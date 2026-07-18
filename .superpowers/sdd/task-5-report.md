@@ -5,7 +5,7 @@ Implemented an injectable ACME HTTP-01 flow with strict, expiring token storage.
 Verification (Rust 1.84.1 Docker):
 
 - `cargo fmt --all` passed.
-- `cargo test --test acme_http01` passed: 4 tests.
+- `cargo test --test acme_http01` passed: 7 tests.
 - `cargo clippy --all-targets -- -D warnings` passed.
 
 Challenge entries are bound to order and hostname, cleanup is cancellation-safe via a drop guard, key authorization is strict token-plus-base64url, and `lookup_http01` handles only the dedicated challenge path. Tests cover exact token retrieval/expiry, order/hostname isolation, path isolation, key authorization validation, successful order/finalization and activation, timeout cleanup, and preservation of the previous active certificate when issuance fails.
