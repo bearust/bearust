@@ -1,11 +1,13 @@
 //! ACME issuance orchestration with an injectable transport.
 mod cloudflare;
+mod client;
 mod dns;
 mod http01;
 use crate::certificates::{CertificateError, CertificateRecord, CertificateStore};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 pub use cloudflare::CloudflareProvider;
+pub use client::{AcmeEnvironment, LetsEncryptClient};
 pub use dns::{DnsError, DnsProvider, TxtRecord};
 pub use http01::lookup_http01;
 pub use http01::lookup_http01_for_host;
@@ -26,11 +28,14 @@ impl CertificateRequest {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AcmeOrder {
     pub id: String,
     pub token: String,
     pub key_authorization: String,
+}
+impl std::fmt::Debug for AcmeOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("AcmeOrder").field("id", &self.id).field("token", &"[REDACTED]").field("key_authorization", &"[REDACTED]").finish() }
 }
 #[derive(Clone, Debug)]
 pub struct IssuedCertificate {
@@ -43,6 +48,14 @@ pub enum AcmeError {
     Timeout,
     #[error("ACME transport failed")]
     Transport(String),
+    #[error("ACME directory unavailable")]
+    Directory,
+    #[error("ACME account operation failed")]
+    Account(String),
+    #[error("ACME authorization failed")]
+    Authorization,
+    #[error("ACME order finalization failed")]
+    Finalize,
     #[error("ACME certificate could not be stored")]
     Certificate(#[from] CertificateError),
     #[error("invalid ACME request")]
@@ -252,6 +265,10 @@ fn acme_reason(error: &AcmeError) -> &'static str {
     match error {
         AcmeError::Timeout => "timeout",
         AcmeError::Transport(_) => "transport",
+        AcmeError::Directory => "directory",
+        AcmeError::Account(_) => "account",
+        AcmeError::Authorization => "authorization",
+        AcmeError::Finalize => "finalize",
         AcmeError::Certificate(_) => "certificate",
         AcmeError::InvalidRequest => "invalid_request",
     }

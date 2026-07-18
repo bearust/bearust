@@ -1,37 +1,20 @@
-# Task 2 Report: Secure certificate store
+# Task 2 report — persisted ACME client and secret store
 
-## Implemented
+Status: implementation complete for the storage/security seam; ACME wire-protocol integration is intentionally scoped behind `AcmeTransport` because the requested pinned `instant-acme` API could not be compiled in this environment (no Cargo/Docker toolchain available).
 
-- Added `CertificateStore` with custom PEM import, activation, and active snapshot APIs.
-- Validates X.509 PEM, private-key PEM, certificate expiry, and public-key correspondence.
-- Extracts SAN/CN hostnames and persists non-secret metadata.
-- Stores each certificate under a caller-provided root with name/path containment checks.
-- Uses temporary files, restrictive `0600` permissions for private keys, fsync, and atomic rename.
-- Redacts parsing/storage failures so PEM and private-key contents cannot appear in errors.
-- Added focused malformed-input, traversal, and unknown-activation tests.
+Changes:
 
-## Verification
+- Added `SecretStore` with constrained names, symlink rejection, atomic replacement, parent creation, and Unix 0600 files.
+- Added `AcmeEnvironment` and `LetsEncryptClient` with staging/production directory selection, persisted account-key reuse, operation timeout, and stable error categories.
+- Redacted ACME order tokens/key authorizations and account key from `Debug` output.
+- Added focused tests for permissions, traversal, key reuse, environment selection, and redaction.
+- Added pinned `instant-acme = 0.7.2` dependency declaration.
 
-- `cargo fmt --all` completed with Rust 1.84.1 Docker toolchain.
-- Full Rust test execution was blocked by the container's crates.io resolution selecting newer transitive crates requiring Cargo/Rust beyond 1.84.1. The source and focused tests were formatted; parent integration should regenerate the lockfile with Rust 1.84-compatible pins.
+Verification:
 
-## Commit
+- `git diff --check` passed.
+- `cargo test --locked --test acme_client`: not runnable; `cargo` is unavailable in the current environment. `Cargo.lock` therefore still needs regeneration with the pinned dependency before the branch can pass `--locked` CI.
 
-`4b948c8 feat: add secure certificate store`
+Concerns:
 
-## Notes
-
-`openssl` is used for robust PEM/X.509 parsing and key matching. `Cargo.lock` intentionally remains unchanged because this worktree cannot resolve the new dependency without upgrading unrelated locked packages.
-
-## Review fixes
-
-- Imports stage certificate, key, and metadata in a unique temporary directory and atomically swap the directory after fsync; failed swaps restore the previous directory.
-- Root and named certificate directories reject symlinks, and names cannot traverse outside the root.
-- Added valid import/activation, key mismatch, and Unix `0600` permission tests.
-- OpenSSL is pinned to `0.10.68` for the Rust 1.84 target. Cargo.lock still needs regeneration in an environment with compatible cached index entries; the available container resolver selected unrelated newer packages.
-
-Fix commit: `86ec277 fix: harden certificate staging and validation`
-
-## Lockfile verification
-
-Using Rust 1.84.1 with `pkg-config libssl-dev cmake`, `cargo check --locked --all-targets` and `cargo test --locked --all-targets` both passed. The lockfile now includes OpenSSL `0.10.68` and its required packages.
+- The ACME protocol operations currently return categorized seam errors after directory reachability; they should be wired to the exact pinned `instant-acme` API in a toolchain-enabled follow-up before production issuance is enabled.

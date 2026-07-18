@@ -10,4 +10,5 @@ pub mod proxy;
 pub mod reload;
 pub mod router;
 pub mod runtime;
+pub mod secrets;
 pub mod tls;

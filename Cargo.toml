@@ -11,6 +11,7 @@ arc-swap = "1.7"
 bytes = "1"
 base64 = "0.22"
 openssl = "=0.10.68"
+instant-acme = "=0.7.2"
 async-trait = "0.1"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["multipart"] }
