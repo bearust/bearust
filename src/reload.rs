@@ -35,7 +35,36 @@ pub struct PidFileGuard {
 impl PidFileGuard {
     pub fn acquire(path: impl AsRef<Path>) -> Result<Self, PidError> {
         let path = path.as_ref().to_path_buf();
-        if path.exists() {
+        loop {
+            match OpenOptions::new().create_new(true).write(true).open(&path) {
+                Ok(mut file) => {
+                    let pid = std::process::id() as i32;
+                    writeln!(file, "{pid}")
+                        .and_then(|_| file.flush())
+                        .and_then(|_| file.sync_all())
+                        .map_err(|source| PidError::Io {
+                            path: path.clone(),
+                            source,
+                        })?;
+                    return Ok(Self { path, pid });
+                }
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(source) => {
+                    return Err(PidError::Io {
+                        path: path.clone(),
+                        source,
+                    })
+                }
+            }
+
+            // Read and inspect an existing owner. We only remove the stale
+            // file if its inode is unchanged since the read; this prevents a
+            // concurrent server from replacing it between our check and
+            // cleanup. The create_new retry then re-checks any race winner.
+            let before = fs::metadata(&path).map_err(|source| PidError::Io {
+                path: path.clone(),
+                source,
+            })?;
             let text = fs::read_to_string(&path).map_err(|source| PidError::Io {
                 path: path.clone(),
                 source,
@@ -48,29 +77,39 @@ impl PidFileGuard {
                     Err(_) => return Err(PidError::AlreadyRunning(pid)),
                 }
             }
-            let _ = fs::remove_file(&path);
+            let after = fs::metadata(&path).map_err(|source| PidError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            if !same_file(&before, &after) {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(PidError::Io {
+                        path: path.clone(),
+                        source,
+                    })
+                }
+            }
         }
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-            .map_err(|source| PidError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        let pid = std::process::id() as i32;
-        writeln!(file, "{pid}")
-            .and_then(|_| file.flush())
-            .and_then(|_| file.sync_all())
-            .map_err(|source| PidError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        Ok(Self { path, pid })
     }
     pub fn pid(&self) -> i32 {
         self.pid
     }
+}
+
+#[cfg(unix)]
+fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    a.len() == b.len() && a.modified().ok() == b.modified().ok()
 }
 impl Drop for PidFileGuard {
     fn drop(&mut self) {
@@ -157,6 +196,8 @@ pub async fn reload_loop(
     use tokio::signal::unix::{signal, SignalKind};
     let mut hup = signal(SignalKind::hangup())
         .map_err(|error| crate::runtime::RuntimeError::Signal(error.to_string()))?;
+    let mut terminate = signal(SignalKind::terminate())
+        .map_err(|error| crate::runtime::RuntimeError::Signal(error.to_string()))?;
     loop {
         tokio::select! {
             _ = hup.recv() => {
@@ -168,6 +209,7 @@ pub async fn reload_loop(
             changed = server_done.changed() => {
                 if changed.is_err() || *server_done.borrow() { break; }
             }
+            _ = terminate.recv() => break,
         }
     }
     Ok(())
