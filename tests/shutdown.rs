@@ -151,7 +151,7 @@ fn serve_exits_promptly_on_sigterm() {
     let text = include_str!("fixtures/valid.toml").replace(
         "bind = \"127.0.0.1:18080\"",
         &format!(
-            "bind = \"127.0.0.1:18180\"\npid_file = \"{}\"",
+            "bind = \"127.0.0.1:18180\"\ngraceful_shutdown_seconds = 1\npid_file = \"{}\"",
             pid.display()
         ),
     );
