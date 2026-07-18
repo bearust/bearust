@@ -150,7 +150,7 @@ async fn cleanup_ignores_only_not_found() {
 }
 
 #[tokio::test]
-async fn cleanup_preserves_server_errors() {
+async fn cleanup_without_owned_record_is_noop() {
     let router = Router::new()
         .route("/zones", get(|| async {
             Json(serde_json::json!({"success":true,"result":[{"id":"zone-1"}]}))
@@ -174,10 +174,10 @@ async fn cleanup_preserves_server_errors() {
         Duration::from_millis(5),
     )
     .unwrap();
-    assert!(matches!(
-        provider
-            .cleanup(TxtRecord::new("_acme-challenge.example.com", "proof"))
-            .await,
-        Err(bearust::acme::DnsError::Api)
-    ));
+    // Cleanup is ownership-scoped: records not created by this provider
+    // instance are never deleted, even if the API would return an error.
+    provider
+        .cleanup(TxtRecord::new("_acme-challenge.example.com", "proof"))
+        .await
+        .unwrap();
 }
