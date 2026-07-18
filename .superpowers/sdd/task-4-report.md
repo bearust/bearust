@@ -1,4 +1,20 @@
-# Task 4 report: atomic TLS certificate reload
+# Task 4 report: ACME certificate lifecycle service
+
+## Implemented
+
+- Added `certificates::AcmeService` with normalized request validation, per-certificate single-flight locking, issue/renew/status/due-renewal methods, redacted audit events, renewal scheduling metadata, and reload callback after activation.
+- Added `ConfigReloader::apply_certificate_change` as a backwards-compatible default hook.
+- Exported the service from `certificates`.
+
+## Verification
+
+- `git diff --check`: passed.
+- `cargo check --locked`: blocked by the repository's Rust 1.84.1 toolchain resolving `clap_lex 1.1.0`, which requires the stabilized Cargo 1.85 `edition2024` feature (`feature edition2024 is required`). No test execution was possible in that toolchain.
+
+## Concerns for integration
+
+- DNS-01 provider selection remains owned by the control-plane/API task; the service currently returns a sanitized configuration error when no provider is injected.
+- The existing control-plane edits were concurrently present when the service commit was created and are included in commit `611944f`; parent should retain or split them as desired.
 
 ## Implemented
 
