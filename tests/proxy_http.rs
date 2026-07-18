@@ -1,7 +1,13 @@
 use bearust::observability::{append_forwarded_for, validated_request_id};
-use bearust::{config::{Algorithm, BackendConfig, Config, HealthCheckKind, PoolConfig, RouteConfig, ServerConfig}, proxy::{http_service, BeaRustProxy}, runtime::{RuntimeSnapshot, RuntimeStore}};
-use pingora_http::RequestHeader;
+use bearust::{
+    config::{
+        Algorithm, BackendConfig, Config, HealthCheckKind, PoolConfig, RouteConfig, ServerConfig,
+    },
+    proxy::{http_service, BeaRustProxy},
+    runtime::{RuntimeSnapshot, RuntimeStore},
+};
 use pingora_core::server::{configuration::ServerConf, Server};
+use pingora_http::RequestHeader;
 use std::{net::TcpListener, sync::Arc, time::Duration};
 
 mod support;
@@ -28,13 +34,36 @@ fn forwarding_headers_append_ip_and_request_id_is_safe() {
 #[tokio::test]
 #[ignore = "starts a process-wide Pingora server; run with cargo test --test proxy_http -- --ignored"]
 async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() {
-    let backend = support::spawn_http_backend(Arc::new(std::sync::atomic::AtomicU16::new(200)), "stream-body").await;
+    let backend = support::spawn_http_backend(
+        Arc::new(std::sync::atomic::AtomicU16::new(200)),
+        "stream-body",
+    )
+    .await;
     let backend_addr = backend.address;
     let config = Config {
-        server: ServerConfig { bind: "127.0.0.1:0".parse().unwrap(), graceful_shutdown_seconds: 1, pid_file: "./target/test.pid".into() },
+        server: ServerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            graceful_shutdown_seconds: 1,
+            pid_file: "./target/test.pid".into(),
+        },
         health: Default::default(),
-        upstream_pools: vec![PoolConfig { name: "main".into(), algorithm: Algorithm::RoundRobin, connect_timeout_seconds: 1, request_timeout_seconds: 1, backends: vec![BackendConfig { address: backend_addr, health_check: HealthCheckKind::Tcp, health_path: None }] }],
-        routes: vec![RouteConfig { name: "default".into(), host: "example.test".into(), path_prefix: "/".into(), upstream_pool: "main".into() }],
+        upstream_pools: vec![PoolConfig {
+            name: "main".into(),
+            algorithm: Algorithm::RoundRobin,
+            connect_timeout_seconds: 1,
+            request_timeout_seconds: 1,
+            backends: vec![BackendConfig {
+                address: backend_addr,
+                health_check: HealthCheckKind::Tcp,
+                health_path: None,
+            }],
+        }],
+        routes: vec![RouteConfig {
+            name: "default".into(),
+            host: "example.test".into(),
+            path_prefix: "/".into(),
+            upstream_pool: "main".into(),
+        }],
     };
     let snapshot = RuntimeSnapshot::build(config, None).unwrap();
     let pool = snapshot.pool("main").unwrap();
@@ -51,13 +80,28 @@ async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() 
     server.bootstrap();
     std::thread::spawn(move || server.run_forever());
     tokio::time::sleep(Duration::from_millis(250)).await;
-    let response = reqwest::Client::new().get(format!("http://{address}/missing")).header("Host", "example.test").send().await.unwrap();
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/missing"))
+        .header("Host", "example.test")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(pool.total_inflight(), 0);
-    let unknown = reqwest::Client::new().get(format!("http://{address}/missing")).header("Host", "unknown.test").send().await.unwrap();
+    let unknown = reqwest::Client::new()
+        .get(format!("http://{address}/missing"))
+        .header("Host", "unknown.test")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(unknown.status(), reqwest::StatusCode::NOT_FOUND);
     pool.set_healthy(0.into(), true);
-    let success = reqwest::Client::new().get(format!("http://{address}/stream")).header("Host", "example.test").send().await.unwrap();
+    let success = reqwest::Client::new()
+        .get(format!("http://{address}/stream"))
+        .header("Host", "example.test")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(success.status(), reqwest::StatusCode::OK);
     assert_eq!(success.text().await.unwrap(), "stream-body");
     backend.shutdown().await;
