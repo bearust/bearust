@@ -100,6 +100,8 @@ impl SecretStore {
 
     fn validate(&self, name: &str) -> Result<(), SecretError> {
         if name.is_empty()
+            || name == "."
+            || name == ".."
             || name.len() > 128
             || !name
                 .bytes()
@@ -108,5 +110,25 @@ impl SecretStore {
             return Err(SecretError::InvalidName);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_dot_and_dotdot_names() {
+        let root = std::env::temp_dir().join(format!("bearust-secrets-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let store = SecretStore::open(&root).expect("open secret store");
+        for name in [".", ".."] {
+            assert!(matches!(
+                store.put(name, b"x"),
+                Err(SecretError::InvalidName)
+            ));
+            assert!(matches!(store.get(name), Err(SecretError::InvalidName)));
+        }
+        let _ = fs::remove_dir_all(root);
     }
 }

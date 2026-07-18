@@ -197,7 +197,17 @@ impl LetsEncryptClient {
             match state.status {
                 OrderStatus::Ready | OrderStatus::Valid => return Ok(()),
                 OrderStatus::Invalid => return Err(AcmeError::Authorization),
-                _ => tokio::time::sleep(Duration::from_secs(1)).await,
+                _ => {
+                    let now = tokio::time::Instant::now();
+                    if now >= deadline {
+                        return Err(AcmeError::Timeout);
+                    }
+                    let wake = std::cmp::min(deadline, now + Duration::from_secs(1));
+                    tokio::time::sleep_until(wake).await;
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(AcmeError::Timeout);
+                    }
+                }
             }
         }
         Err(AcmeError::Timeout)
@@ -338,56 +348,74 @@ impl AcmeTransport for LetsEncryptClient {
             .await
             .remove(&order.id)
             .ok_or(AcmeError::Finalize)?;
-        let rsa = Rsa::generate(2048).map_err(|_| AcmeError::Finalize)?;
-        let key = PKey::from_rsa(rsa).map_err(|_| AcmeError::Finalize)?;
-        let mut name = X509NameBuilder::new().map_err(|_| AcmeError::Finalize)?;
-        name.append_entry_by_text("CN", &request.hostnames[0])
-            .map_err(|_| AcmeError::Finalize)?;
-        let name = name.build();
-        let mut csr = X509ReqBuilder::new().map_err(|_| AcmeError::Finalize)?;
-        csr.set_subject_name(&name)
-            .map_err(|_| AcmeError::Finalize)?;
-        csr.set_pubkey(&key).map_err(|_| AcmeError::Finalize)?;
-        let mut extensions = Stack::new().map_err(|_| AcmeError::Finalize)?;
-        let san = request
-            .hostnames
-            .iter()
-            .map(|h| format!("DNS:{}", h.trim()))
-            .collect::<Vec<_>>()
-            .join(",");
-        extensions
-            .push(
-                X509Extension::new_nid(None, None, Nid::SUBJECT_ALT_NAME, &san)
-                    .map_err(|_| AcmeError::Finalize)?,
+        let result = async {
+            let rsa = Rsa::generate(2048).map_err(|_| AcmeError::Finalize)?;
+            let key = PKey::from_rsa(rsa).map_err(|_| AcmeError::Finalize)?;
+            let mut name = X509NameBuilder::new().map_err(|_| AcmeError::Finalize)?;
+            name.append_entry_by_text("CN", &request.hostnames[0])
+                .map_err(|_| AcmeError::Finalize)?;
+            let name = name.build();
+            let mut csr = X509ReqBuilder::new().map_err(|_| AcmeError::Finalize)?;
+            csr.set_subject_name(&name)
+                .map_err(|_| AcmeError::Finalize)?;
+            csr.set_pubkey(&key).map_err(|_| AcmeError::Finalize)?;
+            let mut extensions = Stack::new().map_err(|_| AcmeError::Finalize)?;
+            let san = request
+                .hostnames
+                .iter()
+                .map(|h| format!("DNS:{}", h.trim()))
+                .collect::<Vec<_>>()
+                .join(",");
+            extensions
+                .push(
+                    X509Extension::new_nid(None, None, Nid::SUBJECT_ALT_NAME, &san)
+                        .map_err(|_| AcmeError::Finalize)?,
+                )
+                .map_err(|_| AcmeError::Finalize)?;
+            csr.add_extensions(&extensions)
+                .map_err(|_| AcmeError::Finalize)?;
+            csr.sign(&key, MessageDigest::sha256())
+                .map_err(|_| AcmeError::Finalize)?;
+            tokio::time::timeout_at(
+                deadline,
+                order.finalize(&csr.build().to_der().map_err(|_| AcmeError::Finalize)?),
             )
-            .map_err(|_| AcmeError::Finalize)?;
-        csr.add_extensions(&extensions)
-            .map_err(|_| AcmeError::Finalize)?;
-        csr.sign(&key, MessageDigest::sha256())
-            .map_err(|_| AcmeError::Finalize)?;
-        tokio::time::timeout_at(
-            deadline,
-            order.finalize(&csr.build().to_der().map_err(|_| AcmeError::Finalize)?),
-        )
-        .await
-        .map_err(|_| AcmeError::Timeout)?
-        .map_err(|e| Self::map_error(e, "finalize"))?;
-        let cert = loop {
-            if let Some(cert) = tokio::time::timeout_at(deadline, order.certificate())
-                .await
-                .map_err(|_| AcmeError::Timeout)?
-                .map_err(|e| Self::map_error(e, "finalize"))?
-            {
-                break cert.into_bytes();
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        };
-        let private_key_pem = key
-            .private_key_to_pem_pkcs8()
-            .map_err(|_| AcmeError::Finalize)?;
-        Ok(IssuedCertificate {
-            certificate_pem: cert,
-            private_key_pem,
-        })
+            .await
+            .map_err(|_| AcmeError::Timeout)?
+            .map_err(|e| Self::map_error(e, "finalize"))?;
+            let cert = loop {
+                if let Some(cert) = tokio::time::timeout_at(deadline, order.certificate())
+                    .await
+                    .map_err(|_| AcmeError::Timeout)?
+                    .map_err(|e| Self::map_error(e, "finalize"))?
+                {
+                    break cert.into_bytes();
+                }
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    return Err(AcmeError::Timeout);
+                }
+                let wake = std::cmp::min(deadline, now + Duration::from_secs(1));
+                tokio::time::sleep_until(wake).await;
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(AcmeError::Timeout);
+                }
+            };
+            let private_key_pem = key
+                .private_key_to_pem_pkcs8()
+                .map_err(|_| AcmeError::Finalize)?;
+            Ok(IssuedCertificate {
+                certificate_pem: cert,
+                private_key_pem,
+            })
+        }
+        .await;
+        // Keep the order available for retry/inspection when finalization
+        // fails. Successful issuance consumes it to prevent duplicate use.
+        if result.is_err() {
+            let order_id = order.url().to_owned();
+            self.orders.lock().await.insert(order_id, order);
+        }
+        result
     }
 }
