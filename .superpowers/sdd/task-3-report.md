@@ -18,13 +18,12 @@ All commands ran in `rust:1.84.1-bookworm` Docker:
 
 ## Test coverage and limitations
 
-`tests/tls_listener.rs` generates a self-signed certificate and exercises the
-native `TlsSettings` construction through the certificate-store validation
-boundary. A full spawned-process HTTPS request remains deferred because the
-existing Pingora process harness is intentionally isolated/ignored; startup
-selection is covered by the CLI implementation and the generated-material
-test verifies the TLS backend accepts the resulting files. The module also
-has a unit test covering missing-material error redaction.
+`tests/tls_listener.rs` generates a self-signed certificate, starts a local
+TCP upstream and a BeaRust child process, then performs a real OpenSSL TLS
+request through the Pingora listener and asserts the proxied response. The
+test also covers native `TlsSettings` construction through the
+certificate-store validation boundary and the module has a unit test covering
+missing-material error redaction.
 
 The rustls feature pulls newer transitive crates, so `Cargo.lock` pins
 `time` 0.3.36 and `zeroize` 1.8.1 for Rust 1.84 compatibility.
