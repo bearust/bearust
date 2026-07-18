@@ -1,28 +1,29 @@
-# Task 8 report: Phase 2 acceptance
+# Task 8 report: Phase 4A acceptance
 
 ## Delivered
 
-- Extended `scripts/smoke-test.sh` with TLS configuration, generated test
-  material, invalid-certificate, reload, and secret-leakage checks.
-- Added TLS fixture guidance under `tests/fixtures/tls/`.
-- Regenerated `Cargo.lock` after the Phase 2 dependency additions.
-- Formatted the ACME, certificate, renewal, and smoke-test changes.
+- Documented staging-first ACME rollout, HTTP-01 port/DNS requirements,
+  Cloudflare least-privilege token permissions, wildcard behavior, renewal,
+  recovery, atomic activation, and secret-file permissions in `docs/acme.md`.
+- Linked the ACME runbook from `README.md` and `DEPLOY.md` and added safe
+  control-plane setup-token guidance to `.env.example`.
+- The deterministic fake-transport coverage already present in
+  `tests/acme_http01.rs` and `tests/acme_dns01.rs` exercises issuance,
+  activation, timeout cleanup, record ownership, and redaction without
+  contacting either CA or Cloudflare. The certificate lifecycle and repository
+  tests cover durable status/renewal transitions; these are the release gate
+  harness for this phase.
 
 ## Verification
 
-- `docker compose config`: passed locally.
-- `git diff --check`: passed locally.
-- Rust 1.84.1 Docker `cargo check --locked --all-targets`, formatting, and
-  clippy were reported passing by the implementation run; a second local run
-  was not possible after the Docker toolchain became unavailable.
-- Full smoke/build execution remains environment-dependent because it requires
-  Docker daemon access and generated runtime certificates.
+- `git diff --check`: passed.
+- Full Rust/frontend/Compose verification is run by the parent implementation
+  agent because shared Phase 4A source changes are still in the worktree. The
+  exact commands are recorded in `task-8-brief.md`.
 
-## Known scope limitations
+## Security notes
 
-- CLI/control-plane construction of `AcmeManager` and its shared challenge
-  store is deferred to Phase 3 API/GUI integration.
-- Cloudflare propagation currently checks provider API visibility rather than
-  an external recursive DNS resolver.
-- Pingora TLS handoff uses its documented pre-bootstrap upgrade marker because
-  post-bootstrap readiness would deadlock FD transfer in Pingora 0.8.1.
+ACME credentials are accepted through authenticated control-plane requests,
+stored below `/data/secrets` with `0700`/`0600` permissions, and excluded from
+responses and structured logs. HTTP-01 is explicitly staging-first and
+wildcards are directed to DNS-01.

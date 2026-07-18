@@ -2,7 +2,7 @@
 
 ![BeaRust](docs/logo.png)
 
-BeaRust is a configuration-driven reverse proxy and load balancer. It supports HTTP/1.1, host/path routing, round-robin and least-connections balancing, TCP/HTTP backend health checks, WebSocket passthrough, JSON logs, graceful shutdown, atomic `SIGHUP` reloads, native TLS, custom certificates, and ACME renewal foundations (HTTP-01 and Cloudflare DNS-01).
+BeaRust is a configuration-driven reverse proxy and load balancer. It supports HTTP/1.1, host/path routing, round-robin and least-connections balancing, TCP/HTTP backend health checks, WebSocket passthrough, JSON logs, graceful shutdown, atomic `SIGHUP` reloads, native TLS, custom certificates, and authenticated ACME certificate automation (HTTP-01 and Cloudflare DNS-01).
 
 ## Five-minute start
 
@@ -17,3 +17,5 @@ Edit `config/bearust.example.toml` (or set `BEARUST_CONFIG`) for backends. Mount
 The management API listens on `127.0.0.1:8081` by default. Set `BEARUST_SETUP_TOKEN` before startup, or read the generated one-time token from `./data/setup-token` and expose the management UI only through an HTTPS reverse proxy. Keep `./data` private because it contains the SQLite database and certificate material.
 
 Run `cargo test --locked`, `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings`. See [DEVELOPMENT.md](DEVELOPMENT.md), [DEPLOY.md](DEPLOY.md), and the [roadmap](docs/PRD.md). Licensed under MIT OR Apache-2.0.
+
+Certificate automation is documented in [docs/acme.md](docs/acme.md). Start with Let's Encrypt staging, verify the challenge and reload path, then switch to production.
