@@ -12,7 +12,9 @@ services:
       RUST_LOG: "${RUST_LOG:-info}"
     working_dir: /run/bearust
     read_only: true
-    tmpfs: [/tmp, /run/bearust]
+    tmpfs:
+      - /tmp:mode=1777
+      - /run/bearust:uid=10001,gid=10001,mode=0755
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped

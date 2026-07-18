@@ -14,6 +14,9 @@ services:
     environment:
       RUST_LOG: debug
     working_dir: /app
+    tmpfs:
+      - /tmp:mode=1777
+      - /run/bearust:uid=10001,gid=10001,mode=0755
 volumes:
   cargo-registry:
   cargo-git:
