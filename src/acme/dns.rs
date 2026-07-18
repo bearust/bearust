@@ -30,6 +30,8 @@ pub enum DnsError {
     PropagationTimeout,
     #[error("DNS record is invalid")]
     InvalidRecord,
+    #[error("DNS provider secret is unavailable")]
+    Secret,
 }
 
 #[async_trait]

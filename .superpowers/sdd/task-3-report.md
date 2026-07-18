@@ -1,29 +1,20 @@
-# Task 3 report: native Pingora TLS listener
+# Task 3 report — Cloudflare DNS-01 lifecycle
 
-## Result
+Implemented and committed as `fix: harden cloudflare dns01 lifecycle`.
 
-Implemented `tls::settings` using Pingora 0.8.1's native rustls listener API and
-selected TLS vs TCP at startup from `server.tls`.  TLS material errors avoid
-including PEM contents or private-key paths.  Existing HTTP mode remains the
-default when `server.tls` is absent.
+## Changes
+
+- Added `CloudflareProvider::with_secret_store` and `with_client` constructors.
+- Added `DnsError::Secret`; secret values are not included in errors or tracing.
+- Normalized wildcard/trailing-dot DNS names before provider operations.
+- Cleanup now deletes only record IDs created by this provider operation, is idempotent, and never removes a pre-existing matching TXT record.
+- Added `AcmeManager::request_dns01_with_status`; the compatibility wrapper remains unchanged. Status events include order creation, DNS presentation, propagation, finalization, storage, and failure.
 
 ## Verification
 
-All commands ran in `rust:1.84.1-bookworm` Docker:
+- `git diff --check`: passed.
+- `cargo fmt` / focused Cargo tests could not run in this environment because neither host nor Docker Rust image exposes `cargo` (`cargo: command not found`).
 
-- `cargo fmt --all -- --check` — passed.
-- `cargo check --locked --all-targets` — passed.
-- `cargo test --locked --all-targets` — passed.
-- `cargo clippy --locked --all-targets -- -D warnings` — passed.
+## Concerns
 
-## Test coverage and limitations
-
-`tests/tls_listener.rs` generates a self-signed certificate, starts a local
-TCP upstream and a BeaRust child process, then performs a real OpenSSL TLS
-request through the Pingora listener and asserts the proxied response. The
-test also covers native `TlsSettings` construction through the
-certificate-store validation boundary and the module has a unit test covering
-missing-material error redaction.
-
-The rustls feature pulls newer transitive crates, so `Cargo.lock` pins
-`time` 0.3.36 and `zeroize` 1.8.1 for Rust 1.84 compatibility.
+- Please run `cargo test --locked --test cloudflare_dns --test acme_dns01` and full CI in a Rust-enabled environment before merging.

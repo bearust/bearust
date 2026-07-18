@@ -1,4 +1,5 @@
 use super::dns::{DnsError, DnsProvider, TxtRecord};
+use crate::secrets::SecretStore;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
@@ -74,6 +75,48 @@ impl CloudflareProvider {
         })
     }
 
+    /// Construct a provider without exposing the API token to callers. The
+    /// token is loaded only while building the provider and is never included
+    /// in diagnostics or tracing fields.
+    pub fn with_secret_store(
+        token_name: impl AsRef<str>,
+        secrets: SecretStore,
+        endpoint: impl Into<String>,
+        timeout: Duration,
+        propagation_timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<Self, DnsError> {
+        let value = secrets
+            .get(token_name.as_ref())
+            .map_err(|_| DnsError::Secret)?
+            .ok_or(DnsError::Secret)?;
+        let token = String::from_utf8(value).map_err(|_| DnsError::Secret)?;
+        Self::with_endpoint(token, endpoint, timeout, propagation_timeout, poll_interval)
+    }
+
+    /// Use a caller-supplied client (typically a client aimed at a local fake
+    /// server) while retaining the same auth and timeout behavior.
+    pub fn with_client(
+        token: impl Into<String>,
+        endpoint: impl Into<String>,
+        client: Client,
+        propagation_timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<Self, DnsError> {
+        let token = token.into();
+        if token.trim().is_empty() {
+            return Err(DnsError::InvalidRecord);
+        }
+        Ok(Self {
+            client,
+            base_url: endpoint.into().trim_end_matches('/').to_string(),
+            token,
+            propagation_timeout,
+            poll_interval,
+            created_records: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
     async fn send<T: for<'de> Deserialize<'de>>(
         &self,
         request: reqwest::RequestBuilder,
@@ -126,12 +169,13 @@ impl CloudflareProvider {
     }
 
     async fn record_id(&self, record: &TxtRecord) -> Result<(Zone, Option<String>), DnsError> {
-        let zone = self.zone(&record.name).await?;
+        let name = normalize_dns_name(&record.name);
+        let zone = self.zone(&name).await?;
         let url = format!("{}/zones/{}/dns_records", self.base_url, zone.id);
         let records: Vec<Record> = self
             .send(self.client.get(url).query(&[
                 ("type", "TXT"),
-                ("name", record.name.as_str()),
+                ("name", name.as_str()),
                 ("per_page", "100"),
             ]))
             .await?;
@@ -140,7 +184,7 @@ impl CloudflareProvider {
             records
                 .into_iter()
                 .find(|candidate| {
-                    candidate.name == record.name && candidate.content == record.value
+                    candidate.name == name && candidate.content == record.value
                 })
                 .map(|r| r.id),
         ))
@@ -150,6 +194,7 @@ impl CloudflareProvider {
 #[async_trait]
 impl DnsProvider for CloudflareProvider {
     async fn present(&self, record: TxtRecord) -> Result<(), DnsError> {
+        let record = TxtRecord::new(normalize_dns_name(&record.name), record.value);
         if !valid_dns_name(&record.name) || record.value.is_empty() {
             return Err(DnsError::InvalidRecord);
         }
@@ -163,17 +208,18 @@ impl DnsProvider for CloudflareProvider {
     }
 
     async fn cleanup(&self, record: TxtRecord) -> Result<(), DnsError> {
+        let record = TxtRecord::new(normalize_dns_name(&record.name), record.value);
         let id =
             self.created_records.lock().ok().and_then(|mut records| {
                 records.remove(&(record.name.clone(), record.value.clone()))
             });
-        let (zone, id) = match id {
-            Some(id) => (self.zone(&record.name).await?, Some(id)),
-            None => self.record_id(&record).await?,
-        };
+        // Only delete records created by this operation. Looking up and
+        // deleting an existing matching TXT would risk destroying a user's
+        // challenge or a concurrent ACME order.
         let Some(id) = id else {
             return Ok(());
         };
+        let zone = self.zone(&record.name).await?;
         let url = format!("{}/zones/{}/dns_records/{}", self.base_url, zone.id, id);
         let request = self.client.delete(url);
         match self.send::<serde_json::Value>(request).await {
@@ -209,4 +255,12 @@ fn valid_dns_name(value: &str) -> bool {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         })
+}
+
+fn normalize_dns_name(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches("*.")
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
 }

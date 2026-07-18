@@ -149,6 +149,18 @@ impl AcmeManager {
         request: CertificateRequest,
         provider: Arc<dyn DnsProvider>,
     ) -> Result<CertificateRecord, AcmeError> {
+        self.request_dns01_with_status(request, provider, |_| {}).await
+    }
+
+    pub async fn request_dns01_with_status<F>(
+        &self,
+        request: CertificateRequest,
+        provider: Arc<dyn DnsProvider>,
+        status_callback: F,
+    ) -> Result<CertificateRecord, AcmeError>
+    where
+        F: Fn(&'static str) + Send + Sync,
+    {
         if request.name.trim().is_empty()
             || request.hostnames.len() != 1
             || request
@@ -159,9 +171,18 @@ impl AcmeManager {
             return Err(AcmeError::InvalidRequest);
         }
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let order = tokio::time::timeout_at(deadline, self.transport.new_order(&request))
-            .await
-            .map_err(|_| AcmeError::Timeout)??;
+        status_callback("creating_order");
+        let order = match tokio::time::timeout_at(deadline, self.transport.new_order(&request)).await {
+            Ok(Ok(order)) => order,
+            Ok(Err(error)) => {
+                status_callback("failed");
+                return Err(error);
+            }
+            Err(_) => {
+                status_callback("failed");
+                return Err(AcmeError::Timeout);
+            }
+        };
         let records: Vec<_> = request
             .hostnames
             .iter()
@@ -174,12 +195,14 @@ impl AcmeManager {
         // Track every candidate before the provider call so partial failure or
         // cancellation still leads to cleanup attempts for all records.
         let result = tokio::time::timeout_at(deadline, async {
+            status_callback("presenting_dns");
             for record in &records {
                 provider
                     .present(record.clone())
                     .await
                     .map_err(|_| AcmeError::Transport("DNS provider failed".into()))?;
             }
+            status_callback("waiting_propagation");
             for record in &records {
                 provider
                     .wait_for_propagation(record.clone())
@@ -187,6 +210,7 @@ impl AcmeManager {
                     .map_err(|_| AcmeError::Transport("DNS propagation failed".into()))?;
             }
             self.transport.poll_order_dns01(&order, &records).await?;
+            status_callback("finalizing");
             let issued = self.transport.finalize(&order, &request).await?;
             let record = self.certificates.import_letsencrypt(
                 &request.name,
@@ -194,6 +218,7 @@ impl AcmeManager {
                 &issued.private_key_pem,
             )?;
             self.certificates.activate(&record.name)?;
+            status_callback("stored");
             Ok(record)
         })
         .await
@@ -206,6 +231,9 @@ impl AcmeManager {
                     reason = dns_reason(&error)
                 );
             }
+        }
+        if result.is_err() {
+            status_callback("failed");
         }
         result
     }
@@ -288,5 +316,6 @@ fn dns_reason(error: &DnsError) -> &'static str {
         DnsError::NotFound => "not_found",
         DnsError::PropagationTimeout => "propagation_timeout",
         DnsError::InvalidRecord => "invalid_record",
+        DnsError::Secret => "secret",
     }
 }
