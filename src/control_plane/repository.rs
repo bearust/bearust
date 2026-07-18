@@ -27,25 +27,29 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-fn acme_status_from_row(r: &sqlx::sqlite::SqliteRow) -> AcmeStatus {
+fn acme_status_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<AcmeStatus, sqlx::Error> {
     let environment = match r.get::<String, _>("environment").as_str() {
         "staging" => AcmeEnvironment::Staging,
-        _ => AcmeEnvironment::Production,
+        "production" => AcmeEnvironment::Production,
+        value => return Err(sqlx::Error::Protocol(format!("invalid ACME environment: {value}"))),
     };
     let challenge = match r.get::<String, _>("challenge").as_str() {
         "http01" => AcmeChallenge::Http01,
-        _ => AcmeChallenge::CloudflareDns01,
+        "cloudflare_dns01" => AcmeChallenge::CloudflareDns01,
+        value => return Err(sqlx::Error::Protocol(format!("invalid ACME challenge: {value}"))),
     };
-    AcmeStatus {
+    let hostnames = serde_json::from_str(&r.get::<String, _>("hostnames"))
+        .map_err(|e| sqlx::Error::Protocol(format!("invalid certificate hostnames: {e}")))?;
+    Ok(AcmeStatus {
         certificate_id: r.get("certificate_id"),
         environment,
         challenge,
-        hostnames: serde_json::from_str(&r.get::<String, _>("hostnames")).unwrap_or_default(),
+        hostnames,
         renewal_state: r.get("renewal_state"),
         next_renewal_at: r.get("next_renewal_at"),
         last_attempt_at: r.get("last_attempt_at"),
         last_error_code: r.get("last_error_code"),
-    }
+    })
 }
 
 pub async fn insert_acme_certificate(
@@ -65,11 +69,20 @@ pub async fn insert_acme_certificate(
         AcmeChallenge::Http01 => "http01",
         AcmeChallenge::CloudflareDns01 => "cloudflare_dns01",
     };
-    sqlx::query("INSERT INTO acme_certificates(certificate_id,environment,challenge,renewal_state,next_renewal_at,last_attempt_at,last_error_code) VALUES(?,?,?, 'pending', NULL, NULL, NULL)")
-        .bind(certificate_id).bind(environment).bind(challenge).execute(pool).await?;
     let hosts = serde_json::to_string(&request.hostnames).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let mut tx = pool.begin().await?;
+    let exists = sqlx::query("SELECT id FROM certificates WHERE id=?")
+        .bind(certificate_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if exists.is_none() {
+        return Err(sqlx::Error::RowNotFound);
+    }
+    sqlx::query("INSERT INTO acme_certificates(certificate_id,environment,challenge,renewal_state,next_renewal_at,last_attempt_at,last_error_code) VALUES(?,?,?, 'pending', NULL, NULL, NULL)")
+        .bind(certificate_id).bind(environment).bind(challenge).execute(&mut *tx).await?;
     sqlx::query("UPDATE certificates SET covered_hostnames=? WHERE id=?")
-        .bind(hosts).bind(certificate_id).execute(pool).await?;
+        .bind(hosts).bind(certificate_id).execute(&mut *tx).await?;
+    tx.commit().await?;
     get_acme_status(pool, certificate_id).await?.ok_or_else(|| sqlx::Error::RowNotFound)
 }
 
@@ -88,13 +101,13 @@ pub async fn update_acme_status(
 pub async fn get_acme_status(pool: &SqlitePool, certificate_id: i64) -> Result<Option<AcmeStatus>, sqlx::Error> {
     let row = sqlx::query("SELECT a.certificate_id,a.environment,a.challenge,c.covered_hostnames AS hostnames,a.renewal_state,a.next_renewal_at,a.last_attempt_at,a.last_error_code FROM acme_certificates a JOIN certificates c ON c.id=a.certificate_id WHERE a.certificate_id=?")
         .bind(certificate_id).fetch_optional(pool).await?;
-    Ok(row.as_ref().map(acme_status_from_row))
+    row.as_ref().map(acme_status_from_row).transpose()
 }
 
 pub async fn list_due_acme_certificates(pool: &SqlitePool, at: &str) -> Result<Vec<AcmeStatus>, sqlx::Error> {
     let rows = sqlx::query("SELECT a.certificate_id,a.environment,a.challenge,c.covered_hostnames AS hostnames,a.renewal_state,a.next_renewal_at,a.last_attempt_at,a.last_error_code FROM acme_certificates a JOIN certificates c ON c.id=a.certificate_id WHERE a.next_renewal_at IS NOT NULL AND a.next_renewal_at<=? ORDER BY a.next_renewal_at,a.certificate_id")
         .bind(at).fetch_all(pool).await?;
-    Ok(rows.iter().map(acme_status_from_row).collect())
+    rows.iter().map(acme_status_from_row).collect()
 }
 pub async fn user_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
     Ok(sqlx::query("SELECT COUNT(*) c FROM users")

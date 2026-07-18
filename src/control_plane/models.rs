@@ -46,11 +46,14 @@ impl AcmeRequest {
                 if self.challenge == AcmeChallenge::Http01 {
                     return Err("http-01 does not support wildcard hostnames".into());
                 }
-                if host.len() <= 2 || host[2..].contains('*') {
+                let suffix = &host[2..];
+                if suffix.contains('*') || !valid_dns_name(suffix) || suffix.split('.').count() < 2 {
                     return Err("invalid wildcard hostname".into());
                 }
             } else if host.contains('*') {
                 return Err("invalid wildcard hostname".into());
+            } else if !valid_dns_name(&host) {
+                return Err("invalid hostname".into());
             }
             if !hosts.contains(&host) {
                 hosts.push(host);
@@ -62,6 +65,19 @@ impl AcmeRequest {
         self.hostnames = hosts;
         Ok(self)
     }
+}
+
+fn valid_dns_name(host: &str) -> bool {
+    if host.len() > 253 || host.starts_with('.') || host.ends_with('.') {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
