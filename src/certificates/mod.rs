@@ -61,6 +61,13 @@ impl CertificateStore {
     pub fn new(root: impl AsRef<Path>) -> Result<Self, CertificateError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root).map_err(CertificateError::Io)?;
+        if fs::symlink_metadata(&root)
+            .map_err(CertificateError::Io)?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(CertificateError::InvalidPath);
+        }
         Ok(Self {
             active_path: root.join("active.json"),
             root,
@@ -99,11 +106,25 @@ impl CertificateStore {
         let hostnames = hostnames(&cert);
         let expiry = cert.not_after().to_string();
         let dir = self.root.join(&name);
-        fs::create_dir_all(&dir).map_err(CertificateError::Io)?;
+        if fs::symlink_metadata(&dir)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(CertificateError::InvalidPath);
+        }
+        let staging = self
+            .root
+            .join(format!(".staging-{}-{}", name, uuid::Uuid::new_v4()));
+        if staging.exists() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        fs::create_dir(&staging).map_err(CertificateError::Io)?;
         let cert_path = dir.join("cert.pem");
         let key_path = dir.join("key.pem");
-        atomic_write(&cert_path, cert_pem, false)?;
-        atomic_write(&key_path, key_pem, true)?;
+        let staged_cert = staging.join("cert.pem");
+        let staged_key = staging.join("key.pem");
+        atomic_write(&staged_cert, cert_pem, false)?;
+        atomic_write(&staged_key, key_pem, true)?;
         let record = CertificateRecord {
             name: name.clone(),
             source: CertificateSource::Custom,
@@ -113,7 +134,20 @@ impl CertificateStore {
             key_path,
         };
         let metadata = serde_json::to_vec(&record).map_err(CertificateError::Metadata)?;
-        atomic_write(&dir.join("metadata.json"), &metadata, false)?;
+        atomic_write(&staging.join("metadata.json"), &metadata, false)?;
+        if dir.exists() {
+            let backup = self
+                .root
+                .join(format!(".backup-{}-{}", name, std::process::id()));
+            fs::rename(&dir, &backup).map_err(CertificateError::Io)?;
+            if let Err(e) = fs::rename(&staging, &dir) {
+                let _ = fs::rename(&backup, &dir);
+                return Err(CertificateError::Io(e));
+            }
+            let _ = fs::remove_dir_all(backup);
+        } else {
+            fs::rename(&staging, &dir).map_err(CertificateError::Io)?;
+        }
         Ok(record)
     }
 
@@ -200,9 +234,8 @@ fn atomic_write(path: &Path, bytes: &[u8], secret: bool) -> Result<(), Certifica
     file.sync_all().map_err(CertificateError::Io)?;
     fs::rename(&tmp, path).map_err(CertificateError::Io)?;
     if let Some(parent) = path.parent() {
-        if let Ok(dir) = fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
+        let dir = fs::File::open(parent).map_err(CertificateError::Io)?;
+        dir.sync_all().map_err(CertificateError::Io)?;
     }
     Ok(())
 }
