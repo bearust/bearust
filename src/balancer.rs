@@ -1,4 +1,4 @@
-use crate::config::{Algorithm, PoolConfig};
+use crate::config::{Algorithm, HealthCheckKind, PoolConfig};
 use std::{
     hash::Hash,
     net::SocketAddr,
@@ -28,6 +28,8 @@ struct BackendState {
     address: SocketAddr,
     healthy: AtomicBool,
     inflight: AtomicUsize,
+    health_check: HealthCheckKind,
+    health_path: Option<String>,
 }
 
 pub struct PoolState {
@@ -53,6 +55,8 @@ impl PoolState {
                     address: backend.address,
                     healthy: AtomicBool::new(false),
                     inflight: AtomicUsize::new(0),
+                    health_check: backend.health_check,
+                    health_path: backend.health_path.clone(),
                 })
             })
             .collect();
@@ -115,6 +119,12 @@ impl PoolState {
 
     pub fn backend_address(&self, id: BackendId) -> Option<SocketAddr> {
         self.backends.get(id.0).map(|backend| backend.address)
+    }
+
+    pub fn backend_health_check(&self, id: BackendId) -> Option<(HealthCheckKind, Option<String>)> {
+        self.backends
+            .get(id.0)
+            .map(|b| (b.health_check, b.health_path.clone()))
     }
 
     pub fn is_healthy(&self, id: BackendId) -> bool {
