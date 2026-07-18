@@ -3,6 +3,7 @@ use crate::{
     config::{self, Config},
     health::{HealthError, HealthSupervisor},
     router::{ResolvedRoute, Router},
+    tls::{self, TlsSnapshot},
 };
 use arc_swap::ArcSwap;
 use std::{collections::HashMap, path::Path, sync::Arc};
@@ -15,6 +16,8 @@ pub enum RuntimeError {
     Config(#[from] config::ConfigError),
     #[error(transparent)]
     Health(#[from] HealthError),
+    #[error(transparent)]
+    Tls(#[from] tls::TlsError),
     #[error("signal handler failed: {0}")]
     Signal(String),
 }
@@ -24,6 +27,7 @@ pub struct RuntimeSnapshot {
     config: Arc<Config>,
     router: Router,
     pools: HashMap<String, Arc<PoolState>>,
+    tls: Option<Arc<TlsSnapshot>>,
 }
 
 impl RuntimeSnapshot {
@@ -42,11 +46,19 @@ impl RuntimeSnapshot {
                 (pool_config.name.clone(), pool)
             })
             .collect();
+        let tls = config
+            .server
+            .tls
+            .as_ref()
+            .map(TlsSnapshot::from_config)
+            .transpose()?
+            .map(Arc::new);
         Ok(Self {
             generation,
             router: Router::new(&config.routes),
             config: Arc::new(config),
             pools,
+            tls,
         })
     }
     pub fn generation(&self) -> u64 {
@@ -54,6 +66,9 @@ impl RuntimeSnapshot {
     }
     pub fn config(&self) -> &Config {
         &self.config
+    }
+    pub fn tls(&self) -> Option<Arc<TlsSnapshot>> {
+        self.tls.clone()
     }
     pub fn route(&self, authority: &str, path: &str) -> Option<(&ResolvedRoute, Arc<PoolState>)> {
         let route = self.router.route(authority, path)?;

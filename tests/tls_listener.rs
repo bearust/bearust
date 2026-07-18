@@ -58,6 +58,8 @@ fn spawned_tls_listener_proxies_to_local_upstream() {
 
     let dir = tempdir().unwrap();
     let (cert, private) = generated_material(dir.path());
+    let (replacement_cert, replacement_private) =
+        generated_material_with_suffix(dir.path(), "replacement");
 
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
     upstream.set_nonblocking(true).unwrap();
@@ -154,6 +156,36 @@ upstream_pool = "api"
         }
         thread::sleep(Duration::from_millis(100));
     }
+    let updated = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace(
+            cert.to_string_lossy().as_ref(),
+            replacement_cert.to_string_lossy().as_ref(),
+        )
+        .replace(
+            private.to_string_lossy().as_ref(),
+            replacement_private.to_string_lossy().as_ref(),
+        );
+    fs::write(&config_path, updated).unwrap();
+    kill(Pid::from_raw(child.id() as i32), Signal::SIGHUP).unwrap();
+    let replacement_der = X509::from_pem(&fs::read(&replacement_cert).unwrap())
+        .unwrap()
+        .to_der()
+        .unwrap();
+    let mut saw_replacement = false;
+    for _ in 0..50 {
+        if let Ok(stream) = TcpStream::connect(proxy_addr) {
+            if let Ok(tls_stream) = connector.connect("localhost", stream) {
+                if let Some(peer) = tls_stream.ssl().peer_certificate() {
+                    if peer.to_der().unwrap() == replacement_der {
+                        saw_replacement = true;
+                        break;
+                    }
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
     let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM);
     let status = child.wait().unwrap();
     stop_upstream.store(true, Ordering::Relaxed);
@@ -163,9 +195,20 @@ upstream_pool = "api"
         response.is_some(),
         "TLS proxy did not return upstream response"
     );
+    assert!(
+        saw_replacement,
+        "TLS listener did not adopt replacement certificate"
+    );
 }
 
 fn generated_material(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    generated_material_with_suffix(root, "initial")
+}
+
+fn generated_material_with_suffix(
+    root: &std::path::Path,
+    suffix: &str,
+) -> (std::path::PathBuf, std::path::PathBuf) {
     let rsa = Rsa::generate(2048).unwrap();
     let key = PKey::from_rsa(rsa).unwrap();
     let mut name = X509NameBuilder::new().unwrap();
@@ -183,8 +226,8 @@ fn generated_material(root: &std::path::Path) -> (std::path::PathBuf, std::path:
         .set_not_after(&Asn1Time::days_from_now(1).unwrap())
         .unwrap();
     builder.sign(&key, MessageDigest::sha256()).unwrap();
-    let cert = root.join("cert.pem");
-    let private = root.join("key.pem");
+    let cert = root.join(format!("cert-{suffix}.pem"));
+    let private = root.join(format!("key-{suffix}.pem"));
     fs::write(&cert, builder.build().to_pem().unwrap()).unwrap();
     fs::write(&private, key.private_key_to_pem_pkcs8().unwrap()).unwrap();
     (cert, private)

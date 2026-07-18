@@ -5,7 +5,10 @@
 
 use crate::{certificates::CertificateStore, config::TlsConfig};
 use pingora_core::listeners::tls::TlsSettings;
-use std::{io, path::Path};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -16,6 +19,30 @@ pub enum TlsError {
     PrivateKey(#[source] io::Error),
     #[error("TLS certificate or private key is invalid")]
     InvalidMaterial,
+}
+
+/// Immutable, validated TLS material selected by a runtime snapshot.
+///
+/// Keeping only paths here is intentional: Pingora owns the parsed keypair,
+/// while the runtime can atomically swap this value without ever copying key
+/// bytes into the reload state or logs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TlsSnapshot {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+}
+
+impl TlsSnapshot {
+    pub fn from_config(config: &TlsConfig) -> Result<Self, TlsError> {
+        // Validation is performed before publishing a candidate snapshot.
+        // Calling settings also verifies the certificate/key correspondence
+        // against the same native backend used by the listener.
+        let _ = settings(config)?;
+        Ok(Self {
+            cert_path: config.cert_path.clone(),
+            key_path: config.key_path.clone(),
+        })
+    }
 }
 
 /// Build native Pingora TLS settings from certificate-store paths.
