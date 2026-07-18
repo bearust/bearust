@@ -58,6 +58,29 @@ pub struct CertificateStore {
 }
 
 impl CertificateStore {
+    /// Validate PEM material before it is handed to a TLS backend.
+    pub fn validate_material_paths(
+        cert_path: &Path,
+        key_path: &Path,
+    ) -> Result<(), CertificateError> {
+        let cert_pem = fs::read(cert_path).map_err(CertificateError::Io)?;
+        let key_pem = fs::read(key_path).map_err(CertificateError::Io)?;
+        let cert = X509::from_pem(&cert_pem).map_err(|_| CertificateError::Malformed)?;
+        let key = PKey::private_key_from_pem(&key_pem).map_err(|_| CertificateError::Malformed)?;
+        let cert_pub = cert
+            .public_key()
+            .map_err(|_| CertificateError::Malformed)?
+            .public_key_to_der()
+            .map_err(|_| CertificateError::Malformed)?;
+        let key_pub = key
+            .public_key_to_der()
+            .map_err(|_| CertificateError::Malformed)?;
+        if cert_pub != key_pub {
+            return Err(CertificateError::KeyMismatch);
+        }
+        Ok(())
+    }
+
     pub fn new(root: impl AsRef<Path>) -> Result<Self, CertificateError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root).map_err(CertificateError::Io)?;

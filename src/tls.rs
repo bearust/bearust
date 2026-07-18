@@ -3,7 +3,7 @@
 //! Certificate files are loaded by Pingora's TLS backend at startup.  Errors
 //! deliberately retain only paths and the backend error, never PEM contents.
 
-use crate::config::TlsConfig;
+use crate::{certificates::CertificateStore, config::TlsConfig};
 use pingora_core::listeners::tls::TlsSettings;
 use std::{io, path::Path};
 use thiserror::Error;
@@ -14,8 +14,8 @@ pub enum TlsError {
     Certificate(#[source] io::Error),
     #[error("TLS private key file is not readable")]
     PrivateKey(#[source] io::Error),
-    #[error("TLS certificate or private key is invalid: {0}")]
-    InvalidMaterial(String),
+    #[error("TLS certificate or private key is invalid")]
+    InvalidMaterial,
 }
 
 /// Build native Pingora TLS settings from certificate-store paths.
@@ -25,11 +25,13 @@ pub fn settings(config: &TlsConfig) -> Result<TlsSettings, TlsError> {
     // errors, preventing accidental private-key disclosure in logs.
     ensure_readable(&config.cert_path, false)?;
     ensure_readable(&config.key_path, true)?;
+    CertificateStore::validate_material_paths(&config.cert_path, &config.key_path)
+        .map_err(|_| TlsError::InvalidMaterial)?;
     TlsSettings::intermediate(
         config.cert_path.to_string_lossy().as_ref(),
         config.key_path.to_string_lossy().as_ref(),
     )
-    .map_err(|error| TlsError::InvalidMaterial(error.to_string()))
+    .map_err(|_| TlsError::InvalidMaterial)
 }
 
 fn ensure_readable(path: &Path, key: bool) -> Result<(), TlsError> {
