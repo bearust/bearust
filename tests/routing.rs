@@ -23,7 +23,14 @@ fn chooses_longest_segment_aware_prefix() {
         router.route("api.example.com", "/api/users").unwrap().name,
         "users"
     );
-    assert_eq!(router.route("api.example.com", "/apiv2"), None);
+    assert_eq!(router.route("api.example.com", "/api").unwrap().name, "api");
+    // `/api` is segment-aware and must not match `/apiv2`; `/` remains the
+    // mandated catch-all route for paths that do not match a more specific
+    // prefix.
+    assert_eq!(
+        router.route("api.example.com", "/apiv2").unwrap().name,
+        "root"
+    );
 }
 
 #[test]

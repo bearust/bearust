@@ -18,4 +18,11 @@ Implemented host normalization and indexed, segment-aware longest-prefix routing
 
 ## Concern
 
-The `/` fixture route and `/apiv2` `None` assertion are internally inconsistent under the exact boundary-matching function in the brief. The implementation follows that function verbatim.
+The `/` fixture route and `/apiv2` `None` assertion were internally inconsistent under the exact boundary-matching function in the brief. The mandated behavior is retained: `/` is a catch-all. The routing test now verifies `/api` does not match `/apiv2` by asserting that `/apiv2` resolves to the `root` route.
+
+## Resolution Verification
+
+- Rust 1.84 Docker `cargo test --test routing`: passed (3 tests).
+- Rust 1.84 Docker `cargo test --test config_validation`: passed (9 tests).
+- Rust 1.84 Docker `cargo fmt -- --check`: passed.
+- Rust 1.84 Docker `cargo clippy --all-targets -- -D warnings`: passed.
