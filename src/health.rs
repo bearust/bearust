@@ -79,6 +79,12 @@ pub async fn probe_tcp(address: std::net::SocketAddr, timeout: Duration) -> bool
 }
 
 pub async fn probe_http(address: std::net::SocketAddr, path: &str, timeout: Duration) -> bool {
+    // This value is interpolated into a raw HTTP request line. Keep the
+    // defense here as well as in config validation because this function is
+    // public and may be called independently of Config::parse.
+    if !path.starts_with('/') || path.chars().any(|ch| ch.is_ascii_control()) {
+        return false;
+    }
     let result = time::timeout(timeout, async {
         let mut stream = TcpStream::connect(address).await?;
         let request = format!(

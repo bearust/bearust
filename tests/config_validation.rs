@@ -131,6 +131,15 @@ fn rejects_http_path_and_route_path_errors() {
         .unwrap_err()
         .to_string()
         .contains("path_prefix"));
+
+    for payload in ["/health\\r\\nX-Injected: yes", "/health\\nX-Injected: yes"] {
+        let invalid = VALID.replace(
+            "health_path = \"/health\"",
+            &format!("health_path = \"{payload}\""),
+        );
+        let error = Config::parse(&invalid).unwrap_err().to_string();
+        assert!(error.contains("health_path"), "{payload:?}: {error}");
+    }
 }
 
 #[test]
@@ -140,4 +149,19 @@ fn rejects_duplicate_normalized_routes() {
         .unwrap_err()
         .to_string()
         .contains("routes"));
+}
+
+#[test]
+fn rejects_empty_or_malformed_route_hosts() {
+    for host in [
+        "",
+        "   ",
+        "api.example.com\\r\\nX: y",
+        "http://api.example.com",
+        "[2001:db8::1",
+    ] {
+        let invalid = VALID.replace("host = \"api.example.com\"", &format!("host = \"{host}\""));
+        let error = Config::parse(&invalid).unwrap_err().to_string();
+        assert!(error.contains("routes[0].host"), "{host:?}: {error}");
+    }
 }

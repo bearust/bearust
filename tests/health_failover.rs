@@ -55,6 +55,19 @@ async fn tcp_and_http_probes_follow_status() {
 }
 
 #[tokio::test]
+async fn http_probe_rejects_header_injection_path() {
+    let address = "127.0.0.1:1".parse().unwrap();
+    assert!(
+        !probe_http(
+            address,
+            "/health\\r\\nX-Injected: yes",
+            Duration::from_millis(25)
+        )
+        .await
+    );
+}
+
+#[tokio::test]
 async fn refused_port_fails() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

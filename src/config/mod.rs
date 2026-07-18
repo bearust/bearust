@@ -172,9 +172,9 @@ impl Config {
             }
             for (j, b) in p.backends.iter().enumerate() {
                 if b.health_check == HealthCheckKind::Http
-                    && b.health_path
-                        .as_deref()
-                        .map_or(true, |x| !x.starts_with('/'))
+                    && b.health_path.as_deref().map_or(true, |x| {
+                        !x.starts_with('/') || x.chars().any(|ch| ch.is_ascii_control())
+                    })
                 {
                     return err(
                         &format!("upstream_pools[{i}].backends[{j}].health_path"),
@@ -201,6 +201,12 @@ impl Config {
                     "must begin with /",
                 ));
             }
+            if !is_valid_config_host(&r.host) {
+                return Err(validation(
+                    &format!("routes[{i}].host"),
+                    "must be a non-empty host authority without control characters",
+                ));
+            }
             let key = (normalize_config_host(&r.host), r.path_prefix.clone());
             if !route_keys.insert(key) {
                 return Err(validation(
@@ -211,6 +217,70 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn is_valid_config_host(host: &str) -> bool {
+    let value = host.trim();
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
+    {
+        return false;
+    }
+    // Reject URI-like authorities and malformed bracketed IPv6/ports.
+    if value.contains('/') || value.contains('@') || value.contains('?') || value.contains('#') {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with('[') {
+        let Some(end) = lower.find(']') else {
+            return false;
+        };
+        if end == 1 {
+            return false;
+        }
+        if lower[1..end].parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        let rest = &lower[end + 1..];
+        if !rest.is_empty() {
+            let Some(port) = rest.strip_prefix(':') else {
+                return false;
+            };
+            let port = port.strip_suffix('.').unwrap_or(port);
+            if port.is_empty() || port.parse::<u16>().is_err() {
+                return false;
+            }
+        }
+    } else if lower.matches(':').count() == 1 {
+        let Some((_, port)) = lower.rsplit_once(':') else {
+            return false;
+        };
+        let port = port.strip_suffix('.').unwrap_or(port);
+        if port.is_empty() || port.parse::<u16>().is_err() {
+            return false;
+        }
+    } else if lower.matches(':').count() > 1 {
+        // Unbracketed IPv6 is accepted for backwards compatibility.
+        if lower.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+    } else if lower.parse::<std::net::IpAddr>().is_err()
+        && (lower.starts_with('.')
+            || lower.ends_with('.')
+            || lower.split('.').any(|label| {
+                label.is_empty()
+                    || label.starts_with('-')
+                    || label.ends_with('-')
+                    || !label
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+            }))
+    {
+        return false;
+    }
+    !normalize_config_host(value).is_empty()
 }
 fn err(field: &str, message: impl Into<String>) -> Result<(), ConfigError> {
     Err(validation(field, message))
