@@ -65,8 +65,88 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
 
 fn serve(path: PathBuf, json_logs: bool) -> Result<(), AppError> {
     let config = config::load(&path)?;
-    let pid = PidFileGuard::acquire(&config.server.pid_file)?;
-    let _ = pid;
+    if std::env::var_os("BEARUST_PROXY_CHILD").is_none() {
+        let _pid = PidFileGuard::acquire(&config.server.pid_file)?;
+        return supervise_child(path, json_logs, config.server.graceful_shutdown_seconds);
+    }
+    serve_proxy(path, json_logs, config)
+}
+
+#[cfg(unix)]
+fn supervise_child(
+    path: PathBuf,
+    json_logs: bool,
+    graceful_shutdown_seconds: u64,
+) -> Result<(), AppError> {
+    use nix::{
+        sys::signal::{kill, Signal},
+        unistd::Pid,
+    };
+    let exe = std::env::current_exe().map_err(|e| AppError::Server(e.to_string()))?;
+    let mut child = std::process::Command::new(exe)
+        .env("BEARUST_PROXY_CHILD", "1")
+        .args(["serve", "--config"])
+        .arg(path)
+        .args(json_logs.then_some(["--json-logs"]).into_iter().flatten())
+        .spawn()
+        .map_err(|e| AppError::Server(e.to_string()))?;
+    let mut signals = signal_hook::iterator::Signals::new([
+        signal_hook::consts::SIGHUP,
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+    ])
+    .map_err(|e| AppError::Server(e.to_string()))?;
+    for signal in signals.forever() {
+        if child
+            .try_wait()
+            .map_err(|e| AppError::Server(e.to_string()))?
+            .is_some()
+        {
+            break;
+        }
+        match signal {
+            signal_hook::consts::SIGHUP => {
+                let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGHUP);
+            }
+            _ => {
+                let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM);
+                let deadline =
+                    std::time::Instant::now() + Duration::from_secs(graceful_shutdown_seconds);
+                while child
+                    .try_wait()
+                    .map_err(|e| AppError::Server(e.to_string()))?
+                    .is_none()
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if child
+                    .try_wait()
+                    .map_err(|e| AppError::Server(e.to_string()))?
+                    .is_none()
+                {
+                    let _ = child.kill();
+                }
+                break;
+            }
+        }
+    }
+    child.wait().map_err(|e| AppError::Server(e.to_string()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn supervise_child(
+    _path: PathBuf,
+    _json_logs: bool,
+    _graceful_shutdown_seconds: u64,
+) -> Result<(), AppError> {
+    Err(AppError::Server(
+        "process supervisor requires Unix signals".into(),
+    ))
+}
+
+fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result<(), AppError> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     if json_logs {
