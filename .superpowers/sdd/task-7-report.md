@@ -1,25 +1,17 @@
-# Task 7 report: certificate renewal scheduling
+# Task 7 report
 
-Implemented renewal scheduling and operational persistence foundations.
+Implemented the certificate automation UI in the frontend.
 
-## Delivered
+- Added typed ACME/certificate APIs for issue, list, status, renew, activate, and host updates.
+- Added `AcmeWizard` with staging default, production confirmation, HTTP-01/Cloudflare DNS-01 fields, wildcard validation, local-only token state, busy-state submit lock, and redacted errors.
+- Added `CertificateTable` with expiry/source/domain/active/renewal status, manual renew/activate actions, and refresh after changes.
+- Extended proxy-host creation with TLS mode and certificate selector.
+- Added responsive certificate cards and form styles.
+- Added validation/redaction tests in `frontend/src/acme.test.tsx`.
 
-- Added `RenewalScheduler` with renewal-window calculation, bounded exponential retry, and last-known-good activation semantics.
-- Added `RenewalIssuer` abstraction so ACME issuance remains injectable and outside the request path.
-- Added Tokio `run_forever` task and CLI `spawn_renewal_task` hook; Phase 3 will supply the concrete `AcmeManager` command/API wiring.
-- Added scheduler tests covering due-window calculation, successful activation, retries, and active-record preservation after repeated failures.
-- Renewal issuers return PEM material; the scheduler imports and activates it
-  through `CertificateStore` before reporting success, so a successful run
-  actually rotates the stored certificate.
-- Renewal preserves the active certificate source (custom versus Let’s
-  Encrypt) and rejects issuer output addressed to a different certificate name.
-- Mounted writable `/data` and read-only `/etc/bearust/tls` in production and development Compose files.
-- Documented custom PEM certificates, HTTP-01/DNS-01 prerequisites, Cloudflare token scope, renewal behavior, and secret handling.
+Verification:
 
-## Verification
-
-- `cargo fmt --all -- --check`: unavailable in this environment (`cargo` is not installed; Rust Docker image also lacked the cargo binary).
-- `cargo test --locked --test certificate_renewal`: not run for the same environment limitation.
-- `cargo clippy --locked --all-targets -- -D warnings`: not run for the same environment limitation.
-
-The implementation is intentionally limited to the scheduler boundary. It does not add GUI or CLI ACME account/provider configuration; those are Phase 3 concerns.
+```text
+npm test --prefix frontend -- --run  # 3 passed
+npm run build --prefix frontend       # passed
+```
