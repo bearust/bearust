@@ -51,6 +51,7 @@ async fn old_snapshot_remains_usable_after_reload() {
 
     assert_eq!(old.generation(), 1);
     assert!(old.route("api.example.com", "/health").is_some());
+    assert!(!Arc::ptr_eq(&old, &store.load()));
     assert_eq!(store.load().generation(), 2);
     store.shutdown().await.unwrap();
 }
