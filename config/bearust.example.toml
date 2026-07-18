@@ -1,0 +1,32 @@
+[server]
+bind = "0.0.0.0:8080"
+
+# Health timings are in seconds; safe defaults apply when omitted.
+[health]
+
+[[upstream_pools]]
+name = "api"
+# Supported algorithms: round_robin or least_connections.
+algorithm = "round_robin"
+
+[[upstream_pools.backends]]
+address = "127.0.0.1:9001"
+# Checks are tcp or http; HTTP checks require health_path.
+health_check = "http"
+health_path = "/health"
+
+[[upstream_pools.backends]]
+address = "127.0.0.1:9002"
+health_check = "tcp"
+
+[[routes]]
+name = "api-v1"
+host = "api.example.com"
+path_prefix = "/v1"
+upstream_pool = "api"
+
+[[routes]]
+name = "api-root"
+host = "api.example.com"
+path_prefix = "/"
+upstream_pool = "api"

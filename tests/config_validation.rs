@@ -1,0 +1,61 @@
+use bearust::config::{Algorithm, Config, HealthCheckKind};
+
+const VALID: &str = include_str!("fixtures/valid.toml");
+
+#[test]
+fn parses_valid_configuration_and_defaults() {
+    let config = Config::parse(VALID).expect("valid fixture");
+    assert_eq!(config.server.bind.to_string(), "127.0.0.1:18080");
+    assert_eq!(config.server.graceful_shutdown_seconds, 30);
+    assert_eq!(config.health.healthy_threshold, 2);
+    assert_eq!(config.upstream_pools[0].algorithm, Algorithm::LeastConnections);
+    assert_eq!(config.upstream_pools[0].backends[0].health_check, HealthCheckKind::Http);
+}
+
+fn invalid(replacement: &str) -> String { VALID.replace("path_prefix = \"/\"", replacement) }
+
+#[test]
+fn rejects_route_that_references_missing_pool() {
+    let invalid = VALID.replace("upstream_pool = \"api\"", "upstream_pool = \"missing\"");
+    let error = Config::parse(&invalid).unwrap_err().to_string();
+    assert!(error.contains("routes[0].upstream_pool"));
+    assert!(error.contains("missing"));
+}
+
+#[test]
+fn rejects_weight_field_in_phase_one() {
+    let invalid = VALID.replace("address = \"127.0.0.1:19001\"", "address = \"127.0.0.1:19001\"\nweight = 2");
+    assert!(Config::parse(&invalid).unwrap_err().to_string().contains("weight"));
+}
+
+#[test]
+fn rejects_duplicate_names_and_empty_pool() {
+    let dup = format!("{VALID}\n[[upstream_pools]]\nname=\"api\"\nalgorithm=\"round_robin\"\n[[upstream_pools.backends]]\naddress=\"127.0.0.1:2\"\nhealth_check=\"tcp\"");
+    assert!(Config::parse(&dup).unwrap_err().to_string().contains("upstream_pools[1].name"));
+    let empty = VALID.replace("[[upstream_pools.backends]]", "# [[upstream_pools.backends]]");
+    assert!(Config::parse(&empty).is_err());
+}
+
+#[test]
+fn rejects_invalid_health_and_addresses() {
+    for (needle, replacement) in [("interval_seconds", "interval_seconds = 0"), ("timeout_seconds", "timeout_seconds = 0"), ("unhealthy_threshold", "unhealthy_threshold = 0"), ("healthy_threshold", "healthy_threshold = 0")] {
+        let input = VALID.replace("[health]\n", &format!("[health]\n{replacement}\n"));
+        assert!(Config::parse(&input).unwrap_err().to_string().contains(needle));
+    }
+    let bad = VALID.replace("127.0.0.1:19001", "not-an-address");
+    assert!(Config::parse(&bad).is_err());
+}
+
+#[test]
+fn rejects_http_path_and_route_path_errors() {
+    let no_path = VALID.replace("health_path = \"/health\"\n", "");
+    assert!(Config::parse(&no_path).unwrap_err().to_string().contains("health_path"));
+    let bad = invalid("path_prefix = \"api\"");
+    assert!(Config::parse(&bad).unwrap_err().to_string().contains("path_prefix"));
+}
+
+#[test]
+fn rejects_duplicate_normalized_routes() {
+    let dup = format!("{VALID}\n[[routes]]\nname=\"other\"\nhost=\"API.EXAMPLE.COM:80.\"\npath_prefix=\"/\"\nupstream_pool=\"api\"");
+    assert!(Config::parse(&dup).unwrap_err().to_string().contains("routes"));
+}
