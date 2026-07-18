@@ -82,6 +82,13 @@ fn serve(path: PathBuf, json_logs: bool) -> Result<(), AppError> {
         let store = Arc::new(RuntimeStore::from_path(&path).await?);
         let mut server =
             pingora_core::server::Server::new(None).map_err(|e| AppError::Server(e.to_string()))?;
+        // Bound Pingora's graceful drain by the operator's configured
+        // shutdown timeout. A zero grace period starts draining immediately.
+        let server_config = std::sync::Arc::get_mut(&mut server.configuration)
+            .ok_or_else(|| AppError::Server("Pingora server configuration is shared".into()))?;
+        server_config.grace_period_seconds = Some(0);
+        server_config.graceful_shutdown_timeout_seconds =
+            Some(config.server.graceful_shutdown_seconds);
         server.bootstrap();
         let mut service = proxy::http_service(
             crate::proxy::BeaRustProxy::new(store.clone()),
@@ -89,23 +96,29 @@ fn serve(path: PathBuf, json_logs: bool) -> Result<(), AppError> {
         );
         service.add_tcp(&config.server.bind.to_string());
         server.add_service(service);
-        // Keep Pingora's accept loop in a blocking task while this Tokio
-        // runtime owns explicit SIGHUP/SIGTERM handling. Pingora still gets
-        // the process signal and performs its listener shutdown; our handler
-        // reloads snapshots and joins health workers deterministically.
-        let server_task = tokio::task::spawn_blocking(move || server.run_forever());
-        let signal_result = crate::reload::signal_loop(
+        // Pingora owns SIGTERM/SIGINT so it can stop accepting connections
+        // and drain in-flight requests using its graceful shutdown timeout.
+        // BeaRust handles SIGHUP independently for atomic config reloads.
+        let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+        let server_task = tokio::task::spawn_blocking(move || {
+            server.run(pingora_core::server::RunArgs::default());
+            let _ = done_tx.send(true);
+        });
+        let reload_task = tokio::spawn(crate::reload::reload_loop(
             Arc::clone(&store),
             path,
-            Duration::from_secs(config.server.graceful_shutdown_seconds),
-        )
-        .await;
-        if let Err(error) = signal_result {
-            tracing::error!(error = %error, "signal loop failed");
-        }
+            done_rx,
+        ));
         server_task
             .await
             .map_err(|error| AppError::Server(error.to_string()))?;
+        reload_task.abort();
+        tokio::time::timeout(
+            Duration::from_secs(config.server.graceful_shutdown_seconds),
+            store.shutdown(),
+        )
+        .await
+        .map_err(|_| AppError::Server("health shutdown timed out".into()))??;
         Ok(())
     })
 }

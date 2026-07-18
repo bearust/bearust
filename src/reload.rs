@@ -145,6 +145,34 @@ pub async fn signal_loop(
         .unwrap_or_else(|_| Ok(()))
 }
 
+/// Reload-only signal loop. Pingora owns SIGTERM/SIGINT so it can drain
+/// listeners and in-flight requests; this task handles SIGHUP and exits when
+/// the server task completes.
+#[cfg(unix)]
+pub async fn reload_loop(
+    store: std::sync::Arc<crate::runtime::RuntimeStore>,
+    config_path: PathBuf,
+    mut server_done: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), crate::runtime::RuntimeError> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut hup = signal(SignalKind::hangup())
+        .map_err(|error| crate::runtime::RuntimeError::Signal(error.to_string()))?;
+    loop {
+        tokio::select! {
+            _ = hup.recv() => {
+                match store.reload(&config_path).await {
+                    Ok(outcome) => tracing::info!(old_generation = outcome.old_generation, new_generation = outcome.new_generation, "configuration reloaded"),
+                    Err(error) => tracing::error!(error = %error, "configuration reload rejected; keeping active snapshot"),
+                }
+            }
+            changed = server_done.changed() => {
+                if changed.is_err() || *server_done.borrow() { break; }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(not(unix))]
 pub async fn signal_loop(
     _store: std::sync::Arc<crate::runtime::RuntimeStore>,
