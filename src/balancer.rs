@@ -72,6 +72,21 @@ impl PoolState {
         &self.name
     }
 
+    pub fn preserve_health_from(&self, previous: &PoolState) {
+        for backend in &self.backends {
+            let Some(old) = previous.backends.iter().find(|old| {
+                old.address == backend.address
+                    && old.health_check == backend.health_check
+                    && old.health_path == backend.health_path
+            }) else {
+                continue;
+            };
+            backend
+                .healthy
+                .store(old.healthy.load(Ordering::Acquire), Ordering::Release);
+        }
+    }
+
     pub fn select(self: &Arc<Self>, excluded: Option<BackendId>) -> Option<BackendLease> {
         if self.backends.is_empty() {
             return None;
