@@ -76,6 +76,25 @@ impl Http01Store {
             Some(value)
         }
     }
+    pub fn get_for_hostname(&self, hostname: &str, token: &str) -> Option<String> {
+        if !valid_token(token) {
+            return None;
+        }
+        let mut map = self.inner.lock().ok()?;
+        let key = map
+            .keys()
+            .find(|(_, host, candidate)| {
+                host == &hostname.to_ascii_lowercase() && candidate == token
+            })?
+            .clone();
+        let (value, expiry) = map.get(&key)?.clone();
+        if Instant::now() >= expiry {
+            map.remove(&key);
+            None
+        } else {
+            Some(value)
+        }
+    }
     pub fn remove(&self, token: &str) {
         self.remove_for_order("", "", token);
     }
@@ -100,7 +119,7 @@ fn valid_key_authorization(token: &str, value: &str) -> bool {
         return false;
     };
     prefix == token
-        && (32..=128).contains(&digest.len())
+        && digest.len() == 43
         && digest
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -113,25 +132,26 @@ pub fn lookup_http01(path: &str, store: &Http01Store) -> Option<String> {
     }
     store.get(token)
 }
+pub fn lookup_http01_for_host(path: &str, hostname: &str, store: &Http01Store) -> Option<String> {
+    let token = path.strip_prefix("/.well-known/acme-challenge/")?;
+    if token.is_empty() || token.contains('/') {
+        return None;
+    }
+    store.get_for_hostname(hostname, token)
+}
 pub(crate) struct ChallengeGuard {
     store: Http01Store,
-    order: String,
-    hostname: String,
-    token: String,
+    entries: Vec<(String, String, String)>,
 }
 impl ChallengeGuard {
-    pub fn new(store: Http01Store, order: &str, hostname: &str, token: &str) -> Self {
-        Self {
-            store,
-            order: order.to_owned(),
-            hostname: hostname.to_owned(),
-            token: token.to_owned(),
-        }
+    pub fn new(store: Http01Store, entries: Vec<(String, String, String)>) -> Self {
+        Self { store, entries }
     }
 }
 impl Drop for ChallengeGuard {
     fn drop(&mut self) {
-        self.store
-            .remove_for_order(&self.order, &self.hostname, &self.token);
+        for (order, hostname, token) in &self.entries {
+            self.store.remove_for_order(order, hostname, token);
+        }
     }
 }

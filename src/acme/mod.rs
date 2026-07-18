@@ -3,6 +3,7 @@ mod http01;
 use crate::certificates::{CertificateError, CertificateRecord, CertificateStore};
 use async_trait::async_trait;
 pub use http01::lookup_http01;
+pub use http01::lookup_http01_for_host;
 pub use http01::{Http01Error, Http01Store};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
@@ -110,12 +111,14 @@ impl AcmeManager {
     }
     async fn issue(&self, request: CertificateRequest) -> Result<CertificateRecord, AcmeError> {
         let order = self.transport.new_order(&request).await?;
-        let hostname = request.hostnames.first().map(String::as_str).unwrap_or("");
-        self.challenges
-            .put_for_order(&order.id, hostname, &order.token, &order.key_authorization)
-            .map_err(|_| AcmeError::InvalidRequest)?;
-        let _guard =
-            http01::ChallengeGuard::new(self.challenges.clone(), &order.id, hostname, &order.token);
+        let mut entries = Vec::new();
+        for hostname in &request.hostnames {
+            self.challenges
+                .put_for_order(&order.id, hostname, &order.token, &order.key_authorization)
+                .map_err(|_| AcmeError::InvalidRequest)?;
+            entries.push((order.id.clone(), hostname.clone(), order.token.clone()));
+        }
+        let _guard = http01::ChallengeGuard::new(self.challenges.clone(), entries);
         async {
             self.transport.poll_order(&order, &self.challenges).await?;
             let issued = self.transport.finalize(&order, &request).await?;

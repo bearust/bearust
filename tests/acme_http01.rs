@@ -17,11 +17,14 @@ use std::time::Duration;
 fn http01_store_returns_only_exact_token_and_expires() {
     let store = Http01Store::new(Duration::from_millis(20));
     store
-        .put("abc-123", "abc-123.abcdefghijklmnopqrstuvwxyz0123456789")
+        .put(
+            "abc-123",
+            "abc-123.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
         .unwrap();
     assert_eq!(
         store.get("abc-123").as_deref(),
-        Some("abc-123.abcdefghijklmnopqrstuvwxyz0123456789")
+        Some("abc-123.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     );
     assert!(store.get("abc-123/../x").is_none());
     std::thread::sleep(Duration::from_millis(30));
@@ -38,7 +41,7 @@ impl AcmeTransport for Harness {
         Ok(AcmeOrder {
             id: "order-1".into(),
             token: "token-1".into(),
-            key_authorization: "token-1.abcdefghijklmnopqrstuvwxyz0123456789".into(),
+            key_authorization: "token-1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         })
     }
     async fn poll_order(&self, _order: &AcmeOrder, _store: &Http01Store) -> Result<(), AcmeError> {
@@ -116,7 +119,7 @@ fn source_enum_includes_letsencrypt() {
 #[test]
 fn challenge_entries_are_isolated_by_order_and_hostname() {
     let store = Http01Store::default();
-    let value = "token.abcdefghijklmnopqrstuvwxyz0123456789";
+    let value = "token.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     store
         .put_for_order("one", "a.example", "token", value)
         .unwrap();
@@ -132,11 +135,11 @@ fn challenge_entries_are_isolated_by_order_and_hostname() {
 fn key_authorization_requires_token_and_base64url_digest() {
     let store = Http01Store::default();
     assert!(store
-        .put("token", "wrong.abcdefghijklmnopqrstuvwxyz0123456789")
+        .put("token", "wrong.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         .is_err());
     assert!(store.put("token", "token.not valid").is_err());
     assert!(store
-        .put("token", "token.abcdefghijklmnopqrstuvwxyz0123456789")
+        .put("token", "token.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         .is_ok());
 }
 
@@ -144,7 +147,7 @@ fn key_authorization_requires_token_and_base64url_digest() {
 fn challenge_lookup_handles_only_dedicated_path() {
     let store = Http01Store::default();
     store
-        .put("token", "token.abcdefghijklmnopqrstuvwxyz0123456789")
+        .put("token", "token.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         .unwrap();
     assert!(lookup_http01("/.well-known/acme-challenge/token", &store).is_some());
     assert!(lookup_http01("/proxy/.well-known/acme-challenge/token", &store).is_none());
