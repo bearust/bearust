@@ -22,6 +22,31 @@ pub struct AcmeRequest {
     pub hostnames: Vec<String>,
 }
 
+/// Control-plane payload. Credentials are write-only and are never serialized.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AcmeIssueRequest {
+    pub environment: AcmeEnvironment,
+    pub challenge: AcmeChallenge,
+    pub hostnames: Vec<String>,
+    #[serde(default, alias = "cloudflare_api_token")]
+    pub cloudflare_token: Option<String>,
+}
+impl AcmeIssueRequest {
+    pub fn request(&self) -> AcmeRequest {
+        AcmeRequest {
+            environment: self.environment.clone(),
+            challenge: self.challenge.clone(),
+            hostnames: self.hostnames.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AcmeJobResponse {
+    pub job_id: String,
+    pub certificate_id: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AcmeStatus {
     pub certificate_id: i64,

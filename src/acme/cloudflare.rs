@@ -188,9 +188,7 @@ impl CloudflareProvider {
             zone,
             records
                 .into_iter()
-                .find(|candidate| {
-                    candidate.name == name && candidate.content == record.value
-                })
+                .find(|candidate| candidate.name == name && candidate.content == record.value)
                 .map(|r| r.id),
         ))
     }

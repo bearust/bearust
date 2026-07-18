@@ -149,7 +149,8 @@ impl AcmeManager {
         request: CertificateRequest,
         provider: Arc<dyn DnsProvider>,
     ) -> Result<CertificateRecord, AcmeError> {
-        self.request_dns01_with_status(request, provider, |_| {}).await
+        self.request_dns01_with_status(request, provider, |_| {})
+            .await
     }
 
     pub async fn request_dns01_with_status<F>(
@@ -172,17 +173,18 @@ impl AcmeManager {
         }
         let deadline = tokio::time::Instant::now() + self.timeout;
         status_callback("creating_order");
-        let order = match tokio::time::timeout_at(deadline, self.transport.new_order(&request)).await {
-            Ok(Ok(order)) => order,
-            Ok(Err(error)) => {
-                status_callback("failed");
-                return Err(error);
-            }
-            Err(_) => {
-                status_callback("failed");
-                return Err(AcmeError::Timeout);
-            }
-        };
+        let order =
+            match tokio::time::timeout_at(deadline, self.transport.new_order(&request)).await {
+                Ok(Ok(order)) => order,
+                Ok(Err(error)) => {
+                    status_callback("failed");
+                    return Err(error);
+                }
+                Err(_) => {
+                    status_callback("failed");
+                    return Err(AcmeError::Timeout);
+                }
+            };
         let records: Vec<_> = request
             .hostnames
             .iter()
