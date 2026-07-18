@@ -43,6 +43,9 @@ async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() 
     let config = Config {
         server: ServerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
+            control_bind: "127.0.0.1:0".parse().unwrap(),
+            control_database: "./target/test.sqlite".into(),
+            certificate_store: "./target/test-certs".into(),
             graceful_shutdown_seconds: 1,
             pid_file: "./target/test.pid".into(),
             tls: None,

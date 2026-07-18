@@ -1,5 +1,8 @@
 [server]
 bind = "0.0.0.0:8080"
+control_bind = "0.0.0.0:8081"
+control_database = "/data/bearust.sqlite"
+certificate_store = "/data/certificates"
 
 # Optional native TLS. Both paths are required when this block is enabled.
 # [server.tls]

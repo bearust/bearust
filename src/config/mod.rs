@@ -20,6 +20,12 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub bind: SocketAddr,
+    #[serde(default = "default_control_bind")]
+    pub control_bind: SocketAddr,
+    #[serde(default = "default_control_database")]
+    pub control_database: PathBuf,
+    #[serde(default = "default_certificate_store")]
+    pub certificate_store: PathBuf,
     #[serde(default = "default_shutdown")]
     pub graceful_shutdown_seconds: u64,
     #[serde(default = "default_pid")]
@@ -98,6 +104,9 @@ pub enum HealthCheckKind {
 fn default_shutdown() -> u64 {
     30
 }
+fn default_control_bind() -> SocketAddr { "127.0.0.1:8081".parse().expect("valid default") }
+fn default_control_database() -> PathBuf { "./data/bearust.sqlite".into() }
+fn default_certificate_store() -> PathBuf { "./data/certificates".into() }
 fn default_pid() -> PathBuf {
     "./bearust.pid".into()
 }

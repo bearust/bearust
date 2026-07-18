@@ -228,6 +228,17 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
     let rt = tokio::runtime::Runtime::new().map_err(|e| AppError::Server(e.to_string()))?;
     rt.block_on(async move {
         let store = Arc::new(RuntimeStore::from_path(&path).await?);
+        let database_url = format!("sqlite://{}", config.server.control_database.display());
+        let setup_token_from_env = std::env::var("BEARUST_SETUP_TOKEN").ok();
+        let setup_token = setup_token_from_env.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        tracing::info!(event = "control_plane_start", bind = %config.server.control_bind, setup_token_configured = setup_token_from_env.is_some(), generated_setup_token = setup_token_from_env.is_none(), setup_token = %setup_token);
+        let control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
+            .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
+        let control_listener = tokio::net::TcpListener::bind(config.server.control_bind).await
+            .map_err(|e| AppError::Server(format!("control plane bind: {e}")))?;
+        let control_task = tokio::spawn(async move {
+            let _ = axum::serve(control_listener, crate::control_plane::router(control_state)).await;
+        });
         let pingora_options = std::env::var_os("BEARUST_PROXY_UPGRADE").map(|_| {
             pingora_core::server::configuration::Opt {
                 upgrade: true,
@@ -337,6 +348,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             .await
             .map_err(|error| AppError::Server(error.to_string()))?;
         reload_task.abort();
+        control_task.abort();
         tokio::time::timeout(
             Duration::from_secs(config.server.graceful_shutdown_seconds),
             store.shutdown(),

@@ -3,6 +3,7 @@ pub mod balancer;
 pub mod certificates;
 pub mod cli;
 pub mod config;
+pub mod control_plane;
 pub mod health;
 pub mod observability;
 pub mod proxy;
