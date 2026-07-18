@@ -231,6 +231,13 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let database_url = format!("sqlite://{}", config.server.control_database.display());
         let setup_token_from_env = std::env::var("BEARUST_SETUP_TOKEN").ok();
         let setup_token = setup_token_from_env.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if setup_token_from_env.is_none() {
+            let token_path = config.server.control_database.parent().unwrap_or(std::path::Path::new(".")).join("setup-token");
+            std::fs::write(&token_path, format!("{setup_token}\n")).map_err(|e| AppError::Server(format!("write setup token: {e}")))?;
+            #[cfg(unix)]
+            { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)); }
+            tracing::warn!(event = "generated_setup_token_file", path = %token_path.display());
+        }
         tracing::info!(event = "control_plane_start", bind = %config.server.control_bind, setup_token_configured = setup_token_from_env.is_some(), generated_setup_token = setup_token_from_env.is_none());
         let control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;

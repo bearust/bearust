@@ -151,6 +151,13 @@ pub async fn get_host(pool: &SqlitePool, id: i64) -> Result<Option<ProxyHost>, s
         enabled: x.get::<i64, _>("enabled") != 0,
     }))
 }
+
+pub async fn update_host(pool: &SqlitePool, id: i64, h: &ProxyHost) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("UPDATE proxy_hosts SET name=?,domain=?,upstream_host=?,upstream_port=?,tls_mode=?,certificate_id=?,enabled=?,updated_at=? WHERE id=?")
+        .bind(&h.name).bind(&h.domain).bind(&h.upstream_host).bind(h.upstream_port as i64)
+        .bind(&h.tls_mode).bind(h.certificate_id).bind(h.enabled as i64)
+        .bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(pool).await?.rows_affected())
+}
 pub async fn insert_certificate(
     pool: &SqlitePool,
     name: &str,

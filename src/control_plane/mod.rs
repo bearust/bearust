@@ -10,7 +10,7 @@ use axum::{
     extract::{Multipart, Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use models::*;
@@ -90,7 +90,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(me))
         .route("/api/proxy-hosts", get(list_hosts).post(create_host))
-        .route("/api/proxy-hosts/{id}", delete(remove_host))
+        .route(
+            "/api/proxy-hosts/{id}",
+            get(get_host).patch(update_host).delete(remove_host),
+        )
         .route(
             "/api/certificates",
             get(list_certificates).post(upload_certificate),
@@ -203,6 +206,21 @@ async fn list_hosts(State(s): State<AppState>, h: HeaderMap) -> impl IntoRespons
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
+
+async fn get_host(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    if current(&s, &h).await.is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match repository::get_host(&s.db, id).await {
+        Ok(Some(host)) => Json(host).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
 async fn create_host(
     State(s): State<AppState>,
     h: HeaderMap,
@@ -263,6 +281,76 @@ async fn create_host(
             .into_response(),
     }
 }
+async fn update_host(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<ProxyHostRequest>,
+) -> impl IntoResponse {
+    let u = match current(&s, &h).await {
+        Ok(x) => x,
+        Err(c) => return c.into_response(),
+    };
+    if !allowed(
+        Role::parse(&u.role).unwrap_or(Role::Viewer),
+        Permission::ProxyHostsWrite,
+    ) {
+        audit::record(
+            &s.db,
+            Some(u.id),
+            "authorization_denied",
+            "proxy_host_update",
+        )
+        .await;
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if req.name.trim().is_empty()
+        || req.domain.trim().is_empty()
+        || req.upstream_host.trim().is_empty()
+        || req.upstream_port == 0
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let next = ProxyHost {
+        id,
+        name: req.name,
+        domain: req.domain.to_ascii_lowercase(),
+        upstream_host: req.upstream_host,
+        upstream_port: req.upstream_port,
+        tls_mode: req.tls_mode,
+        certificate_id: req.certificate_id,
+        enabled: req.enabled,
+    };
+    if repository::update_host(&s.db, id, &next).await.is_err() {
+        return StatusCode::CONFLICT.into_response();
+    }
+    let desired = DesiredConfig {
+        proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default(),
+    };
+    if s.reloader.apply(desired).await.is_err() {
+        let _ = repository::update_host(&s.db, id, &previous).await;
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorEnvelope {
+                code: "reload_failed".into(),
+                message: "Proxy host update was not activated".into(),
+            }),
+        )
+            .into_response();
+    }
+    audit::record(
+        &s.db,
+        Some(u.id),
+        "proxy_host_updated",
+        "configuration_changed",
+    )
+    .await;
+    Json(next).into_response()
+}
+
 async fn remove_host(
     State(s): State<AppState>,
     h: HeaderMap,
