@@ -1,5 +1,6 @@
-import {describe,expect,it} from 'vitest';
-import {sanitizeError,validHostname} from './App';
+import {describe,expect,it,vi,afterEach} from 'vitest';
+import {api} from './api';
+import {acmeSubmissionReady,sanitizeError,validHostname} from './App';
 
 describe('ACME wizard validation',()=>{
   it('accepts normal HTTP-01 names and rejects wildcards',()=>{
@@ -13,5 +14,24 @@ describe('ACME wizard validation',()=>{
   it('redacts tokens from errors before rendering',()=>{
     expect(sanitizeError('cloudflare_api_token=super-secret-token-value-123456789012345')).toContain('[redacted]');
     expect(sanitizeError('invalid hostname')).toBe('invalid hostname');
+  });
+  it('requires a Cloudflare token for DNS-01 but not HTTP-01',()=>{
+    expect(acmeSubmissionReady('cloudflare_dns01',['example.com'],'')).toBe(false);
+    expect(acmeSubmissionReady('cloudflare_dns01',['example.com'],'token')).toBe(true);
+    expect(acmeSubmissionReady('http01',['example.com'],'')).toBe(true);
+  });
+});
+
+describe('ACME API contracts',()=>{
+  afterEach(()=>vi.restoreAllMocks());
+  it('posts HTTP-01 requests and accepts the 202 job shape',async()=>{
+    const fetchMock=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify({job_id:'job-1',certificate_id:null,status:'pending'}),{status:202,headers:{'Content-Type':'application/json'}}));
+    await expect(api.issueAcme({environment:'staging',challenge:'http01',hostnames:['example.com']})).resolves.toMatchObject({job_id:'job-1',status:'pending'});
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({environment:'staging',challenge:'http01',hostnames:['example.com']});
+  });
+  it('refreshes status through the per-certificate endpoint',async()=>{
+    vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify({certificate_id:4,environment:'staging',challenge:'http01',hostnames:['example.com'],renewal_state:'pending',next_renewal_at:null,last_attempt_at:null,last_error_code:null}),{status:200,headers:{'Content-Type':'application/json'}}));
+    await api.certificateStatus(4);
+    expect(vi.mocked(globalThis.fetch).mock.calls[0][0]).toBe('/api/certificates/4/status');
   });
 });
