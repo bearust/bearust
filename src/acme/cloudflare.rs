@@ -2,7 +2,7 @@ use super::dns::{DnsError, DnsProvider, TxtRecord};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
-use std::time::Duration;
+use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
 
 #[derive(Clone)]
 pub struct CloudflareProvider {
@@ -11,6 +11,7 @@ pub struct CloudflareProvider {
     token: String,
     propagation_timeout: Duration,
     poll_interval: Duration,
+    created_records: Arc<Mutex<HashMap<(String, String), String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +66,7 @@ impl CloudflareProvider {
             token,
             propagation_timeout,
             poll_interval,
+            created_records: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -144,22 +146,22 @@ impl CloudflareProvider {
 #[async_trait]
 impl DnsProvider for CloudflareProvider {
     async fn present(&self, record: TxtRecord) -> Result<(), DnsError> {
-        if record.name.trim().is_empty() || record.value.is_empty() {
+        if !valid_dns_name(&record.name) || record.value.is_empty() {
             return Err(DnsError::InvalidRecord);
         }
         let zone = self.zone(&record.name).await?;
         let url = format!("{}/zones/{}/dns_records", self.base_url, zone.id);
-        let _: Record = self.send(self.client.post(url).json(&serde_json::json!({"type":"TXT", "name":record.name, "content":record.value, "ttl":120, "proxied":false}))).await?;
+        let created: Record = self.send(self.client.post(url).json(&serde_json::json!({"type":"TXT", "name":record.name, "content":record.value, "ttl":120, "proxied":false}))).await?;
+        if let Ok(mut records) = self.created_records.lock() {
+            records.insert((record.name, record.value), created.id);
+        }
         Ok(())
     }
 
     async fn cleanup(&self, record: TxtRecord) -> Result<(), DnsError> {
-        let (zone, id) = match self.record_id(&record).await {
-            Ok(value) => value,
-            Err(DnsError::NotFound) => return Ok(()),
-            Err(error) => return Err(error),
-        };
+        let id = self.created_records.lock().ok().and_then(|mut records| records.remove(&(record.name.clone(), record.value.clone())));
         if let Some(id) = id {
+            let zone = self.zone(&record.name).await?;
             let url = format!("{}/zones/{}/dns_records/{}", self.base_url, zone.id, id);
             let request = self.client.delete(url);
             match self.send::<serde_json::Value>(request).await {
@@ -184,4 +186,12 @@ impl DnsProvider for CloudflareProvider {
             tokio::time::sleep(self.poll_interval).await;
         }
     }
+}
+
+fn valid_dns_name(value: &str) -> bool {
+    let value = value.trim().trim_end_matches('.');
+    !value.is_empty() && value.split('.').all(|label| {
+        !label.is_empty() && label.len() <= 63 && !label.starts_with('-') && !label.ends_with('-')
+            && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
 }

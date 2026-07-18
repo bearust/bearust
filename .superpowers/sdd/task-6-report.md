@@ -35,3 +35,10 @@ cargo clippy --locked --all-targets -- -D warnings
 ```
 
 No provider token or response body is included in errors or structured logs.
+
+DNS-01 publishes the required base64url-no-padding SHA-256 digest of the ACME
+key authorization. Cloudflare cleanup tracks record IDs created by this
+provider instance, preventing deletion of pre-existing identical TXT records;
+cleanup failures are emitted as redacted category-only warnings. Propagation
+polling currently checks Cloudflare API visibility rather than an external DNS
+resolver and remains an operational limitation for a later hardening task.

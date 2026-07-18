@@ -9,6 +9,7 @@ description = "Open source reverse proxy and load balancer"
 [dependencies]
 arc-swap = "1.7"
 bytes = "1"
+base64 = "0.22"
 openssl = "=0.10.68"
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"] }

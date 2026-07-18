@@ -4,6 +4,7 @@ mod dns;
 mod http01;
 use crate::certificates::{CertificateError, CertificateRecord, CertificateStore};
 use async_trait::async_trait;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 pub use cloudflare::CloudflareProvider;
 pub use dns::{DnsError, DnsProvider, TxtRecord};
 pub use http01::lookup_http01;
@@ -143,7 +144,8 @@ impl AcmeManager {
             .hostnames
             .iter()
             .map(|hostname| {
-                TxtRecord::new(dns01_record_name(hostname), order.key_authorization.clone())
+                let digest = URL_SAFE_NO_PAD.encode(openssl::sha::sha256(order.key_authorization.as_bytes()));
+                TxtRecord::new(dns01_record_name(hostname), digest)
             })
             .collect();
         // Track every candidate before the provider call so partial failure or
@@ -174,7 +176,9 @@ impl AcmeManager {
         .map_err(|_| AcmeError::Timeout)
         .and_then(|result| result);
         for record in records {
-            let _ = provider.cleanup(record).await;
+            if let Err(error) = provider.cleanup(record).await {
+                tracing::warn!(event = "dns_challenge_cleanup_failed", reason = dns_reason(&error));
+            }
         }
         result
     }
@@ -242,5 +246,16 @@ fn acme_reason(error: &AcmeError) -> &'static str {
         AcmeError::Transport(_) => "transport",
         AcmeError::Certificate(_) => "certificate",
         AcmeError::InvalidRequest => "invalid_request",
+    }
+}
+
+fn dns_reason(error: &DnsError) -> &'static str {
+    match error {
+        DnsError::Timeout => "timeout",
+        DnsError::Transport => "transport",
+        DnsError::Api => "api",
+        DnsError::NotFound => "not_found",
+        DnsError::PropagationTimeout => "propagation_timeout",
+        DnsError::InvalidRecord => "invalid_record",
     }
 }
