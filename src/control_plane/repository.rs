@@ -136,6 +136,21 @@ pub async fn delete_host(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error>
         .await?
         .rows_affected())
 }
+
+pub async fn get_host(pool: &SqlitePool, id: i64) -> Result<Option<ProxyHost>, sqlx::Error> {
+    let row = sqlx::query("SELECT id,name,domain,upstream_host,upstream_port,tls_mode,certificate_id,enabled FROM proxy_hosts WHERE id=?")
+        .bind(id).fetch_optional(pool).await?;
+    Ok(row.map(|x| ProxyHost {
+        id: x.get("id"),
+        name: x.get("name"),
+        domain: x.get("domain"),
+        upstream_host: x.get("upstream_host"),
+        upstream_port: x.get::<i64, _>("upstream_port") as u16,
+        tls_mode: x.get("tls_mode"),
+        certificate_id: x.get("certificate_id"),
+        enabled: x.get::<i64, _>("enabled") != 0,
+    }))
+}
 pub async fn insert_certificate(
     pool: &SqlitePool,
     name: &str,

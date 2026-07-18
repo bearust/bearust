@@ -249,11 +249,34 @@ async fn remove_host(
     ) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    match repository::delete_host(&s.db, id).await {
-        Ok(0) => StatusCode::NOT_FOUND.into_response(),
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if repository::delete_host(&s.db, id).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
+    let desired = DesiredConfig {
+        proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default(),
+    };
+    if s.reloader.apply(desired).await.is_err() {
+        let _ = repository::insert_host(&s.db, &previous).await;
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorEnvelope {
+                code: "reload_failed".into(),
+                message: "Proxy host deletion was not activated".into(),
+            }),
+        )
+            .into_response();
+    }
+    audit::record(
+        &s.db,
+        Some(u.id),
+        "proxy_host_deleted",
+        "configuration_changed",
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
 }
 async fn upload_certificate(
     State(s): State<AppState>,
