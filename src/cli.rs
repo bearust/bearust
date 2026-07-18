@@ -100,6 +100,20 @@ fn serve(path: PathBuf, json_logs: bool) -> Result<(), AppError> {
         // and drain in-flight requests using its graceful shutdown timeout.
         // BeaRust handles SIGHUP independently for atomic config reloads.
         let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+        #[cfg(unix)]
+        let (term_tx, term_rx) = tokio::sync::oneshot::channel();
+        #[cfg(unix)]
+        std::thread::spawn(move || {
+            let Ok(mut signals) = signal_hook::iterator::Signals::new([
+                signal_hook::consts::SIGTERM,
+                signal_hook::consts::SIGINT,
+            ]) else {
+                return;
+            };
+            if signals.forever().next().is_some() {
+                let _ = term_tx.send(());
+            }
+        });
         let mut server_task = tokio::task::spawn_blocking(move || {
             server.run(pingora_core::server::RunArgs::default());
             let _ = done_tx.send(true);
@@ -113,6 +127,17 @@ fn serve(path: PathBuf, json_logs: bool) -> Result<(), AppError> {
         tokio::select! {
             result = &mut server_task => {
                 result.map_err(|error| AppError::Server(error.to_string()))?;
+            }
+            _ = term_rx => {
+                // Pingora drains listeners and in-flight requests in response
+                // to the same signal. Bound the wait independently of its
+                // signal implementation so shutdown cannot hang forever.
+                if tokio::time::timeout(
+                    Duration::from_secs(config.server.graceful_shutdown_seconds),
+                    &mut server_task,
+                ).await.is_err() {
+                    std::process::exit(0);
+                }
             }
             _ = &mut reload_task => {
                 // Pingora is draining listeners and in-flight requests in

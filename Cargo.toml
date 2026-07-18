@@ -12,6 +12,7 @@ async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"] }
 http = "1"
 nix = { version = "0.29", features = ["process", "signal"] }
+signal-hook = "0.3"
 pingora-core = "0.8.1"
 pingora-error = "0.8.1"
 pingora-http = "0.8.1"
