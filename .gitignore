@@ -2,6 +2,7 @@
 .superpowers/
 .worktrees/
 /target/
+data/
 *.pid
 .env
 .DS_Store
