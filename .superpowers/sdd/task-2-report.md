@@ -31,3 +31,7 @@
 - OpenSSL is pinned to `0.10.68` for the Rust 1.84 target. Cargo.lock still needs regeneration in an environment with compatible cached index entries; the available container resolver selected unrelated newer packages.
 
 Fix commit: `86ec277 fix: harden certificate staging and validation`
+
+## Lockfile verification
+
+Using Rust 1.84.1 with `pkg-config libssl-dev cmake`, `cargo check --locked --all-targets` and `cargo test --locked --all-targets` both passed. The lockfile now includes OpenSSL `0.10.68` and its required packages.

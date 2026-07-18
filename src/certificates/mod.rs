@@ -95,9 +95,10 @@ impl CertificateStore {
         if cert_pub != key_pub {
             return Err(CertificateError::KeyMismatch);
         }
+        let now = Asn1Time::days_from_now(0).map_err(|_| CertificateError::Malformed)?;
         if cert
             .not_after()
-            .compare(&Asn1Time::days_from_now(0).map_err(|_| CertificateError::Malformed)?)
+            .compare(now.as_ref())
             .map_err(|_| CertificateError::Malformed)?
             == Ordering::Less
         {
