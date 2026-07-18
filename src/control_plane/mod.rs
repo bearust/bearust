@@ -7,6 +7,7 @@ use crate::certificates::{
     AcmeService as CertificateAcmeService, AcmeServiceError as CertificateAcmeError,
     CertificateStore,
 };
+use crate::acme::{AcmeEnvironment, AcmeManager, LetsEncryptClient};
 use crate::secrets::SecretStore;
 use async_trait::async_trait;
 use axum::{
@@ -171,16 +172,38 @@ pub async fn build_state(
     repository::migrate(&db).await?;
     let certificates = CertificateStore::new(certificate_root)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let certificates = Arc::new(certificates);
     let secrets = SecretStore::open(&certificate_root.join("secrets"))
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let reloader: Arc<dyn ConfigReloader> = Arc::new(NoopReloader);
+    // The production control-plane path uses the real ACME client.  The
+    // client is lazy with respect to network calls, so startup remains
+    // deterministic even when the CA is unavailable; issuance errors are
+    // surfaced through the authenticated API.
+    let client = LetsEncryptClient::new(
+        AcmeEnvironment::Production,
+        secrets.clone(),
+        reqwest::Client::new(),
+    )
+    .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let manager = AcmeManager::with_transport(
+        certificates.as_ref().clone(),
+        Arc::new(client),
+    );
+    let certificate_acme = Arc::new(CertificateAcmeService::new(
+        db.clone(),
+        certificates.clone(),
+        Arc::new(manager),
+        reloader.clone(),
+    ));
     Ok(AppState {
         db,
-        certificates: Arc::new(certificates),
-        reloader: Arc::new(NoopReloader),
+        certificates,
+        reloader,
         setup_token: setup_token.into(),
         auth_attempts: Arc::new(Mutex::new(HashMap::new())),
         secrets,
-        acme: Arc::new(NoopAcmeService),
+        acme: Arc::new(CertificateAcmeAdapter::new(certificate_acme)),
     })
 }
 
