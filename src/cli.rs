@@ -168,7 +168,13 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             crate::proxy::BeaRustProxy::new(store.clone()),
             &server.configuration,
         );
-        service.add_tcp(&config.server.bind.to_string());
+        if let Some(tls_config) = &config.server.tls {
+            let tls = crate::tls::settings(tls_config)
+                .map_err(|error| AppError::Server(error.to_string()))?;
+            service.add_tls_with_settings(&config.server.bind.to_string(), None, tls);
+        } else {
+            service.add_tcp(&config.server.bind.to_string());
+        }
         server.add_service(service);
         // Pingora owns SIGTERM/SIGINT so it can stop accepting connections
         // and drain in-flight requests using its graceful shutdown timeout.
