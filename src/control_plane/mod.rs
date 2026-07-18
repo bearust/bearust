@@ -6,6 +6,7 @@ pub mod repository;
 use crate::certificates::CertificateStore;
 use async_trait::async_trait;
 use axum::{
+    extract::DefaultBodyLimit,
     extract::{Multipart, Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -70,7 +71,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/me", get(me))
         .route("/api/proxy-hosts", get(list_hosts).post(create_host))
         .route("/api/proxy-hosts/{id}", delete(remove_host))
-        .route("/api/certificates", post(upload_certificate))
+        .route(
+            "/api/certificates",
+            get(list_certificates).post(upload_certificate),
+        )
+        .route(
+            "/api/certificates/{id}/activate",
+            post(activate_certificate),
+        )
+        .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
 }
 async fn health() -> Json<serde_json::Value> {
@@ -261,6 +270,7 @@ async fn upload_certificate(
     ) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let mut total = 0usize;
     let mut name = None;
     let mut cert = None;
     let mut key = None;
@@ -270,6 +280,10 @@ async fn upload_certificate(
             Ok(b) => b,
             Err(_) => return StatusCode::BAD_REQUEST.into_response(),
         };
+        total += bytes.len();
+        if total > 3 * 1024 * 1024 {
+            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        }
         if bytes.len() > 1024 * 1024 {
             return StatusCode::PAYLOAD_TOO_LARGE.into_response();
         }
@@ -288,5 +302,59 @@ async fn upload_certificate(
             match repository::insert_certificate(&s.db,&record.name,"custom",&serde_json::to_string(&record.covered_hostnames).unwrap_or_default(),&record.expiry,&record.certificate_path.to_string_lossy(),&record.key_path.to_string_lossy()).await{Ok(id)=>(StatusCode::CREATED,Json(serde_json::json!({"id":id,"name":record.name,"source":"custom","covered_hostnames":record.covered_hostnames,"expiry":record.expiry}))).into_response(),Err(_)=>StatusCode::CONFLICT.into_response()}
         }
         Err(_) => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+async fn list_certificates(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
+    let user = match current(&s, &h).await {
+        Ok(u) => u,
+        Err(c) => return c.into_response(),
+    };
+    if !allowed(
+        Role::parse(&user.role).unwrap_or(Role::Viewer),
+        Permission::CertificatesRead,
+    ) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match repository::list_certificates(&s.db).await {
+        Ok(c) => Json(c).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn activate_certificate(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let user = match current(&s, &h).await {
+        Ok(u) => u,
+        Err(c) => return c.into_response(),
+    };
+    if !allowed(
+        Role::parse(&user.role).unwrap_or(Role::Viewer),
+        Permission::CertificatesWrite,
+    ) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(name) = repository::certificate_name(&s.db, id).await.ok().flatten() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if s.certificates.activate(&name).is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match repository::activate_certificate(&s.db, id).await {
+        Ok(1) => {
+            audit::record(
+                &s.db,
+                Some(user.id),
+                "certificate_activated",
+                "metadata_only",
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(_) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

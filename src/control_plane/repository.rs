@@ -1,4 +1,4 @@
-use crate::control_plane::models::{ProxyHost, User};
+use crate::control_plane::models::{CertificateMetadata, ProxyHost, User};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     Row, SqlitePool,
@@ -147,4 +147,46 @@ pub async fn insert_certificate(
 ) -> Result<i64, sqlx::Error> {
     let r=sqlx::query("INSERT INTO certificates(name,source,covered_hostnames,expiry,certificate_path,key_path) VALUES(?,?,?,?,?,?) RETURNING id").bind(name).bind(source).bind(hosts).bind(expiry).bind(cert_path).bind(key_path).fetch_one(pool).await?;
     Ok(r.get("id"))
+}
+
+pub async fn list_certificates(pool: &SqlitePool) -> Result<Vec<CertificateMetadata>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id,name,source,covered_hostnames,expiry,active FROM certificates ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| CertificateMetadata {
+            id: r.get("id"),
+            name: r.get("name"),
+            source: r.get("source"),
+            covered_hostnames: serde_json::from_str(&r.get::<String, _>("covered_hostnames"))
+                .unwrap_or_default(),
+            expiry: r.get("expiry"),
+            active: r.get::<i64, _>("active") != 0,
+        })
+        .collect())
+}
+
+pub async fn certificate_name(pool: &SqlitePool, id: i64) -> Result<Option<String>, sqlx::Error> {
+    Ok(sqlx::query("SELECT name FROM certificates WHERE id=?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .map(|r| r.get("name")))
+}
+
+pub async fn activate_certificate(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE certificates SET active=0")
+        .execute(&mut *tx)
+        .await?;
+    let changed = sqlx::query("UPDATE certificates SET active=1 WHERE id=?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(changed)
 }
