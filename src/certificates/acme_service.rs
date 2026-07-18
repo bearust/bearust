@@ -7,9 +7,13 @@
 
 use crate::{
     acme::{AcmeError, AcmeManager, CertificateRequest},
-    control_plane::{audit, models::{AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus}, repository},
-    certificates::{CertificateError, CertificateSource, CertificateStore},
+    certificates::{CertificateError, CertificateStore},
     control_plane::ConfigReloader,
+    control_plane::{
+        audit,
+        models::{AcmeChallenge, AcmeRequest, AcmeStatus},
+        repository,
+    },
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use sha2::{Digest, Sha256};
@@ -52,79 +56,213 @@ impl AcmeService {
         manager: Arc<AcmeManager>,
         reloader: Arc<dyn ConfigReloader>,
     ) -> Self {
-        Self { db, certificates, manager, reloader, jobs: Arc::new(Mutex::new(HashSet::new())) }
+        Self {
+            db,
+            certificates,
+            manager,
+            reloader,
+            jobs: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
 
     /// Issue and activate a certificate.  The request is normalized before a
     /// lock is acquired so equivalent host lists share one in-flight job.
-    pub async fn issue(&self, actor_id: i64, request: AcmeRequest) -> Result<AcmeStatus, AcmeServiceError> {
+    pub async fn issue(
+        &self,
+        actor_id: i64,
+        request: AcmeRequest,
+    ) -> Result<AcmeStatus, AcmeServiceError> {
         let request = request.normalized().map_err(AcmeServiceError::Invalid)?;
         let key = operation_key(&request);
         let _guard = JobGuard::acquire(self.jobs.clone(), key).await?;
         let name = certificate_name(&request);
         let issued = self.issue_material(&request, &name).await?;
-        let hosts = serde_json::to_string(&issued.covered_hostnames).unwrap_or_else(|_| "[]".into());
-        let id = repository::insert_certificate(&self.db, &issued.name, "letsencrypt", &hosts,
-            &issued.expiry, &issued.certificate_path.to_string_lossy(), &issued.key_path.to_string_lossy()).await?;
+        let hosts =
+            serde_json::to_string(&issued.covered_hostnames).unwrap_or_else(|_| "[]".into());
+        let id = repository::insert_certificate(
+            &self.db,
+            &issued.name,
+            "letsencrypt",
+            &hosts,
+            &issued.expiry,
+            &issued.certificate_path.to_string_lossy(),
+            &issued.key_path.to_string_lossy(),
+        )
+        .await?;
         let status = repository::insert_acme_certificate(&self.db, id, &request).await?;
         let next = renewal_at(&issued.expiry);
-        repository::update_acme_status(&self.db, id, "active", next.as_deref(), Some(&Utc::now().to_rfc3339()), None).await?;
-        audit::record(&self.db, Some(actor_id), "acme_issued", &format!("certificate_id={id}")).await;
+        repository::update_acme_status(
+            &self.db,
+            id,
+            "active",
+            next.as_deref(),
+            Some(&Utc::now().to_rfc3339()),
+            None,
+        )
+        .await?;
+        audit::record(
+            &self.db,
+            Some(actor_id),
+            "acme_issued",
+            &format!("certificate_id={id}"),
+        )
+        .await;
         self.reload(id).await?;
-        Ok(repository::get_acme_status(&self.db, id).await?.unwrap_or(status))
+        Ok(repository::get_acme_status(&self.db, id)
+            .await?
+            .unwrap_or(status))
     }
 
-    pub async fn renew(&self, actor_id: Option<i64>, certificate_id: i64) -> Result<AcmeStatus, AcmeServiceError> {
-        let status = repository::get_acme_status(&self.db, certificate_id).await?.ok_or(AcmeServiceError::NotFound)?;
+    pub async fn renew(
+        &self,
+        actor_id: Option<i64>,
+        certificate_id: i64,
+    ) -> Result<AcmeStatus, AcmeServiceError> {
+        let status = repository::get_acme_status(&self.db, certificate_id)
+            .await?
+            .ok_or(AcmeServiceError::NotFound)?;
         let _guard = JobGuard::acquire(self.jobs.clone(), format!("id:{certificate_id}")).await?;
-        let name = repository::certificate_name(&self.db, certificate_id).await?.ok_or(AcmeServiceError::NotFound)?;
-        let request = AcmeRequest { environment: status.environment.clone(), challenge: status.challenge.clone(), hostnames: status.hostnames.clone() }.normalized().map_err(AcmeServiceError::Invalid)?;
+        let name = repository::certificate_name(&self.db, certificate_id)
+            .await?
+            .ok_or(AcmeServiceError::NotFound)?;
+        let request = AcmeRequest {
+            environment: status.environment.clone(),
+            challenge: status.challenge.clone(),
+            hostnames: status.hostnames.clone(),
+        }
+        .normalized()
+        .map_err(AcmeServiceError::Invalid)?;
         let issued = self.issue_material(&request, &name).await?;
         // import_letsencrypt validates before replacing the existing material;
         // activation is the final state transition and can therefore be
         // retried without changing the previous active pointer on failure.
-        let cert = std::fs::read(&issued.certificate_path).map_err(|e| AcmeServiceError::Certificate(CertificateError::Io(e)))?;
-        let key = std::fs::read(&issued.key_path).map_err(|e| AcmeServiceError::Certificate(CertificateError::Io(e)))?;
+        let cert = std::fs::read(&issued.certificate_path)
+            .map_err(|e| AcmeServiceError::Certificate(CertificateError::Io(e)))?;
+        let key = std::fs::read(&issued.key_path)
+            .map_err(|e| AcmeServiceError::Certificate(CertificateError::Io(e)))?;
         let record = self.certificates.import_letsencrypt(&name, &cert, &key)?;
         self.certificates.activate(&record.name)?;
         let next = renewal_at(&record.expiry);
-        repository::update_acme_status(&self.db, certificate_id, "active", next.as_deref(), Some(&Utc::now().to_rfc3339()), None).await?;
-        audit::record(&self.db, actor_id, "acme_renewed", &format!("certificate_id={certificate_id}")).await;
+        repository::update_acme_status(
+            &self.db,
+            certificate_id,
+            "active",
+            next.as_deref(),
+            Some(&Utc::now().to_rfc3339()),
+            None,
+        )
+        .await?;
+        audit::record(
+            &self.db,
+            actor_id,
+            "acme_renewed",
+            &format!("certificate_id={certificate_id}"),
+        )
+        .await;
         self.reload(certificate_id).await?;
-        Ok(repository::get_acme_status(&self.db, certificate_id).await?.ok_or(AcmeServiceError::NotFound)?)
+        Ok(repository::get_acme_status(&self.db, certificate_id)
+            .await?
+            .ok_or(AcmeServiceError::NotFound)?)
     }
 
     pub async fn status(&self, certificate_id: i64) -> Result<AcmeStatus, AcmeServiceError> {
-        repository::get_acme_status(&self.db, certificate_id).await?.ok_or(AcmeServiceError::NotFound)
+        repository::get_acme_status(&self.db, certificate_id)
+            .await?
+            .ok_or(AcmeServiceError::NotFound)
     }
 
     pub async fn run_due_renewals(&self) -> Result<(), AcmeServiceError> {
         let now = Utc::now();
         let due = repository::list_due_acme_certificates(&self.db, &now.to_rfc3339()).await?;
-        for item in due { if let Err(error) = self.renew(None, item.certificate_id).await {
-            let code = error_code(&error);
-            let _ = repository::update_acme_status(&self.db, item.certificate_id, "retrying", Some(&(now + ChronoDuration::hours(1)).to_rfc3339()), Some(&now.to_rfc3339()), Some(code)).await;
-        }}
+        for item in due {
+            if let Err(error) = self.renew(None, item.certificate_id).await {
+                let code = error_code(&error);
+                let _ = repository::update_acme_status(
+                    &self.db,
+                    item.certificate_id,
+                    "retrying",
+                    Some(&(now + ChronoDuration::hours(1)).to_rfc3339()),
+                    Some(&now.to_rfc3339()),
+                    Some(code),
+                )
+                .await;
+            }
+        }
         Ok(())
     }
 
-    async fn issue_material(&self, request: &AcmeRequest, name: &str) -> Result<crate::certificates::CertificateRecord, AcmeServiceError> {
+    async fn issue_material(
+        &self,
+        request: &AcmeRequest,
+        name: &str,
+    ) -> Result<crate::certificates::CertificateRecord, AcmeServiceError> {
         let req = CertificateRequest::new(name, request.hostnames.clone());
         match request.challenge {
             AcmeChallenge::Http01 => Ok(self.manager.request_http01(req).await?),
-            AcmeChallenge::CloudflareDns01 => Err(AcmeServiceError::Invalid("DNS provider is not configured".into())),
+            AcmeChallenge::CloudflareDns01 => Err(AcmeServiceError::Invalid(
+                "DNS provider is not configured".into(),
+            )),
         }
     }
     async fn reload(&self, certificate_id: i64) -> Result<(), AcmeServiceError> {
-        self.reloader.apply_certificate_change(certificate_id).await.map_err(|e| AcmeServiceError::Reload(e.to_string()))
+        self.reloader
+            .apply_certificate_change(certificate_id)
+            .await
+            .map_err(|e| AcmeServiceError::Reload(e.to_string()))
     }
 }
 
-struct JobGuard { jobs: Arc<Mutex<HashSet<String>>>, key: String }
-impl JobGuard { async fn acquire(jobs: Arc<Mutex<HashSet<String>>>, key: String) -> Result<Self, AcmeServiceError> { let mut lock = jobs.lock().await; if !lock.insert(key.clone()) { return Err(AcmeServiceError::Busy); } Ok(Self { jobs, key }) } }
-impl Drop for JobGuard { fn drop(&mut self) { let jobs = self.jobs.clone(); let key = self.key.clone(); tokio::spawn(async move { jobs.lock().await.remove(&key); }); } }
+struct JobGuard {
+    jobs: Arc<Mutex<HashSet<String>>>,
+    key: String,
+}
+impl JobGuard {
+    async fn acquire(
+        jobs: Arc<Mutex<HashSet<String>>>,
+        key: String,
+    ) -> Result<Self, AcmeServiceError> {
+        let mut lock = jobs.lock().await;
+        if !lock.insert(key.clone()) {
+            return Err(AcmeServiceError::Busy);
+        }
+        drop(lock);
+        Ok(Self { jobs, key })
+    }
+}
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        let jobs = self.jobs.clone();
+        let key = self.key.clone();
+        tokio::spawn(async move {
+            jobs.lock().await.remove(&key);
+        });
+    }
+}
 
-fn operation_key(request: &AcmeRequest) -> String { format!("{}:{:?}:{:?}", certificate_name(request), request.environment, request.challenge) }
-fn certificate_name(request: &AcmeRequest) -> String { let mut h = Sha256::new(); h.update(request.hostnames.join("\n")); format!("acme-{}", hex::encode(h.finalize())[..24].to_string()) }
-fn renewal_at(expiry: &str) -> Option<String> { DateTime::parse_from_str(expiry, "%b %e %H:%M:%S %Y GMT").ok().map(|d| (d.with_timezone(&Utc) - ChronoDuration::days(30)).to_rfc3339()) }
-fn error_code(error: &AcmeServiceError) -> &'static str { match error { AcmeServiceError::Busy => "busy", AcmeServiceError::Invalid(_) => "invalid_request", AcmeServiceError::NotFound => "not_found", AcmeServiceError::Acme(AcmeError::Timeout) => "timeout", _ => "failed" } }
+fn operation_key(request: &AcmeRequest) -> String {
+    format!(
+        "{}:{:?}:{:?}",
+        certificate_name(request),
+        request.environment,
+        request.challenge
+    )
+}
+fn certificate_name(request: &AcmeRequest) -> String {
+    let mut h = Sha256::new();
+    h.update(request.hostnames.join("\n"));
+    format!("acme-{}", hex::encode(h.finalize())[..24].to_string())
+}
+fn renewal_at(expiry: &str) -> Option<String> {
+    DateTime::parse_from_str(expiry, "%b %e %H:%M:%S %Y GMT")
+        .ok()
+        .map(|d| (d.with_timezone(&Utc) - ChronoDuration::days(30)).to_rfc3339())
+}
+fn error_code(error: &AcmeServiceError) -> &'static str {
+    match error {
+        AcmeServiceError::Busy => "busy",
+        AcmeServiceError::Invalid(_) => "invalid_request",
+        AcmeServiceError::NotFound => "not_found",
+        AcmeServiceError::Acme(AcmeError::Timeout) => "timeout",
+        _ => "failed",
+    }
+}
