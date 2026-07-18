@@ -1,3 +1,4 @@
+pub mod acme;
 pub mod balancer;
 pub mod certificates;
 pub mod cli;

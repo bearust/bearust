@@ -175,6 +175,27 @@ impl CertificateStore {
         Ok(record)
     }
 
+    pub fn import_letsencrypt(
+        &self,
+        name: impl Into<String>,
+        cert_pem: &[u8],
+        key_pem: &[u8],
+    ) -> Result<CertificateRecord, CertificateError> {
+        let mut record = self.import_custom(name, cert_pem, key_pem)?;
+        record.source = CertificateSource::LetsEncrypt;
+        let metadata = serde_json::to_vec(&record).map_err(CertificateError::Metadata)?;
+        atomic_write(
+            &record
+                .certificate_path
+                .parent()
+                .unwrap()
+                .join("metadata.json"),
+            &metadata,
+            false,
+        )?;
+        Ok(record)
+    }
+
     pub fn activate(&self, name: impl AsRef<str>) -> Result<ActiveCertificate, CertificateError> {
         let name = name.as_ref();
         validate_name(name)?;
