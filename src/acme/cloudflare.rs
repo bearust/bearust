@@ -16,7 +16,12 @@ pub struct CloudflareProvider {
     token: String,
     propagation_timeout: Duration,
     poll_interval: Duration,
-    created_records: Arc<Mutex<HashMap<(String, String), String>>>,
+    // Keep every record id created for a challenge key.  Multiple ACME
+    // orders can legitimately use the same TXT name/value concurrently;
+    // storing a single id would overwrite the first order and leak it on
+    // cleanup.  Each cleanup call consumes one id, making cleanup idempotent
+    // while preserving ownership of pre-existing records.
+    created_records: Arc<Mutex<HashMap<(String, String), Vec<String>>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,17 +207,25 @@ impl DnsProvider for CloudflareProvider {
         let url = format!("{}/zones/{}/dns_records", self.base_url, zone.id);
         let created: Record = self.send(self.client.post(url).json(&serde_json::json!({"type":"TXT", "name":record.name, "content":record.value, "ttl":120, "proxied":false}))).await?;
         if let Ok(mut records) = self.created_records.lock() {
-            records.insert((record.name, record.value), created.id);
+            records
+                .entry((record.name, record.value))
+                .or_default()
+                .push(created.id);
         }
         Ok(())
     }
 
     async fn cleanup(&self, record: TxtRecord) -> Result<(), DnsError> {
         let record = TxtRecord::new(normalize_dns_name(&record.name), record.value);
-        let id =
-            self.created_records.lock().ok().and_then(|mut records| {
-                records.remove(&(record.name.clone(), record.value.clone()))
-            });
+        let id = self.created_records.lock().ok().and_then(|mut records| {
+            let key = (record.name.clone(), record.value.clone());
+            let ids = records.get_mut(&key)?;
+            let id = ids.pop();
+            if ids.is_empty() {
+                records.remove(&key);
+            }
+            id
+        });
         // Only delete records created by this operation. Looking up and
         // deleting an existing matching TXT would risk destroying a user's
         // challenge or a concurrent ACME order.
