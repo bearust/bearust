@@ -3,9 +3,14 @@ use bearust::control_plane::{
     repository,
 };
 use sqlx::Row;
+use uuid::Uuid;
 
 async fn db() -> sqlx::SqlitePool {
-    let p = repository::connect("sqlite:file:acme_repository_test?mode=memory&cache=shared")
+    let database_url = format!(
+        "sqlite:file:acme_repository_test_{}?mode=memory&cache=shared",
+        Uuid::new_v4()
+    );
+    let p = repository::connect(&database_url)
         .await
         .unwrap();
     repository::migrate(&p).await.unwrap();

@@ -273,7 +273,7 @@ pub async fn insert_certificate(
     cert_path: &str,
     key_path: &str,
 ) -> Result<i64, sqlx::Error> {
-    let r=sqlx::query("INSERT INTO certificates(name,source,covered_hostnames,expiry,certificate_path,key_path) VALUES(?,?,?,?,?,?) RETURNING id").bind(name).bind(source).bind(hosts).bind(expiry).bind(cert_path).bind(key_path).fetch_one(pool).await?;
+    let r=sqlx::query("INSERT INTO certificates(name,source,covered_hostnames,expiry,certificate_path,key_path,created_at) VALUES(?,?,?,?,?,?,?) RETURNING id").bind(name).bind(source).bind(hosts).bind(expiry).bind(cert_path).bind(key_path).bind(chrono::Utc::now().to_rfc3339()).fetch_one(pool).await?;
     Ok(r.get("id"))
 }
 
