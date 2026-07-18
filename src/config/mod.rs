@@ -105,7 +105,9 @@ fn default_shutdown() -> u64 {
     30
 }
 fn default_control_bind() -> SocketAddr {
-    "127.0.0.1:8081".parse().expect("valid default")
+    // Library/test default avoids binding a shared fixed port. Production
+    // deployments should set an explicit control_bind in their TOML.
+    "127.0.0.1:0".parse().expect("valid default")
 }
 fn default_control_database() -> PathBuf {
     "./data/bearust.sqlite".into()
