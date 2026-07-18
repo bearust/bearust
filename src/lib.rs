@@ -1,7 +1,9 @@
 pub mod balancer;
+pub mod cli;
 pub mod config;
 pub mod health;
 pub mod observability;
 pub mod proxy;
+pub mod reload;
 pub mod router;
 pub mod runtime;
