@@ -19,6 +19,7 @@ pub struct RequestContext {
     pub upstream_started: bool,
     pub failover_attempted: bool,
     pub excluded_backend: Option<BackendId>,
+    pub completion_logged: bool,
 }
 
 impl Default for RequestContext {
@@ -32,6 +33,7 @@ impl Default for RequestContext {
             upstream_started: false,
             failover_attempted: false,
             excluded_backend: None,
+            completion_logged: false,
         }
     }
 }
@@ -89,6 +91,7 @@ impl ProxyHttp for BeaRustProxy {
                 ctx.start.elapsed().as_millis() as u64,
                 "routing",
             );
+            ctx.completion_logged = true;
             return Ok(true);
         };
         ctx.route = Some(route.clone());
@@ -153,6 +156,10 @@ impl ProxyHttp for BeaRustProxy {
         error: Option<&pingora_core::Error>,
         ctx: &mut Self::CTX,
     ) {
+        if ctx.completion_logged {
+            ctx.lease.take();
+            return;
+        }
         let status = session
             .response_written()
             .map(|response| response.status.as_u16())
@@ -173,6 +180,7 @@ impl ProxyHttp for BeaRustProxy {
             ctx.start.elapsed().as_millis() as u64,
             error.map(classify_error).unwrap_or(""),
         );
+        ctx.completion_logged = true;
         ctx.lease.take();
     }
 

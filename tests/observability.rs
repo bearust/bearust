@@ -12,5 +12,5 @@ fn request_ids_are_safe_or_generated() {
 fn errors_use_stable_categories_without_body_content() {
     let error = Error::explain(ErrorType::ConnectError, "super-secret-body");
     assert_eq!(classify_error(&error), "connect");
-    assert!(!format!("{}", classify_error(&error)).contains("super-secret-body"));
+    assert!(!classify_error(&error).contains("super-secret-body"));
 }

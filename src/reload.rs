@@ -169,7 +169,7 @@ pub async fn signal_loop(
             _ = hup.recv() => {
                 match store.reload(&config_path).await {
                     Ok(outcome) => tracing::info!(event = "reload_complete", old_generation = outcome.old_generation, new_generation = outcome.new_generation),
-                    Err(error) => tracing::error!(event = "reload_rejected", error = %error),
+                    Err(_error) => tracing::error!(event = "reload_rejected", config_path = %config_path.display()),
                 }
             }
             _ = terminate.recv() => break,
@@ -203,7 +203,7 @@ pub async fn reload_loop(
             _ = hup.recv() => {
                 match store.reload(&config_path).await {
                     Ok(outcome) => tracing::info!(event = "reload_complete", old_generation = outcome.old_generation, new_generation = outcome.new_generation),
-                    Err(error) => tracing::error!(event = "reload_rejected", error = %error),
+                    Err(_error) => tracing::error!(event = "reload_rejected", config_path = %config_path.display()),
                 }
             }
             changed = server_done.changed() => {

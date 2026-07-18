@@ -17,33 +17,12 @@ pub fn init(json: bool, filter: &str) -> Result<(), InitError> {
 }
 
 pub fn classify_error(error: &pingora_core::Error) -> &'static str {
-    let kind = format!("{:?}", error.etype()).to_ascii_lowercase();
-    if kind.contains("httpstatus") {
-        if error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("healthy upstream")
-        {
-            return "no_healthy_upstream";
-        }
-        return "upstream";
+    match error.etype() {
+        pingora_core::ErrorType::HTTPStatus(503) => "no_healthy_upstream",
+        pingora_core::ErrorType::HTTPStatus(_) => "upstream",
+        pingora_core::ErrorType::ConnectError => "connect",
+        _ => "internal",
     }
-    if kind.contains("connect") {
-        return "connect";
-    }
-    if kind.contains("timeout") {
-        return "timeout";
-    }
-    if kind.contains("client") {
-        return "client";
-    }
-    if kind.contains("read") || kind.contains("write") || kind.contains("upstream") {
-        return "upstream";
-    }
-    if kind.contains("route") {
-        return "routing";
-    }
-    "internal"
 }
 
 pub fn validated_request_id(value: Option<&[u8]>) -> String {
@@ -74,6 +53,7 @@ pub fn append_forwarded_for(request: &mut RequestHeader, client: Option<&str>) {
     let _ = request.insert_header("X-Forwarded-Proto", "http");
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn log_request(
     request_id: &str,
     method: &str,
