@@ -1,20 +1,37 @@
-### Task 6 report
+# Task 6 report: Cloudflare DNS-01 provider
 
-Implemented Pingora proxy integration and forwarding semantics in `src/proxy.rs`, `src/observability.rs`, and `src/runtime.rs`.
+## Implemented
 
-Evidence (Rust 1.84.1 Docker toolchain):
+- Added `DnsProvider` and `TxtRecord` interfaces.
+- Added Cloudflare REST implementation with scoped bearer token, request
+  timeout, zone discovery, TXT create/delete, idempotent cleanup, and
+  propagation polling.
+- Added DNS-01 orchestration to `AcmeManager`, including wildcard record name
+  normalization, bounded request timeout, hostname validation, and cleanup on
+  every failure path (including partial presentation and timeout).
+- DNS-01 intentionally rejects multi-SAN requests for now. The current
+  transport exposes one key authorization per order, while ACME may require a
+  distinct value per authorization; accepting those requests would publish an
+  incorrect shared TXT value. Supporting multi-SAN requires extending the
+  order/challenge transport model first.
+- Cloudflare cleanup ignores only an explicit 404/not-found response. Auth,
+  server, transport, and timeout failures remain visible to callers.
+- Added local HTTP contract tests for create/cleanup, wildcard names,
+  redacted non-2xx errors, and propagation timeout.
 
-- `docker run --rm -v "$PWD":/app -w /app rust:1.84-slim cargo test --all-targets` — passed; 2 unit tests and 30 integration tests.
-- `docker run --rm -v "$PWD":/app -w /app rust:1.84-slim cargo clippy --all-targets -- -D warnings` — passed.
-- `docker run --rm -v "$PWD":/app -w /app rust:1.84-slim cargo fmt --all -- --check` — passed after formatting.
+## Verification
 
-Behavior covered:
+Source review completed. Cargo is not installed in this environment and
+Docker-based Rust verification could not be rerun because access to
+`/var/run/docker.sock` is denied. The contract tests are deterministic and do
+not contact Cloudflare; run these commands in the project Rust 1.84.1
+environment before merging:
 
-- `http_service` constructs a real Pingora `Service` from `BeaRustProxy` for runtime wiring.
-- Route-selected pools are used directly; no dummy peer is created when no backend is healthy, and the request returns a clean 503 error.
-- Pool connect/read/write timeouts are applied to `HttpPeer::options`.
-- `X-Forwarded-For` appends client IP without a port, including bracketed IPv6; `Host`, `X-Forwarded-Proto`, and validated request IDs are preserved/set.
-- Failover state excludes the failed backend and permits exactly one retry only before upstream transmission; `error_while_proxy` disables retries once transmission begins. `BackendLease` remains RAII-released on every path.
-- Structured request completion logging includes request ID, method, path, status, and duration.
+```text
+cargo fmt --all -- --check
+cargo check --locked --all-targets
+cargo test --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
+```
 
-The full local-process HTTP/WebSocket harness depends on Task 7's binary and listener lifecycle; direct proxy/upgrade header tests are included in `tests/proxy_http.rs` and `tests/websocket.rs`.
+No provider token or response body is included in errors or structured logs.

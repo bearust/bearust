@@ -1,7 +1,11 @@
 //! ACME issuance orchestration with an injectable transport.
+mod cloudflare;
+mod dns;
 mod http01;
 use crate::certificates::{CertificateError, CertificateRecord, CertificateStore};
 use async_trait::async_trait;
+pub use cloudflare::CloudflareProvider;
+pub use dns::{DnsError, DnsProvider, TxtRecord};
 pub use http01::lookup_http01;
 pub use http01::lookup_http01_for_host;
 pub use http01::{Http01Error, Http01Store};
@@ -56,6 +60,14 @@ pub trait AcmeTransport: Send + Sync {
         order: &AcmeOrder,
         request: &CertificateRequest,
     ) -> Result<IssuedCertificate, AcmeError>;
+
+    async fn poll_order_dns01(
+        &self,
+        _order: &AcmeOrder,
+        _records: &[TxtRecord],
+    ) -> Result<(), AcmeError> {
+        Err(AcmeError::InvalidRequest)
+    }
 }
 pub struct AcmeManager {
     certificates: CertificateStore,
@@ -109,6 +121,63 @@ impl AcmeManager {
             }
         }
     }
+
+    /// Issue a certificate using DNS-01 challenges. Wildcard names are
+    /// normalized to the same `_acme-challenge.<base>` TXT record as ACME.
+    pub async fn request_dns01(
+        &self,
+        request: CertificateRequest,
+        provider: Arc<dyn DnsProvider>,
+    ) -> Result<CertificateRecord, AcmeError> {
+        if request.name.trim().is_empty()
+            || request.hostnames.len() != 1
+            || request.hostnames.iter().any(|host| !valid_dns_hostname(host))
+        {
+            return Err(AcmeError::InvalidRequest);
+        }
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let order = tokio::time::timeout_at(deadline, self.transport.new_order(&request))
+            .await
+            .map_err(|_| AcmeError::Timeout)??;
+        let records: Vec<_> = request
+            .hostnames
+            .iter()
+            .map(|hostname| {
+                TxtRecord::new(dns01_record_name(hostname), order.key_authorization.clone())
+            })
+            .collect();
+        // Track every candidate before the provider call so partial failure or
+        // cancellation still leads to cleanup attempts for all records.
+        let result = tokio::time::timeout_at(deadline, async {
+            for record in &records {
+                provider.present(record.clone()).await.map_err(|_| {
+                    AcmeError::Transport("DNS provider failed".into())
+                })?;
+            }
+            for record in &records {
+                provider
+                    .wait_for_propagation(record.clone())
+                    .await
+                    .map_err(|_| AcmeError::Transport("DNS propagation failed".into()))?;
+            }
+            self.transport.poll_order_dns01(&order, &records).await?;
+            let issued = self.transport.finalize(&order, &request).await?;
+            let record = self.certificates.import_letsencrypt(
+                &request.name,
+                &issued.certificate_pem,
+                &issued.private_key_pem,
+            )?;
+            self.certificates.activate(&record.name)?;
+            Ok(record)
+        })
+        .await
+        .map_err(|_| AcmeError::Timeout)
+        .and_then(|result| result);
+        for record in records {
+            let _ = provider.cleanup(record).await;
+        }
+        result
+    }
     async fn issue(&self, request: CertificateRequest) -> Result<CertificateRecord, AcmeError> {
         let order = self.transport.new_order(&request).await?;
         let mut entries = Vec::new();
@@ -132,6 +201,39 @@ impl AcmeManager {
         }
         .await
     }
+}
+
+pub fn dns01_record_name(hostname: &str) -> String {
+    format!(
+        "_acme-challenge.{}",
+        hostname
+            .trim()
+            .trim_start_matches("*.")
+            .trim_end_matches('.')
+    )
+}
+
+/// DNS-01 currently supports one authorization per order. Multi-SAN support
+/// requires transporting one challenge value per ACME authorization; reject
+/// it at the manager boundary rather than publishing an incorrect shared TXT.
+fn valid_dns_hostname(hostname: &str) -> bool {
+    let mut value = hostname.trim();
+    if let Some(stripped) = value.strip_prefix("*.") {
+        value = stripped;
+    }
+    value = value.trim_end_matches('.');
+    if value.is_empty() || value.len() > 253 || !value.contains('.') {
+        return false;
+    }
+    value.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
 }
 
 fn acme_reason(error: &AcmeError) -> &'static str {

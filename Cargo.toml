@@ -14,6 +14,7 @@ async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"] }
 http = "1"
 nix = { version = "0.29", features = ["process", "signal"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "native-tls"] }
 signal-hook = "0.3"
 pingora-core = { version = "0.8.1", features = ["rustls"] }
 pingora-error = "0.8.1"
