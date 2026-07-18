@@ -2,7 +2,7 @@ use crate::{
     acme::{lookup_http01_for_host, Http01Store},
     balancer::{BackendId, BackendLease},
     observability::{append_forwarded_for, classify_error, log_request, validated_request_id},
-    router::ResolvedRoute,
+    router::{normalize_host, ResolvedRoute},
     runtime::{RuntimeSnapshot, RuntimeStore},
 };
 use async_trait::async_trait;
@@ -89,12 +89,16 @@ impl ProxyHttp for BeaRustProxy {
                 .get("x-request-id")
                 .map(|v| v.as_bytes()),
         );
-        if let Some(value) = lookup_http01_for_host(&path, host, &self.challenges) {
-            session
-                .respond_error_with_body(200, Bytes::from(value))
-                .await?;
-            ctx.completion_logged = true;
-            return Ok(true);
+        let challenge_host = normalize_host(host).unwrap_or_default();
+        let method = session.req_header().method.as_str();
+        if matches!(method, "GET" | "HEAD") {
+            if let Some(value) = lookup_http01_for_host(&path, &challenge_host, &self.challenges) {
+                session
+                    .respond_error_with_body(200, Bytes::from(value))
+                    .await?;
+                ctx.completion_logged = true;
+                return Ok(true);
+            }
         }
         let Some((route, _)) = snapshot.route(host, &path) else {
             session.respond_error(404).await?;
