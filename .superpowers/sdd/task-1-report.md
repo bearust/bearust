@@ -15,3 +15,16 @@ Tests/checks:
 Self-review: configuration structs satisfy Clone/Debug/Deserialize/PartialEq; phase-one algorithms/check kinds are closed enums; unknown fields (including backend weight) are rejected; defaults and validation paths cover the brief's listed invariants. No unrelated files were changed.
 
 Concern: compile/test confirmation should be performed in a Rust-enabled environment before merge.
+
+## Review fixes (2026-07-18)
+
+- Fixed host normalization to strip numeric ports before one trailing dot, including `api.example.com.:8080` and dotted port forms, while preserving bracketed and unbracketed IPv6 behavior.
+- Added regression coverage for host normalization, duplicate route names, unsupported algorithms, zero pool timeouts, and all documented defaults.
+- Generated `Cargo.lock` with Rust 1.84-compatible dependency resolution using `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`.
+
+Verification (Docker `rust:1.84`, `cmake` installed, resolver fallback):
+
+- `cargo test --test config_validation` — **9 passed**.
+- `cargo fmt` — passed.
+- `cargo clippy --all-targets -- -D warnings` — passed.
+- `git diff --check` — passed.
