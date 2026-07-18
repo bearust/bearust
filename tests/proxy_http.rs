@@ -4,6 +4,8 @@ use pingora_http::RequestHeader;
 use pingora_core::server::{configuration::ServerConf, Server};
 use std::{net::TcpListener, sync::Arc, time::Duration};
 
+mod support;
+
 #[test]
 fn forwarding_headers_append_ip_and_request_id_is_safe() {
     let mut request = RequestHeader::build("GET", b"/", Some(2)).unwrap();
@@ -26,9 +28,8 @@ fn forwarding_headers_append_ip_and_request_id_is_safe() {
 #[tokio::test]
 #[ignore = "starts a process-wide Pingora server; run with cargo test --test proxy_http -- --ignored"]
 async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() {
-    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
-    let backend_addr = backend.local_addr().unwrap();
-    drop(backend);
+    let backend = support::spawn_http_backend(Arc::new(std::sync::atomic::AtomicU16::new(200)), "stream-body").await;
+    let backend_addr = backend.address;
     let config = Config {
         server: ServerConfig { bind: "127.0.0.1:0".parse().unwrap(), graceful_shutdown_seconds: 1, pid_file: "./target/test.pid".into() },
         health: Default::default(),
@@ -37,7 +38,7 @@ async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() 
     };
     let snapshot = RuntimeSnapshot::build(config, None).unwrap();
     let pool = snapshot.pool("main").unwrap();
-    // Deliberately leave the backend unhealthy: this validates a clean downstream 503.
+    // Start unhealthy first: this validates a clean downstream 503.
     let runtime = Arc::new(RuntimeStore::new(snapshot));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -53,4 +54,11 @@ async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() 
     let response = reqwest::Client::new().get(format!("http://{address}/missing")).header("Host", "example.test").send().await.unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(pool.total_inflight(), 0);
+    let unknown = reqwest::Client::new().get(format!("http://{address}/missing")).header("Host", "unknown.test").send().await.unwrap();
+    assert_eq!(unknown.status(), reqwest::StatusCode::NOT_FOUND);
+    pool.set_healthy(0.into(), true);
+    let success = reqwest::Client::new().get(format!("http://{address}/stream")).header("Host", "example.test").send().await.unwrap();
+    assert_eq!(success.status(), reqwest::StatusCode::OK);
+    assert_eq!(success.text().await.unwrap(), "stream-body");
+    backend.shutdown().await;
 }
