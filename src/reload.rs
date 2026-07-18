@@ -168,8 +168,8 @@ pub async fn signal_loop(
         tokio::select! {
             _ = hup.recv() => {
                 match store.reload(&config_path).await {
-                    Ok(outcome) => tracing::info!(old_generation = outcome.old_generation, new_generation = outcome.new_generation, "configuration reloaded"),
-                    Err(error) => tracing::error!(error = %error, "configuration reload rejected; keeping active snapshot"),
+                    Ok(outcome) => tracing::info!(event = "reload_complete", old_generation = outcome.old_generation, new_generation = outcome.new_generation),
+                    Err(error) => tracing::error!(event = "reload_rejected", error = %error),
                 }
             }
             _ = terminate.recv() => break,
@@ -202,8 +202,8 @@ pub async fn reload_loop(
         tokio::select! {
             _ = hup.recv() => {
                 match store.reload(&config_path).await {
-                    Ok(outcome) => tracing::info!(old_generation = outcome.old_generation, new_generation = outcome.new_generation, "configuration reloaded"),
-                    Err(error) => tracing::error!(error = %error, "configuration reload rejected; keeping active snapshot"),
+                    Ok(outcome) => tracing::info!(event = "reload_complete", old_generation = outcome.old_generation, new_generation = outcome.new_generation),
+                    Err(error) => tracing::error!(event = "reload_rejected", error = %error),
                 }
             }
             changed = server_done.changed() => {

@@ -149,7 +149,7 @@ impl HealthSupervisor {
                         let ok = match kind { HealthCheckKind::Tcp => probe_tcp(address, timeout).await, HealthCheckKind::Http => probe_http(address, path.as_deref().unwrap_or("/health"), timeout).await };
                         if let Some(transition) = tracker.record(ok) {
                             pool.set_healthy(id, transition == HealthTransition::BecameHealthy);
-                            tracing::debug!(pool = pool.name(), backend = %address, ?transition, "backend health transition");
+                            tracing::info!(event = "health_transition", pool = pool.name(), backend = %address, transition = ?transition);
                         }
                         tokio::select! {
                             _ = time::sleep(interval) => {}

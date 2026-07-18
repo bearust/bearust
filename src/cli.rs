@@ -147,16 +147,10 @@ fn supervise_child(
 }
 
 fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result<(), AppError> {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    if json_logs {
-        tracing_subscriber::fmt()
-            .json()
-            .with_env_filter(filter)
-            .init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
-    }
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
+    crate::observability::init(json_logs, &filter)
+        .map_err(|error| AppError::Server(error.to_string()))?;
+    tracing::info!(event = "server_start", json_logs);
     let rt = tokio::runtime::Runtime::new().map_err(|e| AppError::Server(e.to_string()))?;
     rt.block_on(async move {
         let store = Arc::new(RuntimeStore::from_path(&path).await?);
@@ -242,6 +236,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         )
         .await
         .map_err(|_| AppError::Server("health shutdown timed out".into()))??;
+        tracing::info!(event = "server_stop");
         Ok(())
     })
 }

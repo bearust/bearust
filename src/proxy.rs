@@ -1,6 +1,6 @@
 use crate::{
     balancer::{BackendId, BackendLease},
-    observability::{append_forwarded_for, log_request, validated_request_id},
+    observability::{append_forwarded_for, classify_error, log_request, validated_request_id},
     router::ResolvedRoute,
     runtime::{RuntimeSnapshot, RuntimeStore},
 };
@@ -69,11 +69,7 @@ impl ProxyHttp for BeaRustProxy {
             .get("host")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        let path = session.req_header().uri.path();
-        let Some((route, _)) = snapshot.route(host, path) else {
-            session.respond_error(404).await?;
-            return Ok(true);
-        };
+        let path = session.req_header().uri.path().to_owned();
         ctx.request_id = validated_request_id(
             session
                 .req_header()
@@ -81,6 +77,20 @@ impl ProxyHttp for BeaRustProxy {
                 .get("x-request-id")
                 .map(|v| v.as_bytes()),
         );
+        let Some((route, _)) = snapshot.route(host, &path) else {
+            session.respond_error(404).await?;
+            log_request(
+                &ctx.request_id,
+                session.req_header().method.as_str(),
+                &path,
+                "",
+                "",
+                404,
+                ctx.start.elapsed().as_millis() as u64,
+                "routing",
+            );
+            return Ok(true);
+        };
         ctx.route = Some(route.clone());
         ctx.snapshot = Some(snapshot);
         Ok(false)
@@ -148,12 +158,20 @@ impl ProxyHttp for BeaRustProxy {
             .map(|response| response.status.as_u16())
             .or_else(|| error.map(error_status))
             .unwrap_or(0);
+        let route = ctx.route.as_ref().map_or("", |route| route.name.as_str());
+        let upstream = ctx
+            .lease
+            .as_ref()
+            .map_or_else(String::new, |lease| lease.address().to_string());
         log_request(
             &ctx.request_id,
             session.req_header().method.as_str(),
             session.req_header().uri.path(),
+            route,
+            &upstream,
             status,
             ctx.start.elapsed().as_millis() as u64,
+            error.map(classify_error).unwrap_or(""),
         );
         ctx.lease.take();
     }
