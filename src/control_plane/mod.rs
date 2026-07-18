@@ -3,11 +3,11 @@ pub mod auth;
 pub mod models;
 pub mod rbac;
 pub mod repository;
+use crate::acme::{AcmeEnvironment, AcmeManager, LetsEncryptClient};
 use crate::certificates::{
     AcmeService as CertificateAcmeService, AcmeServiceError as CertificateAcmeError,
     CertificateStore,
 };
-use crate::acme::{AcmeEnvironment, AcmeManager, LetsEncryptClient};
 use crate::secrets::SecretStore;
 use async_trait::async_trait;
 use axum::{
@@ -186,10 +186,7 @@ pub async fn build_state(
         reqwest::Client::new(),
     )
     .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-    let manager = AcmeManager::with_transport(
-        certificates.as_ref().clone(),
-        Arc::new(client),
-    );
+    let manager = AcmeManager::with_transport(certificates.as_ref().clone(), Arc::new(client));
     let certificate_acme = Arc::new(CertificateAcmeService::new(
         db.clone(),
         certificates.clone(),
@@ -829,7 +826,11 @@ async fn activate_certificate(
     ) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let Some((name, cert_path, key_path)) = repository::certificate_paths(&s.db, id).await.ok().flatten() else {
+    let Some((name, cert_path, key_path)) = repository::certificate_paths(&s.db, id)
+        .await
+        .ok()
+        .flatten()
+    else {
         return StatusCode::NOT_FOUND.into_response();
     };
     if CertificateStore::validate_material_paths(
@@ -897,7 +898,11 @@ async fn restore_certificate_activation(
         .await
         .map_err(|_| ())?;
     match previous_name {
-        Some(name) => state.certificates.activate(name).map(|_| ()).map_err(|_| ()),
+        Some(name) => state
+            .certificates
+            .activate(name)
+            .map(|_| ())
+            .map_err(|_| ()),
         None => state.certificates.clear_active().map_err(|_| ()),
     }
 }

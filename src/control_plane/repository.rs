@@ -310,18 +310,22 @@ pub async fn certificate_paths(
     pool: &SqlitePool,
     id: i64,
 ) -> Result<Option<(String, String, String)>, sqlx::Error> {
-    Ok(sqlx::query("SELECT name,certificate_path,key_path FROM certificates WHERE id=?")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?
-        .map(|r| (r.get("name"), r.get("certificate_path"), r.get("key_path"))))
+    Ok(
+        sqlx::query("SELECT name,certificate_path,key_path FROM certificates WHERE id=?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?
+            .map(|r| (r.get("name"), r.get("certificate_path"), r.get("key_path"))),
+    )
 }
 
 pub async fn active_certificate_id(pool: &SqlitePool) -> Result<Option<i64>, sqlx::Error> {
-    Ok(sqlx::query("SELECT id FROM certificates WHERE active=1 ORDER BY id LIMIT 1")
-        .fetch_optional(pool)
-        .await?
-        .map(|r| r.get("id")))
+    Ok(
+        sqlx::query("SELECT id FROM certificates WHERE active=1 ORDER BY id LIMIT 1")
+            .fetch_optional(pool)
+            .await?
+            .map(|r| r.get("id")),
+    )
 }
 
 /// Set exactly one active certificate (or none), in one transaction.

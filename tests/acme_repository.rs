@@ -10,9 +10,7 @@ async fn db() -> sqlx::SqlitePool {
         "sqlite:file:acme_repository_test_{}?mode=memory&cache=shared",
         Uuid::new_v4()
     );
-    let p = repository::connect(&database_url)
-        .await
-        .unwrap();
+    let p = repository::connect(&database_url).await.unwrap();
     repository::migrate(&p).await.unwrap();
     let id = repository::insert_certificate(
         &p,
