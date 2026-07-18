@@ -57,6 +57,9 @@ impl RuntimeSnapshot {
         let route = self.router.route(authority, path)?;
         Some((route, Arc::clone(self.pools.get(&route.upstream_pool)?)))
     }
+    pub fn pool(&self, name: &str) -> Option<Arc<PoolState>> {
+        self.pools.get(name).cloned()
+    }
     pub fn pools(&self) -> impl Iterator<Item = Arc<PoolState>> + '_ {
         self.pools.values().cloned()
     }

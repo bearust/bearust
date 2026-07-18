@@ -1,11 +1,11 @@
 use crate::{
-    balancer::BackendLease,
-    observability::{append_forwarded_for, validated_request_id},
+    balancer::{BackendId, BackendLease},
+    observability::{append_forwarded_for, log_request, validated_request_id},
     router::ResolvedRoute,
     runtime::{RuntimeSnapshot, RuntimeStore},
 };
 use async_trait::async_trait;
-use pingora_core::{upstreams::peer::HttpPeer, Result};
+use pingora_core::{upstreams::peer::HttpPeer, ErrorType, Result};
 use pingora_http::RequestHeader;
 use pingora_proxy::{ProxyHttp, Session};
 use std::{sync::Arc, time::Instant};
@@ -17,58 +17,179 @@ pub struct RequestContext {
     pub request_id: String,
     pub start: Instant,
     pub upstream_started: bool,
+    pub failover_attempted: bool,
+    pub excluded_backend: Option<BackendId>,
 }
 
 impl Default for RequestContext {
     fn default() -> Self {
-        Self { snapshot: None, route: None, lease: None, request_id: validated_request_id(None), start: Instant::now(), upstream_started: false }
+        Self {
+            snapshot: None,
+            route: None,
+            lease: None,
+            request_id: validated_request_id(None),
+            start: Instant::now(),
+            upstream_started: false,
+            failover_attempted: false,
+            excluded_backend: None,
+        }
     }
 }
 
-pub struct BeaRustProxy { pub runtime: Arc<RuntimeStore> }
+pub struct BeaRustProxy {
+    pub runtime: Arc<RuntimeStore>,
+}
 
-impl BeaRustProxy { pub fn new(runtime: Arc<RuntimeStore>) -> Self { Self { runtime } } }
+impl BeaRustProxy {
+    pub fn new(runtime: Arc<RuntimeStore>) -> Self {
+        Self { runtime }
+    }
+}
+
+pub fn http_service(
+    proxy: BeaRustProxy,
+    conf: &Arc<pingora_core::server::configuration::ServerConf>,
+) -> pingora_core::services::listening::Service<pingora_proxy::HttpProxy<BeaRustProxy, ()>> {
+    pingora_proxy::http_proxy_service(conf, proxy)
+}
 
 #[async_trait]
 impl ProxyHttp for BeaRustProxy {
     type CTX = RequestContext;
 
-    fn new_ctx(&self) -> Self::CTX { RequestContext::default() }
+    fn new_ctx(&self) -> Self::CTX {
+        RequestContext::default()
+    }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         let snapshot = self.runtime.load();
-        let host = session.req_header().headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let host = session
+            .req_header()
+            .headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
         let path = session.req_header().uri.path();
         let Some((route, _)) = snapshot.route(host, path) else {
             session.respond_error(404).await?;
             return Ok(true);
         };
-        ctx.request_id = validated_request_id(session.req_header().headers.get("x-request-id").map(|v| v.as_bytes()));
+        ctx.request_id = validated_request_id(
+            session
+                .req_header()
+                .headers
+                .get("x-request-id")
+                .map(|v| v.as_bytes()),
+        );
         ctx.route = Some(route.clone());
         ctx.snapshot = Some(snapshot);
         Ok(false)
     }
 
-    async fn upstream_peer(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
+    async fn upstream_peer(
+        &self,
+        _session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> Result<Box<HttpPeer>> {
         let snapshot = ctx.snapshot.as_ref().expect("request_filter must run");
         let route = ctx.route.as_ref().expect("route must be set");
-        let pool = snapshot.route(&route.host, &route.path_prefix).map(|(_, p)| p).expect("pool must exist");
-        let Some(lease) = pool.select(None) else {
-            session.respond_error(503).await?;
-            return Ok(Box::new(HttpPeer::new(("127.0.0.1", 9), false, String::new())));
+        let Some(pool) = snapshot.pool(&route.upstream_pool) else {
+            return Err(pingora_core::Error::explain(
+                ErrorType::HTTPStatus(503),
+                "upstream pool unavailable",
+            ));
+        };
+        let Some(lease) = pool.select(ctx.excluded_backend) else {
+            return Err(pingora_core::Error::explain(
+                ErrorType::HTTPStatus(503),
+                "no healthy upstream",
+            ));
         };
         let address = lease.address();
         ctx.lease = Some(lease);
-        Ok(Box::new(HttpPeer::new(address, false, String::new())))
+        let mut peer = HttpPeer::new(address, false, String::new());
+        peer.options.connection_timeout = Some(pool.connect_timeout());
+        peer.options.read_timeout = Some(pool.request_timeout());
+        peer.options.write_timeout = Some(pool.request_timeout());
+        Ok(Box::new(peer))
     }
 
-    async fn upstream_request_filter(&self, session: &mut Session, request: &mut RequestHeader, ctx: &mut Self::CTX) -> Result<()> {
-        if let Some(host) = session.req_header().headers.get("host").and_then(|v| v.to_str().ok()) { let _ = request.insert_header("Host", host); }
-        append_forwarded_for(request, session.client_addr().map(ToString::to_string).as_deref());
+    async fn upstream_request_filter(
+        &self,
+        session: &mut Session,
+        request: &mut RequestHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        if let Some(host) = session
+            .req_header()
+            .headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+        {
+            let _ = request.insert_header("Host", host);
+        }
+        append_forwarded_for(
+            request,
+            session.client_addr().map(ToString::to_string).as_deref(),
+        );
         let _ = request.insert_header("X-Request-Id", ctx.request_id.clone());
         ctx.upstream_started = true;
         Ok(())
     }
 
-    async fn logging(&self, _session: &mut Session, _error: Option<&pingora_core::Error>, ctx: &mut Self::CTX) { ctx.lease.take(); }
+    async fn logging(
+        &self,
+        session: &mut Session,
+        error: Option<&pingora_core::Error>,
+        ctx: &mut Self::CTX,
+    ) {
+        let status = error.map_or(200, |_| 502);
+        log_request(
+            &ctx.request_id,
+            session.req_header().method.as_str(),
+            session.req_header().uri.path(),
+            status,
+            ctx.start.elapsed().as_millis() as u64,
+        );
+        ctx.lease.take();
+    }
+
+    fn fail_to_connect(
+        &self,
+        _session: &mut Session,
+        _peer: &HttpPeer,
+        ctx: &mut Self::CTX,
+        mut e: Box<pingora_core::Error>,
+    ) -> Box<pingora_core::Error> {
+        if !ctx.failover_attempted {
+            ctx.failover_attempted = true;
+            if let Some(lease) = ctx.lease.take() {
+                ctx.excluded_backend = Some(lease.id());
+            }
+            e.set_retry(true);
+        } else {
+            e.set_retry(false);
+        }
+        e
+    }
+
+    fn error_while_proxy(
+        &self,
+        peer: &HttpPeer,
+        _session: &mut Session,
+        mut e: Box<pingora_core::Error>,
+        ctx: &mut Self::CTX,
+        _client_reused: bool,
+    ) -> Box<pingora_core::Error> {
+        if ctx.upstream_started || ctx.failover_attempted {
+            e.set_retry(false);
+        } else {
+            ctx.failover_attempted = true;
+            if let Some(lease) = ctx.lease.take() {
+                ctx.excluded_backend = Some(lease.id());
+            }
+            e.set_retry(true);
+        }
+        e.more_context(format!("Peer: {peer}"))
+    }
 }

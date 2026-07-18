@@ -6,6 +6,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -37,6 +38,8 @@ pub struct PoolState {
     algorithm: Algorithm,
     backends: Vec<Arc<BackendState>>,
     cursor: AtomicUsize,
+    connect_timeout: Duration,
+    request_timeout: Duration,
 }
 
 pub struct BackendLease {
@@ -65,6 +68,8 @@ impl PoolState {
             algorithm: config.algorithm,
             backends,
             cursor: AtomicUsize::new(0),
+            connect_timeout: Duration::from_secs(config.connect_timeout_seconds),
+            request_timeout: Duration::from_secs(config.request_timeout_seconds),
         }
     }
 
@@ -153,6 +158,13 @@ impl PoolState {
             .iter()
             .map(|backend| backend.inflight.load(Ordering::Acquire))
             .sum()
+    }
+
+    pub fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
+    pub fn request_timeout(&self) -> Duration {
+        self.request_timeout
     }
 }
 
