@@ -108,6 +108,18 @@ impl RuntimeStore {
         }
         Ok(outcome)
     }
+
+    /// Stop health workers owned by this store.
+    ///
+    /// This is primarily useful for graceful shutdown and deterministic tests;
+    /// dropping a store alone cannot await the spawned Tokio tasks.
+    pub async fn shutdown(&self) -> Result<(), RuntimeError> {
+        let supervisor = self.health.lock().await.take();
+        if let Some(supervisor) = supervisor {
+            supervisor.shutdown().await?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
