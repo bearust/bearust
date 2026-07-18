@@ -120,6 +120,12 @@ fn normalizes_ports_trailing_dots_and_bracketed_ipv6() {
 }
 
 #[test]
+fn accepts_dns_route_host_with_single_trailing_dot() {
+    let input = VALID.replace("host = \"api.example.com\"", "host = \"api.example.com.\"");
+    Config::parse(&input).expect("single DNS root dot is valid");
+}
+
+#[test]
 fn rejects_http_path_and_route_path_errors() {
     let no_path = VALID.replace("health_path = \"/health\"\n", "");
     assert!(Config::parse(&no_path)

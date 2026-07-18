@@ -266,18 +266,19 @@ fn is_valid_config_host(host: &str) -> bool {
         if lower.parse::<std::net::Ipv6Addr>().is_err() {
             return false;
         }
-    } else if lower.parse::<std::net::IpAddr>().is_err()
-        && (lower.starts_with('.')
-            || lower.ends_with('.')
-            || lower.split('.').any(|label| {
+    } else if lower.parse::<std::net::IpAddr>().is_err() && {
+        let labels_host = lower.strip_suffix('.').unwrap_or(&lower);
+        labels_host.starts_with('.')
+            || labels_host.ends_with('.')
+            || labels_host.split('.').any(|label| {
                 label.is_empty()
                     || label.starts_with('-')
                     || label.ends_with('-')
                     || !label
                         .chars()
                         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
-            }))
-    {
+            })
+    } {
         return false;
     }
     !normalize_config_host(value).is_empty()
