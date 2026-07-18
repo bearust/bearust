@@ -61,6 +61,7 @@ impl PidFileGuard {
         let pid = std::process::id() as i32;
         writeln!(file, "{pid}")
             .and_then(|_| file.flush())
+            .and_then(|_| file.sync_all())
             .map_err(|source| PidError::Io {
                 path: path.clone(),
                 source,
@@ -101,4 +102,57 @@ pub fn signal_reload(path: impl AsRef<Path>) -> Result<(), PidError> {
         Err(Errno::ESRCH) => Err(PidError::NotRunning(pid)),
         Err(source) => Err(PidError::Signal { pid, source }),
     }
+}
+
+/// Runs the process signal loop used by `serve`.
+///
+/// SIGHUP is deliberately handled here instead of being delegated to
+/// Pingora: parsing/building the candidate snapshot happens before it is
+/// published, so an invalid reload can never replace the active snapshot.
+/// SIGINT and SIGTERM first stop the health workers and then return to the
+/// caller, which owns the Pingora server task and its graceful shutdown.
+#[cfg(unix)]
+pub async fn signal_loop(
+    store: std::sync::Arc<crate::runtime::RuntimeStore>,
+    config_path: PathBuf,
+    graceful_shutdown: std::time::Duration,
+) -> Result<(), crate::runtime::RuntimeError> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut hup = signal(SignalKind::hangup())
+        .map_err(|error| crate::runtime::RuntimeError::Signal(error.to_string()))?;
+    let mut terminate = signal(SignalKind::terminate())
+        .map_err(|error| crate::runtime::RuntimeError::Signal(error.to_string()))?;
+    let mut interrupt = signal(SignalKind::interrupt())
+        .map_err(|error| crate::runtime::RuntimeError::Signal(error.to_string()))?;
+    loop {
+        tokio::select! {
+            _ = hup.recv() => {
+                match store.reload(&config_path).await {
+                    Ok(outcome) => tracing::info!(old_generation = outcome.old_generation, new_generation = outcome.new_generation, "configuration reloaded"),
+                    Err(error) => tracing::error!(error = %error, "configuration reload rejected; keeping active snapshot"),
+                }
+            }
+            _ = terminate.recv() => break,
+            _ = interrupt.recv() => break,
+        }
+    }
+    // Health probes are independent Tokio tasks. Stop and join them before
+    // allowing the server task to finish; bounded waiting is required so a
+    // wedged probe cannot keep process shutdown open indefinitely.
+    tokio::time::timeout(graceful_shutdown, store.shutdown())
+        .await
+        .unwrap_or_else(|_| Ok(()))
+}
+
+#[cfg(not(unix))]
+pub async fn signal_loop(
+    _store: std::sync::Arc<crate::runtime::RuntimeStore>,
+    _config_path: PathBuf,
+    _graceful_shutdown: std::time::Duration,
+) -> Result<(), crate::runtime::RuntimeError> {
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(|error| crate::runtime::RuntimeError::Signal(error.to_string()))?;
+    Ok(())
 }

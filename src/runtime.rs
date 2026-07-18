@@ -15,6 +15,8 @@ pub enum RuntimeError {
     Config(#[from] config::ConfigError),
     #[error(transparent)]
     Health(#[from] HealthError),
+    #[error("signal handler failed: {0}")]
+    Signal(String),
 }
 
 pub struct RuntimeSnapshot {

@@ -4,7 +4,7 @@ use crate::{
     runtime::RuntimeStore,
 };
 use clap::{Parser, Subcommand};
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use thiserror::Error;
 
 #[derive(Debug, Parser)]
@@ -89,11 +89,23 @@ fn serve(path: PathBuf, json_logs: bool) -> Result<(), AppError> {
         );
         service.add_tcp(&config.server.bind.to_string());
         server.add_service(service);
-        // Pingora owns the accept loop and blocks until the process receives a
-        // termination signal. Keep the store alive for the lifetime of it.
-        let _store = store;
-        server.run_forever();
-        #[allow(unreachable_code)]
+        // Keep Pingora's accept loop in a blocking task while this Tokio
+        // runtime owns explicit SIGHUP/SIGTERM handling. Pingora still gets
+        // the process signal and performs its listener shutdown; our handler
+        // reloads snapshots and joins health workers deterministically.
+        let server_task = tokio::task::spawn_blocking(move || server.run_forever());
+        let signal_result = crate::reload::signal_loop(
+            Arc::clone(&store),
+            path,
+            Duration::from_secs(config.server.graceful_shutdown_seconds),
+        )
+        .await;
+        if let Err(error) = signal_result {
+            tracing::error!(error = %error, "signal loop failed");
+        }
+        server_task
+            .await
+            .map_err(|error| AppError::Server(error.to_string()))?;
         Ok(())
     })
 }
