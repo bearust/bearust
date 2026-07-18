@@ -2,7 +2,7 @@ use crate::{
     balancer::PoolState,
     config::{HealthCheckKind, HealthConfig},
 };
-use std::{num::NonZeroU32, sync::Arc, time::Duration};
+use std::{num::NonZeroU64, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -26,19 +26,19 @@ pub enum HealthTransition {
 
 pub struct HealthTracker {
     state: HealthState,
-    successes: u32,
-    failures: u32,
-    healthy_threshold: NonZeroU32,
-    unhealthy_threshold: NonZeroU32,
+    successes: u64,
+    failures: u64,
+    healthy_threshold: NonZeroU64,
+    unhealthy_threshold: NonZeroU64,
 }
 impl HealthTracker {
-    pub fn new(healthy_threshold: u32, unhealthy_threshold: u32) -> Self {
+    pub fn new(healthy_threshold: u64, unhealthy_threshold: u64) -> Self {
         Self {
             state: HealthState::Probing,
             successes: 0,
             failures: 0,
-            healthy_threshold: NonZeroU32::new(healthy_threshold).unwrap_or(NonZeroU32::MIN),
-            unhealthy_threshold: NonZeroU32::new(unhealthy_threshold).unwrap_or(NonZeroU32::MIN),
+            healthy_threshold: NonZeroU64::new(healthy_threshold).unwrap_or(NonZeroU64::MIN),
+            unhealthy_threshold: NonZeroU64::new(unhealthy_threshold).unwrap_or(NonZeroU64::MIN),
         }
     }
     pub fn state(&self) -> HealthState {
@@ -142,19 +142,19 @@ impl HealthSupervisor {
                 let address = pool.backend_address(id).expect("backend id from pool");
                 let mut rx = cancel.subscribe();
                 let pool = Arc::clone(&pool);
-                let mut tracker = HealthTracker::new(
-                    config.healthy_threshold as u32,
-                    config.unhealthy_threshold as u32,
-                );
+                let mut tracker =
+                    HealthTracker::new(config.healthy_threshold, config.unhealthy_threshold);
                 tasks.push(tokio::spawn(async move {
-                    let mut ticker = time::interval(interval);
                     loop {
                         let ok = match kind { HealthCheckKind::Tcp => probe_tcp(address, timeout).await, HealthCheckKind::Http => probe_http(address, path.as_deref().unwrap_or("/health"), timeout).await };
                         if let Some(transition) = tracker.record(ok) {
                             pool.set_healthy(id, transition == HealthTransition::BecameHealthy);
                             tracing::debug!(pool = pool.name(), backend = %address, ?transition, "backend health transition");
                         }
-                        tokio::select! { _ = ticker.tick() => {}, changed = rx.changed() => if changed.is_err() || *rx.borrow() { break; } }
+                        tokio::select! {
+                            _ = time::sleep(interval) => {}
+                            changed = rx.changed() => if changed.is_err() || *rx.borrow() { break; }
+                        }
                     }
                 }));
             }

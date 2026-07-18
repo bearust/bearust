@@ -24,7 +24,8 @@ pub async fn spawn_http_backend(status: Arc<AtomicU16>, body: &'static str) -> T
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let app = Router::new()
-        .fallback(any(handler))
+        .route("/health", any(health_handler))
+        .fallback(any(body_handler))
         .with_state((status, body));
     let (tx, rx) = oneshot::channel();
     tokio::spawn(async move {
@@ -41,10 +42,16 @@ pub async fn spawn_http_backend(status: Arc<AtomicU16>, body: &'static str) -> T
     }
 }
 
-async fn handler(
+async fn health_handler(
+    State((status, _)): State<(Arc<AtomicU16>, &'static str)>,
+) -> impl IntoResponse {
+    StatusCode::from_u16(status.load(Ordering::Relaxed))
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+async fn body_handler(
     State((status, body)): State<(Arc<AtomicU16>, &'static str)>,
 ) -> impl IntoResponse {
-    let code = StatusCode::from_u16(status.load(Ordering::Relaxed))
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (code, body)
+    let _ = status;
+    (StatusCode::OK, body)
 }
