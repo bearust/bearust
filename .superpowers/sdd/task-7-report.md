@@ -11,6 +11,8 @@ Implemented renewal scheduling and operational persistence foundations.
 - Renewal issuers return PEM material; the scheduler imports and activates it
   through `CertificateStore` before reporting success, so a successful run
   actually rotates the stored certificate.
+- Renewal preserves the active certificate source (custom versus Let’s
+  Encrypt) and rejects issuer output addressed to a different certificate name.
 - Mounted writable `/data` and read-only `/etc/bearust/tls` in production and development Compose files.
 - Documented custom PEM certificates, HTTP-01/DNS-01 prerequisites, Cloudflare token scope, renewal behavior, and secret handling.
 

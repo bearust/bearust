@@ -4,7 +4,7 @@
 //! only activates a newly issued record after the issuer has returned valid
 //! material; failures leave the store's last-known-good active record intact.
 
-use super::{CertificateRecord, CertificateStore};
+use super::{CertificateRecord, CertificateSource, CertificateStore};
 use async_trait::async_trait;
 use std::{sync::Arc, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use thiserror::Error;
@@ -79,7 +79,15 @@ impl RenewalScheduler {
         }
         match self.issuer.renew(&active.record).await {
             Ok(material) => {
-                let record = match self.store.import_custom(&material.name, &material.cert_pem, &material.key_pem)
+                if material.name != active.record.name {
+                    self.attempts = self.attempts.saturating_add(1);
+                    return self.retry_or_fail();
+                }
+                let imported = match active.record.source {
+                    CertificateSource::LetsEncrypt => self.store.import_letsencrypt(&material.name, &material.cert_pem, &material.key_pem),
+                    CertificateSource::Custom => self.store.import_custom(&material.name, &material.cert_pem, &material.key_pem),
+                };
+                let record = match imported
                     .and_then(|record| self.store.activate(&record.name).map(|_| record)) {
                     Ok(record) => record,
                     Err(_) => {
