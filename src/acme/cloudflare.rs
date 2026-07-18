@@ -192,6 +192,8 @@ fn valid_dns_name(value: &str) -> bool {
     let value = value.trim().trim_end_matches('.');
     !value.is_empty() && value.split('.').all(|label| {
         !label.is_empty() && label.len() <= 63 && !label.starts_with('-') && !label.ends_with('-')
-            && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     })
 }
