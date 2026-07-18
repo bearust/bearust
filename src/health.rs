@@ -87,10 +87,8 @@ pub async fn probe_http(address: std::net::SocketAddr, path: &str, timeout: Dura
     }
     let result = time::timeout(timeout, async {
         let mut stream = TcpStream::connect(address).await?;
-        let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            path, address
-        );
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
         stream.write_all(request.as_bytes()).await?;
         let mut data = Vec::with_capacity(64);
         let mut byte = [0u8; 1];

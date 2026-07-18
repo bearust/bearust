@@ -144,7 +144,7 @@ fn supervise_child(
                         .tls
                         .as_ref()
                         .map(crate::tls::settings)
-                        .map_or(true, |result| result.is_ok())
+                        .is_none_or(|result| result.is_ok())
                 });
                 if candidate_valid {
                     let ready_path = std::env::temp_dir().join(format!(

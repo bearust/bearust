@@ -206,7 +206,7 @@ impl Config {
             }
             for (j, b) in p.backends.iter().enumerate() {
                 if b.health_check == HealthCheckKind::Http
-                    && b.health_path.as_deref().map_or(true, |x| {
+                    && b.health_path.as_deref().is_none_or(|x| {
                         !x.starts_with('/') || x.chars().any(|ch| ch.is_ascii_control())
                     })
                 {

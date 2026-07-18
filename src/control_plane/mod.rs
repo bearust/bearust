@@ -54,13 +54,13 @@ pub async fn build_state(
 ) -> Result<AppState, sqlx::Error> {
     if let Some(path) = database_url.strip_prefix("sqlite://") {
         if let Some(parent) = std::path::Path::new(path).parent() {
-            std::fs::create_dir_all(parent).map_err(|e| sqlx::Error::Io(e))?;
+            std::fs::create_dir_all(parent).map_err(sqlx::Error::Io)?;
         }
     }
     let db = repository::connect(database_url).await?;
     repository::migrate(&db).await?;
     let certificates = CertificateStore::new(certificate_root)
-        .map_err(|e| sqlx::Error::Protocol(e.to_string().into()))?;
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     Ok(AppState {
         db,
         certificates: Arc::new(certificates),
