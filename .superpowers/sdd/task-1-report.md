@@ -33,3 +33,13 @@ The first focused test attempt could not build because the base Rust image lacke
 ## Concerns
 
 - Certificate-root containment and PEM/key parsing are intentionally deferred to Task 2's `CertificateStore`.
+
+## Follow-up fix
+
+- Added `tls: None` to the explicit `ServerConfig` test fixture in `tests/proxy_http.rs` so all-targets compilation remains compatible with the new field.
+
+Follow-up verification:
+
+- `cargo fmt --all -- --check` — passed.
+- `cargo test --test config_validation` — 15 passed.
+- `cargo test --all-targets` — all targets passed; one intentional Pingora process test remained ignored.
