@@ -7,7 +7,7 @@ use crate::{
 use async_trait::async_trait;
 use pingora_core::{upstreams::peer::HttpPeer, ErrorType, Result};
 use pingora_http::RequestHeader;
-use pingora_proxy::{ProxyHttp, Session};
+use pingora_proxy::{FailToProxy, ProxyHttp, Session};
 use std::{sync::Arc, time::Instant};
 
 pub struct RequestContext {
@@ -143,7 +143,11 @@ impl ProxyHttp for BeaRustProxy {
         error: Option<&pingora_core::Error>,
         ctx: &mut Self::CTX,
     ) {
-        let status = error.map_or(200, |_| 502);
+        let status = session
+            .response_written()
+            .map(|response| response.status.as_u16())
+            .or_else(|| error.map(error_status))
+            .unwrap_or(0);
         log_request(
             &ctx.request_id,
             session.req_header().method.as_str(),
@@ -152,6 +156,22 @@ impl ProxyHttp for BeaRustProxy {
             ctx.start.elapsed().as_millis() as u64,
         );
         ctx.lease.take();
+    }
+
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        error: &pingora_core::Error,
+        _ctx: &mut Self::CTX,
+    ) -> FailToProxy {
+        let code = error_status(error);
+        if code > 0 && session.response_written().is_none() {
+            let _ = session.respond_error(code).await;
+        }
+        FailToProxy {
+            error_code: code,
+            can_reuse_downstream: false,
+        }
     }
 
     fn fail_to_connect(
@@ -191,5 +211,24 @@ impl ProxyHttp for BeaRustProxy {
             e.set_retry(true);
         }
         e.more_context(format!("Peer: {peer}"))
+    }
+}
+
+fn error_status(error: &pingora_core::Error) -> u16 {
+    match error.etype() {
+        ErrorType::HTTPStatus(code) => *code,
+        _ => 502,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_status;
+    use pingora_core::{Error, ErrorType};
+
+    #[test]
+    fn preserves_explicit_http_error_status() {
+        let error = Error::explain(ErrorType::HTTPStatus(503), "no healthy upstream");
+        assert_eq!(error_status(&error), 503);
     }
 }
