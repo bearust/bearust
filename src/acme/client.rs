@@ -6,7 +6,7 @@ use bytes::Bytes;
 use http::{Request, Response};
 use http_body_util::{BodyExt, Full};
 use instant_acme::{Account, AccountCredentials, ChallengeType, HttpClient, NewAccount, NewOrder, Identifier, OrderStatus};
-use openssl::{hash::MessageDigest, pkey::PKey, rsa::Rsa, x509::{X509NameBuilder, X509ReqBuilder}};
+use openssl::{hash::MessageDigest, nid::Nid, pkey::PKey, rsa::Rsa, stack::Stack, x509::{X509Extension, X509NameBuilder, X509ReqBuilder}};
 use reqwest::Client;
 use std::{collections::HashMap, fmt, future::Future, pin::Pin, time::Duration};
 use tokio::sync::Mutex;
@@ -42,6 +42,7 @@ pub struct LetsEncryptClient {
     account_key: Vec<u8>,
     credentials: Mutex<Option<AccountCredentials>>,
     orders: Mutex<HashMap<String, instant_acme::Order>>,
+    order_challenges: Mutex<HashMap<String, ChallengeType>>,
     operation_timeout: Duration,
 }
 impl fmt::Debug for LetsEncryptClient {
@@ -51,7 +52,7 @@ impl LetsEncryptClient {
     pub fn new(environment: AcmeEnvironment, secrets: SecretStore, http_client: Client) -> Result<Self, AcmeError> {
         let raw = secrets.get("acme-account-key").map_err(|_| AcmeError::Account("secret unavailable".into()))?.unwrap_or_default();
         let credentials = serde_json::from_slice(&raw).ok();
-        Ok(Self { environment, secrets, http_client, account_key: raw, credentials: Mutex::new(credentials), orders: Mutex::new(HashMap::new()), operation_timeout: Duration::from_secs(60) })
+        Ok(Self { environment, secrets, http_client, account_key: raw, credentials: Mutex::new(credentials), orders: Mutex::new(HashMap::new()), order_challenges: Mutex::new(HashMap::new()), operation_timeout: Duration::from_secs(60) })
     }
     pub fn environment(&self) -> AcmeEnvironment { self.environment }
     pub fn directory_url(&self) -> &'static str { self.environment.directory_url() }
@@ -77,14 +78,48 @@ impl LetsEncryptClient {
         }
         Err(AcmeError::Timeout)
     }
+    async fn poll_order_with_type(&self, order_ref: &AcmeOrder, challenge_type: ChallengeType) -> Result<(), AcmeError> {
+        let deadline = tokio::time::Instant::now() + self.operation_timeout;
+        if let Some(expected) = self.order_challenges.lock().await.get(&order_ref.id).cloned() {
+            if expected != challenge_type {
+                return Err(AcmeError::InvalidRequest);
+            }
+        }
+        let mut order = self.orders.lock().await.remove(&order_ref.id).ok_or(AcmeError::Authorization)?;
+        let auths = tokio::time::timeout_at(deadline, order.authorizations()).await.map_err(|_| AcmeError::Timeout)?.map_err(|e| Self::map_error(e, "authorization"))?;
+        for auth in auths {
+            if let Some(ch) = auth.challenges.iter().find(|c| c.r#type == challenge_type) {
+                tokio::time::timeout_at(deadline, order.set_challenge_ready(&ch.url)).await.map_err(|_| AcmeError::Timeout)?.map_err(|e| Self::map_error(e, "authorization"))?;
+            }
+        }
+        self.wait_order(&mut order).await?;
+        self.orders.lock().await.insert(order.url().to_owned(), order);
+        self.order_challenges.lock().await.remove(&order_ref.id);
+        Ok(())
+    }
 }
 #[async_trait]
 impl AcmeTransport for LetsEncryptClient {
     async fn new_order(&self, request: &CertificateRequest) -> Result<AcmeOrder, AcmeError> {
         if request.hostnames.is_empty() { return Err(AcmeError::InvalidRequest); }
-        let fut = async { let account = self.account().await?; let ids: Vec<_> = request.hostnames.iter().map(|h| Identifier::Dns(h.clone())).collect(); let mut order = account.new_order(&NewOrder { identifiers: &ids }).await.map_err(|e| Self::map_error(e, "directory"))?; let auths = order.authorizations().await.map_err(|e| Self::map_error(e, "authorization"))?; let challenge = auths.first().and_then(|a| a.challenges.iter().find(|c| c.r#type == ChallengeType::Http01 || c.r#type == ChallengeType::Dns01)).ok_or(AcmeError::Authorization)?; let key = order.key_authorization(challenge).as_str().to_owned(); let result = AcmeOrder { id: order.url().to_owned(), token: challenge.token.clone(), key_authorization: key }; self.orders.lock().await.insert(result.id.clone(), order); Ok(result) }; tokio::time::timeout(self.operation_timeout, fut).await.map_err(|_| AcmeError::Timeout)?
+        let fut = async {
+            let account = self.account().await?;
+            let ids: Vec<_> = request.hostnames.iter().map(|h| Identifier::Dns(h.clone())).collect();
+            let mut order = account.new_order(&NewOrder { identifiers: &ids }).await.map_err(|e| Self::map_error(e, "directory"))?;
+            let auths = order.authorizations().await.map_err(|e| Self::map_error(e, "authorization"))?;
+            // Wildcard identifiers require DNS-01; otherwise prefer HTTP-01 deterministically.
+            let preferred = if request.hostnames.iter().any(|h| h.trim_start().starts_with("*.")) { ChallengeType::Dns01 } else { ChallengeType::Http01 };
+            let challenge = auths.iter().flat_map(|a| a.challenges.iter()).find(|c| c.r#type == preferred).or_else(|| auths.iter().flat_map(|a| a.challenges.iter()).find(|c| c.r#type == ChallengeType::Http01 || c.r#type == ChallengeType::Dns01)).ok_or(AcmeError::Authorization)?;
+            let key = order.key_authorization(challenge).as_str().to_owned();
+            let result = AcmeOrder { id: order.url().to_owned(), token: challenge.token.clone(), key_authorization: key };
+            self.order_challenges.lock().await.insert(result.id.clone(), challenge.r#type.clone());
+            self.orders.lock().await.insert(result.id.clone(), order);
+            Ok(result)
+        };
+        tokio::time::timeout(self.operation_timeout, fut).await.map_err(|_| AcmeError::Timeout)?
     }
-    async fn poll_order(&self, order: &AcmeOrder, _challenges: &Http01Store) -> Result<(), AcmeError> { let mut order = self.orders.lock().await.remove(&order.id).ok_or(AcmeError::Authorization)?; let auths = order.authorizations().await.map_err(|e| Self::map_error(e, "authorization"))?; for auth in auths { if let Some(ch) = auth.challenges.iter().find(|c| c.r#type == ChallengeType::Http01) { order.set_challenge_ready(&ch.url).await.map_err(|e| Self::map_error(e, "authorization"))?; } } self.wait_order(&mut order).await?; self.orders.lock().await.insert(order.url().to_owned(), order); Ok(()) }
-    async fn poll_order_dns01(&self, order: &AcmeOrder, _records: &[TxtRecord]) -> Result<(), AcmeError> { let mut order = self.orders.lock().await.remove(&order.id).ok_or(AcmeError::Authorization)?; let auths = order.authorizations().await.map_err(|e| Self::map_error(e, "authorization"))?; for auth in auths { if let Some(ch) = auth.challenges.iter().find(|c| c.r#type == ChallengeType::Dns01) { order.set_challenge_ready(&ch.url).await.map_err(|e| Self::map_error(e, "authorization"))?; } } self.wait_order(&mut order).await?; self.orders.lock().await.insert(order.url().to_owned(), order); Ok(()) }
-    async fn finalize(&self, order: &AcmeOrder, request: &CertificateRequest) -> Result<IssuedCertificate, AcmeError> { let deadline = tokio::time::Instant::now() + self.operation_timeout; let mut order = self.orders.lock().await.remove(&order.id).ok_or(AcmeError::Finalize)?; let rsa = Rsa::generate(2048).map_err(|_| AcmeError::Finalize)?; let key = PKey::from_rsa(rsa).map_err(|_| AcmeError::Finalize)?; let mut name = X509NameBuilder::new().map_err(|_| AcmeError::Finalize)?; name.append_entry_by_text("CN", &request.hostnames[0]).map_err(|_| AcmeError::Finalize)?; let name = name.build(); let mut csr = X509ReqBuilder::new().map_err(|_| AcmeError::Finalize)?; csr.set_subject_name(&name).map_err(|_| AcmeError::Finalize)?; csr.set_pubkey(&key).map_err(|_| AcmeError::Finalize)?; csr.sign(&key, MessageDigest::sha256()).map_err(|_| AcmeError::Finalize)?; tokio::time::timeout_at(deadline, order.finalize(&csr.build().to_der().map_err(|_| AcmeError::Finalize)?)).await.map_err(|_| AcmeError::Timeout)?.map_err(|e| Self::map_error(e, "finalize"))?; let cert = loop { if let Some(cert) = tokio::time::timeout_at(deadline, order.certificate()).await.map_err(|_| AcmeError::Timeout)?.map_err(|e| Self::map_error(e, "finalize"))? { break cert.into_bytes(); } tokio::time::sleep(Duration::from_secs(1)).await; }; let private_key_pem = key.private_key_to_pem_pkcs8().map_err(|_| AcmeError::Finalize)?; Ok(IssuedCertificate { certificate_pem: cert, private_key_pem }) }
+    async fn poll_order(&self, order: &AcmeOrder, _challenges: &Http01Store) -> Result<(), AcmeError> { self.poll_order_with_type(order, ChallengeType::Http01).await }
+    async fn poll_order_dns01(&self, order: &AcmeOrder, _records: &[TxtRecord]) -> Result<(), AcmeError> { self.poll_order_with_type(order, ChallengeType::Dns01).await }
+    #[allow(deprecated)]
+    async fn finalize(&self, order: &AcmeOrder, request: &CertificateRequest) -> Result<IssuedCertificate, AcmeError> { let deadline = tokio::time::Instant::now() + self.operation_timeout; let mut order = self.orders.lock().await.remove(&order.id).ok_or(AcmeError::Finalize)?; let rsa = Rsa::generate(2048).map_err(|_| AcmeError::Finalize)?; let key = PKey::from_rsa(rsa).map_err(|_| AcmeError::Finalize)?; let mut name = X509NameBuilder::new().map_err(|_| AcmeError::Finalize)?; name.append_entry_by_text("CN", &request.hostnames[0]).map_err(|_| AcmeError::Finalize)?; let name = name.build(); let mut csr = X509ReqBuilder::new().map_err(|_| AcmeError::Finalize)?; csr.set_subject_name(&name).map_err(|_| AcmeError::Finalize)?; csr.set_pubkey(&key).map_err(|_| AcmeError::Finalize)?; let mut extensions = Stack::new().map_err(|_| AcmeError::Finalize)?; let san = request.hostnames.iter().map(|h| format!("DNS:{}", h.trim())).collect::<Vec<_>>().join(","); extensions.push(X509Extension::new_nid(None, None, Nid::SUBJECT_ALT_NAME, &san).map_err(|_| AcmeError::Finalize)?).map_err(|_| AcmeError::Finalize)?; csr.add_extensions(&extensions).map_err(|_| AcmeError::Finalize)?; csr.sign(&key, MessageDigest::sha256()).map_err(|_| AcmeError::Finalize)?; tokio::time::timeout_at(deadline, order.finalize(&csr.build().to_der().map_err(|_| AcmeError::Finalize)?)).await.map_err(|_| AcmeError::Timeout)?.map_err(|e| Self::map_error(e, "finalize"))?; let cert = loop { if let Some(cert) = tokio::time::timeout_at(deadline, order.certificate()).await.map_err(|_| AcmeError::Timeout)?.map_err(|e| Self::map_error(e, "finalize"))? { break cert.into_bytes(); } tokio::time::sleep(Duration::from_secs(1)).await; }; let private_key_pem = key.private_key_to_pem_pkcs8().map_err(|_| AcmeError::Finalize)?; Ok(IssuedCertificate { certificate_pem: cert, private_key_pem }) }
 }

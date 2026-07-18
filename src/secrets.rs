@@ -15,6 +15,11 @@ pub struct SecretStore { root: PathBuf }
 
 impl SecretStore {
     pub fn open(root: &Path) -> Result<Self, SecretError> {
+        if let Ok(meta) = fs::symlink_metadata(root) {
+            if meta.file_type().is_symlink() {
+                return Err(SecretError::InvalidName);
+            }
+        }
         fs::create_dir_all(root).map_err(SecretError::Io)?;
         #[cfg(unix)] {
             use std::os::unix::fs::PermissionsExt;
