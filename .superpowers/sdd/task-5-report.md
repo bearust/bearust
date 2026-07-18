@@ -8,4 +8,4 @@ Verification (Rust 1.84.1 Docker):
 - `cargo test --test acme_http01` passed: 4 tests.
 - `cargo clippy --all-targets -- -D warnings` passed.
 
-Tests cover exact token retrieval/expiry, successful order/finalization and activation, timeout behavior, and preservation of the previous active certificate when issuance fails.
+Challenge entries are bound to order and hostname, cleanup is cancellation-safe via a drop guard, key authorization is strict token-plus-base64url, and `lookup_http01` handles only the dedicated challenge path. Tests cover exact token retrieval/expiry, order/hostname isolation, path isolation, key authorization validation, successful order/finalization and activation, timeout cleanup, and preservation of the previous active certificate when issuance fails.

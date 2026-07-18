@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use bearust::acme::{
-    AcmeError, AcmeManager, AcmeOrder, AcmeTransport, CertificateRequest, Http01Store,
-    IssuedCertificate,
+    lookup_http01, AcmeError, AcmeManager, AcmeOrder, AcmeTransport, CertificateRequest,
+    Http01Store, IssuedCertificate,
 };
 use bearust::certificates::{CertificateSource, CertificateStore};
 use openssl::{
@@ -16,8 +16,13 @@ use std::time::Duration;
 #[test]
 fn http01_store_returns_only_exact_token_and_expires() {
     let store = Http01Store::new(Duration::from_millis(20));
-    store.put("abc-123", "abc-123.auth").unwrap();
-    assert_eq!(store.get("abc-123").as_deref(), Some("abc-123.auth"));
+    store
+        .put("abc-123", "abc-123.abcdefghijklmnopqrstuvwxyz0123456789")
+        .unwrap();
+    assert_eq!(
+        store.get("abc-123").as_deref(),
+        Some("abc-123.abcdefghijklmnopqrstuvwxyz0123456789")
+    );
     assert!(store.get("abc-123/../x").is_none());
     std::thread::sleep(Duration::from_millis(30));
     assert!(store.get("abc-123").is_none());
@@ -33,7 +38,7 @@ impl AcmeTransport for Harness {
         Ok(AcmeOrder {
             id: "order-1".into(),
             token: "token-1".into(),
-            key_authorization: "key-auth".into(),
+            key_authorization: "token-1.abcdefghijklmnopqrstuvwxyz0123456789".into(),
         })
     }
     async fn poll_order(&self, _order: &AcmeOrder, _store: &Http01Store) -> Result<(), AcmeError> {
@@ -61,6 +66,9 @@ impl AcmeTransport for Harness {
 async fn timeout_preserves_active_certificate() {
     let dir = tempfile::tempdir().unwrap();
     let store = CertificateStore::new(dir.path()).unwrap();
+    let (old_cert, old_key) = material();
+    let old = store.import_custom("old", &old_cert, &old_key).unwrap();
+    store.activate(&old.name).unwrap();
     let manager = AcmeManager::with_transport(
         store.clone(),
         Arc::new(Harness {
@@ -72,7 +80,11 @@ async fn timeout_preserves_active_certificate() {
     let request = CertificateRequest::new("site", vec!["example.com".into()]);
     let result = manager.request_http01(request).await;
     assert!(matches!(result, Err(AcmeError::Timeout)));
-    assert!(store.active().is_none());
+    assert_eq!(store.active().unwrap().record.name, "old");
+    assert!(manager
+        .challenge_store()
+        .get_for_order("order-1", "example.com", "token-1")
+        .is_none());
 }
 
 #[tokio::test]
@@ -99,6 +111,44 @@ fn source_enum_includes_letsencrypt() {
         CertificateSource::LetsEncrypt,
         CertificateSource::LetsEncrypt
     );
+}
+
+#[test]
+fn challenge_entries_are_isolated_by_order_and_hostname() {
+    let store = Http01Store::default();
+    let value = "token.abcdefghijklmnopqrstuvwxyz0123456789";
+    store
+        .put_for_order("one", "a.example", "token", value)
+        .unwrap();
+    assert_eq!(
+        store.get_for_order("one", "a.example", "token").as_deref(),
+        Some(value)
+    );
+    assert!(store.get_for_order("two", "a.example", "token").is_none());
+    assert!(store.get_for_order("one", "b.example", "token").is_none());
+}
+
+#[test]
+fn key_authorization_requires_token_and_base64url_digest() {
+    let store = Http01Store::default();
+    assert!(store
+        .put("token", "wrong.abcdefghijklmnopqrstuvwxyz0123456789")
+        .is_err());
+    assert!(store.put("token", "token.not valid").is_err());
+    assert!(store
+        .put("token", "token.abcdefghijklmnopqrstuvwxyz0123456789")
+        .is_ok());
+}
+
+#[test]
+fn challenge_lookup_handles_only_dedicated_path() {
+    let store = Http01Store::default();
+    store
+        .put("token", "token.abcdefghijklmnopqrstuvwxyz0123456789")
+        .unwrap();
+    assert!(lookup_http01("/.well-known/acme-challenge/token", &store).is_some());
+    assert!(lookup_http01("/proxy/.well-known/acme-challenge/token", &store).is_none());
+    assert!(lookup_http01("/.well-known/acme-challenge/token/extra", &store).is_none());
 }
 
 fn material() -> (Vec<u8>, Vec<u8>) {

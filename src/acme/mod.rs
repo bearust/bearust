@@ -2,6 +2,7 @@
 mod http01;
 use crate::certificates::{CertificateError, CertificateRecord, CertificateStore};
 use async_trait::async_trait;
+pub use http01::lookup_http01;
 pub use http01::{Http01Error, Http01Store};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
@@ -98,7 +99,7 @@ impl AcmeManager {
                 Ok(record)
             }
             Ok(Err(error)) => {
-                tracing::warn!(event = "acme_request_failure", certificate = %request.name, error = %error);
+                tracing::warn!(event = "acme_request_failure", certificate = %request.name, reason = acme_reason(&error));
                 Err(error)
             }
             Err(_) => {
@@ -109,10 +110,13 @@ impl AcmeManager {
     }
     async fn issue(&self, request: CertificateRequest) -> Result<CertificateRecord, AcmeError> {
         let order = self.transport.new_order(&request).await?;
+        let hostname = request.hostnames.first().map(String::as_str).unwrap_or("");
         self.challenges
-            .put(&order.token, &order.key_authorization)
+            .put_for_order(&order.id, hostname, &order.token, &order.key_authorization)
             .map_err(|_| AcmeError::InvalidRequest)?;
-        let result = async {
+        let _guard =
+            http01::ChallengeGuard::new(self.challenges.clone(), &order.id, hostname, &order.token);
+        async {
             self.transport.poll_order(&order, &self.challenges).await?;
             let issued = self.transport.finalize(&order, &request).await?;
             let record = self.certificates.import_letsencrypt(
@@ -123,8 +127,15 @@ impl AcmeManager {
             self.certificates.activate(&record.name)?;
             Ok(record)
         }
-        .await;
-        self.challenges.remove(&order.token);
-        result
+        .await
+    }
+}
+
+fn acme_reason(error: &AcmeError) -> &'static str {
+    match error {
+        AcmeError::Timeout => "timeout",
+        AcmeError::Transport(_) => "transport",
+        AcmeError::Certificate(_) => "certificate",
+        AcmeError::InvalidRequest => "invalid_request",
     }
 }
