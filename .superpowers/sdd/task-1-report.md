@@ -1,30 +1,35 @@
-# Task 1 report
+# Task 1 Report: TLS configuration model and validation
 
-Status: implementation complete; local verification is blocked because this environment has no `cargo`/Rust toolchain installed.
+## Status
 
-Commit: pending (created after this report).
+Complete. Optional native TLS configuration is supported while preserving HTTP-only defaults.
 
-Implemented package metadata/toolchain declaration, public configuration model, TOML parsing, typed addresses and paths, defaults, deny-unknown-fields behavior, validation, host normalization, file loading, runnable fixture, example configuration, and focused invariant tests.
+## Commit
 
-Tests/checks:
+- `feat: add optional tls configuration` (final commit; see `git log` for hash)
 
-- `cargo test --test config_validation` — could not run: `/bin/bash: cargo: command not found`.
-- `cargo fmt --check` and clippy likewise could not run for the same missing toolchain.
-- `git diff --check` passed.
+## Changes
 
-Self-review: configuration structs satisfy Clone/Debug/Deserialize/PartialEq; phase-one algorithms/check kinds are closed enums; unknown fields (including backend weight) are rejected; defaults and validation paths cover the brief's listed invariants. No unrelated files were changed.
+- Added `ServerConfig.tls: Option<TlsConfig>`.
+- Added `TlsConfig` with required `cert_path` and `key_path` `PathBuf` fields.
+- Added validation rejecting empty certificate/key paths.
+- Serde unknown-field denial and required fields reject unknown keys and one-sided TLS blocks.
+- Added commented manual TLS example configuration.
+- Added parsing and validation tests for accepted, incomplete, empty, and unknown TLS blocks.
 
-Concern: compile/test confirmation should be performed in a Rust-enabled environment before merge.
+## Verification
 
-## Review fixes (2026-07-18)
+- `docker run --rm -v "$PWD":/work -w /work rust:1.84.1-bookworm cargo test --test config_validation tls`
+  - Passed: 4 tests.
+- `docker run --rm -v "$PWD":/work -w /work rust:1.84.1-bookworm cargo test --test config_validation`
+  - Passed: 15 tests.
+- `docker run --rm -v "$PWD":/work -w /work rust:1.84.1-bookworm cargo fmt --all -- --check`
+  - Passed after formatting.
+- `git diff --check`
+  - Passed.
 
-- Fixed host normalization to strip numeric ports before one trailing dot, including `api.example.com.:8080` and dotted port forms, while preserving bracketed and unbracketed IPv6 behavior.
-- Added regression coverage for host normalization, duplicate route names, unsupported algorithms, zero pool timeouts, and all documented defaults.
-- Generated `Cargo.lock` with Rust 1.84-compatible dependency resolution using `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`.
+The first focused test attempt could not build because the base Rust image lacked `cmake`; the passing runs installed `cmake` in the ephemeral container.
 
-Verification (Docker `rust:1.84`, `cmake` installed, resolver fallback):
+## Concerns
 
-- `cargo test --test config_validation` — **9 passed**.
-- `cargo fmt` — passed.
-- `cargo clippy --all-targets -- -D warnings` — passed.
-- `git diff --check` — passed.
+- Certificate-root containment and PEM/key parsing are intentionally deferred to Task 2's `CertificateStore`.

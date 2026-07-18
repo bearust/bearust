@@ -24,6 +24,15 @@ pub struct ServerConfig {
     pub graceful_shutdown_seconds: u64,
     #[serde(default = "default_pid")]
     pub pid_file: PathBuf,
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -127,6 +136,14 @@ impl Config {
     fn validate(&self) -> Result<(), ConfigError> {
         if self.server.graceful_shutdown_seconds == 0 {
             return err("server.graceful_shutdown_seconds", "must be positive");
+        }
+        if let Some(tls) = &self.server.tls {
+            if tls.cert_path.as_os_str().is_empty() {
+                return err("server.tls.cert_path", "must not be empty");
+            }
+            if tls.key_path.as_os_str().is_empty() {
+                return err("server.tls.key_path", "must not be empty");
+            }
         }
         for (name, value) in [
             ("health.interval_seconds", self.health.interval_seconds),

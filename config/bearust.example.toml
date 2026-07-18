@@ -1,6 +1,11 @@
 [server]
 bind = "0.0.0.0:8080"
 
+# Optional native TLS. Both paths are required when this block is enabled.
+# [server.tls]
+# cert_path = "/etc/bearust/tls/fullchain.pem"
+# key_path = "/etc/bearust/tls/privkey.pem"
+
 # Health timings are in seconds; safe defaults apply when omitted.
 [health]
 
