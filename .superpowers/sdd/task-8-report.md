@@ -11,3 +11,10 @@ Verification with Docker Rust 1.84.1:
 - `cargo test --all-targets`: passed (all tests; one pre-existing ignored Pingora process test).
 - `cargo fmt --all -- --check`: passed.
 - `cargo clippy --all-targets -- -D warnings`: passed.
+
+Classification follow-up: `classify_error` now maps Pingora's typed timeout
+variants and `ErrorSource` (`Downstream`, `Upstream`, `Internal`) directly to
+stable `timeout`, `client`, `upstream`, and `internal` categories. The explicit
+HTTP 503 no-healthy-backend category remains highest priority. Focused tests
+cover connect/read/write timeout variants, source attribution, internal errors,
+and 503s without inspecting `Debug` output or free-form context.

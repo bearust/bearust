@@ -17,10 +17,50 @@ pub fn init(json: bool, filter: &str) -> Result<(), InitError> {
 }
 
 pub fn classify_error(error: &pingora_core::Error) -> &'static str {
+    use pingora_core::{ErrorSource, ErrorType};
+
+    // Preserve the explicit routing failure emitted when a pool has no
+    // eligible backends.  This is more actionable than a generic upstream
+    // category and must not depend on the error context string.
+    if matches!(error.etype(), ErrorType::HTTPStatus(503)) {
+        return "no_healthy_upstream";
+    }
+
+    // Pingora has distinct timeout variants for each phase.  Treat all of
+    // them uniformly, regardless of the source attached by the callback.
+    if matches!(
+        error.etype(),
+        ErrorType::ConnectTimedout
+            | ErrorType::TLSHandshakeTimedout
+            | ErrorType::ReadTimedout
+            | ErrorType::WriteTimedout
+    ) {
+        return "timeout";
+    }
+
+    // ErrorSource is the authoritative attribution for errors created by
+    // Pingora's proxy pipeline.  It avoids leaking or parsing free-form
+    // error context and keeps the log contract stable across releases.
+    match &error.esource {
+        ErrorSource::Downstream => return "client",
+        ErrorSource::Upstream => return "upstream",
+        ErrorSource::Internal => return "internal",
+        ErrorSource::Unset => {}
+    }
+
+    // For errors without an explicit source, use only the typed variant as a
+    // conservative fallback.  Connection failures retain their dedicated
+    // category; HTTP/read/write failures are upstream-facing; everything
+    // else is internal.
     match error.etype() {
-        pingora_core::ErrorType::HTTPStatus(503) => "no_healthy_upstream",
-        pingora_core::ErrorType::HTTPStatus(_) => "upstream",
-        pingora_core::ErrorType::ConnectError => "connect",
+        ErrorType::ConnectRefused
+        | ErrorType::ConnectNoRoute
+        | ErrorType::ConnectError
+        | ErrorType::ConnectProxyFailure => "connect",
+        ErrorType::HTTPStatus(_)
+        | ErrorType::ReadError
+        | ErrorType::WriteError
+        | ErrorType::ConnectionClosed => "upstream",
         _ => "internal",
     }
 }
