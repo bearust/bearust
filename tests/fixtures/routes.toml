@@ -1,0 +1,29 @@
+[server]
+bind = "127.0.0.1:8080"
+
+[[upstream_pools]]
+name = "app"
+algorithm = "round_robin"
+
+[[upstream_pools.backends]]
+address = "127.0.0.1:9000"
+health_check = "tcp"
+health_path = ""
+
+[[routes]]
+name = "root"
+host = "api.example.com"
+path_prefix = "/"
+upstream_pool = "app"
+
+[[routes]]
+name = "api"
+host = "api.example.com"
+path_prefix = "/api"
+upstream_pool = "app"
+
+[[routes]]
+name = "users"
+host = "api.example.com"
+path_prefix = "/api/users"
+upstream_pool = "app"

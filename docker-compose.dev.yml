@@ -1,0 +1,23 @@
+services:
+  bearust:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+      - "${BEARUST_CONFIG:-./config/bearust.example.toml}:/etc/bearust/bearust.toml:ro"
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target:/app/target
+    environment:
+      RUST_LOG: debug
+    working_dir: /app
+    tmpfs:
+      - /tmp:mode=1777
+      - /run/bearust:uid=10001,gid=10001,mode=0755
+volumes:
+  cargo-registry:
+  cargo-git:
+  cargo-target:

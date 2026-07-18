@@ -1,0 +1,19 @@
+[server]
+bind = "127.0.0.1:18080"
+
+[health]
+
+[[upstream_pools]]
+name = "api"
+algorithm = "least_connections"
+
+[[upstream_pools.backends]]
+address = "127.0.0.1:19001"
+health_check = "http"
+health_path = "/health"
+
+[[routes]]
+name = "api"
+host = "api.example.com"
+path_prefix = "/"
+upstream_pool = "api"

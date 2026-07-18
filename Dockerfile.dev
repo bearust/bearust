@@ -1,0 +1,4 @@
+FROM rust:1.84.1-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends clang cmake make perl pkg-config && rm -rf /var/lib/apt/lists/* && cargo install cargo-watch --locked
+WORKDIR /app
+CMD ["cargo", "watch", "-x", "run -- serve --config /etc/bearust/bearust.toml"]

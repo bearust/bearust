@@ -1,0 +1,20 @@
+services:
+  bearust:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["serve", "--config", "/etc/bearust/bearust.toml", "--json-logs"]
+    ports:
+      - "${BEARUST_PORT:-8080}:8080"
+    volumes:
+      - "${BEARUST_CONFIG:-./config/bearust.example.toml}:/etc/bearust/bearust.toml:ro"
+    environment:
+      RUST_LOG: "${RUST_LOG:-info}"
+    working_dir: /run/bearust
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+      - /run/bearust:uid=10001,gid=10001,mode=0755
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
