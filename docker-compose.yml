@@ -8,6 +8,8 @@ services:
       - "${BEARUST_PORT:-8080}:8080"
     volumes:
       - "${BEARUST_CONFIG:-./config/bearust.example.toml}:/etc/bearust/bearust.toml:ro"
+      - "${BEARUST_DATA:-./data}:/data"
+      - "${BEARUST_TLS:-./tls}:/etc/bearust/tls:ro"
     environment:
       RUST_LOG: "${RUST_LOG:-info}"
     working_dir: /run/bearust

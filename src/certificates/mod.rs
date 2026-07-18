@@ -1,5 +1,8 @@
 //! Secure storage and validation of certificate material.
 
+pub mod renewal;
+pub use renewal::{RenewalError, RenewalIssuer, RenewalOutcome, RenewalScheduler};
+
 use openssl::{asn1::Asn1Time, pkey::PKey, x509::X509};
 use serde::{Deserialize, Serialize};
 use std::{

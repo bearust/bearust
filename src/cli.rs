@@ -1,4 +1,5 @@
 use crate::{
+    certificates::RenewalScheduler,
     config, proxy,
     reload::{self, PidFileGuard},
     runtime::RuntimeStore,
@@ -10,6 +11,17 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
+
+/// Start certificate renewal outside the Pingora traffic path. The command
+/// and API layer supplies the issuer in Phase 3; keeping this hook generic
+/// avoids coupling startup to a CA account or DNS provider.
+pub fn spawn_renewal_task(
+    scheduler: RenewalScheduler,
+    interval: Duration,
+    stop: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(scheduler.run_forever(interval, stop))
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "bearust", version, about)]
