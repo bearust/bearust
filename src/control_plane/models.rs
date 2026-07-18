@@ -47,7 +47,8 @@ impl AcmeRequest {
                     return Err("http-01 does not support wildcard hostnames".into());
                 }
                 let suffix = &host[2..];
-                if suffix.contains('*') || !valid_dns_name(suffix) || suffix.split('.').count() < 2 {
+                if suffix.contains('*') || !valid_dns_name(suffix) || suffix.split('.').count() < 2
+                {
                     return Err("invalid wildcard hostname".into());
                 }
             } else if host.contains('*') {

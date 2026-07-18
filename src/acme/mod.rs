@@ -1,13 +1,13 @@
 //! ACME issuance orchestration with an injectable transport.
-mod cloudflare;
 mod client;
+mod cloudflare;
 mod dns;
 mod http01;
 use crate::certificates::{CertificateError, CertificateRecord, CertificateStore};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-pub use cloudflare::CloudflareProvider;
 pub use client::{AcmeEnvironment, LetsEncryptClient};
+pub use cloudflare::CloudflareProvider;
 pub use dns::{DnsError, DnsProvider, TxtRecord};
 pub use http01::lookup_http01;
 pub use http01::lookup_http01_for_host;
@@ -35,7 +35,13 @@ pub struct AcmeOrder {
     pub key_authorization: String,
 }
 impl std::fmt::Debug for AcmeOrder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("AcmeOrder").field("id", &self.id).field("token", &"[REDACTED]").field("key_authorization", &"[REDACTED]").finish() }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcmeOrder")
+            .field("id", &self.id)
+            .field("token", &"[REDACTED]")
+            .field("key_authorization", &"[REDACTED]")
+            .finish()
+    }
 }
 #[derive(Clone, Debug)]
 pub struct IssuedCertificate {
