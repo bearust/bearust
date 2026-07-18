@@ -1,4 +1,5 @@
 pub mod balancer;
+pub mod certificates;
 pub mod cli;
 pub mod config;
 pub mod health;
