@@ -18,7 +18,13 @@ pub struct RenewalError;
 
 #[async_trait]
 pub trait RenewalIssuer: Send + Sync {
-    async fn renew(&self, record: &CertificateRecord) -> Result<CertificateRecord, RenewalError>;
+    async fn renew(&self, record: &CertificateRecord) -> Result<RenewedCertificate, RenewalError>;
+}
+
+pub struct RenewedCertificate {
+    pub name: String,
+    pub cert_pem: Vec<u8>,
+    pub key_pem: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,11 +78,15 @@ impl RenewalScheduler {
             return RenewalOutcome::NotDue;
         }
         match self.issuer.renew(&active.record).await {
-            Ok(record) => {
-                if self.store.activate(&record.name).is_err() {
-                    self.attempts = self.attempts.saturating_add(1);
-                    return self.retry_or_fail();
-                }
+            Ok(material) => {
+                let record = match self.store.import_custom(&material.name, &material.cert_pem, &material.key_pem)
+                    .and_then(|record| self.store.activate(&record.name).map(|_| record)) {
+                    Ok(record) => record,
+                    Err(_) => {
+                        self.attempts = self.attempts.saturating_add(1);
+                        return self.retry_or_fail();
+                    }
+                };
                 self.attempts = 0;
                 self.next_retry = None;
                 RenewalOutcome::Renewed(record)

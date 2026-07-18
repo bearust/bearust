@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use bearust::certificates::{CertificateRecord, CertificateStore, RenewalError, RenewalIssuer, RenewalOutcome, RenewalScheduler};
+use bearust::certificates::{CertificateRecord, CertificateStore, RenewedCertificate, RenewalError, RenewalIssuer, RenewalOutcome, RenewalScheduler};
 use openssl::{hash::MessageDigest, pkey::PKey, rsa::Rsa, x509::{X509NameBuilder, X509}};
 use std::{sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::{Duration, SystemTime}};
 
@@ -11,19 +11,19 @@ fn material(days: u32) -> (Vec<u8>, Vec<u8>) {
     (b.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
 }
 
-struct Fake { calls: AtomicUsize, fail: bool }
+struct Fake { calls: AtomicUsize, fail: bool, cert: Vec<u8>, key: Vec<u8> }
 #[async_trait] impl RenewalIssuer for Fake {
-    async fn renew(&self, record: &CertificateRecord) -> Result<CertificateRecord, RenewalError> { self.calls.fetch_add(1, Ordering::SeqCst); if self.fail { Err(RenewalError) } else { Ok(record.clone()) } }
+    async fn renew(&self, record: &CertificateRecord) -> Result<RenewedCertificate, RenewalError> { self.calls.fetch_add(1, Ordering::SeqCst); if self.fail { Err(RenewalError) } else { Ok(RenewedCertificate { name: record.name.clone(), cert_pem: self.cert.clone(), key_pem: self.key.clone() }) } }
 }
 
 #[tokio::test]
 async fn due_success_activates_and_failure_keeps_last_good() {
     let root = tempfile::tempdir().unwrap(); let store = CertificateStore::new(root.path()).unwrap(); let (cert,key) = material(30);
     let record = store.import_custom("main", &cert, &key).unwrap(); store.activate("main").unwrap();
-    let issuer = Arc::new(Fake { calls: AtomicUsize::new(0), fail: false });
+    let issuer = Arc::new(Fake { calls: AtomicUsize::new(0), fail: false, cert: cert.clone(), key: key.clone() });
     let mut scheduler = RenewalScheduler::new(store.clone(), issuer.clone()).with_policy(Duration::from_secs(31*86400), 3, Duration::from_secs(0));
     assert!(matches!(scheduler.run_once(SystemTime::now()).await, RenewalOutcome::Renewed(_))); assert_eq!(issuer.calls.load(Ordering::SeqCst), 1);
-    let failing = Arc::new(Fake { calls: AtomicUsize::new(0), fail: true });
+    let failing = Arc::new(Fake { calls: AtomicUsize::new(0), fail: true, cert, key });
     let mut scheduler = RenewalScheduler::new(store.clone(), failing).with_policy(Duration::from_secs(31*86400), 2, Duration::from_secs(0));
     assert!(matches!(scheduler.run_once(SystemTime::now()).await, RenewalOutcome::Retrying { .. }));
     assert!(matches!(scheduler.run_once(SystemTime::now()).await, RenewalOutcome::Failed { attempts: 2 }));

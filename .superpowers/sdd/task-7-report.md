@@ -8,6 +8,9 @@ Implemented renewal scheduling and operational persistence foundations.
 - Added `RenewalIssuer` abstraction so ACME issuance remains injectable and outside the request path.
 - Added Tokio `run_forever` task and CLI `spawn_renewal_task` hook; Phase 3 will supply the concrete `AcmeManager` command/API wiring.
 - Added scheduler tests covering due-window calculation, successful activation, retries, and active-record preservation after repeated failures.
+- Renewal issuers return PEM material; the scheduler imports and activates it
+  through `CertificateStore` before reporting success, so a successful run
+  actually rotates the stored certificate.
 - Mounted writable `/data` and read-only `/etc/bearust/tls` in production and development Compose files.
 - Documented custom PEM certificates, HTTP-01/DNS-01 prerequisites, Cloudflare token scope, renewal behavior, and secret handling.
 
