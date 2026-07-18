@@ -4,6 +4,7 @@ pub mod models;
 pub mod rbac;
 pub mod repository;
 use crate::certificates::CertificateStore;
+use crate::secrets::SecretStore;
 use async_trait::async_trait;
 use axum::{
     extract::DefaultBodyLimit,
@@ -21,6 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
+use uuid::Uuid;
 use tower_http::services::ServeDir;
 
 #[derive(Clone)]
@@ -30,6 +32,24 @@ pub struct AppState {
     pub reloader: Arc<dyn ConfigReloader>,
     pub setup_token: Arc<str>,
     pub auth_attempts: Arc<Mutex<HashMap<String, (Instant, u32)>>>,
+    pub secrets: SecretStore,
+    pub acme: Arc<dyn AcmeService>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AcmeServiceError { #[error("ACME operation is busy")] Busy, #[error("ACME operation failed")] Failed }
+#[derive(Clone, Debug)]
+pub struct AcmeJob { pub job_id: String, pub certificate_id: i64 }
+#[async_trait]
+pub trait AcmeService: Send + Sync {
+    async fn issue(&self, request: AcmeRequest, cloudflare_token: Option<Vec<u8>>, certificate_id: i64) -> Result<AcmeJob, AcmeServiceError>;
+    async fn renew(&self, certificate_id: i64) -> Result<AcmeJob, AcmeServiceError>;
+}
+pub struct NoopAcmeService;
+#[async_trait]
+impl AcmeService for NoopAcmeService {
+    async fn issue(&self, _: AcmeRequest, _: Option<Vec<u8>>, certificate_id: i64) -> Result<AcmeJob, AcmeServiceError> { Ok(AcmeJob { job_id: Uuid::new_v4().to_string(), certificate_id }) }
+    async fn renew(&self, certificate_id: i64) -> Result<AcmeJob, AcmeServiceError> { Ok(AcmeJob { job_id: Uuid::new_v4().to_string(), certificate_id }) }
 }
 #[derive(Debug, thiserror::Error)]
 pub enum ReloadError {
@@ -39,6 +59,9 @@ pub enum ReloadError {
 #[async_trait]
 pub trait ConfigReloader: Send + Sync {
     async fn apply(&self, desired: DesiredConfig) -> Result<(), ReloadError>;
+    async fn apply_certificate_change(&self, _certificate_id: i64) -> Result<(), ReloadError> {
+        Ok(())
+    }
 }
 pub struct NoopReloader;
 #[async_trait]
@@ -61,12 +84,15 @@ pub async fn build_state(
     repository::migrate(&db).await?;
     let certificates = CertificateStore::new(certificate_root)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let secrets = SecretStore::open(&certificate_root.join("secrets")).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     Ok(AppState {
         db,
         certificates: Arc::new(certificates),
         reloader: Arc::new(NoopReloader),
         setup_token: setup_token.into(),
         auth_attempts: Arc::new(Mutex::new(HashMap::new())),
+        secrets,
+        acme: Arc::new(NoopAcmeService),
     })
 }
 
@@ -102,9 +128,42 @@ pub fn router(state: AppState) -> Router {
             "/api/certificates/{id}/activate",
             post(activate_certificate),
         )
+        .route("/api/certificates/acme", post(issue_acme))
+        .route("/api/certificates/{id}/renew", post(renew_acme))
+        .route("/api/certificates/{id}/status", get(acme_status))
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
         .fallback_service(ServeDir::new("/usr/share/bearust/frontend"))
+}
+
+fn acme_error(status: StatusCode, code: &str, message: &str) -> axum::response::Response {
+    (status, Json(ErrorEnvelope { code: code.into(), message: message.into() })).into_response()
+}
+async fn issue_acme(State(s): State<AppState>, h: HeaderMap, Json(input): Json<AcmeIssueRequest>) -> impl IntoResponse {
+    let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };
+    if !allowed(Role::parse(&user.role).unwrap_or(Role::Viewer), Permission::CertificatesWrite) { audit::record(&s.db, Some(user.id), "authorization_denied", "acme_issue").await; return StatusCode::FORBIDDEN.into_response(); }
+    let req = match input.request().normalized() { Ok(r) => r, Err(e) => { let code = if e.contains("wildcard") || e.contains("hostname") { "invalid_hostname" } else { "invalid_hostname" }; audit::record(&s.db, Some(user.id), "acme_issue_failed", code).await; return acme_error(StatusCode::BAD_REQUEST, code, "Invalid ACME hostname"); } };
+    if matches!(req.challenge, AcmeChallenge::Http01) && req.hostnames.iter().any(|x| x.starts_with("*.")) { return acme_error(StatusCode::BAD_REQUEST, "unsupported_challenge", "Challenge does not support this hostname"); }
+    let name = req.hostnames.first().cloned().unwrap_or_else(|| "acme-certificate".into());
+    let hosts = serde_json::to_string(&req.hostnames).unwrap_or_else(|_| "[]".into());
+    let id = match repository::insert_certificate(&s.db, &name, "letsencrypt", &hosts, "", "", "").await { Ok(id) => id, Err(_) => { return acme_error(StatusCode::CONFLICT, "acme_busy", "An ACME operation is already running"); } };
+    if repository::insert_acme_certificate(&s.db, id, &req).await.is_err() { return acme_error(StatusCode::CONFLICT, "acme_busy", "An ACME operation is already running"); }
+    let mut token_bytes = input.cloudflare_token.map(String::into_bytes);
+    if let Some(bytes) = token_bytes.as_ref() { if s.secrets.put(&format!("cloudflare-{id}"), bytes).is_err() { return acme_error(StatusCode::INTERNAL_SERVER_ERROR, "acme_failed", "ACME credentials could not be stored"); } }
+    let result = s.acme.issue(req, token_bytes.clone(), id).await;
+    if let Some(bytes) = token_bytes.as_mut() { bytes.fill(0); }
+    match result { Ok(job) => { audit::record(&s.db, Some(user.id), "acme_issue_accepted", "certificate_job_created").await; (StatusCode::ACCEPTED, Json(AcmeJobResponse { job_id: job.job_id, certificate_id: job.certificate_id })).into_response() }, Err(AcmeServiceError::Busy) => acme_error(StatusCode::CONFLICT, "acme_busy", "An ACME operation is already running"), Err(_) => acme_error(StatusCode::BAD_GATEWAY, "acme_failed", "ACME operation failed") }
+}
+async fn renew_acme(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+    let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };
+    if !allowed(Role::parse(&user.role).unwrap_or(Role::Viewer), Permission::CertificatesWrite) { return StatusCode::FORBIDDEN.into_response(); }
+    if repository::get_acme_status(&s.db, id).await.ok().flatten().is_none() { return acme_error(StatusCode::NOT_FOUND, "not_found", "Certificate not found"); }
+    match s.acme.renew(id).await { Ok(job) => { audit::record(&s.db, Some(user.id), "acme_renew_accepted", "certificate_job_created").await; (StatusCode::ACCEPTED, Json(AcmeJobResponse { job_id: job.job_id, certificate_id: job.certificate_id })).into_response() }, Err(AcmeServiceError::Busy) => acme_error(StatusCode::CONFLICT, "acme_busy", "An ACME operation is already running"), Err(_) => acme_error(StatusCode::BAD_GATEWAY, "acme_failed", "ACME operation failed") }
+}
+async fn acme_status(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+    let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };
+    if !allowed(Role::parse(&user.role).unwrap_or(Role::Viewer), Permission::CertificatesRead) { return StatusCode::FORBIDDEN.into_response(); }
+    match repository::get_acme_status(&s.db, id).await { Ok(Some(status)) => Json(status).into_response(), Ok(None) => acme_error(StatusCode::NOT_FOUND, "not_found", "Certificate not found"), Err(_) => acme_error(StatusCode::INTERNAL_SERVER_ERROR, "acme_failed", "Status unavailable") }
 }
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status":"ok"}))

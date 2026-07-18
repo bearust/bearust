@@ -1,6 +1,8 @@
 //! Secure storage and validation of certificate material.
 
 pub mod renewal;
+pub mod acme_service;
+pub use acme_service::{AcmeService, AcmeServiceError};
 pub use renewal::{
     RenewalError, RenewalIssuer, RenewalOutcome, RenewalScheduler, RenewedCertificate,
 };
