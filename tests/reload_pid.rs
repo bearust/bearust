@@ -45,7 +45,7 @@ fn pid_file_live_process_is_signaled() {
 fn acquire_rejects_live_pid_owner() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("owned.pid");
-    let mut child = ChildGuard(Command::new("sleep").arg("2").spawn().unwrap());
+    let child = ChildGuard(Command::new("sleep").arg("2").spawn().unwrap());
     std::fs::write(&path, child.0.id().to_string()).unwrap();
     let error = match PidFileGuard::acquire(&path) {
         Ok(_) => panic!("live PID must retain ownership"),

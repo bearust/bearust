@@ -109,7 +109,37 @@ fn wait_for_port(address: std::net::SocketAddr, timeout: Duration) {
     panic!("listener {address} did not become ready");
 }
 
+fn bearust_executable() -> std::path::PathBuf {
+    let configured = std::env::var_os("CARGO_BIN_EXE_bearust").map(std::path::PathBuf::from);
+    configured.filter(|path| path.exists()).unwrap_or_else(|| {
+        std::env::current_exe()
+            .unwrap()
+            .parent()
+            .and_then(|path| path.parent())
+            .unwrap()
+            .join("bearust")
+    })
+}
+
+fn wait_for_backend(address: std::net::SocketAddr, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(mut stream) = TcpStream::connect(address) {
+            let _ = stream.write_all(
+                b"GET /warmup HTTP/1.1\r\nHost: api.example.com\r\nConnection: close\r\n\r\n",
+            );
+            let mut response = [0u8; 64];
+            if stream.read(&mut response).is_ok() && response.starts_with(b"HTTP/1.1 200") {
+                return;
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("backend did not become healthy");
+}
+
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn signal_loop_rejects_invalid_hup_then_stops_workers_on_term() {
     let _lock = PROCESS_LIFECYCLE
         .get_or_init(|| Mutex::new(()))
@@ -157,7 +187,7 @@ fn serve_exits_promptly_on_sigterm() {
     );
     std::fs::write(&config, text).unwrap();
     let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_bearust"))
+        Command::new(bearust_executable())
             .args(["serve", "--config"])
             .arg(&config)
             .spawn()
@@ -234,16 +264,14 @@ upstream_pool = "api"
     );
     std::fs::write(&config, config_text).unwrap();
     let mut child = ChildGuard(
-        Command::new(env!("CARGO_BIN_EXE_bearust"))
+        Command::new(bearust_executable())
             .args(["serve", "--config"])
             .arg(&config)
             .spawn()
             .unwrap(),
     );
     wait_for_port(proxy_address, Duration::from_secs(3));
-    // Allow the one-success health threshold to admit the backend before
-    // starting the request that exercises graceful draining.
-    thread::sleep(Duration::from_millis(250));
+    wait_for_backend(proxy_address, Duration::from_secs(3));
     let request_address = proxy_address;
     let request = thread::spawn(move || {
         let mut stream = TcpStream::connect(request_address).unwrap();

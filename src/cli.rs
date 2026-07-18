@@ -166,7 +166,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         // shutdown timeout. A zero grace period starts draining immediately.
         let server_config = std::sync::Arc::get_mut(&mut server.configuration)
             .ok_or_else(|| AppError::Server("Pingora server configuration is shared".into()))?;
-        server_config.grace_period_seconds = Some(0);
+        server_config.grace_period_seconds = Some(config.server.graceful_shutdown_seconds);
         server_config.graceful_shutdown_timeout_seconds =
             Some(config.server.graceful_shutdown_seconds);
         server.bootstrap();

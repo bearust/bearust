@@ -26,4 +26,6 @@ Test-quality remediation:
 - `PidFileGuard::acquire` now uses create-if-absent first and inode-stable stale-file removal to reduce stale-owner replacement races.
 - `tests/shutdown.rs` includes a real TCP backend with a 200ms response, checks listener refusal after SIGTERM, and asserts the drained response and child status.
 
-Verification (Rust 1.84 Docker): `cargo fmt --all` and `cargo test --test reload_pid` passed (6 tests). The process-level shutdown test reaches Pingora's graceful listener shutdown but Pingora 0.8.1's `Server::run` does not return after the service runtime exits, so its 2-second process-exit assertion currently fails; this is reported as an upstream/runtime integration limitation rather than hidden.
+Earlier verification (Rust 1.84 Docker): `cargo fmt --all` and `cargo test --test reload_pid` passed (6 tests). The initial in-process Pingora lifecycle test exposed that `Server::run` can outlive listener shutdown; the parent/child supervisor added afterward bounds this behavior.
+
+Final verification (Rust 1.84.1 Docker, HEAD): `cargo fmt --all -- --check` passed; `cargo test --test shutdown -- --test-threads=1` passed (3/3, including 200ms drain); `cargo test --all-targets` passed (all targets; one intentionally ignored Pingora process test); `cargo clippy --all-targets -- -D warnings` passed.
