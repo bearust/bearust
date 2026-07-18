@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile.dev
     ports:
       - "8080:8080"
+      - "127.0.0.1:8081:8081"
     volumes:
       - .:/app
       - "${BEARUST_CONFIG:-./config/bearust.example.toml}:/etc/bearust/bearust.toml:ro"
@@ -15,6 +16,7 @@ services:
       - cargo-target:/app/target
     environment:
       RUST_LOG: debug
+      BEARUST_SETUP_TOKEN: "${BEARUST_SETUP_TOKEN:-}"
     working_dir: /app
     tmpfs:
       - /tmp:mode=1777

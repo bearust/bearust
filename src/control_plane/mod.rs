@@ -16,6 +16,12 @@ use axum::{
 use models::*;
 use rbac::{allowed, Permission, Role};
 use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+use tokio::sync::Mutex;
+use tower_http::services::ServeDir;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,6 +29,7 @@ pub struct AppState {
     pub certificates: Arc<CertificateStore>,
     pub reloader: Arc<dyn ConfigReloader>,
     pub setup_token: Arc<str>,
+    pub auth_attempts: Arc<Mutex<HashMap<String, (Instant, u32)>>>,
 }
 #[derive(Debug, thiserror::Error)]
 pub enum ReloadError {
@@ -59,7 +66,20 @@ pub async fn build_state(
         certificates: Arc::new(certificates),
         reloader: Arc::new(NoopReloader),
         setup_token: setup_token.into(),
+        auth_attempts: Arc::new(Mutex::new(HashMap::new())),
     })
+}
+
+pub async fn allow_auth_attempt(state: &AppState, key: &str) -> bool {
+    let mut attempts = state.auth_attempts.lock().await;
+    let entry = attempts
+        .entry(key.to_owned())
+        .or_insert((Instant::now(), 0));
+    if entry.0.elapsed() > Duration::from_secs(900) {
+        *entry = (Instant::now(), 0);
+    }
+    entry.1 += 1;
+    entry.1 <= 10
 }
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -81,6 +101,7 @@ pub fn router(state: AppState) -> Router {
         )
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
+        .fallback_service(ServeDir::new("/usr/share/bearust/frontend"))
 }
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status":"ok"}))
@@ -100,8 +121,16 @@ async fn setup_status(State(s): State<AppState>) -> impl IntoResponse {
 }
 async fn setup_initialize(
     State(s): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<SetupRequest>,
 ) -> impl IntoResponse {
+    let key = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    if !allow_auth_attempt(&s, key).await {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
     if req.setup_token != s.setup_token.as_ref() {
         audit::record(&s.db, None, "setup_failed", "invalid_token").await;
         return (

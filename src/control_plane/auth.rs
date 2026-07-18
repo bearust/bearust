@@ -33,8 +33,23 @@ pub fn token_hash(token: &str) -> String {
 }
 pub async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(input): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    let key = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    if !crate::control_plane::allow_auth_attempt(&state, key).await {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorEnvelope {
+                code: "rate_limited".into(),
+                message: "Too many authentication attempts".into(),
+            }),
+        )
+            .into_response();
+    }
     let found = repository::find_user(&state.db, &input.email)
         .await
         .ok()
