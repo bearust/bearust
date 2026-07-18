@@ -132,7 +132,10 @@ impl AcmeManager {
     ) -> Result<CertificateRecord, AcmeError> {
         if request.name.trim().is_empty()
             || request.hostnames.len() != 1
-            || request.hostnames.iter().any(|host| !valid_dns_hostname(host))
+            || request
+                .hostnames
+                .iter()
+                .any(|host| !valid_dns_hostname(host))
         {
             return Err(AcmeError::InvalidRequest);
         }
@@ -144,7 +147,8 @@ impl AcmeManager {
             .hostnames
             .iter()
             .map(|hostname| {
-                let digest = URL_SAFE_NO_PAD.encode(openssl::sha::sha256(order.key_authorization.as_bytes()));
+                let digest = URL_SAFE_NO_PAD
+                    .encode(openssl::sha::sha256(order.key_authorization.as_bytes()));
                 TxtRecord::new(dns01_record_name(hostname), digest)
             })
             .collect();
@@ -152,9 +156,10 @@ impl AcmeManager {
         // cancellation still leads to cleanup attempts for all records.
         let result = tokio::time::timeout_at(deadline, async {
             for record in &records {
-                provider.present(record.clone()).await.map_err(|_| {
-                    AcmeError::Transport("DNS provider failed".into())
-                })?;
+                provider
+                    .present(record.clone())
+                    .await
+                    .map_err(|_| AcmeError::Transport("DNS provider failed".into()))?;
             }
             for record in &records {
                 provider
@@ -177,7 +182,10 @@ impl AcmeManager {
         .and_then(|result| result);
         for record in records {
             if let Err(error) = provider.cleanup(record).await {
-                tracing::warn!(event = "dns_challenge_cleanup_failed", reason = dns_reason(&error));
+                tracing::warn!(
+                    event = "dns_challenge_cleanup_failed",
+                    reason = dns_reason(&error)
+                );
             }
         }
         result

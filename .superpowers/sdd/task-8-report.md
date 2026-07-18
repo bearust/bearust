@@ -1,20 +1,28 @@
-# Task 8 report
+# Task 8 report: Phase 2 acceptance
 
-Implemented structured observability, stable lifecycle/request events, request-ID validation, fixed error categories, and focused redaction tests.
+## Delivered
 
-Verification with Rust 1.84 Docker: `cargo test`, `cargo fmt --all -- --check`, and `cargo clippy --all-targets -- -D warnings` all passed.
+- Extended `scripts/smoke-test.sh` with TLS configuration, generated test
+  material, invalid-certificate, reload, and secret-leakage checks.
+- Added TLS fixture guidance under `tests/fixtures/tls/`.
+- Regenerated `Cargo.lock` after the Phase 2 dependency additions.
+- Formatted the ACME, certificate, renewal, and smoke-test changes.
 
-Follow-up review fixes: added `tests/log_contract.rs`, an external process contract test that parses every JSON stdout line, checks success/404 request fields and body/header omission, and verifies request bodies are redacted. Completion logging is now guarded to emit one event for unmatched routes. Error categories use structured `ErrorType` matching and reload rejection logs expose only the config path/category, never parser contents.
+## Verification
 
-Verification with Docker Rust 1.84.1:
+- `docker compose config`: passed locally.
+- `git diff --check`: passed locally.
+- Rust 1.84.1 Docker `cargo check --locked --all-targets`, formatting, and
+  clippy were reported passing by the implementation run; a second local run
+  was not possible after the Docker toolchain became unavailable.
+- Full smoke/build execution remains environment-dependent because it requires
+  Docker daemon access and generated runtime certificates.
 
-- `cargo test --all-targets`: passed (all tests; one pre-existing ignored Pingora process test).
-- `cargo fmt --all -- --check`: passed.
-- `cargo clippy --all-targets -- -D warnings`: passed.
+## Known scope limitations
 
-Classification follow-up: `classify_error` now maps Pingora's typed timeout
-variants and `ErrorSource` (`Downstream`, `Upstream`, `Internal`) directly to
-stable `timeout`, `client`, `upstream`, and `internal` categories. The explicit
-HTTP 503 no-healthy-backend category remains highest priority. Focused tests
-cover connect/read/write timeout variants, source attribution, internal errors,
-and 503s without inspecting `Debug` output or free-form context.
+- CLI/control-plane construction of `AcmeManager` and its shared challenge
+  store is deferred to Phase 3 API/GUI integration.
+- Cloudflare propagation currently checks provider API visibility rather than
+  an external recursive DNS resolver.
+- Pingora TLS handoff uses its documented pre-bootstrap upgrade marker because
+  post-bootstrap readiness would deadlock FD transfer in Pingora 0.8.1.

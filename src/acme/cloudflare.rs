@@ -2,7 +2,11 @@ use super::dns::{DnsError, DnsProvider, TxtRecord};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
-use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 #[derive(Clone)]
 pub struct CloudflareProvider {
@@ -159,17 +163,22 @@ impl DnsProvider for CloudflareProvider {
     }
 
     async fn cleanup(&self, record: TxtRecord) -> Result<(), DnsError> {
-        let id = self.created_records.lock().ok().and_then(|mut records| records.remove(&(record.name.clone(), record.value.clone())));
-        if let Some(id) = id {
-            let zone = self.zone(&record.name).await?;
-            let url = format!("{}/zones/{}/dns_records/{}", self.base_url, zone.id, id);
-            let request = self.client.delete(url);
-            match self.send::<serde_json::Value>(request).await {
-                Ok(_) | Err(DnsError::NotFound) => Ok(()),
-                Err(e) => Err(e),
-            }
-        } else {
-            Ok(())
+        let id =
+            self.created_records.lock().ok().and_then(|mut records| {
+                records.remove(&(record.name.clone(), record.value.clone()))
+            });
+        let (zone, id) = match id {
+            Some(id) => (self.zone(&record.name).await?, Some(id)),
+            None => self.record_id(&record).await?,
+        };
+        let Some(id) = id else {
+            return Ok(());
+        };
+        let url = format!("{}/zones/{}/dns_records/{}", self.base_url, zone.id, id);
+        let request = self.client.delete(url);
+        match self.send::<serde_json::Value>(request).await {
+            Ok(_) | Err(DnsError::NotFound) => Ok(()),
+            Err(e) => Err(e),
         }
     }
 
@@ -190,10 +199,14 @@ impl DnsProvider for CloudflareProvider {
 
 fn valid_dns_name(value: &str) -> bool {
     let value = value.trim().trim_end_matches('.');
-    !value.is_empty() && value.split('.').all(|label| {
-        !label.is_empty() && label.len() <= 63 && !label.starts_with('-') && !label.ends_with('-')
-            && label
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    })
+    !value.is_empty()
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
 }
