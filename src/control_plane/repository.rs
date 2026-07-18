@@ -1,4 +1,6 @@
-use crate::control_plane::models::{CertificateMetadata, ProxyHost, User};
+use crate::control_plane::models::{
+    AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, CertificateMetadata, ProxyHost, User,
+};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     Row, SqlitePool,
@@ -20,8 +22,79 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,token_hash TEXT NOT NULL UNIQUE,expires_at TEXT NOT NULL,revoked_at TEXT,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS proxy_hosts (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,domain TEXT NOT NULL UNIQUE,upstream_host TEXT NOT NULL,upstream_port INTEGER NOT NULL,tls_mode TEXT NOT NULL,certificate_id INTEGER,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS certificates (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,source TEXT NOT NULL,covered_hostnames TEXT NOT NULL,expiry TEXT NOT NULL,certificate_path TEXT NOT NULL,key_path TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL)").execute(pool).await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS acme_certificates (certificate_id INTEGER PRIMARY KEY,environment TEXT NOT NULL CHECK(environment IN ('staging','production')),challenge TEXT NOT NULL CHECK(challenge IN ('http01','cloudflare_dns01')),renewal_state TEXT NOT NULL,next_renewal_at TEXT,last_attempt_at TEXT,last_error_code TEXT,FOREIGN KEY(certificate_id) REFERENCES certificates(id) ON DELETE CASCADE)").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,event TEXT NOT NULL,details TEXT NOT NULL,created_at TEXT NOT NULL)").execute(pool).await?;
     Ok(())
+}
+
+fn acme_status_from_row(r: &sqlx::sqlite::SqliteRow) -> AcmeStatus {
+    let environment = match r.get::<String, _>("environment").as_str() {
+        "staging" => AcmeEnvironment::Staging,
+        _ => AcmeEnvironment::Production,
+    };
+    let challenge = match r.get::<String, _>("challenge").as_str() {
+        "http01" => AcmeChallenge::Http01,
+        _ => AcmeChallenge::CloudflareDns01,
+    };
+    AcmeStatus {
+        certificate_id: r.get("certificate_id"),
+        environment,
+        challenge,
+        hostnames: serde_json::from_str(&r.get::<String, _>("hostnames")).unwrap_or_default(),
+        renewal_state: r.get("renewal_state"),
+        next_renewal_at: r.get("next_renewal_at"),
+        last_attempt_at: r.get("last_attempt_at"),
+        last_error_code: r.get("last_error_code"),
+    }
+}
+
+pub async fn insert_acme_certificate(
+    pool: &SqlitePool,
+    certificate_id: i64,
+    request: &AcmeRequest,
+) -> Result<AcmeStatus, sqlx::Error> {
+    let request = request
+        .clone()
+        .normalized()
+        .map_err(|e| sqlx::Error::Protocol(e))?;
+    let environment = match request.environment {
+        AcmeEnvironment::Staging => "staging",
+        AcmeEnvironment::Production => "production",
+    };
+    let challenge = match request.challenge {
+        AcmeChallenge::Http01 => "http01",
+        AcmeChallenge::CloudflareDns01 => "cloudflare_dns01",
+    };
+    sqlx::query("INSERT INTO acme_certificates(certificate_id,environment,challenge,renewal_state,next_renewal_at,last_attempt_at,last_error_code) VALUES(?,?,?, 'pending', NULL, NULL, NULL)")
+        .bind(certificate_id).bind(environment).bind(challenge).execute(pool).await?;
+    let hosts = serde_json::to_string(&request.hostnames).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    sqlx::query("UPDATE certificates SET covered_hostnames=? WHERE id=?")
+        .bind(hosts).bind(certificate_id).execute(pool).await?;
+    get_acme_status(pool, certificate_id).await?.ok_or_else(|| sqlx::Error::RowNotFound)
+}
+
+pub async fn update_acme_status(
+    pool: &SqlitePool,
+    certificate_id: i64,
+    renewal_state: &str,
+    next_renewal_at: Option<&str>,
+    last_attempt_at: Option<&str>,
+    last_error_code: Option<&str>,
+) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("UPDATE acme_certificates SET renewal_state=?,next_renewal_at=?,last_attempt_at=?,last_error_code=? WHERE certificate_id=?")
+        .bind(renewal_state).bind(next_renewal_at).bind(last_attempt_at).bind(last_error_code).bind(certificate_id).execute(pool).await?.rows_affected())
+}
+
+pub async fn get_acme_status(pool: &SqlitePool, certificate_id: i64) -> Result<Option<AcmeStatus>, sqlx::Error> {
+    let row = sqlx::query("SELECT a.certificate_id,a.environment,a.challenge,c.covered_hostnames AS hostnames,a.renewal_state,a.next_renewal_at,a.last_attempt_at,a.last_error_code FROM acme_certificates a JOIN certificates c ON c.id=a.certificate_id WHERE a.certificate_id=?")
+        .bind(certificate_id).fetch_optional(pool).await?;
+    Ok(row.as_ref().map(acme_status_from_row))
+}
+
+pub async fn list_due_acme_certificates(pool: &SqlitePool, at: &str) -> Result<Vec<AcmeStatus>, sqlx::Error> {
+    let rows = sqlx::query("SELECT a.certificate_id,a.environment,a.challenge,c.covered_hostnames AS hostnames,a.renewal_state,a.next_renewal_at,a.last_attempt_at,a.last_error_code FROM acme_certificates a JOIN certificates c ON c.id=a.certificate_id WHERE a.next_renewal_at IS NOT NULL AND a.next_renewal_at<=? ORDER BY a.next_renewal_at,a.certificate_id")
+        .bind(at).fetch_all(pool).await?;
+    Ok(rows.iter().map(acme_status_from_row).collect())
 }
 pub async fn user_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
     Ok(sqlx::query("SELECT COUNT(*) c FROM users")

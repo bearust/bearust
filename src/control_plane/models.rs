@@ -1,5 +1,69 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AcmeEnvironment {
+    Staging,
+    Production,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AcmeChallenge {
+    #[serde(rename = "http01")]
+    Http01,
+    #[serde(rename = "cloudflare_dns01")]
+    CloudflareDns01,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AcmeRequest {
+    pub environment: AcmeEnvironment,
+    pub challenge: AcmeChallenge,
+    pub hostnames: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AcmeStatus {
+    pub certificate_id: i64,
+    pub environment: AcmeEnvironment,
+    pub challenge: AcmeChallenge,
+    pub hostnames: Vec<String>,
+    pub renewal_state: String,
+    pub next_renewal_at: Option<String>,
+    pub last_attempt_at: Option<String>,
+    pub last_error_code: Option<String>,
+}
+
+impl AcmeRequest {
+    pub fn normalized(mut self) -> Result<Self, String> {
+        let mut hosts = Vec::new();
+        for raw in self.hostnames.drain(..) {
+            let host = raw.trim().to_ascii_lowercase();
+            if host.is_empty() || host.chars().any(|c| c.is_whitespace()) {
+                return Err("invalid hostname".into());
+            }
+            if host.starts_with("*.") {
+                if self.challenge == AcmeChallenge::Http01 {
+                    return Err("http-01 does not support wildcard hostnames".into());
+                }
+                if host.len() <= 2 || host[2..].contains('*') {
+                    return Err("invalid wildcard hostname".into());
+                }
+            } else if host.contains('*') {
+                return Err("invalid wildcard hostname".into());
+            }
+            if !hosts.contains(&host) {
+                hosts.push(host);
+            }
+        }
+        if hosts.is_empty() {
+            return Err("at least one hostname is required".into());
+        }
+        self.hostnames = hosts;
+        Ok(self)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct User {
     pub id: i64,
