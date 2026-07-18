@@ -829,24 +829,75 @@ async fn activate_certificate(
     ) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let Some(name) = repository::certificate_name(&s.db, id).await.ok().flatten() else {
+    let Some((name, cert_path, key_path)) = repository::certificate_paths(&s.db, id).await.ok().flatten() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if s.certificates.activate(&name).is_err() {
+    if CertificateStore::validate_material_paths(
+        std::path::Path::new(&cert_path),
+        std::path::Path::new(&key_path),
+    )
+    .is_err()
+    {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    match repository::activate_certificate(&s.db, id).await {
-        Ok(1) => {
-            audit::record(
-                &s.db,
-                Some(user.id),
-                "certificate_activated",
-                "metadata_only",
-            )
-            .await;
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Ok(_) => StatusCode::NOT_FOUND.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let previous_id = match repository::active_certificate_id(&s.db).await {
+        Ok(value) => value,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let previous_name = match previous_id {
+        Some(previous_id) => repository::certificate_name(&s.db, previous_id)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    if s.certificates.activate(&name).is_err()
+        || repository::set_active_certificate(&s.db, Some(id))
+            .await
+            .map(|changed| changed != 1)
+            .unwrap_or(true)
+    {
+        let _ = restore_certificate_activation(&s, previous_id, previous_name.as_deref()).await;
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if let Err(error) = s.reloader.apply_certificate_change(id).await {
+        let _ = restore_certificate_activation(&s, previous_id, previous_name.as_deref()).await;
+        audit::record(
+            &s.db,
+            Some(user.id),
+            "certificate_activation_failed",
+            &format!("certificate_id={id};error={error}"),
+        )
+        .await;
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorEnvelope {
+                code: "reload_failed".into(),
+                message: "Certificate activation was not applied".into(),
+            }),
+        )
+            .into_response();
+    }
+    audit::record(
+        &s.db,
+        Some(user.id),
+        "certificate_activated",
+        &format!("certificate_id={id}"),
+    )
+    .await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn restore_certificate_activation(
+    state: &AppState,
+    previous_id: Option<i64>,
+    previous_name: Option<&str>,
+) -> Result<(), ()> {
+    repository::set_active_certificate(&state.db, previous_id)
+        .await
+        .map_err(|_| ())?;
+    match previous_name {
+        Some(name) => state.certificates.activate(name).map(|_| ()).map_err(|_| ()),
+        None => state.certificates.clear_active().map_err(|_| ()),
     }
 }

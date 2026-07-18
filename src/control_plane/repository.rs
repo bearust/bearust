@@ -305,16 +305,47 @@ pub async fn certificate_name(pool: &SqlitePool, id: i64) -> Result<Option<Strin
         .map(|r| r.get("name")))
 }
 
-pub async fn activate_certificate(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
+/// Return the certificate storage paths for activation validation.
+pub async fn certificate_paths(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<Option<(String, String, String)>, sqlx::Error> {
+    Ok(sqlx::query("SELECT name,certificate_path,key_path FROM certificates WHERE id=?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .map(|r| (r.get("name"), r.get("certificate_path"), r.get("key_path"))))
+}
+
+pub async fn active_certificate_id(pool: &SqlitePool) -> Result<Option<i64>, sqlx::Error> {
+    Ok(sqlx::query("SELECT id FROM certificates WHERE active=1 ORDER BY id LIMIT 1")
+        .fetch_optional(pool)
+        .await?
+        .map(|r| r.get("id")))
+}
+
+/// Set exactly one active certificate (or none), in one transaction.
+pub async fn set_active_certificate(
+    pool: &SqlitePool,
+    id: Option<i64>,
+) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query("UPDATE certificates SET active=0")
         .execute(&mut *tx)
         .await?;
-    let changed = sqlx::query("UPDATE certificates SET active=1 WHERE id=?")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+    let changed = if let Some(id) = id {
+        sqlx::query("UPDATE certificates SET active=1 WHERE id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+    } else {
+        0
+    };
     tx.commit().await?;
     Ok(changed)
+}
+
+pub async fn activate_certificate(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
+    set_active_certificate(pool, Some(id)).await
 }

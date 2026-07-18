@@ -231,6 +231,16 @@ impl CertificateStore {
             .ok()
             .map(|record| ActiveCertificate { record })
     }
+
+    /// Remove the active pointer. Used when an activation transaction rolls
+    /// back to a state where no certificate was active.
+    pub fn clear_active(&self) -> Result<(), CertificateError> {
+        match fs::remove_file(&self.active_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(CertificateError::Io(error)),
+        }
+    }
 }
 
 fn validate_name(name: &str) -> Result<(), CertificateError> {
