@@ -1,3 +1,4 @@
 # Local Superpowers brainstorming sessions
 .superpowers/
 .worktrees/
+/target/
