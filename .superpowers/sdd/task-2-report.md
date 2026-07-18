@@ -1,28 +1,24 @@
-# Task 2 Report
+# Task 2 Report: Secure certificate store
 
-Implemented host normalization and indexed, segment-aware longest-prefix routing.
+## Implemented
 
-## Changes
-
-- Added `Router`, `ResolvedRoute`, `normalize_host`, and boundary-aware path matching in `src/router.rs`.
-- Exported `router` from `src/lib.rs`.
-- Added routing tests and TOML fixture under `tests/`.
+- Added `CertificateStore` with custom PEM import, activation, and active snapshot APIs.
+- Validates X.509 PEM, private-key PEM, certificate expiry, and public-key correspondence.
+- Extracts SAN/CN hostnames and persists non-secret metadata.
+- Stores each certificate under a caller-provided root with name/path containment checks.
+- Uses temporary files, restrictive `0600` permissions for private keys, fsync, and atomic rename.
+- Redacts parsing/storage failures so PEM and private-key contents cannot appear in errors.
+- Added focused malformed-input, traversal, and unknown-activation tests.
 
 ## Verification
 
-- Local `cargo test --test routing`: unavailable (`cargo: command not found`).
-- Rust 1.84 Docker `cargo test --test routing`: 2 passed, 1 failed because the prescribed fixture includes a same-host `/` route while the prescribed assertion expects `/apiv2` to return `None`; the required `path_matches` rule explicitly makes `/` match every path.
-- Rust 1.84 Docker `cargo test --test config_validation`: passed.
-- Rust 1.84 Docker `cargo clippy --all-targets -- -D warnings`: passed.
-- Rust 1.84 Docker `cargo fmt -- --check`: passed after formatting.
+- `cargo fmt --all` completed with Rust 1.84.1 Docker toolchain.
+- Full Rust test execution was blocked by the container's crates.io resolution selecting newer transitive crates requiring Cargo/Rust beyond 1.84.1. The source and focused tests were formatted; parent integration should regenerate the lockfile with Rust 1.84-compatible pins.
 
-## Concern
+## Commit
 
-The `/` fixture route and `/apiv2` `None` assertion were internally inconsistent under the exact boundary-matching function in the brief. The mandated behavior is retained: `/` is a catch-all. The routing test now verifies `/api` does not match `/apiv2` by asserting that `/apiv2` resolves to the `root` route.
+`4b948c8 feat: add secure certificate store`
 
-## Resolution Verification
+## Notes
 
-- Rust 1.84 Docker `cargo test --test routing`: passed (3 tests).
-- Rust 1.84 Docker `cargo test --test config_validation`: passed (9 tests).
-- Rust 1.84 Docker `cargo fmt -- --check`: passed.
-- Rust 1.84 Docker `cargo clippy --all-targets -- -D warnings`: passed.
+`openssl` is used for robust PEM/X.509 parsing and key matching. `Cargo.lock` intentionally remains unchanged because this worktree cannot resolve the new dependency without upgrading unrelated locked packages.
