@@ -104,9 +104,15 @@ pub enum HealthCheckKind {
 fn default_shutdown() -> u64 {
     30
 }
-fn default_control_bind() -> SocketAddr { "127.0.0.1:8081".parse().expect("valid default") }
-fn default_control_database() -> PathBuf { "./data/bearust.sqlite".into() }
-fn default_certificate_store() -> PathBuf { "./data/certificates".into() }
+fn default_control_bind() -> SocketAddr {
+    "127.0.0.1:8081".parse().expect("valid default")
+}
+fn default_control_database() -> PathBuf {
+    "./data/bearust.sqlite".into()
+}
+fn default_certificate_store() -> PathBuf {
+    "./data/certificates".into()
+}
 fn default_pid() -> PathBuf {
     "./bearust.pid".into()
 }

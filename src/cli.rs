@@ -231,7 +231,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let database_url = format!("sqlite://{}", config.server.control_database.display());
         let setup_token_from_env = std::env::var("BEARUST_SETUP_TOKEN").ok();
         let setup_token = setup_token_from_env.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        tracing::info!(event = "control_plane_start", bind = %config.server.control_bind, setup_token_configured = setup_token_from_env.is_some(), generated_setup_token = setup_token_from_env.is_none(), setup_token = %setup_token);
+        tracing::info!(event = "control_plane_start", bind = %config.server.control_bind, setup_token_configured = setup_token_from_env.is_some(), generated_setup_token = setup_token_from_env.is_none());
         let control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
         let control_listener = tokio::net::TcpListener::bind(config.server.control_bind).await

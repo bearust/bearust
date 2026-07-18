@@ -1,23 +1,292 @@
-pub mod auth; pub mod models; pub mod rbac; pub mod repository;
-use std::sync::Arc;
-use async_trait::async_trait;
-use axum::{extract::{Multipart, Path, State}, http::{HeaderMap, StatusCode}, response::IntoResponse, routing::{delete,get,post}, Json, Router};
+pub mod audit;
+pub mod auth;
+pub mod models;
+pub mod rbac;
+pub mod repository;
 use crate::certificates::CertificateStore;
+use async_trait::async_trait;
+use axum::{
+    extract::{Multipart, Path, State},
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    routing::{delete, get, post},
+    Json, Router,
+};
 use models::*;
-use rbac::{allowed,Permission,Role};
+use rbac::{allowed, Permission, Role};
+use std::sync::Arc;
 
-#[derive(Clone)] pub struct AppState { pub db: sqlx::SqlitePool, pub certificates: Arc<CertificateStore>, pub reloader: Arc<dyn ConfigReloader>, pub setup_token: Arc<str> }
-#[derive(Debug,thiserror::Error)] pub enum ReloadError { #[error("reload failed: {0}")] Failed(String) }
-#[async_trait] pub trait ConfigReloader: Send+Sync { async fn apply(&self,desired:DesiredConfig)->Result<(),ReloadError>; }
-pub struct NoopReloader; #[async_trait] impl ConfigReloader for NoopReloader { async fn apply(&self,_:DesiredConfig)->Result<(),ReloadError>{Ok(())} }
-pub async fn build_state(database_url:&str, certificate_root:&std::path::Path, setup_token:impl Into<Arc<str>>)->Result<AppState,sqlx::Error>{if let Some(path)=database_url.strip_prefix("sqlite://"){if let Some(parent)=std::path::Path::new(path).parent(){std::fs::create_dir_all(parent).map_err(|e|sqlx::Error::Io(e))?;}}let db=repository::connect(database_url).await?;repository::migrate(&db).await?;let certificates=CertificateStore::new(certificate_root).map_err(|e|sqlx::Error::Protocol(e.to_string().into()))?;Ok(AppState{db,certificates:Arc::new(certificates),reloader:Arc::new(NoopReloader),setup_token:setup_token.into()})}
-pub fn router(state:AppState)->Router { Router::new().route("/api/health",get(health)).route("/api/setup/status",get(setup_status)).route("/api/setup/initialize",post(setup_initialize)).route("/api/auth/login",post(auth::login)).route("/api/auth/logout",post(auth::logout)).route("/api/auth/me",get(me)).route("/api/proxy-hosts",get(list_hosts).post(create_host)).route("/api/proxy-hosts/{id}",delete(remove_host)).route("/api/certificates",post(upload_certificate)).with_state(state) }
-async fn health()->Json<serde_json::Value>{Json(serde_json::json!({"status":"ok"}))}
-async fn setup_status(State(s):State<AppState>)->impl IntoResponse{match repository::user_count(&s.db).await{Ok(n)=>Json(serde_json::json!({"initialized":n>0})).into_response(),Err(_)=>(StatusCode::INTERNAL_SERVER_ERROR,Json(ErrorEnvelope{code:"database_error".into(),message:"Database unavailable".into()})).into_response()}}
-async fn setup_initialize(State(s):State<AppState>,Json(req):Json<SetupRequest>)->impl IntoResponse{if req.setup_token!=s.setup_token.as_ref(){return (StatusCode::FORBIDDEN,Json(ErrorEnvelope{code:"invalid_setup_token".into(),message:"Invalid setup token".into()})).into_response()}if repository::user_count(&s.db).await.ok()!=Some(0){return (StatusCode::CONFLICT,Json(ErrorEnvelope{code:"already_initialized".into(),message:"Setup has already completed".into()})).into_response()}if req.password.len()<12||!req.email.contains('@'){return (StatusCode::BAD_REQUEST,Json(ErrorEnvelope{code:"invalid_input".into(),message:"Valid email and password of at least 12 characters required".into()})).into_response()}let hash=match auth::hash_password(&req.password){Ok(x)=>x,Err(_)=> return StatusCode::INTERNAL_SERVER_ERROR.into_response()};match repository::insert_user(&s.db,&req.email,&hash,"admin").await{Ok(u)=> (StatusCode::CREATED,Json(u)).into_response(),Err(_)=>(StatusCode::CONFLICT,Json(ErrorEnvelope{code:"already_initialized".into(),message:"Setup has already completed".into()})).into_response()}}
-async fn current(s:&AppState,h:&HeaderMap)->Result<User,StatusCode>{let t=auth::cookie(h).ok_or(StatusCode::UNAUTHORIZED)?;repository::find_user_by_session(&s.db,&auth::token_hash(t)).await.map_err(|_|StatusCode::UNAUTHORIZED)?.ok_or(StatusCode::UNAUTHORIZED)}
-async fn me(State(s):State<AppState>,h:HeaderMap)->impl IntoResponse{match current(&s,&h).await{Ok(u)=>Json(u).into_response(),Err(c)=>c.into_response()}}
-async fn list_hosts(State(s):State<AppState>,h:HeaderMap)->impl IntoResponse{if current(&s,&h).await.is_err(){return StatusCode::UNAUTHORIZED.into_response()}match repository::list_hosts(&s.db).await{Ok(x)=>Json(x).into_response(),Err(_)=>StatusCode::INTERNAL_SERVER_ERROR.into_response()}}
-async fn create_host(State(s):State<AppState>,h:HeaderMap,Json(req):Json<ProxyHostRequest>)->impl IntoResponse{let u=match current(&s,&h).await{Ok(x)=>x,Err(c)=>return c.into_response()};if !allowed(Role::parse(&u.role).unwrap_or(Role::Viewer),Permission::ProxyHostsWrite){return StatusCode::FORBIDDEN.into_response()}if req.name.trim().is_empty()||req.domain.trim().is_empty()||req.upstream_host.trim().is_empty()||req.upstream_port==0{return StatusCode::BAD_REQUEST.into_response()}let host=ProxyHost{id:0,name:req.name,domain:req.domain.to_ascii_lowercase(),upstream_host:req.upstream_host,upstream_port:req.upstream_port,tls_mode:req.tls_mode,certificate_id:req.certificate_id,enabled:req.enabled};match repository::insert_host(&s.db,&host).await{Ok(x)=>{let _=s.reloader.apply(DesiredConfig{proxy_hosts:repository::list_hosts(&s.db).await.unwrap_or_default()}).await; (StatusCode::CREATED,Json(x)).into_response()},Err(_)=>(StatusCode::CONFLICT,Json(ErrorEnvelope{code:"duplicate_domain".into(),message:"Domain already exists".into()})).into_response()}}
-async fn remove_host(State(s):State<AppState>,h:HeaderMap,Path(id):Path<i64>)->impl IntoResponse{let u=match current(&s,&h).await{Ok(x)=>x,Err(c)=>return c.into_response()};if !allowed(Role::parse(&u.role).unwrap_or(Role::Viewer),Permission::ProxyHostsWrite){return StatusCode::FORBIDDEN.into_response()}match repository::delete_host(&s.db,id).await{Ok(0)=>StatusCode::NOT_FOUND.into_response(),Ok(_)=>StatusCode::NO_CONTENT.into_response(),Err(_)=>StatusCode::INTERNAL_SERVER_ERROR.into_response()}}
-async fn upload_certificate(State(s):State<AppState>,h:HeaderMap,mut multipart:Multipart)->impl IntoResponse{let u=match current(&s,&h).await{Ok(x)=>x,Err(c)=>return c.into_response()};if !allowed(Role::parse(&u.role).unwrap_or(Role::Viewer),Permission::CertificatesWrite){return StatusCode::FORBIDDEN.into_response()}let mut name=None;let mut cert=None;let mut key=None;while let Ok(Some(field))=multipart.next_field().await{let field_name=field.name().unwrap_or("").to_string();let bytes=match field.bytes().await{Ok(b)=>b,Err(_)=>return StatusCode::BAD_REQUEST.into_response()};if bytes.len()>1024*1024{return StatusCode::PAYLOAD_TOO_LARGE.into_response()}match field_name.as_str(){"name"=>name=String::from_utf8(bytes.to_vec()).ok(),"certificate"=>cert=Some(bytes),"key"=>key=Some(bytes),_=>{}}}let (Some(name),Some(cert),Some(key))=(name,cert,key)else{return StatusCode::BAD_REQUEST.into_response()};match s.certificates.import_custom(&name,&cert,&key){Ok(record)=>{match repository::insert_certificate(&s.db,&record.name,"custom",&serde_json::to_string(&record.covered_hostnames).unwrap_or_default(),&record.expiry,&record.certificate_path.to_string_lossy(),&record.key_path.to_string_lossy()).await{Ok(id)=>(StatusCode::CREATED,Json(serde_json::json!({"id":id,"name":record.name,"source":"custom","covered_hostnames":record.covered_hostnames,"expiry":record.expiry}))).into_response(),Err(_)=>StatusCode::CONFLICT.into_response()}},Err(_)=>StatusCode::BAD_REQUEST.into_response()}}
+#[derive(Clone)]
+pub struct AppState {
+    pub db: sqlx::SqlitePool,
+    pub certificates: Arc<CertificateStore>,
+    pub reloader: Arc<dyn ConfigReloader>,
+    pub setup_token: Arc<str>,
+}
+#[derive(Debug, thiserror::Error)]
+pub enum ReloadError {
+    #[error("reload failed: {0}")]
+    Failed(String),
+}
+#[async_trait]
+pub trait ConfigReloader: Send + Sync {
+    async fn apply(&self, desired: DesiredConfig) -> Result<(), ReloadError>;
+}
+pub struct NoopReloader;
+#[async_trait]
+impl ConfigReloader for NoopReloader {
+    async fn apply(&self, _: DesiredConfig) -> Result<(), ReloadError> {
+        Ok(())
+    }
+}
+pub async fn build_state(
+    database_url: &str,
+    certificate_root: &std::path::Path,
+    setup_token: impl Into<Arc<str>>,
+) -> Result<AppState, sqlx::Error> {
+    if let Some(path) = database_url.strip_prefix("sqlite://") {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| sqlx::Error::Io(e))?;
+        }
+    }
+    let db = repository::connect(database_url).await?;
+    repository::migrate(&db).await?;
+    let certificates = CertificateStore::new(certificate_root)
+        .map_err(|e| sqlx::Error::Protocol(e.to_string().into()))?;
+    Ok(AppState {
+        db,
+        certificates: Arc::new(certificates),
+        reloader: Arc::new(NoopReloader),
+        setup_token: setup_token.into(),
+    })
+}
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/api/health", get(health))
+        .route("/api/setup/status", get(setup_status))
+        .route("/api/setup/initialize", post(setup_initialize))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/logout", post(auth::logout))
+        .route("/api/auth/me", get(me))
+        .route("/api/proxy-hosts", get(list_hosts).post(create_host))
+        .route("/api/proxy-hosts/{id}", delete(remove_host))
+        .route("/api/certificates", post(upload_certificate))
+        .with_state(state)
+}
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"status":"ok"}))
+}
+async fn setup_status(State(s): State<AppState>) -> impl IntoResponse {
+    match repository::user_count(&s.db).await {
+        Ok(n) => Json(serde_json::json!({"initialized":n>0})).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorEnvelope {
+                code: "database_error".into(),
+                message: "Database unavailable".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+async fn setup_initialize(
+    State(s): State<AppState>,
+    Json(req): Json<SetupRequest>,
+) -> impl IntoResponse {
+    if req.setup_token != s.setup_token.as_ref() {
+        audit::record(&s.db, None, "setup_failed", "invalid_token").await;
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorEnvelope {
+                code: "invalid_setup_token".into(),
+                message: "Invalid setup token".into(),
+            }),
+        )
+            .into_response();
+    }
+    if repository::user_count(&s.db).await.ok() != Some(0) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorEnvelope {
+                code: "already_initialized".into(),
+                message: "Setup has already completed".into(),
+            }),
+        )
+            .into_response();
+    }
+    if req.password.len() < 12 || !req.email.contains('@') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorEnvelope {
+                code: "invalid_input".into(),
+                message: "Valid email and password of at least 12 characters required".into(),
+            }),
+        )
+            .into_response();
+    }
+    let hash = match auth::hash_password(&req.password) {
+        Ok(x) => x,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    match repository::insert_user(&s.db, &req.email, &hash, "admin").await {
+        Ok(u) => {
+            audit::record(&s.db, Some(u.id), "setup_completed", "admin_created").await;
+            (StatusCode::CREATED, Json(u)).into_response()
+        }
+        Err(_) => (
+            StatusCode::CONFLICT,
+            Json(ErrorEnvelope {
+                code: "already_initialized".into(),
+                message: "Setup has already completed".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+async fn current(s: &AppState, h: &HeaderMap) -> Result<User, StatusCode> {
+    let t = auth::cookie(h).ok_or(StatusCode::UNAUTHORIZED)?;
+    repository::find_user_by_session(&s.db, &auth::token_hash(t))
+        .await
+        .map_err(|_| StatusCode::UNAUTHORIZED)?
+        .ok_or(StatusCode::UNAUTHORIZED)
+}
+async fn me(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
+    match current(&s, &h).await {
+        Ok(u) => Json(u).into_response(),
+        Err(c) => c.into_response(),
+    }
+}
+async fn list_hosts(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
+    if current(&s, &h).await.is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match repository::list_hosts(&s.db).await {
+        Ok(x) => Json(x).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+async fn create_host(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Json(req): Json<ProxyHostRequest>,
+) -> impl IntoResponse {
+    let u = match current(&s, &h).await {
+        Ok(x) => x,
+        Err(c) => return c.into_response(),
+    };
+    if !allowed(
+        Role::parse(&u.role).unwrap_or(Role::Viewer),
+        Permission::ProxyHostsWrite,
+    ) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if req.name.trim().is_empty()
+        || req.domain.trim().is_empty()
+        || req.upstream_host.trim().is_empty()
+        || req.upstream_port == 0
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let host = ProxyHost {
+        id: 0,
+        name: req.name,
+        domain: req.domain.to_ascii_lowercase(),
+        upstream_host: req.upstream_host,
+        upstream_port: req.upstream_port,
+        tls_mode: req.tls_mode,
+        certificate_id: req.certificate_id,
+        enabled: req.enabled,
+    };
+    match repository::insert_host(&s.db, &host).await {
+        Ok(x) => {
+            let desired = DesiredConfig {
+                proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default(),
+            };
+            if s.reloader.apply(desired).await.is_err() {
+                let _ = repository::delete_host(&s.db, x.id).await;
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(ErrorEnvelope {
+                        code: "reload_failed".into(),
+                        message: "Proxy host was not activated".into(),
+                    }),
+                )
+                    .into_response();
+            }
+            (StatusCode::CREATED, Json(x)).into_response()
+        }
+        Err(_) => (
+            StatusCode::CONFLICT,
+            Json(ErrorEnvelope {
+                code: "duplicate_domain".into(),
+                message: "Domain already exists".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+async fn remove_host(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let u = match current(&s, &h).await {
+        Ok(x) => x,
+        Err(c) => return c.into_response(),
+    };
+    if !allowed(
+        Role::parse(&u.role).unwrap_or(Role::Viewer),
+        Permission::ProxyHostsWrite,
+    ) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match repository::delete_host(&s.db, id).await {
+        Ok(0) => StatusCode::NOT_FOUND.into_response(),
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+async fn upload_certificate(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let u = match current(&s, &h).await {
+        Ok(x) => x,
+        Err(c) => return c.into_response(),
+    };
+    if !allowed(
+        Role::parse(&u.role).unwrap_or(Role::Viewer),
+        Permission::CertificatesWrite,
+    ) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let mut name = None;
+    let mut cert = None;
+    let mut key = None;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let field_name = field.name().unwrap_or("").to_string();
+        let bytes = match field.bytes().await {
+            Ok(b) => b,
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        };
+        if bytes.len() > 1024 * 1024 {
+            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        }
+        match field_name.as_str() {
+            "name" => name = String::from_utf8(bytes.to_vec()).ok(),
+            "certificate" => cert = Some(bytes),
+            "key" => key = Some(bytes),
+            _ => {}
+        }
+    }
+    let (Some(name), Some(cert), Some(key)) = (name, cert, key) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match s.certificates.import_custom(&name, &cert, &key) {
+        Ok(record) => {
+            match repository::insert_certificate(&s.db,&record.name,"custom",&serde_json::to_string(&record.covered_hostnames).unwrap_or_default(),&record.expiry,&record.certificate_path.to_string_lossy(),&record.key_path.to_string_lossy()).await{Ok(id)=>(StatusCode::CREATED,Json(serde_json::json!({"id":id,"name":record.name,"source":"custom","covered_hostnames":record.covered_hostnames,"expiry":record.expiry}))).into_response(),Err(_)=>StatusCode::CONFLICT.into_response()}
+        }
+        Err(_) => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
