@@ -1,0 +1,7 @@
+.git
+.github
+.superpowers
+.worktrees
+target
+*.pid
+.env

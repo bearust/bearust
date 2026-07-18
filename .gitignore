@@ -2,3 +2,8 @@
 .superpowers/
 .worktrees/
 /target/
+*.pid
+.env
+.DS_Store
+.idea/
+.vscode/
