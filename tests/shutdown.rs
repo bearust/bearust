@@ -241,6 +241,9 @@ upstream_pool = "api"
             .unwrap(),
     );
     wait_for_port(proxy_address, Duration::from_secs(3));
+    // Allow the one-success health threshold to admit the backend before
+    // starting the request that exercises graceful draining.
+    thread::sleep(Duration::from_millis(250));
     let request_address = proxy_address;
     let request = thread::spawn(move || {
         let mut stream = TcpStream::connect(request_address).unwrap();
