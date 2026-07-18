@@ -25,6 +25,63 @@ fn parses_valid_configuration_and_defaults() {
     );
 }
 
+#[test]
+fn parses_optional_tls_configuration() {
+    let input = format!("{VALID}\n[server.tls]\ncert_path = \"/etc/bearust/tls/fullchain.pem\"\nkey_path = \"/etc/bearust/tls/privkey.pem\"\n");
+    let config = Config::parse(&input).expect("valid TLS configuration");
+    let tls = config.server.tls.expect("TLS block");
+    assert_eq!(
+        tls.cert_path.to_string_lossy(),
+        "/etc/bearust/tls/fullchain.pem"
+    );
+    assert_eq!(
+        tls.key_path.to_string_lossy(),
+        "/etc/bearust/tls/privkey.pem"
+    );
+}
+
+#[test]
+fn rejects_one_sided_tls_blocks() {
+    for block in [
+        "[server.tls]\ncert_path = \"/etc/cert.pem\"",
+        "[server.tls]\nkey_path = \"/etc/key.pem\"",
+    ] {
+        let input = format!("{VALID}\n{block}\n");
+        assert!(Config::parse(&input).is_err(), "accepted: {block}");
+    }
+}
+
+#[test]
+fn rejects_empty_tls_paths() {
+    for field in ["cert_path", "key_path"] {
+        let input = format!(
+            "{VALID}\n[server.tls]\ncert_path = \"/etc/cert.pem\"\nkey_path = \"/etc/key.pem\"\n"
+        )
+        .replace(
+            &format!(
+                "{field} = \"/etc/{}pem\"",
+                if field == "cert_path" {
+                    "cert."
+                } else {
+                    "key."
+                }
+            ),
+            &format!("{field} = \"\""),
+        );
+        let error = Config::parse(&input).unwrap_err().to_string();
+        assert!(error.contains(field), "{field}: {error}");
+    }
+}
+
+#[test]
+fn rejects_unknown_tls_keys() {
+    let input = format!(
+        "{VALID}\n[server.tls]\ncert_path = \"/etc/cert.pem\"\nkey_path = \"/etc/key.pem\"\nextra = true\n"
+    );
+    let error = Config::parse(&input).unwrap_err().to_string();
+    assert!(error.contains("extra"), "{error}");
+}
+
 fn invalid(replacement: &str) -> String {
     VALID.replace("path_prefix = \"/\"", replacement)
 }

@@ -1,11 +1,27 @@
 use crate::{
+    certificates::RenewalScheduler,
     config, proxy,
     reload::{self, PidFileGuard},
     runtime::RuntimeStore,
 };
 use clap::{Parser, Subcommand};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
+
+/// Start certificate renewal outside the Pingora traffic path. The command
+/// and API layer supplies the issuer in Phase 3; keeping this hook generic
+/// avoids coupling startup to a CA account or DNS provider.
+pub fn spawn_renewal_task(
+    scheduler: RenewalScheduler,
+    interval: Duration,
+    stop: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(scheduler.run_forever(interval, stop))
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "bearust", version, about)]
@@ -83,13 +99,23 @@ fn supervise_child(
         unistd::Pid,
     };
     let exe = std::env::current_exe().map_err(|e| AppError::Server(e.to_string()))?;
-    let mut child = std::process::Command::new(exe)
-        .env("BEARUST_PROXY_CHILD", "1")
-        .args(["serve", "--config"])
-        .arg(path)
-        .args(json_logs.then_some(["--json-logs"]).into_iter().flatten())
-        .spawn()
-        .map_err(|e| AppError::Server(e.to_string()))?;
+    let spawn_child = |upgrade: bool, ready_path: Option<&Path>| {
+        let mut command = std::process::Command::new(&exe);
+        command
+            .env("BEARUST_PROXY_CHILD", "1")
+            .env_remove("BEARUST_PROXY_UPGRADE")
+            .args(["serve", "--config"])
+            .arg(&path)
+            .args(json_logs.then_some(["--json-logs"]).into_iter().flatten());
+        if upgrade {
+            command.env("BEARUST_PROXY_UPGRADE", "1");
+            if let Some(ready_path) = ready_path {
+                command.env("BEARUST_UPGRADE_READY", ready_path);
+            }
+        }
+        command.spawn().map_err(|e| AppError::Server(e.to_string()))
+    };
+    let mut child = spawn_child(false, None)?;
     let mut signals = signal_hook::iterator::Signals::new([
         signal_hook::consts::SIGHUP,
         signal_hook::consts::SIGTERM,
@@ -106,7 +132,55 @@ fn supervise_child(
         }
         match signal {
             signal_hook::consts::SIGHUP => {
-                let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGHUP);
+                // Pingora's SIGQUIT performs a zero-downtime listener handoff:
+                // the replacement process receives inherited listener FDs via
+                // its upgrade socket before the old process drains sessions.
+                // Start the replacement only after its config/TLS validation
+                // succeeds during startup; the old child remains authoritative
+                // if spawning fails.
+                let candidate_valid = config::load(&path).is_ok_and(|candidate| {
+                    candidate
+                        .server
+                        .tls
+                        .as_ref()
+                        .map(crate::tls::settings)
+                        .map_or(true, |result| result.is_ok())
+                });
+                if candidate_valid {
+                    let ready_path = std::env::temp_dir().join(format!(
+                        "bearust-upgrade-ready-{}-{}",
+                        child.id(),
+                        std::process::id()
+                    ));
+                    let _ = std::fs::remove_file(&ready_path);
+                    if let Ok(mut replacement) = spawn_child(true, Some(&ready_path)) {
+                        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                        let mut ready = false;
+                        while std::time::Instant::now() < deadline {
+                            if replacement.try_wait().ok().flatten().is_some() {
+                                break;
+                            }
+                            if matches!(std::fs::read(&ready_path), Ok(bytes) if bytes == b"ready\n")
+                            {
+                                // Re-check immediately after observing the
+                                // marker so an exited replacement never
+                                // drains the only serving child.
+                                ready = replacement.try_wait().ok().flatten().is_none();
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        let _ = std::fs::remove_file(&ready_path);
+                        if ready {
+                            let old_pid = child.id() as i32;
+                            child = replacement;
+                            let _ = kill(Pid::from_raw(old_pid), Signal::SIGQUIT);
+                        } else {
+                            let _ = replacement.kill();
+                            let _ = replacement.wait();
+                        }
+                    }
+                }
             }
             _ => {
                 let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM);
@@ -154,8 +228,14 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
     let rt = tokio::runtime::Runtime::new().map_err(|e| AppError::Server(e.to_string()))?;
     rt.block_on(async move {
         let store = Arc::new(RuntimeStore::from_path(&path).await?);
-        let mut server =
-            pingora_core::server::Server::new(None).map_err(|e| AppError::Server(e.to_string()))?;
+        let pingora_options = std::env::var_os("BEARUST_PROXY_UPGRADE").map(|_| {
+            pingora_core::server::configuration::Opt {
+                upgrade: true,
+                ..Default::default()
+            }
+        });
+        let mut server = pingora_core::server::Server::new(pingora_options)
+            .map_err(|e| AppError::Server(e.to_string()))?;
         // Bound Pingora's graceful drain by the operator's configured
         // shutdown timeout. A zero grace period starts draining immediately.
         let server_config = std::sync::Arc::get_mut(&mut server.configuration)
@@ -163,13 +243,30 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         server_config.grace_period_seconds = Some(config.server.graceful_shutdown_seconds);
         server_config.graceful_shutdown_timeout_seconds =
             Some(config.server.graceful_shutdown_seconds);
-        server.bootstrap();
+        let ready_path = std::env::var_os("BEARUST_UPGRADE_READY").map(PathBuf::from);
         let mut service = proxy::http_service(
             crate::proxy::BeaRustProxy::new(store.clone()),
             &server.configuration,
         );
-        service.add_tcp(&config.server.bind.to_string());
+        if let Some(tls_config) = &config.server.tls {
+            let tls = crate::tls::settings(tls_config)
+                .map_err(|error| AppError::Server(error.to_string()))?;
+            service.add_tls_with_settings(&config.server.bind.to_string(), None, tls);
+        } else {
+            service.add_tcp(&config.server.bind.to_string());
+        }
         server.add_service(service);
+        // The upgrade protocol requires the old process to transfer listener
+        // FDs before bootstrap can complete. Publish an exact, atomic marker
+        // after candidate TLS/service setup and immediately before starting
+        // the server task; the parent then triggers SIGQUIT on the old child.
+        if let Some(ready_path) = &ready_path {
+            let temp = ready_path.with_extension("tmp");
+            let _ =
+                std::fs::write(&temp, b"ready\n").and_then(|_| std::fs::rename(&temp, ready_path));
+        }
+        server.bootstrap();
+        let mut execution_phase = server.watch_execution_phase();
         // Pingora owns SIGTERM/SIGINT so it can stop accepting connections
         // and drain in-flight requests using its graceful shutdown timeout.
         // BeaRust handles SIGHUP independently for atomic config reloads.
@@ -192,6 +289,16 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             server.run(pingora_core::server::RunArgs::default());
             let _ = done_tx.send(true);
         });
+        if let Some(ready_path) = ready_path {
+            tokio::spawn(async move {
+                while let Ok(phase) = execution_phase.recv().await {
+                    if matches!(phase, pingora_core::server::ExecutionPhase::Running) {
+                        let _ = std::fs::write(ready_path, b"ready\n");
+                        break;
+                    }
+                }
+            });
+        }
         let mut reload_task = tokio::spawn(crate::reload::reload_loop(
             Arc::clone(&store),
             path,

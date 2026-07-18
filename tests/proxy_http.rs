@@ -45,6 +45,7 @@ async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() 
             bind: "127.0.0.1:0".parse().unwrap(),
             graceful_shutdown_seconds: 1,
             pid_file: "./target/test.pid".into(),
+            tls: None,
         },
         health: Default::default(),
         upstream_pools: vec![PoolConfig {

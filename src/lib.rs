@@ -1,4 +1,6 @@
+pub mod acme;
 pub mod balancer;
+pub mod certificates;
 pub mod cli;
 pub mod config;
 pub mod health;
@@ -7,3 +9,4 @@ pub mod proxy;
 pub mod reload;
 pub mod router;
 pub mod runtime;
+pub mod tls;

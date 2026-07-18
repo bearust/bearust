@@ -1,10 +1,12 @@
 use crate::{
+    acme::{lookup_http01_for_host, Http01Store},
     balancer::{BackendId, BackendLease},
     observability::{append_forwarded_for, classify_error, log_request, validated_request_id},
-    router::ResolvedRoute,
+    router::{normalize_host, ResolvedRoute},
     runtime::{RuntimeSnapshot, RuntimeStore},
 };
 use async_trait::async_trait;
+use bytes::Bytes;
 use pingora_core::{upstreams::peer::HttpPeer, ErrorType, Result};
 use pingora_http::RequestHeader;
 use pingora_proxy::{FailToProxy, ProxyHttp, Session};
@@ -40,11 +42,19 @@ impl Default for RequestContext {
 
 pub struct BeaRustProxy {
     pub runtime: Arc<RuntimeStore>,
+    pub challenges: Http01Store,
 }
 
 impl BeaRustProxy {
     pub fn new(runtime: Arc<RuntimeStore>) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            challenges: Http01Store::default(),
+        }
+    }
+    pub fn with_challenge_store(mut self, challenges: Http01Store) -> Self {
+        self.challenges = challenges;
+        self
     }
 }
 
@@ -79,6 +89,17 @@ impl ProxyHttp for BeaRustProxy {
                 .get("x-request-id")
                 .map(|v| v.as_bytes()),
         );
+        let challenge_host = normalize_host(host).unwrap_or_default();
+        let method = session.req_header().method.as_str();
+        if matches!(method, "GET" | "HEAD") {
+            if let Some(value) = lookup_http01_for_host(&path, &challenge_host, &self.challenges) {
+                session
+                    .respond_error_with_body(200, Bytes::from(value))
+                    .await?;
+                ctx.completion_logged = true;
+                return Ok(true);
+            }
+        }
         let Some((route, _)) = snapshot.route(host, &path) else {
             session.respond_error(404).await?;
             log_request(

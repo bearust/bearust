@@ -1,6 +1,10 @@
 # Deployment and operations
 
-The production image runs as UID/GID 10001, drops all capabilities, enables `no-new-privileges`, and uses a read-only root filesystem. Only the TOML config is mounted read-only; `/tmp` and `/run/bearust` are tmpfs. `${BEARUST_PORT:-8080}` maps to proxy port 8080.
+The production image runs as UID/GID 10001, drops all capabilities, enables `no-new-privileges`, and uses a read-only root filesystem. The TOML config and `/etc/bearust/tls` are mounted read-only; `/data` stores certificate metadata/material and must be writable by UID 10001. `/tmp` and `/run/bearust` are tmpfs. `${BEARUST_PORT:-8080}` maps to proxy port 8080.
+
+For a custom certificate, place the PEM chain and private key below `/etc/bearust/tls` and reference them from `[server.tls]`. Keep private keys mode `0600`; never put key contents or ACME tokens in configuration, logs, or issue reports. The certificate store persists active metadata below `/data` and activates new material atomically, preserving the previous active certificate when validation or issuance fails.
+
+Let’s Encrypt HTTP-01 requires public port 80 and DNS resolving to the proxy. DNS-01 is required for wildcard names or deployments without port 80; the Cloudflare token should be scoped to the target zone with only `Zone:DNS:Edit` and `Zone:Zone:Read`. Renewal runs asynchronously outside request handling once a certificate enters its renewal window, with bounded exponential retries and last-known-good fallback. Phase 3 will wire the `AcmeManager` command/API to this scheduler.
 
 The command is `bearust serve --config /etc/bearust/bearust.toml --json-logs`. The PID file defaults to `./bearust.pid` relative to `/run/bearust`; send `SIGHUP` (`docker compose kill -s HUP bearust`) after atomically replacing the mounted config. Shutdown is graceful: listeners stop accepting new work and in-flight requests drain.
 

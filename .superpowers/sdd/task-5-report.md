@@ -1,26 +1,13 @@
-# Task 5 implementation report
+# Task 5 report: ACME HTTP-01 orchestration
 
-Implemented immutable runtime snapshots and state-preserving reload in `src/runtime.rs`, exported it from `src/lib.rs`, and added backend eligibility transfer support in `PoolState`.
+Implemented an injectable ACME HTTP-01 flow with strict, expiring token storage. `AcmeManager` performs order creation, challenge publication, authorization polling, finalization, Let’s Encrypt certificate import/activation, bounded timeout handling, cleanup, and redacted structured events. The transport is deliberately abstract so no production CA is contacted by tests; DNS providers and renewal scheduling remain out of scope.
 
-Evidence (Rust 1.84 Docker):
+Verification (Rust 1.84.1 Docker):
 
-- `cargo test --test reload --test health_failover --test routing --test load_balancing`: all tests passed (16 total).
-- `cargo test`: all integration/unit/doc tests passed.
-- `cargo fmt -- --check`: passed after formatting.
-- `cargo clippy --all-targets --all-features -- -D warnings`: passed.
+- `cargo fmt --all` passed.
+- `cargo test --test acme_http01` passed: 7 tests.
+- `cargo clippy --all-targets -- -D warnings` passed.
 
-The reload path validates and builds a complete candidate, starts replacement health workers before ArcSwap publication, serializes reloads, preserves eligibility for matching pool/backend health identities, and leaves the prior Arc snapshot untouched on invalid configuration. `RuntimeStore::new` intentionally starts no workers; `from_path` starts the initial supervisor.
+Challenge entries are bound to order and hostname, cleanup is cancellation-safe via a drop guard, key authorization is strict token-plus-base64url, and `lookup_http01` handles only the dedicated challenge path. Tests cover exact token retrieval/expiry, order/hostname isolation, path isolation, key authorization validation, successful order/finalization and activation, timeout cleanup, and preservation of the previous active certificate when issuance fails.
 
-Concern: workers owned by a `RuntimeStore` created with `new` are absent until the first `from_path`-style lifecycle is used; callers constructing snapshots directly should use `from_path` when active health probing is required.
-
-Follow-up quality coverage:
-
-- Added reload regression tests for generation increments, immutable old `Arc` snapshots, unchanged backend health preservation, changed backend health reset, and invalid reload pointer/generation stability.
-- Added `RuntimeStore::shutdown` so tests and graceful callers can await spawned health workers.
-
-Verification (Rust 1.84 Docker, 2026-07-18):
-
-- `docker run --rm -v "$PWD":/work -w /work rust:1.84-bookworm cargo test --test reload`: 6 passed, 0 failed.
-- `docker run --rm -v "$PWD":/work -w /work rust:1.84-bookworm cargo test`: all unit/integration/doc tests passed (29 total integration tests, 0 failed).
-- `docker run --rm -v "$PWD":/work -w /work rust:1.84-bookworm cargo fmt -- --check`: passed.
-- `docker run --rm -v "$PWD":/work -w /work rust:1.84-bookworm cargo clippy --all-targets --all-features -- -D warnings`: passed.
+The proxy challenge boundary is ready (normalized Host, GET/HEAD only); CLI/control-plane wiring for constructing and invoking `AcmeManager` is intentionally deferred to the Phase 3 API/GUI.

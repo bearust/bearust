@@ -1,14 +1,38 @@
-# Task 4 report
+# Task 4 report: atomic TLS certificate reload
 
-Implemented thresholded TCP/HTTP health checks, backend health metadata, and a watch-cancelled supervisor. Follow-up fixes add bounded eligibility-transition and timeout coverage, correct test-backend endpoint semantics, schedule the first probe immediately with exact post-probe intervals, and preserve u64 health thresholds without narrowing casts.
+## Implemented
 
-Verification (Docker `rust:1.84`):
+- Added `TlsSnapshot`, an immutable, path-only certificate/key selection. Construction validates readability, PEM parsing, key/certificate correspondence, and Pingora TLS settings before publication.
+- Added the optional TLS snapshot to `RuntimeSnapshot`; `RuntimeSnapshot::build` now fails before constructing/publishing an invalid TLS candidate.
+- Existing `ArcSwap` transaction remains publish-after-health-start: failed config/TLS/health preparation leaves the prior `Arc<RuntimeSnapshot>` untouched. Request contexts retain their old snapshot, so active requests continue using the previous state while later requests observe the new state.
+- Added reload tests for unchanged HTTP mode and invalid TLS replacement fallback.
 
-- `cargo test --test health_failover` — `7 passed; 0 failed`.
-- `cargo test --test load_balancing` — `4 passed; 0 failed`.
-- `cargo test --test routing` — `3 passed; 0 failed`.
-- `cargo test --test config_validation` — `9 passed; 0 failed`.
-- `cargo fmt --all` — completed.
-- `cargo clippy --all-targets -- -D warnings` — passed.
+## Verification (Rust 1.84.1 Docker)
 
-Notes: `HealthSupervisor::start` uses serialized `HealthConfig` second-based timings; `start_with_durations` is provided for millisecond-scale tests. New backends retain the initially-unhealthy behavior and only become eligible after the configured success threshold.
+- `cargo test --locked --test reload`: **9 passed** (including valid replacement, invalid fallback, and HTTP compatibility).
+- `cargo test --locked --test tls_listener spawned_tls_listener_proxies_to_local_upstream`: **passed**, including supervisor SIGHUP certificate handoff.
+- `cargo test --locked --test reload_pid --test shutdown`: **9 passed**.
+- `cargo fmt --all -- --check`: **passed**.
+- `cargo clippy --locked --all-targets -- -D warnings`: **passed**.
+- `cargo check --locked`: **passed**.
+
+## Listener handoff
+
+Pingora 0.8.1 builds each TLS acceptor at startup, so in-process `ArcSwap` alone
+cannot replace the certificate used by new handshakes. The supervisor now uses
+Pingora's supported graceful-upgrade path: on SIGHUP it starts a replacement
+child with `Opt { upgrade: true }`, validates the candidate configuration/TLS
+material before bootstrap, waits for a bounded exact `ready\n` marker, then
+sends SIGQUIT to the old child. The marker is atomically written only after
+config, TLS, and service registration succeed; the replacement then blocks in
+Pingora bootstrap until the old process transfers listener FDs. Pingora passes the listening FDs over
+its upgrade socket; the replacement accepts new connections while the old
+process drains active sessions. If validation, startup, or the readiness
+timeout fails, the replacement is terminated and the old child is left serving.
+No ACME behavior is included here.
+
+Pingora's upgrade bootstrap necessarily waits for the old process's FD
+transfer, so a post-bootstrap readiness marker would deadlock the handoff. The
+marker therefore denotes validated pre-bootstrap readiness, while the child
+enters bootstrap immediately afterward; the parent requires the exact marker
+contents and bounds the wait.

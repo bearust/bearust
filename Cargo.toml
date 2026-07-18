@@ -8,16 +8,21 @@ description = "Open source reverse proxy and load balancer"
 
 [dependencies]
 arc-swap = "1.7"
+bytes = "1"
+base64 = "0.22"
+openssl = "=0.10.68"
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"] }
 http = "1"
 nix = { version = "0.29", features = ["process", "signal"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "native-tls"] }
 signal-hook = "0.3"
-pingora-core = "0.8.1"
+pingora-core = { version = "0.8.1", features = ["rustls"] }
 pingora-error = "0.8.1"
 pingora-http = "0.8.1"
 pingora-proxy = "0.8.1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.8"
@@ -30,7 +35,6 @@ axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "blocking"] }
 tempfile = "3"
-serde_json = "1"
 tokio-tungstenite = "0.27"
 
 [profile.release]
