@@ -77,6 +77,7 @@ async fn user_lifecycle_updates_role_status_and_sessions() {
 async fn repository_protects_last_active_admin_and_rejects_unknown_roles() {
     let pool = test_pool().await;
     let admin = repository::insert_user(&pool, "admin@example.com", "hash", "admin").await.unwrap();
+    assert!(repository::insert_user(&pool, "invalid@example.com", "hash", "invalid").await.is_err());
     assert!(repository::set_user_disabled(&pool, admin.id, true).await.is_err());
     assert!(repository::update_user_role(&pool, admin.id, "invalid").await.is_err());
     assert_eq!(repository::count_active_admins(&pool).await.unwrap(), 1);

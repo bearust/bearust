@@ -20,12 +20,24 @@ pub async fn connect(url: &str) -> Result<SqlitePool, sqlx::Error> {
 pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("PRAGMA foreign_keys=ON").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,created_at TEXT NOT NULL)").execute(pool).await?;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0").execute(pool).await;
+    match sqlx::query("ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0").execute(pool).await {
+        Ok(_) => {}
+        Err(error) if error.as_database_error().is_some_and(|db| {
+            db.message().to_ascii_lowercase().contains("duplicate column name")
+        }) => {}
+        Err(error) => return Err(error),
+    }
     sqlx::query("CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,token_hash TEXT NOT NULL UNIQUE,expires_at TEXT NOT NULL,revoked_at TEXT,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS proxy_hosts (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,domain TEXT NOT NULL UNIQUE,upstream_host TEXT NOT NULL,upstream_port INTEGER NOT NULL,tls_mode TEXT NOT NULL,certificate_id INTEGER,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS certificates (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,source TEXT NOT NULL,covered_hostnames TEXT NOT NULL,expiry TEXT NOT NULL,certificate_path TEXT NOT NULL,key_path TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL)").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS acme_certificates (certificate_id INTEGER PRIMARY KEY,environment TEXT NOT NULL CHECK(environment IN ('staging','production')),challenge TEXT NOT NULL CHECK(challenge IN ('http01','cloudflare_dns01')),renewal_state TEXT NOT NULL,next_renewal_at TEXT,last_attempt_at TEXT,last_error_code TEXT,FOREIGN KEY(certificate_id) REFERENCES certificates(id) ON DELETE CASCADE)").execute(pool).await?;
-    let _ = sqlx::query("ALTER TABLE acme_certificates ADD COLUMN secret_ref TEXT").execute(pool).await;
+    match sqlx::query("ALTER TABLE acme_certificates ADD COLUMN secret_ref TEXT").execute(pool).await {
+        Ok(_) => {}
+        Err(error) if error.as_database_error().is_some_and(|db| {
+            db.message().to_ascii_lowercase().contains("duplicate column name")
+        }) => {}
+        Err(error) => return Err(error),
+    }
     sqlx::query("CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,event TEXT NOT NULL,details TEXT NOT NULL,created_at TEXT NOT NULL)").execute(pool).await?;
     Ok(())
 }
@@ -151,20 +163,23 @@ pub async fn insert_user(
     hash: &str,
     role: &str,
 ) -> Result<User, sqlx::Error> {
+    let role = Role::parse(role)
+        .ok_or_else(|| sqlx::Error::Protocol("invalid role".into()))?;
+    let role_name = role.as_str();
     let now = chrono::Utc::now().to_rfc3339();
     let r = sqlx::query(
         "INSERT INTO users(email,password_hash,role,created_at,disabled) VALUES(?,?,?, ?,0) RETURNING id",
     )
     .bind(email)
     .bind(hash)
-    .bind(role)
+    .bind(role_name)
     .bind(&now)
     .fetch_one(pool)
     .await?;
     Ok(User {
         id: r.get("id"),
         email: email.into(),
-        role: role.into(),
+        role: role_name.into(),
         created_at: now,
         disabled: false,
     })
@@ -224,17 +239,21 @@ fn last_admin_error() -> sqlx::Error {
 
 pub async fn update_user_role(pool: &SqlitePool, id: i64, role: &str) -> Result<u64, sqlx::Error> {
     let role = Role::parse(role).ok_or_else(|| sqlx::Error::Protocol("invalid role".into()))?;
-    let mut tx = pool.begin().await?;
-    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *tx).await?;
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *conn).await?;
     if let Some(row) = current {
         let was_admin = row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0;
         if was_admin && role != Role::Admin {
-            let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *tx).await?.get("c");
-            if admins <= 1 { return Err(last_admin_error()); }
+            let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *conn).await?.get("c");
+            if admins <= 1 {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                return Err(last_admin_error());
+            }
         }
     }
-    let changed = sqlx::query("UPDATE users SET role=? WHERE id=?").bind(role.as_str()).bind(id).execute(&mut *tx).await?.rows_affected();
-    tx.commit().await?;
+    let changed = sqlx::query("UPDATE users SET role=? WHERE id=?").bind(role.as_str()).bind(id).execute(&mut *conn).await?.rows_affected();
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(changed)
 }
 
@@ -244,35 +263,43 @@ pub async fn revoke_user_sessions(pool: &SqlitePool, user_id: i64) -> Result<u64
 }
 
 pub async fn set_user_disabled(pool: &SqlitePool, id: i64, disabled: bool) -> Result<u64, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *tx).await?;
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *conn).await?;
     if let Some(row) = current {
         let was_active_admin = row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0;
         if disabled && was_active_admin {
-            let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *tx).await?.get("c");
-            if admins <= 1 { return Err(last_admin_error()); }
+            let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *conn).await?.get("c");
+            if admins <= 1 {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                return Err(last_admin_error());
+            }
         }
     }
-    let changed = sqlx::query("UPDATE users SET disabled=? WHERE id=?").bind(disabled as i64).bind(id).execute(&mut *tx).await?.rows_affected();
+    let changed = sqlx::query("UPDATE users SET disabled=? WHERE id=?").bind(disabled as i64).bind(id).execute(&mut *conn).await?.rows_affected();
     if disabled && changed > 0 {
-        sqlx::query("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL").bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL").bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(&mut *conn).await?;
     }
-    tx.commit().await?;
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(changed)
 }
 
 pub async fn delete_user(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *tx).await?;
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *conn).await?;
     if let Some(row) = current {
         if row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0 {
-            let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *tx).await?.get("c");
-            if admins <= 1 { return Err(last_admin_error()); }
+            let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *conn).await?.get("c");
+            if admins <= 1 {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                return Err(last_admin_error());
+            }
         }
     }
-    sqlx::query("DELETE FROM sessions WHERE user_id=?").bind(id).execute(&mut *tx).await?;
-    let changed = sqlx::query("DELETE FROM users WHERE id=?").bind(id).execute(&mut *tx).await?.rows_affected();
-    tx.commit().await?;
+    sqlx::query("DELETE FROM sessions WHERE user_id=?").bind(id).execute(&mut *conn).await?;
+    let changed = sqlx::query("DELETE FROM users WHERE id=?").bind(id).execute(&mut *conn).await?.rows_affected();
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(changed)
 }
 pub async fn create_session(
