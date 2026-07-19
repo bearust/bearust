@@ -23,8 +23,16 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE TABLE IF NOT EXISTS proxy_hosts (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,domain TEXT NOT NULL UNIQUE,upstream_host TEXT NOT NULL,upstream_port INTEGER NOT NULL,tls_mode TEXT NOT NULL,certificate_id INTEGER,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS certificates (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,source TEXT NOT NULL,covered_hostnames TEXT NOT NULL,expiry TEXT NOT NULL,certificate_path TEXT NOT NULL,key_path TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL)").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS acme_certificates (certificate_id INTEGER PRIMARY KEY,environment TEXT NOT NULL CHECK(environment IN ('staging','production')),challenge TEXT NOT NULL CHECK(challenge IN ('http01','cloudflare_dns01')),renewal_state TEXT NOT NULL,next_renewal_at TEXT,last_attempt_at TEXT,last_error_code TEXT,FOREIGN KEY(certificate_id) REFERENCES certificates(id) ON DELETE CASCADE)").execute(pool).await?;
+    let _ = sqlx::query("ALTER TABLE acme_certificates ADD COLUMN secret_ref TEXT").execute(pool).await;
     sqlx::query("CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,event TEXT NOT NULL,details TEXT NOT NULL,created_at TEXT NOT NULL)").execute(pool).await?;
     Ok(())
+}
+
+pub async fn set_acme_secret_ref(pool: &SqlitePool, certificate_id: i64, secret_ref: &str) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("UPDATE acme_certificates SET secret_ref=? WHERE certificate_id=?").bind(secret_ref).bind(certificate_id).execute(pool).await?.rows_affected())
+}
+pub async fn acme_secret_ref(pool: &SqlitePool, certificate_id: i64) -> Result<Option<String>, sqlx::Error> {
+    Ok(sqlx::query("SELECT secret_ref FROM acme_certificates WHERE certificate_id=?").bind(certificate_id).fetch_optional(pool).await?.and_then(|r| r.get::<Option<String>, _>("secret_ref")))
 }
 
 fn acme_status_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<AcmeStatus, sqlx::Error> {

@@ -82,7 +82,7 @@ impl AcmeService {
         let _guard = JobGuard::acquire(self.jobs.clone(), key).await?;
         let name = certificate_name(&request);
         let issued = self
-            .issue_material(&request, &name, cloudflare_token)
+            .issue_material(&request, &name, cloudflare_token.clone())
             .await?;
         let hosts =
             serde_json::to_string(&issued.covered_hostnames).unwrap_or_else(|_| "[]".into());
@@ -97,6 +97,11 @@ impl AcmeService {
         )
         .await?;
         let status = repository::insert_acme_certificate(&self.db, id, &request).await?;
+        if let (AcmeChallenge::CloudflareDns01, Some(token)) = (&request.challenge, cloudflare_token) {
+            let secret_ref = format!("cloudflare-{id}");
+            self.secrets.put(&secret_ref, &token).map_err(|e| AcmeServiceError::Invalid(e.to_string()))?;
+            repository::set_acme_secret_ref(&self.db, id, &secret_ref).await?;
+        }
         let next = renewal_at(&issued.expiry);
         repository::update_acme_status(
             &self.db,
@@ -139,7 +144,11 @@ impl AcmeService {
         }
         .normalized()
         .map_err(AcmeServiceError::Invalid)?;
-        let issued = self.issue_material(&request, &name, None).await?;
+        let token = if matches!(request.challenge, AcmeChallenge::CloudflareDns01) {
+            let secret_ref = repository::acme_secret_ref(&self.db, certificate_id).await?.ok_or_else(|| AcmeServiceError::Invalid("Cloudflare credentials are unavailable".into()))?;
+            Some(self.secrets.get(&secret_ref).map_err(|e| AcmeServiceError::Invalid(e.to_string()))?.ok_or_else(|| AcmeServiceError::Invalid("Cloudflare credentials are unavailable".into()))?)
+        } else { None };
+        let issued = self.issue_material(&request, &name, token).await?;
         // import_letsencrypt validates before replacing the existing material;
         // activation is the final state transition and can therefore be
         // retried without changing the previous active pointer on failure.
