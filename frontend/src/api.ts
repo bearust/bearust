@@ -1,4 +1,4 @@
-export type User={id:number;email:string;role:string};
+export type User={id:number;email:string;role:string;disabled:boolean};
 export type Host={id:number;name:string;domain:string;upstream_host:string;upstream_port:number;tls_mode:string;certificate_id:number|null;enabled:boolean};
 export type Certificate={id:number;name:string;source:string;covered_hostnames:string[];expiry:string;active:boolean;acme?:AcmeStatus|null};
 export type AcmeRequest={environment:'staging'|'production';challenge:'http01'|'cloudflare_dns01';hostnames:string[];cloudflare_api_token?:string};
@@ -8,5 +8,6 @@ async function request<T>(path:string,init:RequestInit={}):Promise<T>{const r=aw
 export const api={
  status:()=>request<{initialized:boolean}>('/api/setup/status'),setup:(x:object)=>request<User>('/api/setup/initialize',{method:'POST',body:JSON.stringify(x)}),login:(x:object)=>request<User>('/api/auth/login',{method:'POST',body:JSON.stringify(x)}),me:()=>request<User>('/api/auth/me'),logout:()=>request<void>('/api/auth/logout',{method:'POST'}),
  hosts:()=>request<Host[]>('/api/proxy-hosts'),createHost:(x:object)=>request<Host>('/api/proxy-hosts',{method:'POST',body:JSON.stringify(x)}),updateHost:(id:number,x:object)=>request<Host>(`/api/proxy-hosts/${id}`,{method:'PATCH',body:JSON.stringify(x)}),deleteHost:(id:number)=>request<void>(`/api/proxy-hosts/${id}`,{method:'DELETE'}),
- certificates:()=>request<Certificate[]>('/api/certificates'),issueAcme:(x:AcmeRequest)=>request<AcmeJob>('/api/certificates/acme',{method:'POST',body:JSON.stringify(x)}),renewCertificate:(id:number)=>request<AcmeJob>(`/api/certificates/${id}/renew`,{method:'POST'}),certificateStatus:(id:number)=>request<AcmeStatus>(`/api/certificates/${id}/status`),activateCertificate:(id:number)=>request<void>(`/api/certificates/${id}/activate`,{method:'POST'})
+ certificates:()=>request<Certificate[]>('/api/certificates'),issueAcme:(x:AcmeRequest)=>request<AcmeJob>('/api/certificates/acme',{method:'POST',body:JSON.stringify(x)}),renewCertificate:(id:number)=>request<AcmeJob>(`/api/certificates/${id}/renew`,{method:'POST'}),certificateStatus:(id:number)=>request<AcmeStatus>(`/api/certificates/${id}/status`),activateCertificate:(id:number)=>request<void>(`/api/certificates/${id}/activate`,{method:'POST'}),
+ users:()=>request<User[]>('/api/users'),createUser:(x:{email:string;password:string;role:string})=>request<User>('/api/users',{method:'POST',body:JSON.stringify(x)}),updateUser:(id:number,x:{role?:string;disabled?:boolean})=>request<User>(`/api/users/${id}`,{method:'PATCH',body:JSON.stringify(x)}),deleteUser:(id:number)=>request<void>(`/api/users/${id}`,{method:'DELETE'})
 };

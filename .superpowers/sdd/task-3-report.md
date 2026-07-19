@@ -1,20 +1,23 @@
-# Task 3 report — Cloudflare DNS-01 lifecycle
+# Task 3 report — admin user management UI
 
-Implemented and committed as `fix: harden cloudflare dns01 lifecycle`.
+## Status
+
+Implemented and committed as `feat: add admin user management ui`.
 
 ## Changes
 
-- Added `CloudflareProvider::with_secret_store` and `with_client` constructors.
-- Added `DnsError::Secret`; secret values are not included in errors or tracing.
-- Normalized wildcard/trailing-dot DNS names before provider operations.
-- Cleanup now deletes only record IDs created by this provider operation, is idempotent, and never removes a pre-existing matching TXT record.
-- Added `AcmeManager::request_dns01_with_status`; the compatibility wrapper remains unchanged. Status events include order creation, DNS presentation, propagation, finalization, storage, and failure.
+- Extended `User` with `disabled` and added `api.users`, `api.createUser`, `api.updateUser`, and `api.deleteUser`.
+- Added an admin-only Users card with account status, role updates, create form, disable/enable and delete confirmations.
+- Current account role/destructive actions are disabled in the UI; backend remains the authorization boundary.
+- User-facing errors map forbidden/validation failures to safe messages and redact sensitive values.
+- Added focused API/UI coverage in `frontend/src/users.test.tsx`.
 
 ## Verification
 
-- `git diff --check`: passed.
-- `cargo fmt` / focused Cargo tests could not run in this environment because neither host nor Docker Rust image exposes `cargo` (`cargo: command not found`).
+- `npm test --prefix frontend -- --run` — 10 tests passed.
+- `npm run build --prefix frontend` — Vite production build passed.
 
 ## Concerns
 
-- Please run `cargo test --locked --test cloudflare_dns --test acme_dns01` and full CI in a Rust-enabled environment before merging.
+- The Users card expects backend `/api/users` responses to include `disabled`; Task 1/2 backend work must land before end-to-end use.
+- UI tests use React DOM directly because this project does not include a testing-library dependency.
