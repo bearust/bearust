@@ -585,7 +585,8 @@ async fn setup_initialize(
         )
             .into_response();
     }
-    if req.password.len() < 12 || !req.email.contains('@') {
+    let email = req.email.trim().to_ascii_lowercase();
+    if req.password.len() < 12 || !email.contains('@') {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorEnvelope {
@@ -599,7 +600,7 @@ async fn setup_initialize(
         Ok(x) => x,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    match repository::insert_user(&s.db, &req.email, &hash, "admin").await {
+    match repository::insert_user(&s.db, &email, &hash, "admin").await {
         Ok(u) => {
             audit::record(&s.db, Some(u.id), "setup_completed", "admin_created").await;
             (StatusCode::CREATED, Json(u)).into_response()

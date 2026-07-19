@@ -1,54 +1,49 @@
-# Task 4 report: ACME certificate lifecycle service
+# Task 4 report: Phase 4B documentation and verification
 
-## Implemented
+## Documentation
 
-- Added `certificates::AcmeService` with normalized request validation, per-certificate single-flight locking, issue/renew/status/due-renewal methods, redacted audit events, renewal scheduling metadata, and reload callback after activation.
-- Added `ConfigReloader::apply_certificate_change` as a backwards-compatible default hook.
-- Exported the service from `certificates`.
+- Updated `README.md` with the setup-to-admin transition and one-time setup example.
+- Documented `GET/POST /api/users`, `PATCH /api/users/{id}`, and `DELETE /api/users/{id}`, including response shape and error codes.
+- Documented the fixed `admin`/`operator`/`viewer` role matrix, disabled-account login/session behavior, last-admin and self-mutation protections, and redacted audit events.
+- Clarified the Phase 4B boundary (local users and fixed RBAC) versus Phase 4C (audit-log viewer/filtering), plus out-of-scope per-host permissions, custom permissions, and SSO.
 
 ## Verification
 
-- `git diff --check`: passed.
-- `cargo check --locked`: blocked by the repository's Rust 1.84.1 toolchain resolving `clap_lex 1.1.0`, which requires the stabilized Cargo 1.85 `edition2024` feature (`feature edition2024 is required`). No test execution was possible in that toolchain.
+All required commands exited with status 0:
 
-## Concerns for integration
+```text
+docker run --rm -e RUSTUP_TOOLCHAIN=1.88.0 -e CARGO_BUILD_JOBS=1 -v "$PWD":/app -w /app rust:1.88-bookworm cargo test --locked
+  result: 0 failed; all unit, integration, and doc tests passed (including 3 control_plane_users tests and 4 control_plane_repository tests)
 
-- DNS-01 provider selection remains owned by the control-plane/API task; the service currently returns a sanitized configuration error when no provider is injected.
-- The existing control-plane edits were concurrently present when the service commit was created and are included in commit `611944f`; parent should retain or split them as desired.
+npm test --prefix frontend -- --run
+  Test Files 2 passed; Tests 10 passed
 
-## Implemented
+npm run build --prefix frontend
+  tsc -b and vite build passed; production bundle emitted
 
-- Added `TlsSnapshot`, an immutable, path-only certificate/key selection. Construction validates readability, PEM parsing, key/certificate correspondence, and Pingora TLS settings before publication.
-- Added the optional TLS snapshot to `RuntimeSnapshot`; `RuntimeSnapshot::build` now fails before constructing/publishing an invalid TLS candidate.
-- Existing `ArcSwap` transaction remains publish-after-health-start: failed config/TLS/health preparation leaves the prior `Arc<RuntimeSnapshot>` untouched. Request contexts retain their old snapshot, so active requests continue using the previous state while later requests observe the new state.
-- Added reload tests for unchanged HTTP mode and invalid TLS replacement fallback.
+git diff --check
+  passed
+```
 
-## Verification (Rust 1.84.1 Docker)
+## Completion review and gap
 
-- `cargo test --locked --test reload`: **9 passed** (including valid replacement, invalid fallback, and HTTP compatibility).
-- `cargo test --locked --test tls_listener spawned_tls_listener_proxies_to_local_upstream`: **passed**, including supervisor SIGHUP certificate handoff.
-- `cargo test --locked --test reload_pid --test shutdown`: **9 passed**.
-- `cargo fmt --all -- --check`: **passed**.
-- `cargo clippy --locked --all-targets -- -D warnings`: **passed**.
-- `cargo check --locked`: **passed**.
+The Phase 4B design's user CRUD, role validation, admin-only API/UI, setup invariant, disabled-account behavior, session invalidation, last-admin/self-mutation protection, secret redaction, audit events, and frontend flows are implemented and covered by the current tests.
 
-## Listener handoff
+One design completion criterion remains only partially evidenced: the backend test suite does not contain explicit regression assertions that an operator can write proxy hosts/certificates while a viewer receives `403` on each existing write route. The route handlers use the centralized RBAC checks and the existing suite passes, but dedicated role-regression tests should be added before declaring Phase 4B complete.
 
-Pingora 0.8.1 builds each TLS acceptor at startup, so in-process `ArcSwap` alone
-cannot replace the certificate used by new handshakes. The supervisor now uses
-Pingora's supported graceful-upgrade path: on SIGHUP it starts a replacement
-child with `Opt { upgrade: true }`, validates the candidate configuration/TLS
-material before bootstrap, waits for a bounded exact `ready\n` marker, then
-sends SIGQUIT to the old child. The marker is atomically written only after
-config, TLS, and service registration succeed; the replacement then blocks in
-Pingora bootstrap until the old process transfers listener FDs. Pingora passes the listening FDs over
-its upgrade socket; the replacement accepts new connections while the old
-process drains active sessions. If validation, startup, or the readiness
-timeout fails, the replacement is terminated and the old child is left serving.
-No ACME behavior is included here.
+Therefore this task verifies documentation and build health; it does not mark Phase 4B complete.
 
-Pingora's upgrade bootstrap necessarily waits for the old process's FD
-transfer, so a post-bootstrap readiness marker would deadlock the handoff. The
-marker therefore denotes validated pre-bootstrap readiness, while the child
-enters bootstrap immediately afterward; the parent requires the exact marker
-contents and bounds the wait.
+Documentation commit: `8349e40 docs: document phase 4b user management`.
+
+## Regression gap closure
+
+- Added `operator_can_write_hosts_and_certificates_while_viewer_is_read_only` to `tests/control_plane_users.rs`. It exercises successful operator proxy-host creation and custom certificate upload, and asserts `403 Forbidden` for the same writes as a viewer.
+- Added `initial_setup_normalizes_email_like_admin_user_creation`, covering trimming and lowercasing of the first administrator email before persistence/login.
+- Setup initialization now applies the same `trim().to_ascii_lowercase()` normalization already used by the admin user-creation endpoint.
+
+Focused verification:
+
+```text
+docker run --rm -e RUSTUP_TOOLCHAIN=1.88.0 -e CARGO_BUILD_JOBS=1 -v "$PWD":/app -w /app rust:1.88-bookworm cargo test --locked --test control_plane_users
+  5 passed; 0 failed
+```
