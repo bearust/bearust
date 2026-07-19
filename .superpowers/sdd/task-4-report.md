@@ -37,7 +37,7 @@ Documentation commit: `8349e40 docs: document phase 4b user management`.
 
 ## Regression gap closure
 
-- Added `operator_can_write_hosts_and_certificates_while_viewer_is_read_only` to `tests/control_plane_users.rs`. It exercises successful operator proxy-host creation and custom certificate upload, and asserts `403 Forbidden` for the same writes as a viewer.
+- Added `operator_can_write_hosts_and_certificates_while_viewer_is_read_only` to `tests/control_plane_users.rs`. It exercises successful operator proxy-host creation, update (`PATCH`), and deletion (`DELETE`), with viewer `403 Forbidden` assertions for each existing host write route. It also exercises custom certificate upload and activation (`POST /api/certificates/{id}/activate`) as an operator, with viewer `403 Forbidden` assertions for activation and upload.
 - Added `initial_setup_normalizes_email_like_admin_user_creation`, covering trimming and lowercasing of the first administrator email before persistence/login.
 - Setup initialization now applies the same `trim().to_ascii_lowercase()` normalization already used by the admin user-creation endpoint.
 
@@ -46,4 +46,16 @@ Focused verification:
 ```text
 docker run --rm -e RUSTUP_TOOLCHAIN=1.88.0 -e CARGO_BUILD_JOBS=1 -v "$PWD":/app -w /app rust:1.88-bookworm cargo test --locked --test control_plane_users
   5 passed; 0 failed
+
+docker run --rm -e RUSTUP_TOOLCHAIN=1.88.0 -e CARGO_BUILD_JOBS=1 -v "$PWD":/app -w /app rust:1.88-bookworm cargo test --locked
+  all backend unit, integration, and doc tests passed
+
+npm test --prefix frontend -- --run
+  6 tests passed
+
+npm run build --prefix frontend
+  tsc -b and vite build passed
+
+git diff --check
+  passed
 ```

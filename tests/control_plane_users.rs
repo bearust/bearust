@@ -43,7 +43,7 @@ fn certificate_material() -> (Vec<u8>, Vec<u8>) {
     (builder.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
 }
 
-async fn multipart_certificate(app: Router, cookie: &str, certificate: &[u8], key: &[u8]) -> StatusCode {
+async fn multipart_certificate(app: Router, cookie: &str, certificate: &[u8], key: &[u8]) -> (StatusCode, String) {
     let boundary = "rbac-boundary";
     let mut body = Vec::new();
     for (name, value) in [("name", b"operator-cert".as_slice()), ("certificate", certificate), ("key", key)] {
@@ -56,7 +56,9 @@ async fn multipart_certificate(app: Router, cookie: &str, certificate: &[u8], ke
         .header("cookie", cookie)
         .header("content-type", format!("multipart/form-data; boundary={boundary}"))
         .body(Body::from(body)).unwrap()).await.unwrap();
-    response.status()
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    (status, String::from_utf8(body.to_vec()).unwrap())
 }
 
 #[tokio::test]
@@ -74,11 +76,22 @@ async fn operator_can_write_hosts_and_certificates_while_viewer_is_read_only() {
     let op_cookie = op_cookie.unwrap();
     let viewer_cookie = viewer_cookie.unwrap();
     let host = r#"{"name":"operator-host","domain":"operator.example.com","upstream_host":"127.0.0.1","upstream_port":8080}"#;
-    assert_eq!(json(app.clone(), "POST", "/api/proxy-hosts", Some(&op_cookie), host).await.0, StatusCode::CREATED);
+    let (status, host_body, _) = json(app.clone(), "POST", "/api/proxy-hosts", Some(&op_cookie), host).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let host_id = serde_json::from_str::<serde_json::Value>(&host_body).unwrap()["id"].as_i64().unwrap();
     assert_eq!(json(app.clone(), "POST", "/api/proxy-hosts", Some(&viewer_cookie), host).await.0, StatusCode::FORBIDDEN);
+    let updated_host = r#"{"name":"operator-host-updated","domain":"operator.example.com","upstream_host":"127.0.0.1","upstream_port":8081}"#;
+    assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{host_id}"), Some(&op_cookie), updated_host).await.0, StatusCode::OK);
+    assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{host_id}"), Some(&viewer_cookie), updated_host).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(json(app.clone(), "DELETE", &format!("/api/proxy-hosts/{host_id}"), Some(&viewer_cookie), "").await.0, StatusCode::FORBIDDEN);
+    assert_eq!(json(app.clone(), "DELETE", &format!("/api/proxy-hosts/{host_id}"), Some(&op_cookie), "").await.0, StatusCode::NO_CONTENT);
     let (certificate, key) = certificate_material();
-    assert_eq!(multipart_certificate(app.clone(), &op_cookie, &certificate, &key).await, StatusCode::CREATED);
-    assert_eq!(multipart_certificate(app, &viewer_cookie, &certificate, &key).await, StatusCode::FORBIDDEN);
+    let (status, certificate_body) = multipart_certificate(app.clone(), &op_cookie, &certificate, &key).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let certificate_id = serde_json::from_str::<serde_json::Value>(&certificate_body).unwrap()["id"].as_i64().unwrap();
+    assert_eq!(json(app.clone(), "POST", &format!("/api/certificates/{certificate_id}/activate"), Some(&op_cookie), "").await.0, StatusCode::NO_CONTENT);
+    assert_eq!(json(app.clone(), "POST", &format!("/api/certificates/{certificate_id}/activate"), Some(&viewer_cookie), "").await.0, StatusCode::FORBIDDEN);
+    assert_eq!(multipart_certificate(app, &viewer_cookie, &certificate, &key).await.0, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
