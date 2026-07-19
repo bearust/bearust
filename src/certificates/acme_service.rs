@@ -81,7 +81,9 @@ impl AcmeService {
         let key = operation_key(&request);
         let _guard = JobGuard::acquire(self.jobs.clone(), key).await?;
         let name = certificate_name(&request);
-        let issued = self.issue_material(&request, &name, cloudflare_token).await?;
+        let issued = self
+            .issue_material(&request, &name, cloudflare_token)
+            .await?;
         let hosts =
             serde_json::to_string(&issued.covered_hostnames).unwrap_or_else(|_| "[]".into());
         let id = repository::insert_certificate(
@@ -206,13 +208,22 @@ impl AcmeService {
         match request.challenge {
             AcmeChallenge::Http01 => Ok(self.manager.request_http01(req).await?),
             AcmeChallenge::CloudflareDns01 => {
-                let token = cloudflare_token.ok_or_else(|| AcmeServiceError::Invalid("Cloudflare token is required".into()))?;
+                let token = cloudflare_token.ok_or_else(|| {
+                    AcmeServiceError::Invalid("Cloudflare token is required".into())
+                })?;
                 let secret_name = format!("cloudflare-{}", uuid::Uuid::new_v4());
-                self.secrets.put(&secret_name, &token).map_err(|e| AcmeServiceError::Invalid(e.to_string()))?;
+                self.secrets
+                    .put(&secret_name, &token)
+                    .map_err(|e| AcmeServiceError::Invalid(e.to_string()))?;
                 let provider = CloudflareProvider::with_secret_store(
-                    &secret_name, self.secrets.clone(), "https://api.cloudflare.com/client/v4",
-                    std::time::Duration::from_secs(10), std::time::Duration::from_secs(120), std::time::Duration::from_secs(2),
-                ).map_err(|e| AcmeServiceError::Invalid(e.to_string()))?;
+                    &secret_name,
+                    self.secrets.clone(),
+                    "https://api.cloudflare.com/client/v4",
+                    std::time::Duration::from_secs(10),
+                    std::time::Duration::from_secs(120),
+                    std::time::Duration::from_secs(2),
+                )
+                .map_err(|e| AcmeServiceError::Invalid(e.to_string()))?;
                 let result = self.manager.request_dns01(req, Arc::new(provider)).await;
                 let _ = self.secrets.delete(&secret_name);
                 Ok(result?)

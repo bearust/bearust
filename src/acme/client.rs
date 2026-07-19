@@ -1,7 +1,7 @@
 //! Production ACME client backed by `instant-acme`.
 use super::{
-    AcmeChallenge, AcmeError, AcmeOrder, AcmeTransport, CertificateRequest, ChallengeMode, Http01Store, IssuedCertificate,
-    TxtRecord,
+    AcmeChallenge, AcmeError, AcmeOrder, AcmeTransport, CertificateRequest, ChallengeMode,
+    Http01Store, IssuedCertificate, TxtRecord,
 };
 use crate::secrets::SecretStore;
 use async_trait::async_trait;
@@ -114,7 +114,10 @@ impl LetsEncryptClient {
         let credentials = if raw.is_empty() {
             None
         } else if matches!(raw.first(), Some(b'{') | Some(b'[')) {
-            Some(serde_json::from_slice(&raw).map_err(|_| AcmeError::Account("stored account credentials invalid".into()))?)
+            Some(
+                serde_json::from_slice(&raw)
+                    .map_err(|_| AcmeError::Account("stored account credentials invalid".into()))?,
+            )
         } else {
             None
         };
@@ -270,10 +273,17 @@ impl LetsEncryptClient {
 #[async_trait]
 impl AcmeTransport for LetsEncryptClient {
     async fn new_order(&self, request: &CertificateRequest) -> Result<AcmeOrder, AcmeError> {
-        if request.hostnames.len() != 1 { return Err(AcmeError::InvalidRequest); }
-        self.new_order_for_challenge(request, ChallengeMode::Http01).await
+        if request.hostnames.len() != 1 {
+            return Err(AcmeError::InvalidRequest);
+        }
+        self.new_order_for_challenge(request, ChallengeMode::Http01)
+            .await
     }
-    async fn new_order_for_challenge(&self, request: &CertificateRequest, mode: ChallengeMode) -> Result<AcmeOrder, AcmeError> {
+    async fn new_order_for_challenge(
+        &self,
+        request: &CertificateRequest,
+        mode: ChallengeMode,
+    ) -> Result<AcmeOrder, AcmeError> {
         let fut = async {
             let account = self.account().await?;
             let ids: Vec<_> = request
@@ -289,12 +299,25 @@ impl AcmeTransport for LetsEncryptClient {
                 .authorizations()
                 .await
                 .map_err(|e| Self::map_error(e, "authorization"))?;
-            let preferred = match mode { ChallengeMode::Http01 => ChallengeType::Http01, ChallengeMode::Dns01 => ChallengeType::Dns01 };
+            let preferred = match mode {
+                ChallengeMode::Http01 => ChallengeType::Http01,
+                ChallengeMode::Dns01 => ChallengeType::Dns01,
+            };
             let mut metadata = Vec::new();
             for auth in auths {
-                let hostname = match auth.identifier { Identifier::Dns(value) => value };
-                let challenge = auth.challenges.iter().find(|c| c.r#type == preferred).ok_or(AcmeError::Authorization)?;
-                metadata.push(AcmeChallenge { hostname, token: challenge.token.clone(), key_authorization: order.key_authorization(challenge).as_str().to_owned() });
+                let hostname = match auth.identifier {
+                    Identifier::Dns(value) => value,
+                };
+                let challenge = auth
+                    .challenges
+                    .iter()
+                    .find(|c| c.r#type == preferred)
+                    .ok_or(AcmeError::Authorization)?;
+                metadata.push(AcmeChallenge {
+                    hostname,
+                    token: challenge.token.clone(),
+                    key_authorization: order.key_authorization(challenge).as_str().to_owned(),
+                });
             }
             let challenge = metadata.first().ok_or(AcmeError::Authorization)?;
             let result = AcmeOrder {
@@ -306,7 +329,10 @@ impl AcmeTransport for LetsEncryptClient {
                 .lock()
                 .await
                 .insert(result.id.clone(), preferred);
-            self.authorization_challenges.lock().await.insert(result.id.clone(), metadata);
+            self.authorization_challenges
+                .lock()
+                .await
+                .insert(result.id.clone(), metadata);
             self.orders.lock().await.insert(result.id.clone(), order);
             Ok(result)
         };
@@ -314,8 +340,22 @@ impl AcmeTransport for LetsEncryptClient {
             .await
             .map_err(|_| AcmeError::Timeout)?
     }
-    fn challenge_for_hostname(&self, order: &AcmeOrder, hostname: &str) -> Option<(String, String)> {
-        self.authorization_challenges.try_lock().ok()?.get(&order.id).and_then(|items| items.iter().find(|item| item.hostname.eq_ignore_ascii_case(hostname)).map(|item| (item.token.clone(), item.key_authorization.clone()))).or_else(|| Some((order.token.clone(), order.key_authorization.clone())))
+    fn challenge_for_hostname(
+        &self,
+        order: &AcmeOrder,
+        hostname: &str,
+    ) -> Option<(String, String)> {
+        self.authorization_challenges
+            .try_lock()
+            .ok()?
+            .get(&order.id)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.hostname.eq_ignore_ascii_case(hostname))
+                    .map(|item| (item.token.clone(), item.key_authorization.clone()))
+            })
+            .or_else(|| Some((order.token.clone(), order.key_authorization.clone())))
     }
     async fn poll_order(
         &self,
@@ -413,7 +453,10 @@ impl AcmeTransport for LetsEncryptClient {
             let order_id = order.url().to_owned();
             self.orders.lock().await.insert(order_id, order);
         } else {
-            self.authorization_challenges.lock().await.remove(&order.url().to_owned());
+            self.authorization_challenges
+                .lock()
+                .await
+                .remove(&order.url().to_owned());
         }
         result
     }

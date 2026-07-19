@@ -109,7 +109,9 @@ impl AcmeService for CertificateAcmeAdapter {
         // The certificate service creates the durable certificate record only
         // after material has been validated.  Control-plane callers receive
         // its resulting id in the job envelope.
-        let status = self.service.issue(0, request, cloudflare_token)
+        let status = self
+            .service
+            .issue(0, request, cloudflare_token)
             .await
             .map_err(map_acme_error)?;
         Ok(AcmeJob {

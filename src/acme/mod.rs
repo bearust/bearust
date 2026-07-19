@@ -76,8 +76,20 @@ pub enum AcmeError {
 #[async_trait]
 pub trait AcmeTransport: Send + Sync {
     async fn new_order(&self, request: &CertificateRequest) -> Result<AcmeOrder, AcmeError>;
-    async fn new_order_for_challenge(&self, request: &CertificateRequest, _mode: ChallengeMode) -> Result<AcmeOrder, AcmeError> { self.new_order(request).await }
-    fn challenge_for_hostname(&self, order: &AcmeOrder, _hostname: &str) -> Option<(String, String)> { Some((order.token.clone(), order.key_authorization.clone())) }
+    async fn new_order_for_challenge(
+        &self,
+        request: &CertificateRequest,
+        _mode: ChallengeMode,
+    ) -> Result<AcmeOrder, AcmeError> {
+        self.new_order(request).await
+    }
+    fn challenge_for_hostname(
+        &self,
+        order: &AcmeOrder,
+        _hostname: &str,
+    ) -> Option<(String, String)> {
+        Some((order.token.clone(), order.key_authorization.clone()))
+    }
     async fn poll_order(
         &self,
         order: &AcmeOrder,
@@ -98,7 +110,10 @@ pub trait AcmeTransport: Send + Sync {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChallengeMode { Http01, Dns01 }
+pub enum ChallengeMode {
+    Http01,
+    Dns01,
+}
 pub struct AcmeManager {
     certificates: CertificateStore,
     transport: Arc<dyn AcmeTransport>,
@@ -183,25 +198,33 @@ impl AcmeManager {
         }
         let deadline = tokio::time::Instant::now() + self.timeout;
         status_callback("creating_order");
-        let order =
-            match tokio::time::timeout_at(deadline, self.transport.new_order_for_challenge(&request, ChallengeMode::Dns01)).await {
-                Ok(Ok(order)) => order,
-                Ok(Err(error)) => {
-                    status_callback("failed");
-                    return Err(error);
-                }
-                Err(_) => {
-                    status_callback("failed");
-                    return Err(AcmeError::Timeout);
-                }
-            };
+        let order = match tokio::time::timeout_at(
+            deadline,
+            self.transport
+                .new_order_for_challenge(&request, ChallengeMode::Dns01),
+        )
+        .await
+        {
+            Ok(Ok(order)) => order,
+            Ok(Err(error)) => {
+                status_callback("failed");
+                return Err(error);
+            }
+            Err(_) => {
+                status_callback("failed");
+                return Err(AcmeError::Timeout);
+            }
+        };
         let records: Vec<_> = request
             .hostnames
             .iter()
             .map(|hostname| {
-                let (_, key_authorization) = self.transport.challenge_for_hostname(&order, hostname).ok_or(AcmeError::Authorization)?;
-                let digest = URL_SAFE_NO_PAD
-                    .encode(openssl::sha::sha256(key_authorization.as_bytes()));
+                let (_, key_authorization) = self
+                    .transport
+                    .challenge_for_hostname(&order, hostname)
+                    .ok_or(AcmeError::Authorization)?;
+                let digest =
+                    URL_SAFE_NO_PAD.encode(openssl::sha::sha256(key_authorization.as_bytes()));
                 Ok(TxtRecord::new(dns01_record_name(hostname), digest))
             })
             .collect::<Result<Vec<_>, AcmeError>>()?;
@@ -251,10 +274,16 @@ impl AcmeManager {
         result
     }
     async fn issue(&self, request: CertificateRequest) -> Result<CertificateRecord, AcmeError> {
-        let order = self.transport.new_order_for_challenge(&request, ChallengeMode::Http01).await?;
+        let order = self
+            .transport
+            .new_order_for_challenge(&request, ChallengeMode::Http01)
+            .await?;
         let mut entries = Vec::new();
         for hostname in &request.hostnames {
-            let (token, key_authorization) = self.transport.challenge_for_hostname(&order, hostname).ok_or(AcmeError::Authorization)?;
+            let (token, key_authorization) = self
+                .transport
+                .challenge_for_hostname(&order, hostname)
+                .ok_or(AcmeError::Authorization)?;
             self.challenges
                 .put_for_order(&order.id, hostname, &token, &key_authorization)
                 .map_err(|_| AcmeError::InvalidRequest)?;
