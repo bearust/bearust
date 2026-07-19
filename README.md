@@ -26,3 +26,48 @@ The management API is available at host `127.0.0.1:8081` in Docker Compose (the 
 Run `cargo test --locked`, `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings`. See [DEVELOPMENT.md](DEVELOPMENT.md), [DEPLOY.md](DEPLOY.md), and the [roadmap](docs/PRD.md). Licensed under MIT OR Apache-2.0.
 
 Certificate automation is documented in [docs/acme.md](docs/acme.md). Start with Let's Encrypt staging, verify the challenge and reload path, then switch to production.
+
+## Management users and RBAC
+
+The control plane listens on `http://127.0.0.1:8081` in the development compose setup. On a fresh data directory, `GET /api/setup/status` reports that initialization is required. Create the first administrator exactly once with the one-time setup token:
+
+```sh
+curl -c cookies.txt -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"correct horse battery","setup_token":"<setup-token>"}' \
+  http://127.0.0.1:8081/api/setup/initialize
+```
+
+Initialization is rejected after the first user exists. The account created by setup is an enabled `admin`; subsequent accounts must be created by an administrator through the authenticated API or the Users section in the dashboard. Passwords and session material are never included in user responses.
+
+### User API
+
+Send the session cookie returned by login (`curl -b cookies.txt ...`) to these administrator-only endpoints:
+
+| Method and path | Purpose | Success response |
+| --- | --- | --- |
+| `GET /api/users` | List users | JSON array of `{id,email,role,created_at,disabled}` |
+| `POST /api/users` | Create a user | `201` and the created user summary |
+| `PATCH /api/users/{id}` | Change `role` and/or `disabled` | `200` and the updated user summary |
+| `DELETE /api/users/{id}` | Delete a user | `204 No Content` |
+
+Example user creation:
+
+```sh
+curl -b cookies.txt -H 'Content-Type: application/json' \
+  -d '{"email":"operator@example.com","password":"operator password 123","role":"operator"}' \
+  http://127.0.0.1:8081/api/users
+```
+
+Only `admin`, `operator`, and `viewer` are valid roles. Invalid input returns `400` (`invalid_input`), missing users return `404`, duplicate email returns `409`, and insufficient permission returns `403` (`forbidden`). An administrator cannot disable or delete their own account, and the last enabled administrator cannot be disabled, deleted, or changed to another role. Disabling or deleting an account invalidates its active sessions; a disabled account cannot log in.
+
+The role matrix is:
+
+| Capability | Admin | Operator | Viewer |
+| --- | ---: | ---: | ---: |
+| Read proxy hosts | Yes | Yes | Yes |
+| Create/update/delete proxy hosts | Yes | Yes | No |
+| Read certificates | Yes | Yes | Yes |
+| Upload, activate, renew, or issue ACME certificates | Yes | Yes | No |
+| Manage users and roles | Yes | No | No |
+
+The backend remains authoritative even when the UI hides write controls or the admin-only Users section for non-admin users. Successful and denied user mutations are recorded as redacted audit events; the audit-log viewer and advanced filtering are planned for Phase 4C. Phase 4B covers local user lifecycle and the fixed role matrix. Per-host permissions, custom permissions, SSO/external identity providers, and the audit viewer are outside Phase 4B.
