@@ -238,6 +238,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(me))
+        .route("/api/users", get(list_users).post(create_user))
+        .route("/api/users/{id}", axum::routing::patch(update_user).delete(delete_user))
         .route("/api/proxy-hosts", get(list_hosts).post(create_host))
         .route(
             "/api/proxy-hosts/{id}",
@@ -257,6 +259,118 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
         .fallback_service(ServeDir::new("/usr/share/bearust/frontend"))
+}
+
+fn user_error(status: StatusCode, code: &str, message: &str) -> axum::response::Response {
+    (
+        status,
+        Json(ErrorEnvelope { code: code.into(), message: message.into() }),
+    ).into_response()
+}
+
+async fn require_user_admin(s: &AppState, h: &HeaderMap) -> Result<User, axum::response::Response> {
+    let user = current(s, h).await.map_err(|status| status.into_response())?;
+    if !allowed(Role::parse(&user.role).unwrap_or(Role::Viewer), Permission::UsersManage) {
+        audit::record(&s.db, Some(user.id), "authorization_denied", "users_manage").await;
+        return Err(user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required"));
+    }
+    Ok(user)
+}
+
+async fn list_users(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
+    if let Err(response) = require_user_admin(&s, &h).await { return response; }
+    match repository::list_users(&s.db).await {
+        Ok(users) => Json(users).into_response(),
+        Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
+    }
+}
+
+async fn create_user(
+    State(s): State<AppState>, h: HeaderMap, Json(input): Json<UserCreate>,
+) -> impl IntoResponse {
+    let actor = match require_user_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
+    let email = input.email.trim().to_ascii_lowercase();
+    if !email.contains('@') || input.password.len() < 12 || Role::parse(input.role.trim()).is_none() {
+        audit::record(&s.db, Some(actor.id), "user_create_denied", "invalid_input").await;
+        return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Valid email, role, and password of at least 12 characters required");
+    }
+    let hash = match auth::hash_password(&input.password) {
+        Ok(hash) => hash,
+        Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Unable to create user"),
+    };
+    match repository::insert_user(&s.db, &email, &hash, input.role.trim()).await {
+        Ok(user) => {
+            audit::record(&s.db, Some(actor.id), "user_created", "user_created").await;
+            (StatusCode::CREATED, Json(user)).into_response()
+        }
+        Err(error) if error.to_string().to_ascii_lowercase().contains("unique") => {
+            audit::record(&s.db, Some(actor.id), "user_create_denied", "duplicate_email").await;
+            user_error(StatusCode::CONFLICT, "duplicate_email", "Email already exists")
+        }
+        Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
+    }
+}
+
+async fn update_user(
+    State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Json(input): Json<UserPatch>,
+) -> impl IntoResponse {
+    let actor = match require_user_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
+    let Some(_target) = repository::list_users(&s.db).await.ok().and_then(|users| users.into_iter().find(|u| u.id == id)) else {
+        return user_error(StatusCode::NOT_FOUND, "not_found", "User not found");
+    };
+    if input.role.is_none() && input.disabled.is_none() {
+        audit::record(&s.db, Some(actor.id), "user_update_denied", "invalid_input").await;
+        return user_error(StatusCode::BAD_REQUEST, "invalid_input", "At least one field is required");
+    }
+    if actor.id == id && input.disabled == Some(true) {
+        audit::record(&s.db, Some(actor.id), "user_update_denied", "self_disable").await;
+        return user_error(StatusCode::FORBIDDEN, "self_mutation", "You cannot disable your own account");
+    }
+    if let Some(role) = input.role.as_deref() {
+        if Role::parse(role.trim()).is_none() {
+            audit::record(&s.db, Some(actor.id), "user_update_denied", "invalid_role").await;
+            return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role");
+        }
+        if let Err(error) = repository::update_user_role(&s.db, id, role.trim()).await {
+            if error.to_string().contains("last active") {
+                audit::record(&s.db, Some(actor.id), "user_update_denied", "last_admin").await;
+                return user_error(StatusCode::CONFLICT, "last_admin", "Cannot remove the last active administrator");
+            }
+            return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable");
+        }
+    }
+    if let Some(disabled) = input.disabled {
+        if let Err(error) = repository::set_user_disabled(&s.db, id, disabled).await {
+            if error.to_string().contains("last active") {
+                audit::record(&s.db, Some(actor.id), "user_update_denied", "last_admin").await;
+                return user_error(StatusCode::CONFLICT, "last_admin", "Cannot remove the last active administrator");
+            }
+            return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable");
+        }
+    }
+    let Some(updated) = repository::list_users(&s.db).await.ok().and_then(|users| users.into_iter().find(|u| u.id == id)) else {
+        return user_error(StatusCode::NOT_FOUND, "not_found", "User not found");
+    };
+    let detail = if input.disabled == Some(true) { "user_disabled" } else { "user_updated" };
+    audit::record(&s.db, Some(actor.id), detail, "user_updated").await;
+    Json(updated).into_response()
+}
+
+async fn delete_user(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+    let actor = match require_user_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
+    if actor.id == id {
+        audit::record(&s.db, Some(actor.id), "user_delete_denied", "self_delete").await;
+        return user_error(StatusCode::FORBIDDEN, "self_mutation", "You cannot delete your own account");
+    }
+    match repository::delete_user(&s.db, id).await {
+        Ok(0) => user_error(StatusCode::NOT_FOUND, "not_found", "User not found"),
+        Ok(_) => { audit::record(&s.db, Some(actor.id), "user_deleted", "user_deleted").await; StatusCode::NO_CONTENT.into_response() }
+        Err(error) if error.to_string().contains("last active") => {
+            audit::record(&s.db, Some(actor.id), "user_delete_denied", "last_admin").await;
+            user_error(StatusCode::CONFLICT, "last_admin", "Cannot remove the last active administrator")
+        }
+        Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
+    }
 }
 
 fn acme_error(status: StatusCode, code: &str, message: &str) -> axum::response::Response {

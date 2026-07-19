@@ -1,20 +1,32 @@
-# Task 2 report — persisted ACME client and secret store
+# Task 2 report: admin user management API
 
-Status: implementation complete for the storage/security seam; ACME wire-protocol integration is intentionally scoped behind `AcmeTransport` because the requested pinned `instant-acme` API could not be compiled in this environment (no Cargo/Docker toolchain available).
+## Status
 
-Changes:
+Implemented and verified. The control plane now exposes admin-only user lifecycle endpoints:
 
-- Added `SecretStore` with constrained names, symlink rejection, atomic replacement, parent creation, and Unix 0600 files.
-- Added `AcmeEnvironment` and `LetsEncryptClient` with staging/production directory selection, persisted account-key reuse, operation timeout, and stable error categories.
-- Redacted ACME order tokens/key authorizations and account key from `Debug` output.
-- Added focused tests for permissions, traversal, key reuse, environment selection, and redaction.
-- Added pinned `instant-acme = 0.7.2` dependency declaration.
+- `GET /api/users`
+- `POST /api/users`
+- `PATCH /api/users/{id}`
+- `DELETE /api/users/{id}`
 
-Verification:
+Handlers authenticate through the existing session cookie and token hash, authorize through the centralized `UsersManage` permission, hash passwords with the existing Argon2 helper, and return redacted `User` summaries only. Input validation covers email, role, and minimum password length. Duplicate email, invalid input, missing users, forbidden access, last-active-admin violations, and self-disable/self-delete are mapped to stable error envelopes. Successful and denied mutations emit redacted audit events. Disabled accounts cannot authenticate because the existing repository login/session lookups exclude them; disabling also revokes active sessions through the Task 1 repository lifecycle API.
 
-- `git diff --check` passed.
-- `cargo test --locked --test acme_client`: not runnable; `cargo` is unavailable in the current environment. `Cargo.lock` therefore still needs regeneration with the pinned dependency before the branch can pass `--locked` CI.
+## Tests
 
-Concerns:
+Focused API tests:
 
-- The ACME protocol operations currently return categorized seam errors after directory reachability; they should be wired to the exact pinned `instant-acme` API in a toolchain-enabled follow-up before production issuance is enabled.
+```text
+docker run --rm -e RUSTUP_TOOLCHAIN=1.88.0 -e CARGO_BUILD_JOBS=1 -v "$PWD":/app -w /app rust:1.88-bookworm cargo test --locked --test control_plane_users
+2 passed; 0 failed
+```
+
+Full backend suite:
+
+```text
+docker run --rm -e RUSTUP_TOOLCHAIN=1.88.0 -e CARGO_BUILD_JOBS=1 -v "$PWD":/app -w /app rust:1.88-bookworm cargo test --locked
+completed successfully with no failures
+```
+
+## Notes
+
+Task 2 uses the repository's transactional last-admin checks for role demotion, disable, and deletion. The API rejects self-disable and self-delete before mutating state. The frontend Users screen remains Task 3.
