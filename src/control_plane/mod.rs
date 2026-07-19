@@ -103,15 +103,13 @@ impl AcmeService for CertificateAcmeAdapter {
     async fn issue(
         &self,
         request: AcmeRequest,
-        _cloudflare_token: Option<Vec<u8>>,
+        cloudflare_token: Option<Vec<u8>>,
         _certificate_id: i64,
     ) -> Result<AcmeJob, AcmeServiceError> {
         // The certificate service creates the durable certificate record only
         // after material has been validated.  Control-plane callers receive
         // its resulting id in the job envelope.
-        let status = self
-            .service
-            .issue(0, request)
+        let status = self.service.issue(0, request, cloudflare_token)
             .await
             .map_err(map_acme_error)?;
         Ok(AcmeJob {
@@ -192,6 +190,7 @@ pub async fn build_state(
         certificates.clone(),
         Arc::new(manager),
         reloader.clone(),
+        secrets.clone(),
     ));
     Ok(AppState {
         db,
@@ -305,45 +304,8 @@ async fn issue_acme(
             "Challenge does not support this hostname",
         );
     }
-    let name = req
-        .hostnames
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "acme-certificate".into());
-    let hosts = serde_json::to_string(&req.hostnames).unwrap_or_else(|_| "[]".into());
-    let id = match repository::insert_certificate(&s.db, &name, "letsencrypt", &hosts, "", "", "")
-        .await
-    {
-        Ok(id) => id,
-        Err(_) => {
-            return acme_error(
-                StatusCode::CONFLICT,
-                "acme_busy",
-                "An ACME operation is already running",
-            );
-        }
-    };
-    if repository::insert_acme_certificate(&s.db, id, &req)
-        .await
-        .is_err()
-    {
-        return acme_error(
-            StatusCode::CONFLICT,
-            "acme_busy",
-            "An ACME operation is already running",
-        );
-    }
     let mut token_bytes = input.cloudflare_token.map(String::into_bytes);
-    if let Some(bytes) = token_bytes.as_ref() {
-        if s.secrets.put(&format!("cloudflare-{id}"), bytes).is_err() {
-            return acme_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "acme_failed",
-                "ACME credentials could not be stored",
-            );
-        }
-    }
-    let result = s.acme.issue(req, token_bytes.clone(), id).await;
+    let result = s.acme.issue(req, token_bytes.clone(), 0).await;
     if let Some(bytes) = token_bytes.as_mut() {
         bytes.fill(0);
     }

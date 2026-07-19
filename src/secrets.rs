@@ -98,6 +98,15 @@ impl SecretStore {
         }
     }
 
+    pub fn delete(&self, name: &str) -> Result<(), SecretError> {
+        self.validate(name)?;
+        match fs::remove_file(self.root.join(name)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(SecretError::Io(error)),
+        }
+    }
+
     fn validate(&self, name: &str) -> Result<(), SecretError> {
         if name.is_empty()
             || name == "."

@@ -6,7 +6,7 @@
 //! validated and activated.
 
 use crate::{
-    acme::{AcmeError, AcmeManager, CertificateRequest},
+    acme::{AcmeError, AcmeManager, CertificateRequest, CloudflareProvider},
     certificates::{CertificateError, CertificateStore},
     control_plane::ConfigReloader,
     control_plane::{
@@ -14,6 +14,7 @@ use crate::{
         models::{AcmeChallenge, AcmeRequest, AcmeStatus},
         repository,
     },
+    secrets::SecretStore,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use sha2::{Digest, Sha256};
@@ -47,6 +48,7 @@ pub struct AcmeService {
     manager: Arc<AcmeManager>,
     reloader: Arc<dyn ConfigReloader>,
     jobs: Arc<Mutex<HashSet<String>>>,
+    secrets: SecretStore,
 }
 
 impl AcmeService {
@@ -55,6 +57,7 @@ impl AcmeService {
         certificates: Arc<CertificateStore>,
         manager: Arc<AcmeManager>,
         reloader: Arc<dyn ConfigReloader>,
+        secrets: SecretStore,
     ) -> Self {
         Self {
             db,
@@ -62,6 +65,7 @@ impl AcmeService {
             manager,
             reloader,
             jobs: Arc::new(Mutex::new(HashSet::new())),
+            secrets,
         }
     }
 
@@ -71,12 +75,13 @@ impl AcmeService {
         &self,
         actor_id: i64,
         request: AcmeRequest,
+        cloudflare_token: Option<Vec<u8>>,
     ) -> Result<AcmeStatus, AcmeServiceError> {
         let request = request.normalized().map_err(AcmeServiceError::Invalid)?;
         let key = operation_key(&request);
         let _guard = JobGuard::acquire(self.jobs.clone(), key).await?;
         let name = certificate_name(&request);
-        let issued = self.issue_material(&request, &name).await?;
+        let issued = self.issue_material(&request, &name, cloudflare_token).await?;
         let hosts =
             serde_json::to_string(&issued.covered_hostnames).unwrap_or_else(|_| "[]".into());
         let id = repository::insert_certificate(
@@ -132,7 +137,7 @@ impl AcmeService {
         }
         .normalized()
         .map_err(AcmeServiceError::Invalid)?;
-        let issued = self.issue_material(&request, &name).await?;
+        let issued = self.issue_material(&request, &name, None).await?;
         // import_letsencrypt validates before replacing the existing material;
         // activation is the final state transition and can therefore be
         // retried without changing the previous active pointer on failure.
@@ -195,13 +200,23 @@ impl AcmeService {
         &self,
         request: &AcmeRequest,
         name: &str,
+        cloudflare_token: Option<Vec<u8>>,
     ) -> Result<crate::certificates::CertificateRecord, AcmeServiceError> {
         let req = CertificateRequest::new(name, request.hostnames.clone());
         match request.challenge {
             AcmeChallenge::Http01 => Ok(self.manager.request_http01(req).await?),
-            AcmeChallenge::CloudflareDns01 => Err(AcmeServiceError::Invalid(
-                "DNS provider is not configured".into(),
-            )),
+            AcmeChallenge::CloudflareDns01 => {
+                let token = cloudflare_token.ok_or_else(|| AcmeServiceError::Invalid("Cloudflare token is required".into()))?;
+                let secret_name = format!("cloudflare-{}", uuid::Uuid::new_v4());
+                self.secrets.put(&secret_name, &token).map_err(|e| AcmeServiceError::Invalid(e.to_string()))?;
+                let provider = CloudflareProvider::with_secret_store(
+                    &secret_name, self.secrets.clone(), "https://api.cloudflare.com/client/v4",
+                    std::time::Duration::from_secs(10), std::time::Duration::from_secs(120), std::time::Duration::from_secs(2),
+                ).map_err(|e| AcmeServiceError::Invalid(e.to_string()))?;
+                let result = self.manager.request_dns01(req, Arc::new(provider)).await;
+                let _ = self.secrets.delete(&secret_name);
+                Ok(result?)
+            }
         }
     }
     async fn reload(&self, certificate_id: i64) -> Result<(), AcmeServiceError> {
