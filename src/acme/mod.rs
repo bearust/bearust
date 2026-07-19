@@ -34,6 +34,12 @@ pub struct AcmeOrder {
     pub token: String,
     pub key_authorization: String,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AcmeChallenge {
+    pub hostname: String,
+    pub token: String,
+    pub key_authorization: String,
+}
 impl std::fmt::Debug for AcmeOrder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AcmeOrder")
@@ -70,6 +76,8 @@ pub enum AcmeError {
 #[async_trait]
 pub trait AcmeTransport: Send + Sync {
     async fn new_order(&self, request: &CertificateRequest) -> Result<AcmeOrder, AcmeError>;
+    async fn new_order_for_challenge(&self, request: &CertificateRequest, _mode: ChallengeMode) -> Result<AcmeOrder, AcmeError> { self.new_order(request).await }
+    fn challenge_for_hostname(&self, order: &AcmeOrder, _hostname: &str) -> Option<(String, String)> { Some((order.token.clone(), order.key_authorization.clone())) }
     async fn poll_order(
         &self,
         order: &AcmeOrder,
@@ -89,6 +97,8 @@ pub trait AcmeTransport: Send + Sync {
         Err(AcmeError::InvalidRequest)
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChallengeMode { Http01, Dns01 }
 pub struct AcmeManager {
     certificates: CertificateStore,
     transport: Arc<dyn AcmeTransport>,
@@ -163,7 +173,7 @@ impl AcmeManager {
         F: Fn(&'static str) + Send + Sync,
     {
         if request.name.trim().is_empty()
-            || request.hostnames.len() != 1
+            || request.hostnames.is_empty()
             || request
                 .hostnames
                 .iter()
@@ -174,7 +184,7 @@ impl AcmeManager {
         let deadline = tokio::time::Instant::now() + self.timeout;
         status_callback("creating_order");
         let order =
-            match tokio::time::timeout_at(deadline, self.transport.new_order(&request)).await {
+            match tokio::time::timeout_at(deadline, self.transport.new_order_for_challenge(&request, ChallengeMode::Dns01)).await {
                 Ok(Ok(order)) => order,
                 Ok(Err(error)) => {
                     status_callback("failed");
@@ -189,11 +199,12 @@ impl AcmeManager {
             .hostnames
             .iter()
             .map(|hostname| {
+                let (_, key_authorization) = self.transport.challenge_for_hostname(&order, hostname).ok_or(AcmeError::Authorization)?;
                 let digest = URL_SAFE_NO_PAD
-                    .encode(openssl::sha::sha256(order.key_authorization.as_bytes()));
-                TxtRecord::new(dns01_record_name(hostname), digest)
+                    .encode(openssl::sha::sha256(key_authorization.as_bytes()));
+                Ok(TxtRecord::new(dns01_record_name(hostname), digest))
             })
-            .collect();
+            .collect::<Result<Vec<_>, AcmeError>>()?;
         // Track every candidate before the provider call so partial failure or
         // cancellation still leads to cleanup attempts for all records.
         let result = tokio::time::timeout_at(deadline, async {
@@ -240,13 +251,14 @@ impl AcmeManager {
         result
     }
     async fn issue(&self, request: CertificateRequest) -> Result<CertificateRecord, AcmeError> {
-        let order = self.transport.new_order(&request).await?;
+        let order = self.transport.new_order_for_challenge(&request, ChallengeMode::Http01).await?;
         let mut entries = Vec::new();
         for hostname in &request.hostnames {
+            let (token, key_authorization) = self.transport.challenge_for_hostname(&order, hostname).ok_or(AcmeError::Authorization)?;
             self.challenges
-                .put_for_order(&order.id, hostname, &order.token, &order.key_authorization)
+                .put_for_order(&order.id, hostname, &token, &key_authorization)
                 .map_err(|_| AcmeError::InvalidRequest)?;
-            entries.push((order.id.clone(), hostname.clone(), order.token.clone()));
+            entries.push((order.id.clone(), hostname.clone(), token));
         }
         let _guard = http01::ChallengeGuard::new(self.challenges.clone(), entries);
         async {
