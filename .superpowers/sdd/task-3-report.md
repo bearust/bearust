@@ -32,3 +32,14 @@ Implemented and committed as `feat: add admin user management ui`.
 
 - `npm test --prefix frontend -- --run` — 10 tests passed across 2 files.
 - `npm run build --prefix frontend` — Vite production build passed and emitted `frontend/dist`.
+
+## Review 2 follow-up
+
+- User loading and refresh failures are now mapped through `userError`, keeping backend status/details out of the dashboard.
+- UI coverage now triggers a real non-self role change and asserts `api.updateUser` arguments.
+- Rejected role mutations are asserted to render the safe generic user-management error without backend secrets.
+
+## Verification (review 2)
+
+- `npm test --prefix frontend -- --run` — 10 tests passed across 2 files.
+- `npm run build --prefix frontend` — Vite production build passed.
