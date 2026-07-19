@@ -21,3 +21,14 @@ Implemented and committed as `feat: add admin user management ui`.
 
 - The Users card expects backend `/api/users` responses to include `disabled`; Task 1/2 backend work must land before end-to-end use.
 - UI tests use React DOM directly because this project does not include a testing-library dependency.
+
+## Review follow-up
+
+- Expanded `users.test.tsx` to render the real `App` dashboard, verify admin-only visibility for admin/operator/viewer, disabled status, create submission, role-control presence, and confirmed disable/delete actions.
+- Added safe user error mapping for HTTP status classes and generic mutation failures; request errors retain status for safe mapping and sensitive backend text is not rendered.
+- Added the `Role` union type to the frontend API contract.
+
+## Verification (review follow-up)
+
+- `npm test --prefix frontend -- --run` — 10 tests passed across 2 files.
+- `npm run build --prefix frontend` — Vite production build passed and emitted `frontend/dist`.
