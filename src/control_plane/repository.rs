@@ -233,6 +233,56 @@ pub async fn count_active_admins(pool: &SqlitePool) -> Result<i64, sqlx::Error> 
         .fetch_one(pool).await?.get("c"))
 }
 
+/// Atomically apply a user's role and disabled state.  The last-active-admin
+/// invariant is checked while holding SQLite's write lock so a combined PATCH
+/// can never leave a partially updated account behind.
+pub async fn update_user(
+    pool: &SqlitePool,
+    id: i64,
+    role: Option<&str>,
+    disabled: Option<bool>,
+) -> Result<Option<User>, sqlx::Error> {
+    let role = role.map(|value| {
+        Role::parse(value).ok_or_else(|| sqlx::Error::Protocol("invalid role".into()))
+    }).transpose()?;
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let current = sqlx::query("SELECT id,email,role,created_at,disabled FROM users WHERE id=?")
+        .bind(id).fetch_optional(&mut *conn).await?;
+    let Some(current) = current else {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        return Ok(None);
+    };
+    let current_role: String = current.get("role");
+    let current_disabled: bool = current.get::<i64, _>("disabled") != 0;
+    let next_role = role.map(Role::as_str).unwrap_or(current_role.as_str());
+    let next_disabled = disabled.unwrap_or(current_disabled);
+    if current_role == "admin" && !current_disabled
+        && (next_role != "admin" || next_disabled)
+    {
+        let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0")
+            .fetch_one(&mut *conn).await?.get("c");
+        if admins <= 1 {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(last_admin_error());
+        }
+    }
+    sqlx::query("UPDATE users SET role=?,disabled=? WHERE id=?")
+        .bind(next_role).bind(next_disabled as i64).bind(id)
+        .execute(&mut *conn).await?;
+    if next_disabled && !current_disabled {
+        sqlx::query("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL")
+            .bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(&mut *conn).await?;
+    }
+    let updated = sqlx::query("SELECT id,email,role,created_at,disabled FROM users WHERE id=?")
+        .bind(id).fetch_one(&mut *conn).await?;
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
+    Ok(Some(User {
+        id: updated.get("id"), email: updated.get("email"), role: updated.get("role"),
+        created_at: updated.get("created_at"), disabled: updated.get::<i64, _>("disabled") != 0,
+    }))
+}
+
 fn last_admin_error() -> sqlx::Error {
     sqlx::Error::Protocol("cannot remove the last active administrator".into())
 }
