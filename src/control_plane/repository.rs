@@ -184,6 +184,42 @@ pub async fn insert_user(
         disabled: false,
     })
 }
+
+/// Create the first administrator while holding SQLite's write lock.
+/// Returning `Ok(None)` means another request completed setup first.
+pub async fn insert_initial_admin(
+    pool: &SqlitePool,
+    email: &str,
+    hash: &str,
+) -> Result<Option<User>, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let count = sqlx::query("SELECT COUNT(*) c FROM users")
+        .fetch_one(&mut *conn).await?.get::<i64, _>("c");
+    if count != 0 {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        return Ok(None);
+    }
+    let role = "admin";
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = sqlx::query(
+        "INSERT INTO users(email,password_hash,role,created_at,disabled) VALUES(?,?,?, ?,0) RETURNING id",
+    )
+    .bind(email).bind(hash).bind(role).bind(&now)
+    .fetch_one(&mut *conn).await;
+    let row = match result {
+        Ok(row) => row,
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(error);
+        }
+    };
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
+    Ok(Some(User {
+        id: row.get("id"), email: email.into(), role: role.into(),
+        created_at: now, disabled: false,
+    }))
+}
 pub async fn find_user(
     pool: &SqlitePool,
     email: &str,

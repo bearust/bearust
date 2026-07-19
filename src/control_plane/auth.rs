@@ -50,7 +50,8 @@ pub async fn login(
         )
             .into_response();
     }
-    let found = repository::find_user(&state.db, &input.email)
+    let email = input.email.trim().to_ascii_lowercase();
+    let found = repository::find_user(&state.db, &email)
         .await
         .ok()
         .flatten();

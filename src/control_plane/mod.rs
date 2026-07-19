@@ -575,16 +575,6 @@ async fn setup_initialize(
         )
             .into_response();
     }
-    if repository::user_count(&s.db).await.ok() != Some(0) {
-        return (
-            StatusCode::CONFLICT,
-            Json(ErrorEnvelope {
-                code: "already_initialized".into(),
-                message: "Setup has already completed".into(),
-            }),
-        )
-            .into_response();
-    }
     let email = req.email.trim().to_ascii_lowercase();
     if req.password.len() < 12 || !email.contains('@') {
         return (
@@ -600,12 +590,12 @@ async fn setup_initialize(
         Ok(x) => x,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    match repository::insert_user(&s.db, &email, &hash, "admin").await {
-        Ok(u) => {
+    match repository::insert_initial_admin(&s.db, &email, &hash).await {
+        Ok(Some(u)) => {
             audit::record(&s.db, Some(u.id), "setup_completed", "admin_created").await;
             (StatusCode::CREATED, Json(u)).into_response()
         }
-        Err(_) => (
+        Ok(None) => (
             StatusCode::CONFLICT,
             Json(ErrorEnvelope {
                 code: "already_initialized".into(),
@@ -613,6 +603,7 @@ async fn setup_initialize(
             }),
         )
             .into_response(),
+        Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
     }
 }
 async fn current(s: &AppState, h: &HeaderMap) -> Result<User, StatusCode> {
@@ -629,8 +620,9 @@ async fn me(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
     }
 }
 async fn list_hosts(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
-    if current(&s, &h).await.is_err() {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };
+    if !allowed(Role::parse(&user.role).unwrap_or(Role::Viewer), Permission::ProxyHostsRead) {
+        return StatusCode::FORBIDDEN.into_response();
     }
     match repository::list_hosts(&s.db).await {
         Ok(x) => Json(x).into_response(),
@@ -643,8 +635,9 @@ async fn get_host(
     h: HeaderMap,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    if current(&s, &h).await.is_err() {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };
+    if !allowed(Role::parse(&user.role).unwrap_or(Role::Viewer), Permission::ProxyHostsRead) {
+        return StatusCode::FORBIDDEN.into_response();
     }
     match repository::get_host(&s.db, id).await {
         Ok(Some(host)) => Json(host).into_response(),

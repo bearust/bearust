@@ -102,9 +102,27 @@ async fn initial_setup_normalizes_email_like_admin_user_creation() {
     let (status, body, _) = json(app.clone(), "GET", "/api/auth/me", None, "").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(body.is_empty() || body.contains("Unauthorized") || body.contains("unauthorized"));
-    let (status, cookie) = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    let (status, cookie) = login(app.clone(), "  ADMIN@EXAMPLE.COM ", "correct horse battery").await;
     assert_eq!(status, StatusCode::OK);
     assert!(cookie.is_some());
+}
+
+#[tokio::test]
+async fn concurrent_initial_setup_creates_exactly_one_admin() {
+    let (app, db) = app().await;
+    let request = |email: &'static str| {
+        let app = app.clone();
+        async move {
+            json(app, "POST", "/api/setup/initialize", None,
+                &format!(r#"{{"email":"{email}","password":"correct horse battery","setup_token":"setup-token"}}"#)).await
+        }
+    };
+    let (first, second) = tokio::join!(request("first@example.com"), request("second@example.com"));
+    assert_eq!([first.0, second.0].into_iter().filter(|s| *s == StatusCode::CREATED).count(), 1);
+    assert_eq!([first.0, second.0].into_iter().filter(|s| *s == StatusCode::CONFLICT).count(), 1);
+    let rows = sqlx::query("SELECT email,role FROM users").fetch_all(&db).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<String, _>("role"), "admin");
 }
 
 #[tokio::test]
