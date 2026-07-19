@@ -11,6 +11,7 @@ services:
       - "${BEARUST_CONFIG:-./config/bearust.example.toml}:/etc/bearust/bearust.toml:ro"
       - "${BEARUST_DATA:-./data}:/data"
       - "${BEARUST_TLS:-./tls}:/etc/bearust/tls:ro"
+      - "./frontend/dist:/usr/share/bearust/frontend:ro"
       - cargo-registry:/usr/local/cargo/registry
       - cargo-git:/usr/local/cargo/git
       - cargo-target:/app/target
