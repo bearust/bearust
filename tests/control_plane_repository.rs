@@ -4,7 +4,9 @@ use axum::{
     Router,
 };
 use bearust::control_plane::{build_state, router};
+use bearust::control_plane::repository;
 use tower::util::ServiceExt;
+use sqlx::Row;
 
 #[tokio::test]
 async fn creates_schema_and_reports_first_run_status() {
@@ -27,4 +29,55 @@ async fn creates_schema_and_reports_first_run_status() {
         .await
         .unwrap();
     assert_eq!(&body[..], br#"{"initialized":false}"#);
+}
+
+async fn test_pool() -> sqlx::SqlitePool {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+    pool
+}
+
+#[tokio::test]
+async fn existing_users_migrate_to_default_enabled_and_list_without_hashes() {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,created_at TEXT NOT NULL)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users(email,password_hash,role,created_at) VALUES('old@example.com','secret-hash','admin','2024-01-01T00:00:00Z')")
+        .execute(&pool).await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+    let users = repository::list_users(&pool).await.unwrap();
+    assert_eq!(users.len(), 1);
+    assert!(!users[0].disabled);
+    assert_eq!(users[0].email, "old@example.com");
+    let columns = sqlx::query("PRAGMA table_info(users)").fetch_all(&pool).await.unwrap();
+    assert!(columns.iter().any(|r| r.get::<String, _>("name") == "disabled"));
+}
+
+#[tokio::test]
+async fn user_lifecycle_updates_role_status_and_sessions() {
+    let pool = test_pool().await;
+    let admin = repository::insert_user(&pool, "admin@example.com", "hash", "admin").await.unwrap();
+    let operator = repository::insert_user(&pool, "operator@example.com", "hash", "operator").await.unwrap();
+    repository::create_session(&pool, operator.id, "session-hash", "2999-01-01T00:00:00Z").await.unwrap();
+    assert_eq!(repository::count_active_admins(&pool).await.unwrap(), 1);
+    assert_eq!(repository::update_user_role(&pool, operator.id, "viewer").await.unwrap(), 1);
+    assert_eq!(repository::list_users(&pool).await.unwrap()[1].role, "viewer");
+    assert_eq!(repository::set_user_disabled(&pool, operator.id, true).await.unwrap(), 1);
+    assert!(repository::find_user(&pool, "operator@example.com").await.unwrap().is_none());
+    assert!(repository::find_user_by_session(&pool, "session-hash").await.unwrap().is_none());
+    assert_eq!(sqlx::query("SELECT COUNT(*) c FROM sessions WHERE user_id=? AND revoked_at IS NOT NULL").bind(operator.id).fetch_one(&pool).await.unwrap().get::<i64,_>("c"), 1);
+    assert_eq!(repository::set_user_disabled(&pool, operator.id, false).await.unwrap(), 1);
+    assert!(repository::find_user(&pool, "operator@example.com").await.unwrap().is_some());
+    assert_eq!(repository::delete_user(&pool, operator.id).await.unwrap(), 1);
+    assert!(repository::list_users(&pool).await.unwrap().iter().all(|u| u.id != operator.id));
+    assert_eq!(admin.role, "admin");
+}
+
+#[tokio::test]
+async fn repository_protects_last_active_admin_and_rejects_unknown_roles() {
+    let pool = test_pool().await;
+    let admin = repository::insert_user(&pool, "admin@example.com", "hash", "admin").await.unwrap();
+    assert!(repository::set_user_disabled(&pool, admin.id, true).await.is_err());
+    assert!(repository::update_user_role(&pool, admin.id, "invalid").await.is_err());
+    assert_eq!(repository::count_active_admins(&pool).await.unwrap(), 1);
 }

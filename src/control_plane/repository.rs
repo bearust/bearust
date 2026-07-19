@@ -1,6 +1,7 @@
 use crate::control_plane::models::{
     AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, CertificateMetadata, ProxyHost, User,
 };
+use crate::control_plane::rbac::Role;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     Row, SqlitePool,
@@ -19,6 +20,7 @@ pub async fn connect(url: &str) -> Result<SqlitePool, sqlx::Error> {
 pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("PRAGMA foreign_keys=ON").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,created_at TEXT NOT NULL)").execute(pool).await?;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0").execute(pool).await;
     sqlx::query("CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,token_hash TEXT NOT NULL UNIQUE,expires_at TEXT NOT NULL,revoked_at TEXT,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS proxy_hosts (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,domain TEXT NOT NULL UNIQUE,upstream_host TEXT NOT NULL,upstream_port INTEGER NOT NULL,tls_mode TEXT NOT NULL,certificate_id INTEGER,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS certificates (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,source TEXT NOT NULL,covered_hostnames TEXT NOT NULL,expiry TEXT NOT NULL,certificate_path TEXT NOT NULL,key_path TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL)").execute(pool).await?;
@@ -151,7 +153,7 @@ pub async fn insert_user(
 ) -> Result<User, sqlx::Error> {
     let now = chrono::Utc::now().to_rfc3339();
     let r = sqlx::query(
-        "INSERT INTO users(email,password_hash,role,created_at) VALUES(?,?,?,?) RETURNING id",
+        "INSERT INTO users(email,password_hash,role,created_at,disabled) VALUES(?,?,?, ?,0) RETURNING id",
     )
     .bind(email)
     .bind(hash)
@@ -164,13 +166,14 @@ pub async fn insert_user(
         email: email.into(),
         role: role.into(),
         created_at: now,
+        disabled: false,
     })
 }
 pub async fn find_user(
     pool: &SqlitePool,
     email: &str,
 ) -> Result<Option<(User, String)>, sqlx::Error> {
-    let r = sqlx::query("SELECT id,email,password_hash,role,created_at FROM users WHERE email=?")
+    let r = sqlx::query("SELECT id,email,password_hash,role,created_at,disabled FROM users WHERE email=? AND disabled=0")
         .bind(email)
         .fetch_optional(pool)
         .await?;
@@ -181,6 +184,7 @@ pub async fn find_user(
                 email: x.get("email"),
                 role: x.get("role"),
                 created_at: x.get("created_at"),
+                disabled: x.get::<i64, _>("disabled") != 0,
             },
             x.get("password_hash"),
         )
@@ -190,13 +194,86 @@ pub async fn find_user_by_session(
     pool: &SqlitePool,
     hash: &str,
 ) -> Result<Option<User>, sqlx::Error> {
-    let r=sqlx::query("SELECT u.id,u.email,u.role,u.created_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>?").bind(hash).bind(chrono::Utc::now().to_rfc3339()).fetch_optional(pool).await?;
+    let r=sqlx::query("SELECT u.id,u.email,u.role,u.created_at,u.disabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>? AND u.disabled=0").bind(hash).bind(chrono::Utc::now().to_rfc3339()).fetch_optional(pool).await?;
     Ok(r.map(|x| User {
         id: x.get("id"),
         email: x.get("email"),
         role: x.get("role"),
         created_at: x.get("created_at"),
+        disabled: x.get::<i64, _>("disabled") != 0,
     }))
+}
+
+pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, sqlx::Error> {
+    let rows = sqlx::query("SELECT id,email,role,created_at,disabled FROM users ORDER BY id")
+        .fetch_all(pool).await?;
+    Ok(rows.into_iter().map(|x| User {
+        id: x.get("id"), email: x.get("email"), role: x.get("role"),
+        created_at: x.get("created_at"), disabled: x.get::<i64, _>("disabled") != 0,
+    }).collect())
+}
+
+pub async fn count_active_admins(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    Ok(sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0")
+        .fetch_one(pool).await?.get("c"))
+}
+
+fn last_admin_error() -> sqlx::Error {
+    sqlx::Error::Protocol("cannot remove the last active administrator".into())
+}
+
+pub async fn update_user_role(pool: &SqlitePool, id: i64, role: &str) -> Result<u64, sqlx::Error> {
+    let role = Role::parse(role).ok_or_else(|| sqlx::Error::Protocol("invalid role".into()))?;
+    let mut tx = pool.begin().await?;
+    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *tx).await?;
+    if let Some(row) = current {
+        let was_admin = row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0;
+        if was_admin && role != Role::Admin {
+            let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *tx).await?.get("c");
+            if admins <= 1 { return Err(last_admin_error()); }
+        }
+    }
+    let changed = sqlx::query("UPDATE users SET role=? WHERE id=?").bind(role.as_str()).bind(id).execute(&mut *tx).await?.rows_affected();
+    tx.commit().await?;
+    Ok(changed)
+}
+
+pub async fn revoke_user_sessions(pool: &SqlitePool, user_id: i64) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL")
+        .bind(chrono::Utc::now().to_rfc3339()).bind(user_id).execute(pool).await?.rows_affected())
+}
+
+pub async fn set_user_disabled(pool: &SqlitePool, id: i64, disabled: bool) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *tx).await?;
+    if let Some(row) = current {
+        let was_active_admin = row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0;
+        if disabled && was_active_admin {
+            let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *tx).await?.get("c");
+            if admins <= 1 { return Err(last_admin_error()); }
+        }
+    }
+    let changed = sqlx::query("UPDATE users SET disabled=? WHERE id=?").bind(disabled as i64).bind(id).execute(&mut *tx).await?.rows_affected();
+    if disabled && changed > 0 {
+        sqlx::query("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL").bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(changed)
+}
+
+pub async fn delete_user(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *tx).await?;
+    if let Some(row) = current {
+        if row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0 {
+            let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *tx).await?.get("c");
+            if admins <= 1 { return Err(last_admin_error()); }
+        }
+    }
+    sqlx::query("DELETE FROM sessions WHERE user_id=?").bind(id).execute(&mut *tx).await?;
+    let changed = sqlx::query("DELETE FROM users WHERE id=?").bind(id).execute(&mut *tx).await?.rows_affected();
+    tx.commit().await?;
+    Ok(changed)
 }
 pub async fn create_session(
     pool: &SqlitePool,

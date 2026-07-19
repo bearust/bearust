@@ -112,7 +112,23 @@ pub struct User {
     pub email: String,
     pub role: String,
     pub created_at: String,
+    pub disabled: bool,
 }
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct UserCreate {
+    pub email: String,
+    pub password: String,
+    pub role: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct UserPatch {
+    pub role: Option<String>,
+    pub disabled: Option<bool>,
+}
+
+pub type UserSummary = User;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProxyHost {
     pub id: i64,
