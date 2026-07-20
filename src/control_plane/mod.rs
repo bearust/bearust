@@ -18,6 +18,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use chrono::{DateTime, SecondsFormat, Utc};
 use models::*;
 use rbac::{allowed, Permission, Role};
 use std::sync::Arc;
@@ -652,16 +653,25 @@ async fn list_audit_logs(
             _ => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid actor id"),
         },
     };
-    for value in [params.from.as_deref(), params.to.as_deref()].into_iter().flatten() {
-        if chrono::DateTime::parse_from_rfc3339(value).is_err() {
-            return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid timestamp");
-        }
-    }
+    let from = match params.from.as_deref().filter(|value| !value.is_empty()) {
+        Some(value) => match normalize_audit_timestamp(value) {
+            Ok(value) => Some(value),
+            Err(_) => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid timestamp"),
+        },
+        None => None,
+    };
+    let to = match params.to.as_deref().filter(|value| !value.is_empty()) {
+        Some(value) => match normalize_audit_timestamp(value) {
+            Ok(value) => Some(value),
+            Err(_) => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid timestamp"),
+        },
+        None => None,
+    };
     let query = AuditLogQuery {
         event: params.event.filter(|value| !value.is_empty()),
         actor_id,
-        from: params.from.filter(|value| !value.is_empty()),
-        to: params.to.filter(|value| !value.is_empty()),
+        from,
+        to,
         q: params.q.filter(|value| !value.is_empty()),
         page,
         page_size,
@@ -670,6 +680,17 @@ async fn list_audit_logs(
         Ok(page) => Json(page).into_response(),
         Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
     }
+}
+
+/// Normalize RFC3339 query bounds to the UTC representation persisted in
+/// SQLite. Text comparisons are lexical, so retaining a caller's offset
+/// (e.g. `+02:00`) would compare different instants incorrectly.
+fn normalize_audit_timestamp(value: &str) -> Result<String, chrono::ParseError> {
+    DateTime::parse_from_rfc3339(value).map(|parsed| {
+        parsed
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::AutoSi, true)
+    })
 }
 async fn list_hosts(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
     let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };

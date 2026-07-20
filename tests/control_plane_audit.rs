@@ -101,6 +101,27 @@ async fn audit_log_endpoint_rejects_unknown_persisted_role() {
 }
 
 #[tokio::test]
+async fn audit_log_endpoint_normalizes_non_utc_timestamp_bounds() {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let state = build_state("sqlite::memory:", dir.path(), "setup-token").await.unwrap();
+    let app = router(state.clone());
+    let setup = app.clone().oneshot(Request::builder().method("POST").uri("/api/setup/initialize")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#)).unwrap()).await.unwrap();
+    assert_eq!(setup.status(), StatusCode::CREATED);
+    let admin = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    insert_audit(&state.db, None, "offset_event", "reason=test", "2026-07-20T10:00:00Z").await;
+
+    let (status, body) = request(
+        app,
+        "/api/audit-logs?event=offset_event&from=2026-07-20T12:00:00%2B02:00&to=2026-07-20T12:00:00%2B02:00",
+        Some(&admin),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("offset_event"), "response: {body}");
+}
+
+#[tokio::test]
 async fn repository_lists_filtered_paginated_rows() {
     let pool = pool().await;
     let active = repository::insert_user(&pool, "active@example.com", "hash", "operator")
