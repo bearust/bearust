@@ -277,6 +277,10 @@ fn user_audit(target: Option<i64>, reason: &str) -> String {
     }
 }
 
+async fn role_slug_exists(s: &AppState, role: &str) -> Result<bool, sqlx::Error> {
+    Ok(Role::parse(role).is_some() || repository::role_by_slug(&s.db, role).await?.is_some())
+}
+
 async fn require_user_admin(s: &AppState, h: &HeaderMap) -> Result<User, axum::response::Response> {
     let user = current(s, h).await.map_err(|status| status.into_response())?;
     if !allowed(Role::parse(&user.role).unwrap_or(Role::Viewer), Permission::UsersManage) {
@@ -299,7 +303,8 @@ async fn create_user(
 ) -> impl IntoResponse {
     let actor = match require_user_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
     let email = input.email.trim().to_ascii_lowercase();
-    if !email.contains('@') || input.password.len() < 12 || Role::parse(input.role.trim()).is_none() {
+    let role = input.role.trim();
+    if !email.contains('@') || input.password.len() < 12 || !role_slug_exists(&s, role).await.unwrap_or(false) {
         audit::record(&s.db, Some(actor.id), "user_create_denied", &user_audit(None, "invalid_input")).await;
         return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Valid email, role, and password of at least 12 characters required");
     }
@@ -307,7 +312,7 @@ async fn create_user(
         Ok(hash) => hash,
         Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Unable to create user"),
     };
-    match repository::insert_user(&s.db, &email, &hash, input.role.trim()).await {
+    match repository::insert_user(&s.db, &email, &hash, role).await {
         Ok(user) => {
             audit::record(&s.db, Some(actor.id), "user_created", &user_audit(Some(user.id), "success")).await;
             (StatusCode::CREATED, Json(user)).into_response()
@@ -338,7 +343,7 @@ async fn update_user(
         return user_error(StatusCode::FORBIDDEN, "self_mutation", "You cannot disable your own account");
     }
     if let Some(role) = input.role.as_deref() {
-        if Role::parse(role.trim()).is_none() {
+        if !role_slug_exists(&s, role.trim()).await.unwrap_or(false) {
             audit::record(&s.db, Some(actor.id), "user_update_denied", &user_audit(Some(id), "invalid_role")).await;
             return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role");
         }

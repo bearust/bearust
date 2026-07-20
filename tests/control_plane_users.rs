@@ -1,5 +1,6 @@
 use axum::{body::{to_bytes, Body}, http::{Request, StatusCode}, Router};
 use bearust::control_plane::{build_state, router};
+use bearust::control_plane::repository;
 use sqlx::Row;
 use tower::util::ServiceExt;
 use openssl::{hash::MessageDigest, pkey::PKey, rsa::Rsa, x509::{X509NameBuilder, X509}};
@@ -178,6 +179,24 @@ async fn role_authorization_and_denials_are_enforced_and_audited() {
     let rows = sqlx::query("SELECT event,details FROM audit_logs WHERE event LIKE '%denied' OR event LIKE 'user_%_denied'").fetch_all(&db).await.unwrap();
     assert!(rows.len() >= 5);
     assert!(rows.iter().all(|r| r.get::<String, _>("details").contains("reason=")));
+}
+
+#[tokio::test]
+async fn admin_can_create_and_update_users_with_custom_roles_but_rejects_unknown_roles() {
+    let (app, db) = app().await;
+    assert_eq!(json(app.clone(), "POST", "/api/setup/initialize", None, r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#).await.0, StatusCode::CREATED);
+    let (_, cookie) = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    let cookie = cookie.unwrap();
+    let role = repository::insert_role(&db, "security-auditor", "Security Auditor", "custom role").await.unwrap();
+    let (status, body, _) = json(app.clone(), "POST", "/api/users", Some(&cookie), r#"{"email":"auditor@example.com","password":"auditor password 123","role":"security-auditor"}"#).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let user_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["role"], role.slug);
+    let (status, body, _) = json(app.clone(), "PATCH", &format!("/api/users/{user_id}"), Some(&cookie), r#"{"role":"security-auditor"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["role"], "security-auditor");
+    assert_eq!(json(app.clone(), "POST", "/api/users", Some(&cookie), r#"{"email":"unknown@example.com","password":"unknown password 123","role":"missing-role"}"#).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(json(app, "PATCH", &format!("/api/users/{user_id}"), Some(&cookie), r#"{"role":"missing-role"}"#).await.0, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
