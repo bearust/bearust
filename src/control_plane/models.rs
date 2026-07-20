@@ -197,6 +197,7 @@ pub struct RoleDetail {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoleCreate {
     pub slug: String,
     pub name: String,
@@ -207,6 +208,7 @@ pub struct RoleCreate {
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RolePatch {
     pub name: Option<String>,
     pub description: Option<String>,

@@ -242,6 +242,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{id}", axum::routing::patch(update_user).delete(delete_user))
+        .route("/api/roles", get(list_roles).post(create_role))
+        .route("/api/roles/{id}", get(get_role).patch(update_role).delete(delete_role))
         .route("/api/proxy-hosts", get(list_hosts).post(create_host))
         .route(
             "/api/proxy-hosts/{id}",
@@ -297,6 +299,74 @@ async fn list_users(State(s): State<AppState>, h: HeaderMap) -> impl IntoRespons
         Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
     }
 }
+
+fn role_audit(role: &RoleDetail, before: Option<&[String]>, after: Option<&[String]>) -> String {
+    serde_json::json!({"role_id": role.id, "slug": role.slug, "before": before.map(|x| x.to_vec()), "after": after.map(|x| x.to_vec())}).to_string()
+}
+
+async fn require_role_admin(s: &AppState, h: &HeaderMap) -> Result<User, axum::response::Response> {
+    let user = current(s, h).await.map_err(|status| status.into_response())?;
+    if !authorize(&s.db, &user, Permission::RolesManage, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record(&s.db, Some(user.id), "role_mutation_denied", "authorization").await;
+        return Err(user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required"));
+    }
+    Ok(user)
+}
+
+fn normalize_role_slug(raw: &str) -> Option<String> {
+    let slug = raw.trim().to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>();
+    let slug = slug.split('-').filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-");
+    (!slug.is_empty() && slug.len() <= 64).then_some(slug)
+}
+
+fn validate_role_input(name: &str, permissions: &[String]) -> Result<(), ()> {
+    if name.trim().is_empty() || permissions.iter().any(|key| !matches!(key.as_str(), "proxy_hosts.read" | "proxy_hosts.write" | "certificates.read" | "certificates.write" | "users.manage" | "roles.manage" | "audit_logs.read" | "audit_logs.export" | "system.settings.manage" | "sessions.revoke")) { return Err(()); }
+    Ok(())
+}
+
+async fn list_roles(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
+    let _actor = match require_role_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
+    match repository::list_roles(&s.db).await { Ok(roles) => Json(roles).into_response(), Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") }
+}
+
+async fn get_role(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+    let _actor = match require_role_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
+    match repository::get_role(&s.db, id).await { Ok(Some(role)) => Json(role).into_response(), Ok(None) => user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"), Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") }
+}
+
+async fn create_role(State(s): State<AppState>, h: HeaderMap, Json(input): Json<RoleCreate>) -> impl IntoResponse {
+    let actor = match require_role_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
+    let Some(slug) = normalize_role_slug(&input.slug) else { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role slug"); };
+    if validate_role_input(&input.name, &input.permissions).is_err() { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role name or permission"); }
+    let role = match repository::insert_role(&s.db, &slug, input.name.trim(), input.description.trim()).await { Ok(role) => role, Err(error) if error.to_string().to_ascii_lowercase().contains("unique") => return user_error(StatusCode::CONFLICT, "conflict", "Role slug already exists"), Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") };
+    let keys = input.permissions.iter().map(String::as_str).collect::<Vec<_>>();
+    let role = match repository::set_role_permissions(&s.db, role.id, &keys).await { Ok(role) => role, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") };
+    let details = role_audit(&role, None, Some(&role.permissions));
+    audit::record(&s.db, Some(actor.id), "role_created", &details).await;
+    audit::record(&s.db, Some(actor.id), "role_permissions_changed", &details).await;
+    (StatusCode::CREATED, Json(role)).into_response()
+}
+
+async fn update_role(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, Json(input): Json<RolePatch>) -> impl IntoResponse {
+    let actor = match require_role_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
+    let Some(before) = (match repository::get_role(&s.db, id).await { Ok(role) => role, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") }) else { return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"); };
+    if before.system_managed { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::CONFLICT, "conflict", "Built-in roles cannot be mutated"); }
+    if input.name.as_deref().is_some_and(|name| name.trim().is_empty()) || input.permissions.as_ref().is_some_and(|permissions| validate_role_input("valid", permissions).is_err()) { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role update"); }
+    let updated = match repository::update_role(&s.db, id, input.name.as_deref().map(str::trim), input.description.as_deref().map(str::trim)).await { Ok(Some(role)) => role, Ok(None) => return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"), Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") };
+    let updated = if let Some(permissions) = input.permissions.as_ref() { let keys = permissions.iter().map(String::as_str).collect::<Vec<_>>(); match repository::set_role_permissions(&s.db, id, &keys).await { Ok(role) => role, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") } } else { updated };
+    let details = role_audit(&updated, Some(&before.permissions), Some(&updated.permissions));
+    audit::record(&s.db, Some(actor.id), "role_updated", &details).await;
+    if input.permissions.is_some() { audit::record(&s.db, Some(actor.id), "role_permissions_changed", &details).await; }
+    Json(updated).into_response()
+}
+
+async fn delete_role(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+    let actor = match require_role_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
+    let Some(role) = (match repository::get_role(&s.db, id).await { Ok(role) => role, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") }) else { return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"); };
+    if role.system_managed { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, None, None)).await; return user_error(StatusCode::CONFLICT, "conflict", "Built-in roles cannot be deleted"); }
+    match repository::delete_role(&s.db, id).await { Ok(1) => { audit::record(&s.db, Some(actor.id), "role_deleted", &role_audit(&role, Some(&role.permissions), None)).await; StatusCode::NO_CONTENT.into_response() }, Ok(0) => user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"), Err(error) if error.to_string().contains("assigned") => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, Some(&role.permissions), None)).await; user_error(StatusCode::CONFLICT, "conflict", "Role is assigned to users") }, Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") }
+}
+
 
 async fn create_user(
     State(s): State<AppState>, h: HeaderMap, Json(input): Json<UserCreate>,
