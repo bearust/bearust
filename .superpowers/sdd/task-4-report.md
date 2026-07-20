@@ -8,6 +8,7 @@ Implemented administrator-protected role management routes in `/home/rizalord/Pr
 - Malformed JSON and unknown fields now return stable 400 `invalid_input` envelopes.
 - Added safe `role_mutation_denied` audits for authorization, validation, duplicate, built-in, assigned, not-found, and database failure branches.
 - Added HTTP integration coverage for seeded roles/permissions, admin lifecycle, permissions, non-admin denial, built-in rejection, assigned deletion conflict, invalid permissions, and audit events in `tests/control_plane_roles.rs`.
+- Role create/update metadata and permissions now use transactional repository operations for atomicity.
 - Preserved persistent RBAC repository/authorization prerequisite commits from the approved Task 2/3 chain.
 
 Validation: `cargo test --test control_plane_roles` could not run because Cargo is not installed (`cargo: command not found`). `git diff --check` should be run in a Cargo-capable environment as well.
