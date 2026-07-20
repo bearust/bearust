@@ -321,6 +321,47 @@ pub async fn insert_role(pool: &SqlitePool, slug: &str, name: &str, description:
     role_detail(pool, row).await
 }
 
+/// Atomically creates a role and installs its global permissions.
+pub async fn insert_role_with_permissions(pool: &SqlitePool, slug: &str, name: &str, description: &str, keys: &[&str]) -> Result<RoleDetail, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let row = sqlx::query("INSERT INTO roles(slug,name,description,created_at,updated_at) VALUES(?,?,?,?,?) RETURNING id,slug,name,description,system_managed")
+        .bind(slug).bind(name).bind(description).bind(&now).bind(&now).fetch_one(&mut *tx).await?;
+    let id: i64 = row.get("id");
+    for key in keys {
+        if sqlx::query("SELECT 1 FROM permissions WHERE key=?").bind(key).fetch_optional(&mut *tx).await?.is_none() {
+            return Err(sqlx::Error::Protocol("invalid permission".into()));
+        }
+        sqlx::query("INSERT INTO role_permissions(role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?")
+            .bind(id).bind(key).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    get_role(pool, id).await?.ok_or(sqlx::Error::RowNotFound)
+}
+
+/// Atomically updates role metadata and replaces its global permissions.
+pub async fn update_role_with_permissions(pool: &SqlitePool, id: i64, name: Option<&str>, description: Option<&str>, keys: Option<&[&str]>) -> Result<Option<RoleDetail>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(id).fetch_optional(&mut *tx).await?;
+    let Some(current) = current else { tx.rollback().await?; return Ok(None); };
+    if current.get::<i64, _>("system_managed") != 0 { tx.rollback().await?; return Err(sqlx::Error::Protocol("system-managed role cannot be mutated".into())); }
+    sqlx::query("UPDATE roles SET name=COALESCE(?,name),description=COALESCE(?,description),updated_at=? WHERE id=?")
+        .bind(name).bind(description).bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(&mut *tx).await?;
+    if let Some(keys) = keys {
+        for key in keys {
+            if sqlx::query("SELECT 1 FROM permissions WHERE key=?").bind(key).fetch_optional(&mut *tx).await?.is_none() {
+                return Err(sqlx::Error::Protocol("invalid permission".into()));
+            }
+        }
+        sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type IS NULL AND scope_id IS NULL").bind(id).execute(&mut *tx).await?;
+        for key in keys {
+            sqlx::query("INSERT INTO role_permissions(role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?").bind(id).bind(key).execute(&mut *tx).await?;
+        }
+    }
+    tx.commit().await?;
+    get_role(pool, id).await
+}
+
 pub async fn update_role(pool: &SqlitePool, id: i64, name: Option<&str>, description: Option<&str>) -> Result<Option<RoleDetail>, sqlx::Error> {
     let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(id).fetch_optional(pool).await?;
     let Some(current) = current else { return Ok(None); };
