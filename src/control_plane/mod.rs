@@ -12,7 +12,7 @@ use crate::secrets::SecretStore;
 use async_trait::async_trait;
 use axum::{
     extract::DefaultBodyLimit,
-    extract::{rejection::JsonRejection, Multipart, Path, Query, State},
+    extract::{rejection::{JsonRejection, PathRejection}, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -329,8 +329,9 @@ async fn list_roles(State(s): State<AppState>, h: HeaderMap) -> impl IntoRespons
     match repository::list_roles(&s.db).await { Ok(roles) => Json(roles).into_response(), Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") }
 }
 
-async fn get_role(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+async fn get_role(State(s): State<AppState>, h: HeaderMap, path: Result<Path<i64>, PathRejection>) -> impl IntoResponse {
     let _actor = match require_role_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
+    let Path(id) = match path { Ok(path) => path, Err(_) => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role id") };
     match repository::get_role(&s.db, id).await { Ok(Some(role)) => Json(role).into_response(), Ok(None) => user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"), Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") }
 }
 
@@ -347,9 +348,10 @@ async fn create_role(State(s): State<AppState>, h: HeaderMap, input: Result<Json
     (StatusCode::CREATED, Json(role)).into_response()
 }
 
-async fn update_role(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, input: Result<Json<RolePatch>, JsonRejection>) -> impl IntoResponse {
+async fn update_role(State(s): State<AppState>, h: HeaderMap, path: Result<Path<i64>, PathRejection>, input: Result<Json<RolePatch>, JsonRejection>) -> impl IntoResponse {
     let actor = match require_role_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
-    let Some(before) = (match repository::get_role(&s.db, id).await { Ok(role) => role, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") }) else { return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"); };
+    let Path(id) = match path { Ok(path) => path, Err(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", "reason=invalid_input").await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role id"); } };
+    let Some(before) = (match repository::get_role(&s.db, id).await { Ok(role) => role, Err(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &format!("role_id={id};reason=database_error")).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"); } }) else { audit::record(&s.db, Some(actor.id), &"role_mutation_denied", &format!("role_id={id};reason=not_found")).await; return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"); };
     if before.system_managed { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::CONFLICT, "conflict", "Built-in roles cannot be mutated"); }
     let input = match input { Ok(Json(input)) => input, Err(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role request"); } };
     if input.name.as_deref().is_some_and(|name| name.trim().is_empty()) || input.permissions.as_ref().is_some_and(|permissions| validate_role_input("valid", permissions).is_err()) { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role update"); }
@@ -361,9 +363,10 @@ async fn update_role(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64
     Json(updated).into_response()
 }
 
-async fn delete_role(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+async fn delete_role(State(s): State<AppState>, h: HeaderMap, path: Result<Path<i64>, PathRejection>) -> impl IntoResponse {
     let actor = match require_role_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
-    let Some(role) = (match repository::get_role(&s.db, id).await { Ok(role) => role, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") }) else { return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"); };
+    let Path(id) = match path { Ok(path) => path, Err(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", "reason=invalid_input").await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role id"); } };
+    let Some(role) = (match repository::get_role(&s.db, id).await { Ok(role) => role, Err(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &format!("role_id={id};reason=database_error")).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"); } }) else { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &format!("role_id={id};reason=not_found")).await; return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"); };
     if role.system_managed { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, None, None)).await; return user_error(StatusCode::CONFLICT, "conflict", "Built-in roles cannot be deleted"); }
     match repository::delete_role(&s.db, id).await { Ok(1) => { audit::record(&s.db, Some(actor.id), "role_deleted", &role_audit(&role, Some(&role.permissions), None)).await; StatusCode::NO_CONTENT.into_response() }, Ok(0) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, None, None)).await; user_error(StatusCode::NOT_FOUND, "not_found", "Role not found") }, Err(error) if error.to_string().contains("assigned") => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, Some(&role.permissions), None)).await; user_error(StatusCode::CONFLICT, "conflict", "Role is assigned to users") }, Err(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, Some(&role.permissions), None)).await; user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") } }
 }
