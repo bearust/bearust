@@ -12,7 +12,7 @@ use crate::secrets::SecretStore;
 use async_trait::async_trait;
 use axum::{
     extract::DefaultBodyLimit,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -238,6 +238,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(me))
+        .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{id}", axum::routing::patch(update_user).delete(delete_user))
         .route("/api/proxy-hosts", get(list_hosts).post(create_host))
@@ -617,6 +618,50 @@ async fn me(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
     match current(&s, &h).await {
         Ok(u) => Json(u).into_response(),
         Err(c) => c.into_response(),
+    }
+}
+
+async fn list_audit_logs(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Query(params): Query<AuditLogParams>,
+) -> impl IntoResponse {
+    if let Err(status) = current(&s, &h).await {
+        return status.into_response();
+    }
+
+    let page = match params.page.as_deref().unwrap_or("1").parse::<u32>() {
+        Ok(value) if value >= 1 => value,
+        _ => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid page"),
+    };
+    let page_size = match params.page_size.as_deref().unwrap_or("25").parse::<u32>() {
+        Ok(value) if (1..=100).contains(&value) => value,
+        _ => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid page size"),
+    };
+    let actor_id = match params.actor_id.as_deref() {
+        None | Some("") => None,
+        Some(value) => match value.parse::<i64>() {
+            Ok(value) if value >= 0 => Some(value),
+            _ => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid actor id"),
+        },
+    };
+    for value in [params.from.as_deref(), params.to.as_deref()].into_iter().flatten() {
+        if chrono::DateTime::parse_from_rfc3339(value).is_err() {
+            return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid timestamp");
+        }
+    }
+    let query = AuditLogQuery {
+        event: params.event.filter(|value| !value.is_empty()),
+        actor_id,
+        from: params.from.filter(|value| !value.is_empty()),
+        to: params.to.filter(|value| !value.is_empty()),
+        q: params.q.filter(|value| !value.is_empty()),
+        page,
+        page_size,
+    };
+    match repository::list_audit_logs(&s.db, &query).await {
+        Ok(page) => Json(page).into_response(),
+        Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
     }
 }
 async fn list_hosts(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {

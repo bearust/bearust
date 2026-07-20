@@ -139,6 +139,20 @@ pub struct AuditLogQuery {
     pub page_size: u32,
 }
 
+/// Raw query parameters for the audit-log HTTP endpoint. Numeric values are
+/// kept as strings so the handler can return the control-plane error envelope
+/// for malformed input instead of exposing extractor errors.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct AuditLogParams {
+    pub event: Option<String>,
+    pub actor_id: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub q: Option<String>,
+    pub page: Option<String>,
+    pub page_size: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditLogItem {
     pub id: i64,

@@ -1,6 +1,9 @@
 use bearust::control_plane::models::AuditLogQuery;
 use bearust::control_plane::repository;
 use sqlx::SqlitePool;
+use axum::{body::{to_bytes, Body}, http::{Request, StatusCode}};
+use tower::util::ServiceExt;
+use bearust::control_plane::{build_state, router};
 
 async fn pool() -> SqlitePool {
     let pool = repository::connect("sqlite::memory:").await.unwrap();
@@ -17,6 +20,68 @@ async fn insert_audit(pool: &SqlitePool, user_id: Option<i64>, event: &str, deta
         .execute(pool)
         .await
         .unwrap();
+}
+
+async fn http_app() -> axum::Router {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let state = build_state("sqlite::memory:", dir.path(), "setup-token").await.unwrap();
+    router(state)
+}
+
+async fn request(app: axum::Router, uri: &str, cookie: Option<&str>) -> (StatusCode, String) {
+    let mut req = Request::builder().method("GET").uri(uri);
+    if let Some(cookie) = cookie { req = req.header("cookie", cookie); }
+    let response = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+async fn login(app: axum::Router, email: &str, password: &str) -> String {
+    let response = app.oneshot(Request::builder().method("POST").uri("/api/auth/login")
+        .header("content-type", "application/json")
+        .body(Body::from(format!(r#"{{"email":"{email}","password":"{password}"}}"#))).unwrap()).await.unwrap();
+    response.headers().get("set-cookie").unwrap().to_str().unwrap().split(';').next().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn audit_log_endpoint_authenticates_roles_validates_query_and_redacts_secrets() {
+    let app = http_app().await;
+    assert_eq!(request(app.clone(), "/api/audit-logs", None).await.0, StatusCode::UNAUTHORIZED);
+    let setup = app.clone().oneshot(Request::builder().method("POST").uri("/api/setup/initialize")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#)).unwrap()).await.unwrap();
+    assert_eq!(setup.status(), StatusCode::CREATED);
+    let admin = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    let (_, op_body, _) = {
+        let response = app.clone().oneshot(Request::builder().method("POST").uri("/api/users")
+            .header("cookie", &admin).header("content-type", "application/json")
+            .body(Body::from(r#"{"email":"operator@example.com","password":"operator password 123","role":"operator"}"#)).unwrap()).await.unwrap();
+        let status = response.status(); let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap(), None::<String>)
+    };
+    assert!(!op_body.is_empty());
+    let (_, viewer_body, _) = {
+        let response = app.clone().oneshot(Request::builder().method("POST").uri("/api/users")
+            .header("cookie", &admin).header("content-type", "application/json")
+            .body(Body::from(r#"{"email":"viewer@example.com","password":"viewer password 123","role":"viewer"}"#)).unwrap()).await.unwrap();
+        let status = response.status(); let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap(), None::<String>)
+    };
+    assert!(!viewer_body.is_empty());
+    let operator = login(app.clone(), "operator@example.com", "operator password 123").await;
+    let viewer = login(app.clone(), "viewer@example.com", "viewer password 123").await;
+    for cookie in [&admin, &operator, &viewer] {
+        let (status, body) = request(app.clone(), "/api/audit-logs?page=1&page_size=25", Some(cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("password_hash") && !body.contains("token_hash") && !body.contains("setup-token"));
+    }
+    for uri in ["/api/audit-logs?page=0", "/api/audit-logs?page_size=0", "/api/audit-logs?page_size=101", "/api/audit-logs?actor_id=-1", "/api/audit-logs?from=not-a-date"] {
+        let (status, body) = request(app.clone(), uri, Some(&admin)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("invalid_input"));
+        assert!(!body.contains("password_hash") && !body.contains("token_hash"));
+    }
 }
 
 #[tokio::test]
