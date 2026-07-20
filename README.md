@@ -70,4 +70,19 @@ The role matrix is:
 | Upload, activate, renew, or issue ACME certificates | Yes | Yes | No |
 | Manage users and roles | Yes | No | No |
 
-The backend remains authoritative even when the UI hides write controls or the admin-only Users section for non-admin users. Successful and denied user mutations are recorded as redacted audit events; the audit-log viewer and advanced filtering are planned for Phase 4C. Phase 4B covers local user lifecycle and the fixed role matrix. Per-host permissions, custom permissions, SSO/external identity providers, and the audit viewer are outside Phase 4B.
+The backend remains authoritative even when the UI hides write controls or the admin-only Users section for non-admin users. Successful and denied user mutations are recorded as redacted audit events. Per-host permissions, custom permissions, and SSO/external identity providers remain future work.
+
+### Audit log API and viewer
+
+Authenticated `admin`, `operator`, and `viewer` sessions can read the audit history through `GET /api/audit-logs`; unauthenticated requests are rejected. The dashboard exposes the same read-only view for every role. Results are newest first (`created_at DESC, id DESC`) and are returned as `{items, page, page_size, total}`.
+
+The endpoint accepts these optional query parameters:
+
+- `event` — exact event name.
+- `actor_id` — numeric user ID (including actors whose account was later deleted).
+- `from` and `to` — RFC3339 timestamp bounds, inclusive.
+- `q` — text search across the event name and details.
+- `page` — 1-based page number (default `1`).
+- `page_size` — rows per page (default `25`, limited to `1`–`100`).
+
+Each row contains only `id`, `actor`, `event`, redacted `details`, and `created_at`. Actor labels are the current user email, `system` for system-generated events, or `deleted-user` when the original account no longer exists. Passwords, session/token hashes, setup tokens, private keys, provider credentials, request bodies, and raw SQL/database errors are never selected, serialized, or rendered. Audit history is strictly read-only: there are no delete, mutation, or export endpoints.

@@ -587,7 +587,7 @@ An **incremental** approach, not a big-bang release. Each phase should be stable
 | **Phase 1 — Core MVP** | Basic reverse proxy + load balancer (round robin, least-conn, health check), file/CLI configuration, no GUI yet |
 | **Phase 2 — TLS & Automation** | TLS termination + Let's Encrypt auto-renewal |
 | **Phase 3 — Basic GUI** | Proxy host CRUD via web GUI + SQLite |
-| **Phase 4 — RBAC & Multi-user** | Roles, permissions, audit log |
+| **Phase 4 — RBAC & Multi-user** | Roles, permissions, audit log (including the Phase 4C read-only viewer) |
 | **Phase 5 — External Database** | MySQL/PostgreSQL support |
 | **Phase 6 — Basic WAF** | Signature-based rule set for common attacks |
 | **Phase 7 — Advanced WAF** | Semantic detection engine, bot protection, adaptive rate limiting |
@@ -598,6 +598,12 @@ An **incremental** approach, not a big-bang release. Each phase should be stable
 | **Phase 12 — AI Advisor** | Optional module based on external LLM |
 | **Phase 13 — Plugin System** | WASM runtime, SDK, initial hook points |
 | **Phase 14 — Plugin Ecosystem** | Community registry, signature verification, public contribution documentation |
+
+### Phase 4C status: authenticated audit-log viewer
+
+The Phase 4C increment delivers a read-only `GET /api/audit-logs` endpoint and dashboard section for authenticated `admin`, `operator`, and `viewer` sessions. The API supports exact `event` and `actor_id` filters, inclusive RFC3339 `from`/`to` bounds, and `q` text search over event/details. Responses are deterministic newest-first pages with `page` (default `1`) and `page_size` (default `25`, constrained to `1`–`100`) plus a total count.
+
+Rows expose only an actor label, event, redacted details, timestamp, and ID. Actor labels resolve to the current email, `system`, or `deleted-user`; sensitive credentials, hashes, tokens, private keys, request bodies, and raw database errors are excluded by contract. No audit delete, mutation, or export operation is provided.
 
 ---
 
