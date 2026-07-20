@@ -244,6 +244,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/users/{id}", axum::routing::patch(update_user).delete(delete_user))
         .route("/api/roles", get(list_roles).post(create_role))
         .route("/api/roles/{id}", get(get_role).patch(update_role).delete(delete_role))
+        .route("/api/users/{id}/sessions/revoke", post(revoke_user_sessions))
         .route("/api/proxy-hosts", get(list_hosts).post(create_host))
         .route(
             "/api/proxy-hosts/{id}",
@@ -438,6 +439,53 @@ async fn update_user(
     let detail = if input.disabled == Some(true) { "user_disabled" } else { "user_updated" };
     audit::record(&s.db, Some(actor.id), detail, &user_audit(Some(id), "success")).await;
     Json(updated).into_response()
+}
+
+async fn revoke_user_sessions(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    path: Result<Path<i64>, PathRejection>,
+) -> impl IntoResponse {
+    let actor = match current(&s, &h).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !authorize(&s.db, &actor, Permission::SessionsRevoke, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record(&s.db, Some(actor.id), "session_revoke_denied", "reason=authorization").await;
+        return user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required");
+    }
+    let Path(id) = match path {
+        Ok(path) => path,
+        Err(_) => {
+            audit::record(&s.db, Some(actor.id), "session_revoke_denied", "reason=invalid_input").await;
+            return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid user id");
+        }
+    };
+    if actor.id == id {
+        audit::record(&s.db, Some(actor.id), "session_revoke_denied", &user_audit(Some(id), "self_target")).await;
+        return user_error(StatusCode::FORBIDDEN, "self_mutation", "You cannot revoke your own sessions");
+    }
+    let target_exists = match repository::list_users(&s.db).await {
+        Ok(users) => users.into_iter().any(|user| user.id == id),
+        Err(_) => {
+            audit::record(&s.db, Some(actor.id), "session_revoke_denied", &user_audit(Some(id), "database_error")).await;
+            return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable");
+        }
+    };
+    if !target_exists {
+        audit::record(&s.db, Some(actor.id), "session_revoke_denied", &user_audit(Some(id), "not_found")).await;
+        return user_error(StatusCode::NOT_FOUND, "not_found", "User not found");
+    }
+    match repository::revoke_user_sessions(&s.db, id).await {
+        Ok(revoked) => {
+            audit::record(&s.db, Some(actor.id), "sessions_revoked", &format!("target_user_id={id};count={revoked}")).await;
+            Json(SessionsRevokeResponse { revoked }).into_response()
+        }
+        Err(_) => {
+            audit::record(&s.db, Some(actor.id), "session_revoke_denied", &user_audit(Some(id), "database_error")).await;
+            user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable")
+        }
+    }
 }
 
 async fn delete_user(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {

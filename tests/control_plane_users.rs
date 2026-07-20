@@ -219,6 +219,27 @@ async fn admin_can_create_and_update_users_with_custom_roles_but_rejects_unknown
 }
 
 #[tokio::test]
+async fn administrator_can_revoke_target_sessions_but_not_own_or_viewer_sessions() {
+    let (app, db) = app().await;
+    assert_eq!(json(app.clone(), "POST", "/api/setup/initialize", None, r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#).await.0, StatusCode::CREATED);
+    let (_, admin_cookie) = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    let admin_cookie = admin_cookie.unwrap();
+    let (_, target_body, _) = json(app.clone(), "POST", "/api/users", Some(&admin_cookie), r#"{"email":"target@example.com","password":"target password 123","role":"viewer"}"#).await;
+    let target_id = serde_json::from_str::<serde_json::Value>(&target_body).unwrap()["id"].as_i64().unwrap();
+    let (_, target_cookie) = login(app.clone(), "target@example.com", "target password 123").await;
+    let target_cookie = target_cookie.unwrap();
+    repository::create_session(&db, target_id, "target-extra", "2999-01-01T00:00:00Z").await.unwrap();
+    let (status, body, _) = json(app.clone(), "POST", &format!("/api/users/{target_id}/sessions/revoke"), Some(&admin_cookie), "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["revoked"], 2);
+    assert_eq!(json(app.clone(), "GET", "/api/auth/me", Some(&target_cookie), "").await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(json(app.clone(), "POST", "/api/users/1/sessions/revoke", Some(&admin_cookie), "").await.0, StatusCode::FORBIDDEN);
+    let rows = sqlx::query("SELECT event,details FROM audit_logs WHERE event IN ('sessions_revoked','session_revoke_denied')").fetch_all(&db).await.unwrap();
+    assert!(rows.iter().any(|r| r.get::<String, _>("event") == "sessions_revoked"));
+    assert!(rows.iter().all(|r| !r.get::<String, _>("details").contains("target-extra")));
+}
+
+#[tokio::test]
 async fn combined_patch_is_atomic_when_last_admin_would_be_removed() {
     let (app, _) = app().await;
     assert_eq!(json(app.clone(), "POST", "/api/setup/initialize", None, r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#).await.0, StatusCode::CREATED);
