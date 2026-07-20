@@ -1,6 +1,6 @@
 use crate::control_plane::models::{
     AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AuditLogItem, AuditLogPage,
-    AuditLogQuery, CertificateMetadata, ProxyHost, User,
+    AuditLogQuery, CertificateMetadata, ProxyHost, RoleDetail, User,
 };
 use crate::control_plane::rbac::Role;
 use sqlx::{
@@ -40,6 +40,21 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         Err(error) => return Err(error),
     }
     sqlx::query("CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,event TEXT NOT NULL,details TEXT NOT NULL,created_at TEXT NOT NULL)").execute(pool).await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS roles (id INTEGER PRIMARY KEY AUTOINCREMENT,slug TEXT NOT NULL UNIQUE,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',system_managed INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)").execute(pool).await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS permissions (id INTEGER PRIMARY KEY AUTOINCREMENT,key TEXT NOT NULL UNIQUE,description TEXT NOT NULL DEFAULT '')").execute(pool).await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS role_permissions (role_id INTEGER NOT NULL,permission_id INTEGER NOT NULL,scope_type TEXT,scope_id INTEGER,PRIMARY KEY (role_id,permission_id,scope_type,scope_id),FOREIGN KEY(role_id) REFERENCES roles(id) ON DELETE CASCADE,FOREIGN KEY(permission_id) REFERENCES permissions(id) ON DELETE CASCADE)").execute(pool).await?;
+    let permissions = ["proxy_hosts.read","proxy_hosts.write","certificates.read","certificates.write","users.manage","roles.manage","audit_logs.read","audit_logs.export","system.settings.manage","sessions.revoke"];
+    for key in &permissions { sqlx::query("INSERT OR IGNORE INTO permissions(key) VALUES(?)").bind(key).execute(pool).await?; }
+    let now = chrono::Utc::now().to_rfc3339();
+    for (slug, name) in [("admin","Administrator"),("operator","Operator"),("viewer","Viewer")] {
+        sqlx::query("INSERT OR IGNORE INTO roles(slug,name,system_managed,created_at,updated_at) VALUES(?,?,1,?,?)").bind(slug).bind(name).bind(&now).bind(&now).execute(pool).await?;
+    }
+    let assignments: [(&str, &[&str]); 3] = [
+        ("admin", &permissions),
+        ("operator", &["proxy_hosts.read","proxy_hosts.write","certificates.read","certificates.write"]),
+        ("viewer", &["proxy_hosts.read","certificates.read","audit_logs.read"]),
+    ];
+    for (slug, keys) in assignments { for key in keys { sqlx::query("INSERT OR IGNORE INTO role_permissions(role_id,permission_id) SELECT r.id,p.id FROM roles r,permissions p WHERE r.slug=? AND p.key=? AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id=r.id AND rp.permission_id=p.id AND rp.scope_type IS NULL AND rp.scope_id IS NULL)").bind(slug).bind(key).execute(pool).await?; } }
     Ok(())
 }
 
@@ -263,6 +278,72 @@ pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, sqlx::Error> {
         id: x.get("id"), email: x.get("email"), role: x.get("role"),
         created_at: x.get("created_at"), disabled: x.get::<i64, _>("disabled") != 0,
     }).collect())
+}
+
+fn role_detail_from_row(row: &sqlx::sqlite::SqliteRow, permissions: Vec<String>) -> RoleDetail {
+    RoleDetail { id: row.get("id"), slug: row.get("slug"), name: row.get("name"), description: row.get("description"), system_managed: row.get::<i64, _>("system_managed") != 0, permissions }
+}
+
+async fn role_detail(pool: &SqlitePool, row: sqlx::sqlite::SqliteRow) -> Result<RoleDetail, sqlx::Error> {
+    let permissions = role_permissions(pool, row.get("id")).await?;
+    Ok(role_detail_from_row(&row, permissions))
+}
+
+pub async fn role_permissions(pool: &SqlitePool, role_id: i64) -> Result<Vec<String>, sqlx::Error> {
+    Ok(sqlx::query_scalar("SELECT p.key FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND rp.scope_type IS NULL AND rp.scope_id IS NULL ORDER BY p.key").bind(role_id).fetch_all(pool).await?)
+}
+
+pub async fn list_roles(pool: &SqlitePool) -> Result<Vec<RoleDetail>, sqlx::Error> {
+    let rows = sqlx::query("SELECT id,slug,name,description,system_managed FROM roles ORDER BY id").fetch_all(pool).await?;
+    let mut result = Vec::with_capacity(rows.len());
+    for row in rows { result.push(role_detail(pool, row).await?); }
+    Ok(result)
+}
+
+pub async fn role_by_slug(pool: &SqlitePool, slug: &str) -> Result<Option<RoleDetail>, sqlx::Error> {
+    match sqlx::query("SELECT id,slug,name,description,system_managed FROM roles WHERE slug=?").bind(slug).fetch_optional(pool).await? { Some(row) => Ok(Some(role_detail(pool, row).await?)), None => Ok(None) }
+}
+
+pub async fn get_role(pool: &SqlitePool, id: i64) -> Result<Option<RoleDetail>, sqlx::Error> {
+    match sqlx::query("SELECT id,slug,name,description,system_managed FROM roles WHERE id=?").bind(id).fetch_optional(pool).await? { Some(row) => Ok(Some(role_detail(pool, row).await?)), None => Ok(None) }
+}
+
+pub async fn insert_role(pool: &SqlitePool, slug: &str, name: &str, description: &str) -> Result<RoleDetail, sqlx::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let row = sqlx::query("INSERT INTO roles(slug,name,description,created_at,updated_at) VALUES(?,?,?,?,?) RETURNING id,slug,name,description,system_managed").bind(slug).bind(name).bind(description).bind(&now).bind(&now).fetch_one(pool).await?;
+    role_detail(pool, row).await
+}
+
+pub async fn update_role(pool: &SqlitePool, id: i64, name: Option<&str>, description: Option<&str>) -> Result<Option<RoleDetail>, sqlx::Error> {
+    let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(id).fetch_optional(pool).await?;
+    let Some(current) = current else { return Ok(None); };
+    if current.get::<i64, _>("system_managed") != 0 { return Err(sqlx::Error::Protocol("system-managed role cannot be mutated".into())); }
+    sqlx::query("UPDATE roles SET name=COALESCE(?,name),description=COALESCE(?,description),updated_at=? WHERE id=?").bind(name).bind(description).bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(pool).await?;
+    get_role(pool, id).await
+}
+
+pub async fn set_role_permissions(pool: &SqlitePool, role_id: i64, keys: &[&str]) -> Result<RoleDetail, sqlx::Error> {
+    let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(role_id).fetch_optional(pool).await?.ok_or(sqlx::Error::RowNotFound)?;
+    if current.get::<i64, _>("system_managed") != 0 { return Err(sqlx::Error::Protocol("system-managed role cannot be mutated".into())); }
+    let mut tx = pool.begin().await?;
+    for key in keys { if sqlx::query("SELECT 1 FROM permissions WHERE key=?").bind(key).fetch_optional(&mut *tx).await?.is_none() { return Err(sqlx::Error::Protocol(format!("invalid permission: {key}"))); } }
+    sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type IS NULL AND scope_id IS NULL").bind(role_id).execute(&mut *tx).await?;
+    for key in keys { sqlx::query("INSERT INTO role_permissions(role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?").bind(role_id).bind(key).execute(&mut *tx).await?; }
+    tx.commit().await?;
+    get_role(pool, role_id).await?.ok_or(sqlx::Error::RowNotFound)
+}
+
+pub async fn delete_role(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
+    let row = sqlx::query("SELECT slug,system_managed FROM roles WHERE id=?").bind(id).fetch_optional(pool).await?;
+    let Some(row) = row else { return Ok(0); };
+    if row.get::<i64, _>("system_managed") != 0 { return Err(sqlx::Error::Protocol("system-managed role cannot be deleted".into())); }
+    if sqlx::query("SELECT 1 FROM users WHERE role=? LIMIT 1").bind(row.get::<String, _>("slug")).fetch_optional(pool).await?.is_some() { return Err(sqlx::Error::Protocol("role is assigned to users".into())); }
+    Ok(sqlx::query("DELETE FROM roles WHERE id=?").bind(id).execute(pool).await?.rows_affected())
+}
+
+pub async fn user_has_permission(pool: &SqlitePool, user_id: i64, key: &str, scope: Option<(&str, i64)>) -> Result<bool, sqlx::Error> {
+    let allowed = match scope { Some(_) => false, None => sqlx::query("SELECT 1 FROM users u JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.id=? AND u.disabled=0 AND p.key=? AND rp.scope_type IS NULL AND rp.scope_id IS NULL LIMIT 1").bind(user_id).bind(key).fetch_optional(pool).await?.is_some() };
+    Ok(allowed)
 }
 
 enum AuditFilter {

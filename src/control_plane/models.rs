@@ -170,6 +170,49 @@ pub struct AuditLogPage {
     pub total: i64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoleRecord {
+    pub id: i64,
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    pub system_managed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PermissionRecord {
+    pub id: i64,
+    pub key: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RoleDetail {
+    pub id: i64,
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    pub system_managed: bool,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RoleCreate {
+    pub slug: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct RolePatch {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub permissions: Option<Vec<String>>,
+}
+
 pub type UserSummary = User;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProxyHost {
