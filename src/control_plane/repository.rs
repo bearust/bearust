@@ -356,7 +356,10 @@ pub async fn delete_role(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error>
         }
     };
     let Some(row) = row else {
-        sqlx::query("COMMIT").execute(&mut *conn).await?;
+        if let Err(error) = sqlx::query("COMMIT").execute(&mut *conn).await {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(error);
+        }
         return Ok(0);
     };
     if row.get::<i64, _>("system_managed") != 0 {
@@ -390,7 +393,10 @@ pub async fn delete_role(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error>
             return Err(error);
         }
     };
-    sqlx::query("COMMIT").execute(&mut *conn).await?;
+    if let Err(error) = sqlx::query("COMMIT").execute(&mut *conn).await {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+        return Err(error);
+    }
     Ok(changed)
 }
 
