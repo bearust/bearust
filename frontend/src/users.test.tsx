@@ -4,13 +4,14 @@ import React from 'react';
 import {act} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App';
-import {api,User} from './api';
+import {api,User,RoleRecord} from './api';
 
 const admin:User={id:1,email:'admin@example.com',role:'admin',disabled:false};
 const operator:User={id:2,email:'operator@example.com',role:'operator',disabled:false};
 const viewer:User={id:3,email:'viewer@example.com',role:'viewer',disabled:false};
 const emptyHosts=vi.fn().mockResolvedValue([]);
 const emptyCerts=vi.fn().mockResolvedValue([]);
+const customRole:RoleRecord={id:4,slug:'auditor',name:'Auditor',description:'',system_managed:false,permissions:['audit_logs.read']};
 
 async function renderDashboard(user:User,users:User[]=[admin,operator,viewer]) {
   vi.spyOn(api,'status').mockResolvedValue({initialized:true});
@@ -18,6 +19,7 @@ async function renderDashboard(user:User,users:User[]=[admin,operator,viewer]) {
   vi.spyOn(api,'hosts').mockImplementation(emptyHosts);
   vi.spyOn(api,'certificates').mockImplementation(emptyCerts);
   vi.spyOn(api,'users').mockResolvedValue(users);
+  vi.spyOn(api,'roles').mockResolvedValue([customRole]);
   const element=document.createElement('div');document.body.appendChild(element);
   const root=createRoot(element);
   await act(async()=>{root.render(<App/>);});
@@ -40,6 +42,18 @@ describe('Users API contracts',()=>{
     await expect(api.deleteUser(2)).resolves.toBeUndefined();
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
+  it('calls role and session administration endpoints',async()=>{
+    const fetchMock=vi.spyOn(globalThis,'fetch').mockImplementation(async(input,init)=>{
+      const path=String(input);
+      if(path==='/api/roles'&&!init?.method)return new Response(JSON.stringify([customRole]),{status:200});
+      if(path==='/api/users/2/sessions/revoke')return new Response(JSON.stringify({revoked:2}),{status:200});
+      return new Response(JSON.stringify(customRole),{status:200});
+    });
+    await expect(api.roles()).resolves.toEqual([customRole]);
+    await expect(api.revokeUserSessions(2)).resolves.toEqual({revoked:2});
+    await expect(api.createRole({slug:'auditor',name:'Auditor',description:'',permissions:['audit_logs.read']})).resolves.toEqual(customRole);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe('Dashboard Users UI',()=>{
@@ -48,6 +62,8 @@ describe('Dashboard Users UI',()=>{
     const disabled={...viewer,email:'disabled@example.com',disabled:true};
     const adminView=await renderDashboard(admin,[admin,disabled]);
     expect(adminView.element.textContent).toContain('Users');
+    expect(adminView.element.textContent).toContain('Roles');
+    expect(adminView.element.textContent).toContain('Revoke sessions');
     expect(adminView.element.textContent).toContain('Disabled');
     adminView.root.unmount();document.body.innerHTML='';
     const operatorView=await renderDashboard(operator,[operator]);
