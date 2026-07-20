@@ -603,7 +603,7 @@ An **incremental** approach, not a big-bang release. Each phase should be stable
 
 The Phase 4C increment delivers a read-only `GET /api/audit-logs` endpoint and dashboard section for authenticated `admin`, `operator`, and `viewer` sessions. The API supports exact `event` and `actor_id` filters, inclusive RFC3339 `from`/`to` bounds, and `q` text search over event/details. Responses are deterministic newest-first pages with `page` (default `1`) and `page_size` (default `25`, constrained to `1`–`100`) plus a total count.
 
-Rows expose only an actor label, event, redacted details, timestamp, and ID. Actor labels resolve to the current email, `system`, or `deleted-user`; sensitive credentials, hashes, tokens, private keys, request bodies, and raw database errors are excluded by contract. No audit delete, mutation, or export operation is provided.
+Rows expose only an actor label, event, redacted details, timestamp, and ID. Actor labels resolve to the current email, `system`, or `deleted-user`; sensitive credentials, hashes, tokens, private keys, request bodies, and raw database errors are sanitized at the read boundary and never serialized, rendered, or otherwise exposed. No audit delete, mutation, or export operation is provided.
 
 ---
 
