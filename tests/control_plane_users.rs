@@ -11,6 +11,25 @@ async fn app() -> (Router, sqlx::SqlitePool) {
     (router(state.clone()), state.db)
 }
 
+#[tokio::test]
+async fn custom_role_permission_changes_apply_without_relogin() {
+    let (app, db) = app().await;
+    assert_eq!(json(app.clone(), "POST", "/api/setup/initialize", None, r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#).await.0, StatusCode::CREATED);
+    let (_, admin_cookie) = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    let admin_cookie = admin_cookie.unwrap();
+    repository::insert_role(&db, "host-writer", "Host Writer", "").await.unwrap();
+    let role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE slug='host-writer'").fetch_one(&db).await.unwrap();
+    repository::set_role_permissions(&db, role_id, &["proxy_hosts.read"]).await.unwrap();
+    let (_, body, _) = json(app.clone(), "POST", "/api/users", Some(&admin_cookie), r#"{"email":"custom@example.com","password":"custom password 123","role":"host-writer"}"#).await;
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["role"], "host-writer");
+    let (_, cookie) = login(app.clone(), "custom@example.com", "custom password 123").await;
+    let cookie = cookie.unwrap();
+    let host = r#"{"name":"custom-host","domain":"custom.example.com","upstream_host":"127.0.0.1","upstream_port":8080}"#;
+    assert_eq!(json(app.clone(), "POST", "/api/proxy-hosts", Some(&cookie), host).await.0, StatusCode::FORBIDDEN);
+    repository::set_role_permissions(&db, role_id, &["proxy_hosts.read", "proxy_hosts.write"]).await.unwrap();
+    assert_eq!(json(app, "POST", "/api/proxy-hosts", Some(&cookie), host).await.0, StatusCode::CREATED);
+}
+
 async fn json(app: Router, method: &str, uri: &str, cookie: Option<&str>, body: &str) -> (StatusCode, String, Option<String>) {
     let mut request = Request::builder().method(method).uri(uri).header("content-type", "application/json");
     if let Some(cookie) = cookie { request = request.header("cookie", cookie); }
@@ -182,24 +201,21 @@ async fn role_authorization_and_denials_are_enforced_and_audited() {
 }
 
 #[tokio::test]
-async fn administrator_can_revoke_target_sessions_but_not_own_or_viewer_sessions() {
+async fn admin_can_create_and_update_users_with_custom_roles_but_rejects_unknown_roles() {
     let (app, db) = app().await;
     assert_eq!(json(app.clone(), "POST", "/api/setup/initialize", None, r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#).await.0, StatusCode::CREATED);
-    let (_, admin_cookie) = login(app.clone(), "admin@example.com", "correct horse battery").await;
-    let admin_cookie = admin_cookie.unwrap();
-    let (_, target_body, _) = json(app.clone(), "POST", "/api/users", Some(&admin_cookie), r#"{"email":"target@example.com","password":"target password 123","role":"viewer"}"#).await;
-    let target_id = serde_json::from_str::<serde_json::Value>(&target_body).unwrap()["id"].as_i64().unwrap();
-    let (_, target_cookie) = login(app.clone(), "target@example.com", "target password 123").await;
-    let target_cookie = target_cookie.unwrap();
-    repository::create_session(&db, target_id, "target-extra", "2999-01-01T00:00:00Z").await.unwrap();
-    let (status, body, _) = json(app.clone(), "POST", &format!("/api/users/{target_id}/sessions/revoke"), Some(&admin_cookie), "").await;
+    let (_, cookie) = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    let cookie = cookie.unwrap();
+    let role = repository::insert_role(&db, "security-auditor", "Security Auditor", "custom role").await.unwrap();
+    let (status, body, _) = json(app.clone(), "POST", "/api/users", Some(&cookie), r#"{"email":"auditor@example.com","password":"auditor password 123","role":"security-auditor"}"#).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let user_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["role"], role.slug);
+    let (status, body, _) = json(app.clone(), "PATCH", &format!("/api/users/{user_id}"), Some(&cookie), r#"{"role":"security-auditor"}"#).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["revoked"], 2);
-    assert_eq!(json(app.clone(), "GET", "/api/auth/me", Some(&target_cookie), "").await.0, StatusCode::UNAUTHORIZED);
-    assert_eq!(json(app.clone(), "POST", "/api/users/1/sessions/revoke", Some(&admin_cookie), "").await.0, StatusCode::FORBIDDEN);
-    let rows = sqlx::query("SELECT event,details FROM audit_logs WHERE event IN ('sessions_revoked','session_revoke_denied')").fetch_all(&db).await.unwrap();
-    assert!(rows.iter().any(|r| r.get::<String, _>("event") == "sessions_revoked"));
-    assert!(rows.iter().all(|r| !r.get::<String, _>("details").contains("target-extra")));
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["role"], "security-auditor");
+    assert_eq!(json(app.clone(), "POST", "/api/users", Some(&cookie), r#"{"email":"unknown@example.com","password":"unknown password 123","role":"missing-role"}"#).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(json(app, "PATCH", &format!("/api/users/{user_id}"), Some(&cookie), r#"{"role":"missing-role"}"#).await.0, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

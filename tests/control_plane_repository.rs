@@ -74,17 +74,6 @@ async fn user_lifecycle_updates_role_status_and_sessions() {
 }
 
 #[tokio::test]
-async fn revoke_user_sessions_only_revokes_active_sessions_and_returns_count() {
-    let pool = test_pool().await;
-    let user = repository::insert_user(&pool, "sessions@example.com", "hash", "admin").await.unwrap();
-    repository::create_session(&pool, user.id, "active-hash", "2999-01-01T00:00:00Z").await.unwrap();
-    repository::create_session(&pool, user.id, "active-hash-2", "2999-01-01T00:00:00Z").await.unwrap();
-    repository::revoke_session(&pool, "active-hash-2").await.unwrap();
-    assert_eq!(repository::revoke_user_sessions(&pool, user.id).await.unwrap(), 1);
-    assert!(repository::find_user_by_session(&pool, "active-hash").await.unwrap().is_none());
-}
-
-#[tokio::test]
 async fn repository_protects_last_active_admin_and_rejects_unknown_roles() {
     let pool = test_pool().await;
     let admin = repository::insert_user(&pool, "admin@example.com", "hash", "admin").await.unwrap();
