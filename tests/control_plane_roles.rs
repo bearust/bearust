@@ -77,6 +77,7 @@ async fn delete_role_rolls_back_when_commit_is_busy() {
     sqlx::query("ROLLBACK").execute(&mut *conn).await.unwrap();
 }
 
+#[tokio::test]
 async fn unauthenticated_and_malformed_role_paths_return_json_errors() {
     let (app, _) = app().await;
     let (status, body, _) = request(app.clone(), "GET", "/api/roles", None, "").await;
