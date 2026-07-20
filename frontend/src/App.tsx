@@ -793,7 +793,10 @@ export function AuditLogSection({ user }: { user: User }) {
     [error, setError] = useState(""),
     [loading, setLoading] = useState(false);
   const [event, setEvent] = useState(""),
-    [q, setQ] = useState("");
+    [q, setQ] = useState(""),
+    [actorId, setActorId] = useState(""),
+    [from, setFrom] = useState(""),
+    [to, setTo] = useState("");
   const pageSize = 25;
   const requestSeq = useRef(0);
   const load = async () => {
@@ -805,6 +808,9 @@ export function AuditLogSection({ user }: { user: User }) {
         page,
         page_size: pageSize,
         ...(event ? { event } : {}),
+        ...(actorId && Number.isInteger(Number(actorId)) ? { actor_id: Number(actorId) } : {}),
+        ...(from ? { from: new Date(from).toISOString() } : {}),
+        ...(to ? { to: new Date(to).toISOString() } : {}),
         ...(q ? { q } : {}),
       };
       const result = await api.auditLogs(query);
@@ -822,10 +828,10 @@ export function AuditLogSection({ user }: { user: User }) {
   };
   useEffect(() => {
     void load();
-  }, [page, event, q]);
+  }, [page, event, q, actorId, from, to]);
   useEffect(() => {
     setPage(1);
-  }, [event, q]);
+  }, [event, q, actorId, from, to]);
   const hasNext = page * pageSize < total;
   return (
     <section className="card audit-card">
@@ -852,6 +858,18 @@ export function AuditLogSection({ user }: { user: User }) {
             onChange={(e) => setQ(e.target.value)}
           />
         </label>
+        <label>
+          Actor ID
+          <input aria-label="Actor ID filter" inputMode="numeric" value={actorId} onChange={(e) => setActorId(e.target.value)} />
+        </label>
+        <label>
+          From
+          <input aria-label="From filter" type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} />
+        </label>
+        <label>
+          To
+          <input aria-label="To filter" type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} />
+        </label>
       </div>
       {error && <p className="error">{error}</p>}
       <table>
@@ -864,8 +882,8 @@ export function AuditLogSection({ user }: { user: User }) {
           </tr>
         </thead>
         <tbody>
-          {items.map((item, index) => (
-            <tr key={`${item.created_at}-${index}`}>
+          {items.map((item) => (
+            <tr key={item.id}>
               <td>{item.actor}</td>
               <td>{item.event}</td>
               <td>{item.details}</td>
