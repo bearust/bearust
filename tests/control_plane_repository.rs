@@ -82,3 +82,38 @@ async fn repository_protects_last_active_admin_and_rejects_unknown_roles() {
     assert!(repository::update_user_role(&pool, admin.id, "invalid").await.is_err());
     assert_eq!(repository::count_active_admins(&pool).await.unwrap(), 1);
 }
+
+#[tokio::test]
+async fn migration_seeds_builtin_roles_and_all_permissions_idempotently() {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+
+    let roles: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM roles WHERE system_managed=1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let permissions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM permissions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(roles, 3);
+    assert_eq!(permissions, 10);
+    assert_eq!(repository::role_by_slug(&pool, "admin").await.unwrap().unwrap().slug, "admin");
+}
+
+#[tokio::test]
+async fn role_lifecycle_contracts_exist_for_role_management() {
+    let pool = test_pool().await;
+    let role = repository::insert_role(&pool, "security-auditor", "Security Auditor", "custom role")
+        .await
+        .unwrap();
+    repository::set_role_permissions(&pool, role.id, &["audit_logs.read"])
+        .await
+        .unwrap();
+    assert_eq!(repository::role_permissions(&pool, role.id).await.unwrap().len(), 1);
+    assert_eq!(repository::list_roles(&pool).await.unwrap().iter().any(|r| r.slug == "security-auditor"), true);
+    assert_eq!(repository::update_role(&pool, role.id, "Security Auditor", "updated").await.unwrap(), 1);
+    assert_eq!(repository::delete_role(&pool, role.id).await.unwrap(), 1);
+}
