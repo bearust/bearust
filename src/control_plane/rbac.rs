@@ -19,4 +19,4 @@ impl ResourceContext { pub const GLOBAL: Self = Self; }
 
 pub fn allowed(role: Role, permission: Permission) -> bool { match permission { Permission::ProxyHostsRead | Permission::CertificatesRead | Permission::AuditLogsRead => true, Permission::ProxyHostsWrite | Permission::CertificatesWrite => matches!(role, Role::Admin | Role::Operator), Permission::UsersManage | Permission::RolesManage | Permission::AuditLogsExport | Permission::SystemSettingsManage | Permission::SessionsRevoke => matches!(role, Role::Admin) } }
 
-pub async fn authorize(pool: &SqlitePool, user: &crate::control_plane::models::User, permission: PermissionKey, _context: ResourceContext) -> Result<bool, sqlx::Error> { if Role::parse(&user.role).is_none() { return Ok(false); } crate::control_plane::repository::user_has_permission(pool, user.id, permission.key(), None).await }
+pub async fn authorize(pool: &SqlitePool, user: &crate::control_plane::models::User, permission: PermissionKey, _context: ResourceContext) -> Result<bool, sqlx::Error> { crate::control_plane::repository::user_has_permission(pool, user.id, permission.key(), None).await }

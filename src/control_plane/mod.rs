@@ -472,6 +472,7 @@ async fn renew_acme(
         Err(c) => return c.into_response(),
     };
     if !authorize(&s.db, &user, Permission::CertificatesWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record(&s.db, Some(user.id), "authorization_denied", "CertificatesWrite").await;
         return StatusCode::FORBIDDEN.into_response();
     }
     if repository::get_acme_status(&s.db, id)
@@ -522,6 +523,7 @@ async fn acme_status(
         Err(c) => return c.into_response(),
     };
     if !authorize(&s.db, &user, Permission::CertificatesRead, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record(&s.db, Some(user.id), "authorization_denied", "CertificatesRead").await;
         return StatusCode::FORBIDDEN.into_response();
     }
     match repository::get_acme_status(&s.db, id).await {
@@ -631,6 +633,7 @@ async fn list_audit_logs(
     // Do not treat malformed/unknown persisted roles as a viewer: that would
     // turn a corrupt account record into an authorization bypass.
     if !authorize(&s.db, &user, Permission::AuditLogsRead, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record(&s.db, Some(user.id), "authorization_denied", "AuditLogsRead").await;
         return StatusCode::FORBIDDEN.into_response();
     }
 
@@ -691,6 +694,7 @@ fn normalize_audit_timestamp(value: &str) -> Result<String, chrono::ParseError> 
 async fn list_hosts(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
     let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };
     if !authorize(&s.db, &user, Permission::ProxyHostsRead, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record(&s.db, Some(user.id), "authorization_denied", "ProxyHostsRead").await;
         return StatusCode::FORBIDDEN.into_response();
     }
     match repository::list_hosts(&s.db).await {
@@ -706,6 +710,7 @@ async fn get_host(
 ) -> impl IntoResponse {
     let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };
     if !authorize(&s.db, &user, Permission::ProxyHostsRead, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record(&s.db, Some(user.id), "authorization_denied", "ProxyHostsRead").await;
         return StatusCode::FORBIDDEN.into_response();
     }
     match repository::get_host(&s.db, id).await {
@@ -724,6 +729,7 @@ async fn create_host(
         Err(c) => return c.into_response(),
     };
     if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record(&s.db, Some(u.id), "authorization_denied", "ProxyHostsWrite").await;
         return StatusCode::FORBIDDEN.into_response();
     }
     if req.name.trim().is_empty()
@@ -848,6 +854,7 @@ async fn remove_host(
         Err(c) => return c.into_response(),
     };
     if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record(&s.db, Some(u.id), "authorization_denied", "ProxyHostsWrite").await;
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
@@ -889,6 +896,7 @@ async fn upload_certificate(
         Err(c) => return c.into_response(),
     };
     if !authorize(&s.db, &u, Permission::CertificatesWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record(&s.db, Some(u.id), "authorization_denied", "CertificatesWrite").await;
         return StatusCode::FORBIDDEN.into_response();
     }
     let mut total = 0usize;
@@ -932,6 +940,7 @@ async fn list_certificates(State(s): State<AppState>, h: HeaderMap) -> impl Into
         Err(c) => return c.into_response(),
     };
     if !authorize(&s.db, &user, Permission::CertificatesRead, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record(&s.db, Some(user.id), "authorization_denied", "CertificatesRead").await;
         return StatusCode::FORBIDDEN.into_response();
     }
     match repository::list_certificates(&s.db).await {
@@ -950,6 +959,7 @@ async fn activate_certificate(
         Err(c) => return c.into_response(),
     };
     if !authorize(&s.db, &user, Permission::CertificatesWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record(&s.db, Some(user.id), "authorization_denied", "CertificatesWrite").await;
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some((name, cert_path, key_path)) = repository::certificate_paths(&s.db, id)
