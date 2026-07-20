@@ -341,11 +341,34 @@ pub async fn set_role_permissions(pool: &SqlitePool, role_id: i64, keys: &[&str]
 }
 
 pub async fn delete_role(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
-    let row = sqlx::query("SELECT slug,system_managed FROM roles WHERE id=?").bind(id).fetch_optional(pool).await?;
-    let Some(row) = row else { return Ok(0); };
-    if row.get::<i64, _>("system_managed") != 0 { return Err(sqlx::Error::Protocol("system-managed role cannot be deleted".into())); }
-    if sqlx::query("SELECT 1 FROM users WHERE role=? LIMIT 1").bind(row.get::<String, _>("slug")).fetch_optional(pool).await?.is_some() { return Err(sqlx::Error::Protocol("role is assigned to users".into())); }
-    Ok(sqlx::query("DELETE FROM roles WHERE id=?").bind(id).execute(pool).await?.rows_affected())
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query("SELECT slug,system_managed FROM roles WHERE id=?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(row) = row else {
+        tx.commit().await?;
+        return Ok(0);
+    };
+    if row.get::<i64, _>("system_managed") != 0 {
+        return Err(sqlx::Error::Protocol("system-managed role cannot be deleted".into()));
+    }
+    let slug: String = row.get("slug");
+    if sqlx::query("SELECT 1 FROM users WHERE role=? LIMIT 1")
+        .bind(&slug)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some()
+    {
+        return Err(sqlx::Error::Protocol("role is assigned to users".into()));
+    }
+    let changed = sqlx::query("DELETE FROM roles WHERE id=?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(changed)
 }
 
 pub async fn user_has_permission(pool: &SqlitePool, user_id: i64, key: &str, scope: Option<(&str, i64)>) -> Result<bool, sqlx::Error> {

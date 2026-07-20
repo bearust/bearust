@@ -6,7 +6,8 @@ Commits:
 - `71131c6` feat: persist roles and permissions
 - `58d6170` fix: support persistent custom role assignments
 - `ad712d1` fix: allow update users custom roles
-- pending handler fix commit
+- `3745a16` fix: accept custom roles in user handlers
+- pending transactional delete-role fix commit
 
 Implementation:
 - Added serializable role/permission DTOs and role create/patch request models in `src/control_plane/models.rs`.
@@ -16,10 +17,12 @@ Implementation:
 - `insert_user`, `update_user_role`, and `update_user` accept existing persistent custom role slugs while rejecting unknown slugs. Built-in role compatibility and last-active-admin transaction protections remain intact.
 - Added shared async handler role-existence validation for POST `/api/users` and PATCH `/api/users/{id}`, preserving safe `invalid_input` responses for unknown roles.
 - Restored Task 1 repository coverage and `tests/control_plane_roles.rs`.
-- Added HTTP regression coverage for custom-role user creation/update and unknown-role rejection in `tests/control_plane_users.rs`.
+- Added HTTP regression coverage for custom-role creation/update and unknown-role rejection in `tests/control_plane_users.rs`.
+- Changed `delete_role` to check assignment and delete within one SQLite write transaction, preventing a concurrent assignment from racing between the check and delete.
+- Restored `docs/superpowers/plans/2026-07-20-phase-4d1-rbac-audit.md` and `docs/superpowers/specs/2026-07-20-phase-4d1-rbac-audit-design.md`.
 
 Exact commands/output:
-- `cargo test --test control_plane_users`
+- `cargo test --test control_plane_repository --test control_plane_roles && cargo fmt --check`
   - Exit 127: `/bin/bash: line 1: cargo: command not found`
 - `git diff --check`
   - Passed with no output before committing this fix.
