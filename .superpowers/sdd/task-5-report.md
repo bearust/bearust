@@ -1,13 +1,12 @@
-# Task 5 report — authenticated ACME control-plane APIs
+# Task 5 report
 
-Implemented the authenticated ACME endpoints in `src/control_plane`:
+Implemented administrative session revocation.
 
-- `POST /api/certificates/acme` (CertificatesWrite, 202 job response)
-- `POST /api/certificates/:id/renew` (CertificatesWrite, 202 job response)
-- `GET /api/certificates/:id/status` (CertificatesRead)
+- Added `POST /api/users/{id}/sessions/revoke` using centralized `Permission::SessionsRevoke` authorization.
+- Rejects self-targeting, handles missing users and database failures with generic responses, revokes active sessions only, and returns `{ "revoked": <count> }`.
+- Added safe `sessions_revoked` and `session_revoke_denied` audit events without token/session material.
+- Added repository and HTTP-focused tests.
 
-Requests normalize and validate hostnames, reject unsupported wildcard/http-01 combinations, enforce the existing 3 MiB router body limit, and return sanitized `ErrorEnvelope` codes. Cloudflare tokens are accepted only on the request, persisted in `SecretStore`, passed to the service as bytes, then zeroed where practical. Responses and audit details do not include credentials.
+Verification: `cargo` is unavailable in the environment (`/bin/bash: cargo: command not found`), so focused tests could not run. `git diff --check` passed.
 
-Verification: `git diff --check` passed. Cargo tooling is unavailable on the host; Docker toolchain attempts were unable to complete before the environment timeout. Full compile/test verification remains a parent-agent checkpoint.
-
-Concern for integration: Task 4 has concurrent uncommitted changes in `control_plane/mod.rs`, `acme`, and certificate service files. The route/state edits intentionally preserve those changes; parent should commit the combined diff after resolving the production `AcmeService` wiring (the current default is `NoopAcmeService` for control-plane contract tests).
+Commit: `f2a4444 feat: add administrative session revocation`

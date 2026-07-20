@@ -128,6 +128,11 @@ pub struct UserPatch {
     pub disabled: Option<bool>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionsRevokeResponse {
+    pub revoked: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditLogQuery {
     pub event: Option<String>,
