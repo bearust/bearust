@@ -523,9 +523,17 @@ pub async fn update_user(
     role: Option<&str>,
     disabled: Option<bool>,
 ) -> Result<Option<User>, sqlx::Error> {
-    let role = role.map(|value| {
-        Role::parse(value).ok_or_else(|| sqlx::Error::Protocol("invalid role".into()))
-    }).transpose()?;
+    if let Some(value) = role {
+        if Role::parse(value).is_none()
+            && sqlx::query("SELECT 1 FROM roles WHERE slug=?")
+                .bind(value)
+                .fetch_optional(pool)
+                .await?
+                .is_none()
+        {
+            return Err(sqlx::Error::Protocol("invalid role".into()));
+        }
+    }
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
     let current = sqlx::query("SELECT id,email,role,created_at,disabled FROM users WHERE id=?")
@@ -536,7 +544,7 @@ pub async fn update_user(
     };
     let current_role: String = current.get("role");
     let current_disabled: bool = current.get::<i64, _>("disabled") != 0;
-    let next_role = role.map(Role::as_str).unwrap_or(current_role.as_str());
+    let next_role = role.unwrap_or(current_role.as_str());
     let next_disabled = disabled.unwrap_or(current_disabled);
     if current_role == "admin" && !current_disabled
         && (next_role != "admin" || next_disabled)

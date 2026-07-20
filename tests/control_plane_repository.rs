@@ -104,6 +104,24 @@ async fn migration_seeds_builtin_roles_and_all_permissions_idempotently() {
 }
 
 #[tokio::test]
+async fn update_user_accepts_existing_custom_role_slug() {
+    let pool = test_pool().await;
+    let role = repository::insert_role(&pool, "security-auditor", "Security Auditor", "custom role")
+        .await
+        .unwrap();
+    let user = repository::insert_user(&pool, "auditee@example.com", "hash", "viewer")
+        .await
+        .unwrap();
+
+    let updated = repository::update_user(&pool, user.id, Some(&role.slug), None)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(updated.role, "security-auditor");
+}
+
+#[tokio::test]
 async fn role_lifecycle_contracts_exist_for_role_management() {
     let pool = test_pool().await;
     let role = repository::insert_role(&pool, "security-auditor", "Security Auditor", "custom role")
