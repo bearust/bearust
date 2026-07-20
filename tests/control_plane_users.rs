@@ -11,6 +11,25 @@ async fn app() -> (Router, sqlx::SqlitePool) {
     (router(state.clone()), state.db)
 }
 
+#[tokio::test]
+async fn custom_role_permission_changes_apply_without_relogin() {
+    let (app, db) = app().await;
+    assert_eq!(json(app.clone(), "POST", "/api/setup/initialize", None, r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#).await.0, StatusCode::CREATED);
+    let (_, admin_cookie) = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    let admin_cookie = admin_cookie.unwrap();
+    repository::insert_role(&db, "host-writer", "Host Writer", "").await.unwrap();
+    let role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE slug='host-writer'").fetch_one(&db).await.unwrap();
+    repository::set_role_permissions(&db, role_id, &["proxy_hosts.read"]).await.unwrap();
+    let (_, body, _) = json(app.clone(), "POST", "/api/users", Some(&admin_cookie), r#"{"email":"custom@example.com","password":"custom password 123","role":"host-writer"}"#).await;
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["role"], "host-writer");
+    let (_, cookie) = login(app.clone(), "custom@example.com", "custom password 123").await;
+    let cookie = cookie.unwrap();
+    let host = r#"{"name":"custom-host","domain":"custom.example.com","upstream_host":"127.0.0.1","upstream_port":8080}"#;
+    assert_eq!(json(app.clone(), "POST", "/api/proxy-hosts", Some(&cookie), host).await.0, StatusCode::FORBIDDEN);
+    repository::set_role_permissions(&db, role_id, &["proxy_hosts.read", "proxy_hosts.write"]).await.unwrap();
+    assert_eq!(json(app, "POST", "/api/proxy-hosts", Some(&cookie), host).await.0, StatusCode::CREATED);
+}
+
 async fn json(app: Router, method: &str, uri: &str, cookie: Option<&str>, body: &str) -> (StatusCode, String, Option<String>) {
     let mut request = Request::builder().method(method).uri(uri).header("content-type", "application/json");
     if let Some(cookie) = cookie { request = request.header("cookie", cookie); }

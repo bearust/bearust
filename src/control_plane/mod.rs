@@ -20,7 +20,7 @@ use axum::{
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use models::*;
-use rbac::{allowed, Permission, Role};
+use rbac::{authorize, Permission, ResourceContext, Role};
 use std::sync::Arc;
 use std::{
     collections::HashMap,
@@ -283,7 +283,7 @@ async fn role_slug_exists(s: &AppState, role: &str) -> Result<bool, sqlx::Error>
 
 async fn require_user_admin(s: &AppState, h: &HeaderMap) -> Result<User, axum::response::Response> {
     let user = current(s, h).await.map_err(|status| status.into_response())?;
-    if !allowed(Role::parse(&user.role).unwrap_or(Role::Viewer), Permission::UsersManage) {
+    if !authorize(&s.db, &user, Permission::UsersManage, ResourceContext::GLOBAL).await.unwrap_or(false) {
         audit::record(&s.db, Some(user.id), "user_mutation_denied", &user_audit(None, "authorization")).await;
         return Err(user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required"));
     }
@@ -402,10 +402,7 @@ async fn issue_acme(
         Ok(u) => u,
         Err(c) => return c.into_response(),
     };
-    if !allowed(
-        Role::parse(&user.role).unwrap_or(Role::Viewer),
-        Permission::CertificatesWrite,
-    ) {
+    if !authorize(&s.db, &user, Permission::CertificatesWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
         audit::record(&s.db, Some(user.id), "authorization_denied", "acme_issue").await;
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -474,10 +471,7 @@ async fn renew_acme(
         Ok(u) => u,
         Err(c) => return c.into_response(),
     };
-    if !allowed(
-        Role::parse(&user.role).unwrap_or(Role::Viewer),
-        Permission::CertificatesWrite,
-    ) {
+    if !authorize(&s.db, &user, Permission::CertificatesWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
         return StatusCode::FORBIDDEN.into_response();
     }
     if repository::get_acme_status(&s.db, id)
@@ -527,10 +521,7 @@ async fn acme_status(
         Ok(u) => u,
         Err(c) => return c.into_response(),
     };
-    if !allowed(
-        Role::parse(&user.role).unwrap_or(Role::Viewer),
-        Permission::CertificatesRead,
-    ) {
+    if !authorize(&s.db, &user, Permission::CertificatesRead, ResourceContext::GLOBAL).await.unwrap_or(false) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match repository::get_acme_status(&s.db, id).await {
@@ -639,7 +630,7 @@ async fn list_audit_logs(
     // Audit history is intentionally available to the three known roles only.
     // Do not treat malformed/unknown persisted roles as a viewer: that would
     // turn a corrupt account record into an authorization bypass.
-    if !matches!(Role::parse(&user.role), Some(Role::Admin | Role::Operator | Role::Viewer)) {
+    if !authorize(&s.db, &user, Permission::AuditLogsRead, ResourceContext::GLOBAL).await.unwrap_or(false) {
         return StatusCode::FORBIDDEN.into_response();
     }
 
@@ -699,7 +690,7 @@ fn normalize_audit_timestamp(value: &str) -> Result<String, chrono::ParseError> 
 }
 async fn list_hosts(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
     let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };
-    if !allowed(Role::parse(&user.role).unwrap_or(Role::Viewer), Permission::ProxyHostsRead) {
+    if !authorize(&s.db, &user, Permission::ProxyHostsRead, ResourceContext::GLOBAL).await.unwrap_or(false) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match repository::list_hosts(&s.db).await {
@@ -714,7 +705,7 @@ async fn get_host(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };
-    if !allowed(Role::parse(&user.role).unwrap_or(Role::Viewer), Permission::ProxyHostsRead) {
+    if !authorize(&s.db, &user, Permission::ProxyHostsRead, ResourceContext::GLOBAL).await.unwrap_or(false) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match repository::get_host(&s.db, id).await {
@@ -732,10 +723,7 @@ async fn create_host(
         Ok(x) => x,
         Err(c) => return c.into_response(),
     };
-    if !allowed(
-        Role::parse(&u.role).unwrap_or(Role::Viewer),
-        Permission::ProxyHostsWrite,
-    ) {
+    if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
         return StatusCode::FORBIDDEN.into_response();
     }
     if req.name.trim().is_empty()
@@ -793,10 +781,7 @@ async fn update_host(
         Ok(x) => x,
         Err(c) => return c.into_response(),
     };
-    if !allowed(
-        Role::parse(&u.role).unwrap_or(Role::Viewer),
-        Permission::ProxyHostsWrite,
-    ) {
+    if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
         audit::record(
             &s.db,
             Some(u.id),
@@ -862,10 +847,7 @@ async fn remove_host(
         Ok(x) => x,
         Err(c) => return c.into_response(),
     };
-    if !allowed(
-        Role::parse(&u.role).unwrap_or(Role::Viewer),
-        Permission::ProxyHostsWrite,
-    ) {
+    if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
@@ -906,10 +888,7 @@ async fn upload_certificate(
         Ok(x) => x,
         Err(c) => return c.into_response(),
     };
-    if !allowed(
-        Role::parse(&u.role).unwrap_or(Role::Viewer),
-        Permission::CertificatesWrite,
-    ) {
+    if !authorize(&s.db, &u, Permission::CertificatesWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let mut total = 0usize;
@@ -952,10 +931,7 @@ async fn list_certificates(State(s): State<AppState>, h: HeaderMap) -> impl Into
         Ok(u) => u,
         Err(c) => return c.into_response(),
     };
-    if !allowed(
-        Role::parse(&user.role).unwrap_or(Role::Viewer),
-        Permission::CertificatesRead,
-    ) {
+    if !authorize(&s.db, &user, Permission::CertificatesRead, ResourceContext::GLOBAL).await.unwrap_or(false) {
         return StatusCode::FORBIDDEN.into_response();
     }
     match repository::list_certificates(&s.db).await {
@@ -973,10 +949,7 @@ async fn activate_certificate(
         Ok(u) => u,
         Err(c) => return c.into_response(),
     };
-    if !allowed(
-        Role::parse(&user.role).unwrap_or(Role::Viewer),
-        Permission::CertificatesWrite,
-    ) {
+    if !authorize(&s.db, &user, Permission::CertificatesWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some((name, cert_path, key_path)) = repository::certificate_paths(&s.db, id)
