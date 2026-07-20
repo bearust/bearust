@@ -404,11 +404,13 @@ export function CertificateTable({
 export function UsersSection({
   user,
   users,
+  roles = [],
   onChanged,
   userErrorMessage = "",
 }: {
   user: User;
   users: User[];
+  roles?: RoleRecord[];
   onChanged: () => void | Promise<void>;
   userErrorMessage?: string;
 }) {
@@ -430,6 +432,7 @@ export function UsersSection({
       setBusy(null);
     }
   };
+  const roleOptions = [...roles, ...["admin", "operator", "viewer"].filter((slug) => !roles.some((role) => role.slug === slug)).map((slug) => ({ slug, name: slug[0].toUpperCase() + slug.slice(1) }))];
   return (
     <section className="card users-card">
       <div className="section-heading">
@@ -471,9 +474,7 @@ export function UsersSection({
                       )
                     }
                   >
-                    <option value="admin">Admin</option>
-                    <option value="operator">Operator</option>
-                    <option value="viewer">Viewer</option>
+                    {roleOptions.map((role) => <option value={role.slug} key={role.slug}>{role.name}</option>)}
                   </select>
                 </td>
                 <td>{item.disabled ? "Disabled" : "Active"}</td>
@@ -763,6 +764,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
       <UsersSection
         user={user}
         users={users}
+        roles={roles}
         userErrorMessage={usersError}
         onChanged={() => void refresh()}
       />
