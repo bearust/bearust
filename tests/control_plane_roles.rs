@@ -75,6 +75,19 @@ async fn delete_role_rolls_back_when_commit_is_busy() {
     let mut conn = pool.acquire().await.unwrap();
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await.unwrap();
     sqlx::query("ROLLBACK").execute(&mut *conn).await.unwrap();
+
+async fn unauthenticated_and_malformed_role_paths_return_json_errors() {
+    let (app, _) = app().await;
+    let (status, body, _) = request(app.clone(), "GET", "/api/roles", None, "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "unauthorized");
+    request(app.clone(), "POST", "/api/setup/initialize", None, r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#).await;
+    let admin = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    let (status, body, _) = request(app, "GET", "/api/roles/not-an-id", Some(&admin), "").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["code"], "invalid_input");
+}
+
 }
 
 #[tokio::test]

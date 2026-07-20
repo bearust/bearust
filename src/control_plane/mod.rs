@@ -305,7 +305,7 @@ fn role_audit(role: &RoleDetail, before: Option<&[String]>, after: Option<&[Stri
 }
 
 async fn require_role_admin(s: &AppState, h: &HeaderMap) -> Result<User, axum::response::Response> {
-    let user = current(s, h).await.map_err(|status| status.into_response())?;
+    let user = current(s, h).await.map_err(|status| user_error(status, "unauthorized", "Authentication required"))?;
     if !authorize(&s.db, &user, Permission::RolesManage, ResourceContext::GLOBAL).await.unwrap_or(false) {
         audit::record(&s.db, Some(user.id), "role_mutation_denied", "authorization").await;
         return Err(user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required"));
