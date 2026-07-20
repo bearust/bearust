@@ -70,6 +70,8 @@ async fn delete_role_rolls_back_when_commit_is_busy() {
     drop(blocker_conn);
     drop(blocker);
 
+    assert!(repository::get_role(&pool, role.id).await.unwrap().is_some());
+
     let mut conn = pool.acquire().await.unwrap();
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await.unwrap();
     sqlx::query("ROLLBACK").execute(&mut *conn).await.unwrap();
