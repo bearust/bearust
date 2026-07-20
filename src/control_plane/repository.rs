@@ -51,7 +51,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     }
     let assignments: [(&str, &[&str]); 3] = [
         ("admin", &permissions),
-        ("operator", &["proxy_hosts.read","proxy_hosts.write","certificates.read","certificates.write"]),
+        ("operator", &["proxy_hosts.read","proxy_hosts.write","certificates.read","certificates.write","audit_logs.read"]),
         ("viewer", &["proxy_hosts.read","certificates.read","audit_logs.read"]),
     ];
     for (slug, keys) in assignments { for key in keys { sqlx::query("INSERT OR IGNORE INTO role_permissions(role_id,permission_id) SELECT r.id,p.id FROM roles r,permissions p WHERE r.slug=? AND p.key=? AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id=r.id AND rp.permission_id=p.id AND rp.scope_type IS NULL AND rp.scope_id IS NULL)").bind(slug).bind(key).execute(pool).await?; } }
