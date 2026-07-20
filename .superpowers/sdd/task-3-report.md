@@ -1,45 +1,24 @@
-# Task 3 report — admin user management UI
+# Task 3 Report
 
 ## Status
 
-Implemented and committed as `feat: add admin user management ui`.
+Implemented and committed as `973d90a feat: centralize persistent permission checks`.
 
 ## Changes
 
-- Extended `User` with `disabled` and added `api.users`, `api.createUser`, `api.updateUser`, and `api.deleteUser`.
-- Added an admin-only Users card with account status, role updates, create form, disable/enable and delete confirmations.
-- Current account role/destructive actions are disabled in the UI; backend remains the authorization boundary.
-- User-facing errors map forbidden/validation failures to safe messages and redact sensitive values.
-- Added focused API/UI coverage in `frontend/src/users.test.tsx`.
+- Added stable permission keys, global `ResourceContext`, and async persistent `authorize` in `src/control_plane/rbac.rs`.
+- Authorization fails closed for unknown persisted roles and database errors (`unwrap_or(false)` at handler boundaries).
+- Migrated control-plane authorization branches for users, audit logs, proxy hosts, certificates, and ACME handlers away from hardcoded role matching.
+- Added focused custom-role permission mutation coverage proving changes apply without re-login.
 
-## Verification
+## Commands and output
 
-- `npm test --prefix frontend -- --run` — 10 tests passed.
-- `npm run build --prefix frontend` — Vite production build passed.
+- `rg -n "enum Permission|Permission|Role::|user_has_permission|authorize|proxy-host|audit" ...` — located existing hardcoded checks and persistent repository API.
+- `cargo test --test control_plane_users custom_role_permission_changes_apply_without_relogin` — could not execute: `/bin/bash: cargo: command not found` (exit 127).
+- `git diff --check` — passed with no output.
+- `git add src/control_plane/rbac.rs src/control_plane/mod.rs tests/control_plane_users.rs tests/control_plane_audit.rs && git commit -m "feat: centralize persistent permission checks"` — committed successfully as `973d90a`.
 
 ## Concerns
 
-- The Users card expects backend `/api/users` responses to include `disabled`; Task 1/2 backend work must land before end-to-end use.
-- UI tests use React DOM directly because this project does not include a testing-library dependency.
-
-## Review follow-up
-
-- Expanded `users.test.tsx` to render the real `App` dashboard, verify admin-only visibility for admin/operator/viewer, disabled status, create submission, role-control presence, and confirmed disable/delete actions.
-- Added safe user error mapping for HTTP status classes and generic mutation failures; request errors retain status for safe mapping and sensitive backend text is not rendered.
-- Added the `Role` union type to the frontend API contract.
-
-## Verification (review follow-up)
-
-- `npm test --prefix frontend -- --run` — 10 tests passed across 2 files.
-- `npm run build --prefix frontend` — Vite production build passed and emitted `frontend/dist`.
-
-## Review 2 follow-up
-
-- User loading and refresh failures are now mapped through `userError`, keeping backend status/details out of the dashboard.
-- UI coverage now triggers a real non-self role change and asserts `api.updateUser` arguments.
-- Rejected role mutations are asserted to render the safe generic user-management error without backend secrets.
-
-## Verification (review 2)
-
-- `npm test --prefix frontend -- --run` — 10 tests passed across 2 files.
-- `npm run build --prefix frontend` — Vite production build passed.
+- Rust toolchain is unavailable in this environment, so focused and regression tests could not run.
+- `tests/control_plane_audit.rs` was not behaviorally changed because its existing unknown-role test already covers fail-closed audit access.
