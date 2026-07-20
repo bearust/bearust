@@ -179,9 +179,16 @@ pub async fn insert_user(
     hash: &str,
     role: &str,
 ) -> Result<User, sqlx::Error> {
-    let role = Role::parse(role)
-        .ok_or_else(|| sqlx::Error::Protocol("invalid role".into()))?;
-    let role_name = role.as_str();
+    let role_name = role;
+    if Role::parse(role_name).is_none()
+        && sqlx::query("SELECT 1 FROM roles WHERE slug=?")
+            .bind(role_name)
+            .fetch_optional(pool)
+            .await?
+            .is_none()
+    {
+        return Err(sqlx::Error::Protocol("invalid role".into()));
+    }
     let now = chrono::Utc::now().to_rfc3339();
     let r = sqlx::query(
         "INSERT INTO users(email,password_hash,role,created_at,disabled) VALUES(?,?,?, ?,0) RETURNING id",
@@ -562,13 +569,21 @@ fn last_admin_error() -> sqlx::Error {
 }
 
 pub async fn update_user_role(pool: &SqlitePool, id: i64, role: &str) -> Result<u64, sqlx::Error> {
-    let role = Role::parse(role).ok_or_else(|| sqlx::Error::Protocol("invalid role".into()))?;
+    if Role::parse(role).is_none()
+        && sqlx::query("SELECT 1 FROM roles WHERE slug=?")
+            .bind(role)
+            .fetch_optional(pool)
+            .await?
+            .is_none()
+    {
+        return Err(sqlx::Error::Protocol("invalid role".into()));
+    }
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
     let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *conn).await?;
     if let Some(row) = current {
         let was_admin = row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0;
-        if was_admin && role != Role::Admin {
+        if was_admin && role != "admin" {
             let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *conn).await?.get("c");
             if admins <= 1 {
                 let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
@@ -576,7 +591,7 @@ pub async fn update_user_role(pool: &SqlitePool, id: i64, role: &str) -> Result<
             }
         }
     }
-    let changed = sqlx::query("UPDATE users SET role=? WHERE id=?").bind(role.as_str()).bind(id).execute(&mut *conn).await?.rows_affected();
+    let changed = sqlx::query("UPDATE users SET role=? WHERE id=?").bind(role).bind(id).execute(&mut *conn).await?.rows_affected();
     sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(changed)
 }

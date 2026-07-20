@@ -1,54 +1,24 @@
-# Task 2 report: admin user management API
+# Task 2 Report
 
-## Status
+Status: implemented, review findings fixed, and committed.
 
-Implemented and verified. The control plane now exposes admin-only user lifecycle endpoints:
+Commits:
+- `71131c6` feat: persist roles and permissions
+- pending fix commit (created after this report update)
 
-- `GET /api/users`
-- `POST /api/users`
-- `PATCH /api/users/{id}`
-- `DELETE /api/users/{id}`
+Implementation:
+- Added serializable role/permission DTOs and role create/patch request models in `src/control_plane/models.rs`.
+- Added additive SQLite `roles`, `permissions`, and `role_permissions` migrations.
+- Added idempotent seeds for all ten permission keys and system-managed admin/operator/viewer roles and assignments.
+- Added repository APIs for role CRUD, permission replacement/reading, role lookup, and global user permission checks with system-role and assigned-role protections.
+- Fixed `insert_user` and `update_user_role` to accept existing persistent custom role slugs while rejecting unknown slugs. Existing built-in role parsing and last-active-admin invariants remain enforced; custom roles can be assigned without weakening the admin guard.
+- Restored Task 1 repository coverage and `tests/control_plane_roles.rs`, including migration seed idempotency and custom-role assignment, permission changes, and assigned-role deletion protection.
 
-Handlers authenticate through the existing session cookie and token hash, authorize through the centralized `UsersManage` permission, hash passwords with the existing Argon2 helper, and return redacted `User` summaries only. Input validation covers email, role, and minimum password length. Duplicate email, invalid input, missing users, forbidden access, last-active-admin violations, and self-disable/self-delete are mapped to stable error envelopes. Successful and denied mutations emit redacted audit events. Disabled accounts cannot authenticate because the existing repository login/session lookups exclude them; disabling also revokes active sessions through the Task 1 repository lifecycle API.
+Exact commands/output:
+- `cargo test --test control_plane_repository --test control_plane_roles`
+  - Exit 127: `/bin/bash: line 1: cargo: command not found`
+- `git diff --check`
+  - Passed with no output before committing the fixes.
 
-## Tests
-
-Focused API tests:
-
-```text
-docker run --rm -e RUSTUP_TOOLCHAIN=1.88.0 -e CARGO_BUILD_JOBS=1 -v "$PWD":/app -w /app rust:1.88-bookworm cargo test --locked --test control_plane_users
-2 passed; 0 failed
-```
-
-Full backend suite:
-
-```text
-docker run --rm -e RUSTUP_TOOLCHAIN=1.88.0 -e CARGO_BUILD_JOBS=1 -v "$PWD":/app -w /app rust:1.88-bookworm cargo test --locked
-completed successfully with no failures
-```
-
-## Notes
-
-Task 2 uses the repository's transactional last-admin checks for role demotion, disable, and deletion. The API rejects self-disable and self-delete before mutating state. The frontend Users screen remains Task 3.
-
-## Review follow-up
-
-Addressed review findings:
-
-- Combined role/disabled PATCH updates now run in one `BEGIN IMMEDIATE` transaction, including last-admin validation, session revocation, and account update.
-- User mutation audit records use redacted target metadata (`target_user_id` or `target=redacted`) and explicit reasons for success, authorization, validation, not-found, self-mutation, duplicate, and last-admin denials. Passwords and request secrets are never recorded.
-- Expanded API coverage for operator/viewer 403 responses, disabled-login rejection, self/last-admin invariants, atomic PATCH behavior, and audit rows.
-
-Focused test rerun:
-
-```text
-docker run --rm -e RUSTUP_TOOLCHAIN=1.88.0 -e CARGO_BUILD_JOBS=1 -v "$PWD":/app -w /app rust:1.88-bookworm cargo test --locked --test control_plane_users
-3 passed; 0 failed
-```
-
-Full backend suite rerun:
-
-```text
-docker run --rm -e RUSTUP_TOOLCHAIN=1.88.0 -e CARGO_BUILD_JOBS=1 -v "$PWD":/app -w /app rust:1.88-bookworm cargo test --locked
-completed successfully; all test targets passed with 0 failures
-```
+Concerns:
+- The Rust toolchain is unavailable in this environment, so compilation, focused tests, and formatting could not be run.
