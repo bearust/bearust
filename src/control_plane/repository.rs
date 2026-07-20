@@ -341,33 +341,56 @@ pub async fn set_role_permissions(pool: &SqlitePool, role_id: i64, keys: &[&str]
 }
 
 pub async fn delete_role(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let row = sqlx::query("SELECT slug,system_managed FROM roles WHERE id=?")
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    let row = match sqlx::query("SELECT slug,system_managed FROM roles WHERE id=?")
         .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
+        .fetch_optional(&mut *conn)
+        .await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(error);
+        }
+    };
     let Some(row) = row else {
-        tx.commit().await?;
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
         return Ok(0);
     };
     if row.get::<i64, _>("system_managed") != 0 {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
         return Err(sqlx::Error::Protocol("system-managed role cannot be deleted".into()));
     }
     let slug: String = row.get("slug");
-    if sqlx::query("SELECT 1 FROM users WHERE role=? LIMIT 1")
+    let assigned = match sqlx::query("SELECT 1 FROM users WHERE role=? LIMIT 1")
         .bind(&slug)
-        .fetch_optional(&mut *tx)
-        .await?
-        .is_some()
+        .fetch_optional(&mut *conn)
+        .await
     {
+        Ok(row) => row.is_some(),
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(error);
+        }
+    };
+    if assigned {
+        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
         return Err(sqlx::Error::Protocol("role is assigned to users".into()));
     }
-    let changed = sqlx::query("DELETE FROM roles WHERE id=?")
+    let changed = match sqlx::query("DELETE FROM roles WHERE id=?")
         .bind(id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    tx.commit().await?;
+        .execute(&mut *conn)
+        .await
+    {
+        Ok(result) => result.rows_affected(),
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(error);
+        }
+    };
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(changed)
 }
 

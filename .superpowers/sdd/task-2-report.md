@@ -7,7 +7,8 @@ Commits:
 - `58d6170` fix: support persistent custom role assignments
 - `ad712d1` fix: allow update users custom roles
 - `3745a16` fix: accept custom roles in user handlers
-- pending transactional delete-role fix commit
+- `f23b5d4` fix: serialize custom role deletion
+- pending final delete transaction fix commit
 
 Implementation:
 - Added serializable role/permission DTOs and role create/patch request models in `src/control_plane/models.rs`.
@@ -18,11 +19,11 @@ Implementation:
 - Added shared async handler role-existence validation for POST `/api/users` and PATCH `/api/users/{id}`, preserving safe `invalid_input` responses for unknown roles.
 - Restored Task 1 repository coverage and `tests/control_plane_roles.rs`.
 - Added HTTP regression coverage for custom-role creation/update and unknown-role rejection in `tests/control_plane_users.rs`.
-- Changed `delete_role` to check assignment and delete within one SQLite write transaction, preventing a concurrent assignment from racing between the check and delete.
+- Changed `delete_role` to acquire a connection and execute `BEGIN IMMEDIATE` before lookup, assignment check, and delete. Every failure path explicitly rolls back; no-row and success paths explicitly commit.
 - Restored `docs/superpowers/plans/2026-07-20-phase-4d1-rbac-audit.md` and `docs/superpowers/specs/2026-07-20-phase-4d1-rbac-audit-design.md`.
 
 Exact commands/output:
-- `cargo test --test control_plane_repository --test control_plane_roles && cargo fmt --check`
+- `cargo test --test control_plane_repository --test control_plane_roles`
   - Exit 127: `/bin/bash: line 1: cargo: command not found`
 - `git diff --check`
   - Passed with no output before committing this fix.
