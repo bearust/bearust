@@ -5,7 +5,7 @@ export type Certificate={id:number;name:string;source:string;covered_hostnames:s
 export type AcmeRequest={environment:'staging'|'production';challenge:'http01'|'cloudflare_dns01';hostnames:string[];cloudflare_api_token?:string};
 export type AcmeJob={job_id:string;certificate_id:number|null;status:string};
 export type AcmeStatus={certificate_id:number;environment:'staging'|'production';challenge:'http01'|'cloudflare_dns01';hostnames:string[];renewal_state:string;next_renewal_at:string|null;last_attempt_at:string|null;last_error_code:string|null};
-export type AuditLogItem={actor:string;event:string;details:string;created_at:string};
+export type AuditLogItem={id:number;actor:string;event:string;details:string;created_at:string};
 export type AuditLogPage={items:AuditLogItem[];page:number;page_size:number;total:number};
 export type AuditLogQuery={event?:string;actor_id?:number;from?:string;to?:string;q?:string;page?:number;page_size?:number};
 async function request<T>(path:string,init:RequestInit={}):Promise<T>{const r=await fetch(path,{...init,credentials:'include',headers:{'Content-Type':'application/json',...(init.headers||{})}});if(!r.ok){const e=await r.json().catch(()=>({message:r.statusText}));const error=new Error(typeof e.message==='string'?e.message:'Request failed') as Error & {status?:number};error.status=r.status;throw error}return r.status===204?undefined as T:r.json()}
