@@ -4,6 +4,7 @@ use sqlx::SqlitePool;
 use axum::{body::{to_bytes, Body}, http::{Request, StatusCode}};
 use tower::util::ServiceExt;
 use bearust::control_plane::{build_state, router};
+use bearust::control_plane::auth;
 
 async fn pool() -> SqlitePool {
     let pool = repository::connect("sqlite::memory:").await.unwrap();
@@ -85,6 +86,21 @@ async fn audit_log_endpoint_authenticates_roles_validates_query_and_redacts_secr
 }
 
 #[tokio::test]
+async fn audit_log_endpoint_rejects_unknown_persisted_role() {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let state = build_state("sqlite::memory:", dir.path(), "setup-token").await.unwrap();
+    sqlx::query("INSERT INTO users(email,password_hash,role,created_at,disabled) VALUES(?,?,?,?,0)")
+        .bind("unknown@example.com").bind("hash").bind("future-role").bind("2026-07-20T00:00:00Z")
+        .execute(&state.db).await.unwrap();
+    let unknown_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE email=?").bind("unknown@example.com").fetch_one(&state.db).await.unwrap();
+    let token = "unknown-session";
+    repository::create_session(&state.db, unknown_id, &auth::token_hash(token), "2099-01-01T00:00:00Z").await.unwrap();
+    let (status, body) = request(router(state), "/api/audit-logs", Some(&format!("bearust_session={token}"))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(!body.contains("future-role"));
+}
+
+#[tokio::test]
 async fn repository_lists_filtered_paginated_rows() {
     let pool = pool().await;
     let active = repository::insert_user(&pool, "active@example.com", "hash", "operator")
@@ -118,12 +134,17 @@ async fn repository_lists_filtered_paginated_rows() {
     assert_eq!(second.items.iter().map(|item| item.event.as_str()).collect::<Vec<_>>(), ["user_updated", "system_started"]);
     assert_eq!(second.items[1].actor, "system");
 
+    insert_audit(&pool, Some(active.id), "credential_event", r#"{"password":"super-secret","provider_token":"provider-secret","request_body":{"private_key":"pem-secret"},"reason":"safe"}"#, "2026-07-20T10:04:00Z").await;
+
     let event = repository::list_audit_logs(&pool, &AuditLogQuery { event: Some("user_updated".into()), actor_id: None, from: None, to: None, q: None, page: 1, page_size: 25 }).await.unwrap();
     assert_eq!(event.total, 1);
     assert_eq!(event.items[0].details, "target=proxy;reason=changed");
 
+    let secret = repository::list_audit_logs(&pool, &AuditLogQuery { event: Some("credential_event".into()), actor_id: None, from: None, to: None, q: None, page: 1, page_size: 25 }).await.unwrap();
+    assert_eq!(secret.items[0].details, r#"{"password":"[REDACTED]","provider_token":"[REDACTED]","reason":"safe","request_body":"[REDACTED]"}"#);
+
     let actor = repository::list_audit_logs(&pool, &AuditLogQuery { event: None, actor_id: Some(active.id), from: None, to: None, q: None, page: 1, page_size: 25 }).await.unwrap();
-    assert_eq!(actor.total, 2);
+    assert_eq!(actor.total, 3);
 
     let time = repository::list_audit_logs(&pool, &AuditLogQuery { event: None, actor_id: None, from: Some("2026-07-20T10:01:00Z".into()), to: Some("2026-07-20T10:02:00Z".into()), q: None, page: 1, page_size: 25 }).await.unwrap();
     assert_eq!(time.items.iter().map(|item| item.event.as_str()).collect::<Vec<_>>(), ["user_deleted", "user_updated"]);

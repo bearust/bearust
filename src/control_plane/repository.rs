@@ -270,6 +270,64 @@ enum AuditFilter {
     Actor(i64),
 }
 
+fn sensitive_audit_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase().replace(['-', ' '], "_");
+    ["password", "token", "secret", "private_key", "privatekey", "credential", "request_body", "requestbody"]
+        .iter()
+        .any(|needle| key.contains(needle))
+}
+
+fn redact_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object.iter_mut() {
+                if sensitive_audit_key(key) {
+                    *value = serde_json::Value::String("[REDACTED]".into());
+                } else {
+                    redact_json(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => values.iter_mut().for_each(redact_json),
+        _ => {}
+    }
+}
+
+/// Sanitize legacy/free-form audit details at the read boundary. Audit rows
+/// may have been written by older callers, so API serialization must remain
+/// safe even when storage contains credentials or request bodies.
+pub fn sanitize_audit_details(details: &str) -> String {
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(details) {
+        redact_json(&mut value);
+        return serde_json::to_string(&value).unwrap_or_else(|_| "[REDACTED]".into());
+    }
+    let mut output = details.to_owned();
+    let lower = output.to_ascii_lowercase();
+    let mut replacements = Vec::new();
+    for key in ["password", "token", "secret", "private_key", "private-key", "credential", "request_body", "request-body"] {
+        let mut start = 0;
+        while let Some(relative) = lower[start..].find(key) {
+            let key_start = start + relative;
+            let after_key = key_start + key.len();
+            let bytes = lower.as_bytes();
+            if after_key < bytes.len() && (bytes[after_key] == b'=' || bytes[after_key] == b':') {
+                let value_start = after_key + 1;
+                let value_end = output[value_start..]
+                    .find([';', '&', '\n', ',', '}'])
+                    .map(|offset| value_start + offset)
+                    .unwrap_or(output.len());
+                replacements.push((value_start, value_end));
+            }
+            start = after_key;
+            if start >= lower.len() { break; }
+        }
+    }
+    for (start, end) in replacements.into_iter().rev() {
+        output.replace_range(start..end, "[REDACTED]");
+    }
+    output
+}
+
 fn audit_where(query: &AuditLogQuery) -> (String, Vec<AuditFilter>) {
     let mut predicates = Vec::new();
     let mut filters = Vec::new();
@@ -342,7 +400,7 @@ pub async fn list_audit_logs(
             id: row.get("id"),
             actor: row.get("actor"),
             event: row.get("event"),
-            details: row.get("details"),
+            details: sanitize_audit_details(&row.get::<String, _>("details")),
             created_at: row.get("created_at"),
         })
         .collect();

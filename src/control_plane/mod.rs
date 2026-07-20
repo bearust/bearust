@@ -626,8 +626,15 @@ async fn list_audit_logs(
     h: HeaderMap,
     Query(params): Query<AuditLogParams>,
 ) -> impl IntoResponse {
-    if let Err(status) = current(&s, &h).await {
-        return status.into_response();
+    let user = match current(&s, &h).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    // Audit history is intentionally available to the three known roles only.
+    // Do not treat malformed/unknown persisted roles as a viewer: that would
+    // turn a corrupt account record into an authorization bypass.
+    if !matches!(Role::parse(&user.role), Some(Role::Admin | Role::Operator | Role::Viewer)) {
+        return StatusCode::FORBIDDEN.into_response();
     }
 
     let page = match params.page.as_deref().unwrap_or("1").parse::<u32>() {
