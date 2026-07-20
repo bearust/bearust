@@ -6,6 +6,8 @@ import {
   AuditLogQuery,
   Certificate,
   Host,
+  PermissionKey,
+  RoleRecord,
   Role,
   User,
 } from "./api";
@@ -498,6 +500,13 @@ export function UsersSection({
                         {item.disabled ? "Enable" : "Disable"}
                       </button>{" "}
                       <button
+                        disabled={busy === item.id}
+                        onClick={() => void run(item.id, async () => {
+                          const result = await api.revokeUserSessions(item.id);
+                          window.alert(`Revoked ${result.revoked} session(s).`);
+                        })}
+                      >Revoke sessions</button>{" "}
+                      <button
                         className="danger"
                         disabled={busy === item.id}
                         onClick={() => {
@@ -560,10 +569,19 @@ export function UsersSection({
   );
 }
 
+const PERMISSIONS: PermissionKey[] = ["proxy_hosts.read","proxy_hosts.write","certificates.read","certificates.write","users.manage","roles.manage","audit_logs.read","audit_logs.export","system.settings.manage","sessions.revoke"];
+export function RolesSection({ user, roles, onChanged }: { user: User; roles: RoleRecord[]; onChanged: () => void | Promise<void> }) {
+  const [slug,setSlug]=useState(""), [name,setName]=useState(""), [error,setError]=useState(""), [busy,setBusy]=useState(false);
+  if (user.role !== "admin") return null;
+  const run=async (action:()=>Promise<unknown>)=>{setBusy(true);setError("");try{await action();await onChanged()}catch(e){setError(userError(e))}finally{setBusy(false)}};
+  return <section className="card roles-card"><h2>Roles</h2>{error&&<p className="error">{error}</p>}<table><thead><tr><th>Name</th><th>Slug</th><th>Permissions</th><th /></tr></thead><tbody>{roles.map(role=><tr key={role.id}><td>{role.name}</td><td>{role.slug}</td><td>{role.permissions.join(", ")}</td><td>{!role.system_managed&&<><button disabled={busy} onClick={()=>void run(()=>api.updateRole(role.id,{description:role.description}))}>Save</button>{" "}<button className="danger" disabled={busy} onClick={()=>window.confirm("Delete this role?")&&void run(()=>api.deleteRole(role.id))}>Delete</button></>}</td></tr>)}</tbody></table><form onSubmit={e=>{e.preventDefault();if(!slug.trim()||!name.trim())return;void run(async()=>{await api.createRole({slug,name,description:"",permissions:["audit_logs.read"]});setSlug("");setName("")})}}><h3>Add role</h3><Field label="Slug" value={slug} onChange={(e:any)=>setSlug(e.target.value)}/><Field label="Name" value={name} onChange={(e:any)=>setName(e.target.value)}/><button disabled={busy||!slug.trim()||!name.trim()}>Create role</button></form><p className="muted">Available permissions: {PERMISSIONS.join(", ")}</p></section>;
+}
+
 function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [hosts, setHosts] = useState<Host[]>([]),
     [certs, setCerts] = useState<Certificate[]>([]),
     [users, setUsers] = useState<User[]>([]),
+    [roles, setRoles] = useState<RoleRecord[]>([]),
     [error, setError] = useState(""),
     [usersError, setUsersError] = useState("");
   const [form, setForm] = useState({
@@ -588,6 +606,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
     if (user.role === "admin") {
       try {
         setUsers(await api.users());
+        setRoles(await api.roles());
         setUsersError("");
       } catch (e) {
         setUsersError(userError(e));
@@ -747,6 +766,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
         userErrorMessage={usersError}
         onChanged={() => void refresh()}
       />
+      <RolesSection user={user} roles={roles} onChanged={() => void refresh()} />
       <AuditLogSection user={user} />
     </main>
   );

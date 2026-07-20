@@ -82,8 +82,13 @@ pub async fn login(
 }
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if let Some(t) = cookie(&headers) {
+        let actor_id = repository::find_user_by_session(&state.db, &token_hash(t))
+            .await
+            .ok()
+            .flatten()
+            .map(|user| user.id);
         let _ = repository::revoke_session(&state.db, &token_hash(t)).await;
-        audit::record(&state.db, None, "logout", "session_revoked").await;
+        audit::record(&state.db, actor_id, "logout", "session_revoked").await;
     }
     StatusCode::NO_CONTENT
 }

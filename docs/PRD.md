@@ -605,6 +605,12 @@ The Phase 4C increment delivers a read-only `GET /api/audit-logs` endpoint and d
 
 Rows expose only an actor label, event, redacted details, timestamp, and ID. Actor labels resolve to the current email, `system`, or `deleted-user`; sensitive credentials, hashes, tokens, private keys, request bodies, and raw database errors are sanitized at the read boundary and never serialized, rendered, or otherwise exposed. No audit delete, mutation, or export operation is provided.
 
+### Phase 4D.1 status: persistent RBAC and audit coverage
+
+Phase 4D.1 adds additive, idempotent persistence for the ten global permission keys and the built-in `admin`, `operator`, and `viewer` roles, plus administrator-managed custom role CRUD. Built-in roles remain immutable; assigned custom roles may have permissions changed immediately but cannot be deleted while referenced by users. Existing role strings and session cookies remain compatible, and unknown roles fail closed through centralized authorization.
+
+Administrators can revoke another user's active sessions through `POST /api/users/{id}/sessions/revoke`; self-revocation is rejected. Role, user, session, proxy-host, certificate, and authorization-denial paths record safe audit events. The dashboard includes admin-only role and session controls. Per-host scopes, audit export, system settings, realtime updates, and frontend theme work remain deferred to later Phase 4 increments.
+
 ---
 
 ## 13. Success Metrics (KPIs)
