@@ -128,6 +128,34 @@ pub struct UserPatch {
     pub disabled: Option<bool>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditLogQuery {
+    pub event: Option<String>,
+    pub actor_id: Option<i64>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub q: Option<String>,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditLogItem {
+    pub id: i64,
+    pub actor: String,
+    pub event: String,
+    pub details: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditLogPage {
+    pub items: Vec<AuditLogItem>,
+    pub page: u32,
+    pub page_size: u32,
+    pub total: i64,
+}
+
 pub type UserSummary = User;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProxyHost {

@@ -1,5 +1,6 @@
 use crate::control_plane::models::{
-    AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, CertificateMetadata, ProxyHost, User,
+    AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AuditLogItem, AuditLogPage,
+    AuditLogQuery, CertificateMetadata, ProxyHost, User,
 };
 use crate::control_plane::rbac::Role;
 use sqlx::{
@@ -262,6 +263,90 @@ pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, sqlx::Error> {
         id: x.get("id"), email: x.get("email"), role: x.get("role"),
         created_at: x.get("created_at"), disabled: x.get::<i64, _>("disabled") != 0,
     }).collect())
+}
+
+enum AuditFilter {
+    Text(String),
+    Actor(i64),
+}
+
+fn audit_where(query: &AuditLogQuery) -> (String, Vec<AuditFilter>) {
+    let mut predicates = Vec::new();
+    let mut filters = Vec::new();
+    if let Some(event) = query.event.as_deref() {
+        predicates.push("a.event = ?");
+        filters.push(AuditFilter::Text(event.to_owned()));
+    }
+    if let Some(actor_id) = query.actor_id {
+        predicates.push("a.user_id = ?");
+        filters.push(AuditFilter::Actor(actor_id));
+    }
+    if let Some(from) = query.from.as_deref() {
+        predicates.push("a.created_at >= ?");
+        filters.push(AuditFilter::Text(from.to_owned()));
+    }
+    if let Some(to) = query.to.as_deref() {
+        predicates.push("a.created_at <= ?");
+        filters.push(AuditFilter::Text(to.to_owned()));
+    }
+    if let Some(q) = query.q.as_deref() {
+        predicates.push("(a.event LIKE ? OR a.details LIKE ?)");
+        let pattern = format!("%{q}%");
+        filters.push(AuditFilter::Text(pattern.clone()));
+        filters.push(AuditFilter::Text(pattern));
+    }
+    let where_clause = if predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", predicates.join(" AND "))
+    };
+    (where_clause, filters)
+}
+
+pub async fn list_audit_logs(
+    pool: &SqlitePool,
+    query: &AuditLogQuery,
+) -> Result<AuditLogPage, sqlx::Error> {
+    let (where_clause, filters) = audit_where(query);
+    let count_sql = format!("SELECT COUNT(*) AS c FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id{where_clause}");
+    let mut count = sqlx::query(&count_sql);
+    for filter in &filters {
+        count = match filter {
+            AuditFilter::Text(value) => count.bind(value),
+            AuditFilter::Actor(value) => count.bind(*value),
+        };
+    }
+    let total = count.fetch_one(pool).await?.get::<i64, _>("c");
+
+    let page = query.page.max(1);
+    let page_size = query.page_size;
+    let offset = (page as i64 - 1).saturating_mul(page_size as i64);
+    let select_sql = format!(
+        "SELECT a.id, COALESCE(u.email, CASE WHEN a.user_id IS NULL THEN 'system' ELSE 'deleted-user' END) AS actor, a.event, a.details, a.created_at FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id{where_clause} ORDER BY a.created_at DESC, a.id DESC LIMIT ? OFFSET ?"
+    );
+    let mut select = sqlx::query(&select_sql);
+    for filter in &filters {
+        select = match filter {
+            AuditFilter::Text(value) => select.bind(value),
+            AuditFilter::Actor(value) => select.bind(*value),
+        };
+    }
+    let rows = select
+        .bind(page_size as i64)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+    let items = rows
+        .into_iter()
+        .map(|row| AuditLogItem {
+            id: row.get("id"),
+            actor: row.get("actor"),
+            event: row.get("event"),
+            details: row.get("details"),
+            created_at: row.get("created_at"),
+        })
+        .collect();
+    Ok(AuditLogPage { items, page, page_size, total })
 }
 
 pub async fn count_active_admins(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
