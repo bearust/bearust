@@ -143,8 +143,12 @@ async fn repository_lists_filtered_paginated_rows() {
     let secret = repository::list_audit_logs(&pool, &AuditLogQuery { event: Some("credential_event".into()), actor_id: None, from: None, to: None, q: None, page: 1, page_size: 25 }).await.unwrap();
     assert_eq!(secret.items[0].details, r#"{"password":"[REDACTED]","provider_token":"[REDACTED]","reason":"safe","request_body":"[REDACTED]"}"#);
 
+    insert_audit(&pool, Some(active.id), "overlap_event", "password=password=chained-secret", "2026-07-20T10:05:00Z").await;
+    let overlap = repository::list_audit_logs(&pool, &AuditLogQuery { event: Some("overlap_event".into()), actor_id: None, from: None, to: None, q: None, page: 1, page_size: 25 }).await.unwrap();
+    assert_eq!(overlap.items[0].details, "password=[REDACTED]");
+
     let actor = repository::list_audit_logs(&pool, &AuditLogQuery { event: None, actor_id: Some(active.id), from: None, to: None, q: None, page: 1, page_size: 25 }).await.unwrap();
-    assert_eq!(actor.total, 3);
+    assert_eq!(actor.total, 4);
 
     let time = repository::list_audit_logs(&pool, &AuditLogQuery { event: None, actor_id: None, from: Some("2026-07-20T10:01:00Z".into()), to: Some("2026-07-20T10:02:00Z".into()), q: None, page: 1, page_size: 25 }).await.unwrap();
     assert_eq!(time.items.iter().map(|item| item.event.as_str()).collect::<Vec<_>>(), ["user_deleted", "user_updated"]);

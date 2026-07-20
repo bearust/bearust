@@ -322,7 +322,21 @@ pub fn sanitize_audit_details(details: &str) -> String {
             if start >= lower.len() { break; }
         }
     }
-    for (start, end) in replacements.into_iter().rev() {
+    // A value may itself contain another sensitive key (for example
+    // `password=password=...`). Coalesce ranges first so reverse replacement
+    // never attempts to edit an already-replaced/overlapping span.
+    replacements.sort_unstable_by_key(|(start, _)| *start);
+    let mut merged = Vec::with_capacity(replacements.len());
+    for (start, end) in replacements {
+        if let Some((_, previous_end)) = merged.last_mut() {
+            if start <= *previous_end {
+                *previous_end = (*previous_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    for (start, end) in merged.into_iter().rev() {
         output.replace_range(start..end, "[REDACTED]");
     }
     output
