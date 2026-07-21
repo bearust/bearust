@@ -421,10 +421,10 @@ export function UsersSection({
   };
   const roleOptions = [...roles, ...["admin", "operator", "viewer"].filter((slug) => !roles.some((role) => role.slug === slug)).map((slug) => ({ slug, name: slug[0].toUpperCase() + slug.slice(1) }))];
   return (
-    <Card className="users-card">
+    <Card data-testid="users-section">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-xl font-semibold">Users</h2>
-        <Button variant="secondary" onClick={() => void run(-2, () => Promise.resolve())}>
+        <Button data-testid="users-refresh" variant="secondary" onClick={() => void run(-2, () => Promise.resolve())}>
           Refresh
         </Button>
       </div>
@@ -512,7 +512,8 @@ export function UsersSection({
         </tbody>
       </table></div>
       <form
-        className="user-form mt-6 grid gap-4 sm:grid-cols-2"
+        data-testid="user-create-form"
+        className="mt-6 grid gap-4 sm:grid-cols-2"
         onSubmit={async (e) => {
           e.preventDefault();
           if (!email.trim() || password.length < 12) return;

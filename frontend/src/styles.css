@@ -119,3 +119,15 @@
   --color-info-foreground: var(--color-info-foreground);
   --color-info-hover: var(--color-info-hover);
 }
+
+/* Respect users who request reduced motion while preserving state changes. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

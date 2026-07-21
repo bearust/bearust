@@ -83,7 +83,7 @@ describe('Dashboard Users UI',()=>{
     const {element,root}=await renderDashboard(admin,[admin,operator]);
     const inputs=element.querySelectorAll('input');
     await act(async()=>{const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!;set.call(inputs[4],'new@example.com');inputs[4].dispatchEvent(new Event('input',{bubbles:true}));set.call(inputs[5],'long-password-123');inputs[5].dispatchEvent(new Event('input',{bubbles:true}));});
-    const form=element.querySelector('.user-form') as HTMLFormElement;
+    const form=element.querySelector('[data-testid="user-create-form"]') as HTMLFormElement;
     await act(async()=>{form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));});
     expect(create).toHaveBeenCalledWith({email:'new@example.com',password:'long-password-123',role:'viewer'});
     const selects=element.querySelectorAll('select');
@@ -98,7 +98,7 @@ describe('Dashboard Users UI',()=>{
     const usersLoad=vi.spyOn(api,'users');
     const view=await renderDashboard(admin,[admin]);
     usersLoad.mockRejectedValue(new Error('500 internal stack token=secret-value'));
-    const refresh=view.element.querySelector('.users-card button') as HTMLButtonElement;
+    const refresh=view.element.querySelector('[data-testid="users-refresh"]') as HTMLButtonElement;
     await act(async()=>{refresh.click();});
     expect(view.element.textContent).not.toContain('internal stack');
     expect(view.element.textContent).toContain('Unable to complete the user request. Please try again.');
