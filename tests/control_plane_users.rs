@@ -30,6 +30,41 @@ async fn custom_role_permission_changes_apply_without_relogin() {
     assert_eq!(json(app, "POST", "/api/proxy-hosts", Some(&cookie), host).await.0, StatusCode::CREATED);
 }
 
+#[tokio::test]
+async fn scoped_proxy_host_routes_filter_and_enforce_mutations() {
+    let (app, db) = app().await;
+    assert_eq!(json(app.clone(), "POST", "/api/setup/initialize", None, r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#).await.0, StatusCode::CREATED);
+    let (_, admin_cookie) = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    let admin_cookie = admin_cookie.unwrap();
+    let host = r#"{"name":"scoped-host","domain":"scoped.example.com","upstream_host":"127.0.0.1","upstream_port":8080}"#;
+    let (_, first_body, _) = json(app.clone(), "POST", "/api/proxy-hosts", Some(&admin_cookie), host).await;
+    let first_id = serde_json::from_str::<serde_json::Value>(&first_body).unwrap()["id"].as_i64().unwrap();
+    let other = r#"{"name":"hidden-host","domain":"hidden.example.com","upstream_host":"127.0.0.1","upstream_port":8081}"#;
+    let (_, other_body, _) = json(app.clone(), "POST", "/api/proxy-hosts", Some(&admin_cookie), other).await;
+    let other_id = serde_json::from_str::<serde_json::Value>(&other_body).unwrap()["id"].as_i64().unwrap();
+    repository::insert_role(&db, "scoped-route", "Scoped Route", "").await.unwrap();
+    let role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE slug='scoped-route'").fetch_one(&db).await.unwrap();
+    repository::set_role_permissions(&db, role_id, &["proxy_hosts.write"]).await.unwrap();
+    let (_, user_body, _) = json(app.clone(), "POST", "/api/users", Some(&admin_cookie), r#"{"email":"scoped-route@example.com","password":"scoped password 123","role":"scoped-route"}"#).await;
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&user_body).unwrap()["role"], "scoped-route");
+    let permission_id: i64 = sqlx::query_scalar("SELECT id FROM permissions WHERE key='proxy_hosts.write'").fetch_one(&db).await.unwrap();
+    sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(?,?, 'proxy_host',?)").bind(role_id).bind(permission_id).bind(first_id).execute(&db).await.unwrap();
+    let read_permission_id: i64 = sqlx::query_scalar("SELECT id FROM permissions WHERE key='proxy_hosts.read'").fetch_one(&db).await.unwrap();
+    sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(?,?, 'proxy_host',?)").bind(role_id).bind(read_permission_id).bind(first_id).execute(&db).await.unwrap();
+    let (_, cookie) = login(app.clone(), "scoped-route@example.com", "scoped password 123").await;
+    let cookie = cookie.unwrap();
+    let (status, body, _) = json(app.clone(), "GET", "/api/proxy-hosts", Some(&cookie), "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap().as_array().unwrap().len(), 1);
+    assert_eq!(json(app.clone(), "GET", &format!("/api/proxy-hosts/{other_id}"), Some(&cookie), "").await.0, StatusCode::NOT_FOUND);
+    let updated = r#"{"name":"scoped-updated","domain":"scoped.example.com","upstream_host":"127.0.0.1","upstream_port":8082}"#;
+    assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{first_id}"), Some(&cookie), updated).await.0, StatusCode::OK);
+    assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{other_id}"), Some(&cookie), updated).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(json(app.clone(), "DELETE", &format!("/api/proxy-hosts/{other_id}"), Some(&cookie), "").await.0, StatusCode::NOT_FOUND);
+    assert_eq!(json(app.clone(), "POST", "/api/proxy-hosts", Some(&cookie), host).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(json(app, "DELETE", &format!("/api/proxy-hosts/{first_id}"), Some(&cookie), "").await.0, StatusCode::NO_CONTENT);
+}
+
 async fn json(app: Router, method: &str, uri: &str, cookie: Option<&str>, body: &str) -> (StatusCode, String, Option<String>) {
     let mut request = Request::builder().method(method).uri(uri).header("content-type", "application/json");
     if let Some(cookie) = cookie { request = request.header("cookie", cookie); }

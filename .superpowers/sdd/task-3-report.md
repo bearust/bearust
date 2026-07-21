@@ -33,3 +33,13 @@ Verification:
 - Reload rollback now checks host, scope, and reloader restoration results and records `rollback_failed` when any restoration step fails.
 
 Verification: `git diff --check` passed. Native Cargo unavailable, so route integration tests could not be executed in this environment.
+
+## Route integration test coverage
+
+- Added `scoped_proxy_host_routes_filter_and_enforce_mutations` in `tests/control_plane_users.rs`.
+- The test provisions two hosts and a scoped-only role, then verifies list filtering, successful update/delete of the assigned host, `404` for denied detail/update/delete requests, and `403` for scoped-only host creation.
+
+Verification:
+
+- `git diff --check`: passed.
+- `cargo test --test control_plane_users scoped_proxy_host_routes_filter_and_enforce_mutations -- --nocapture`: blocked because native Cargo is unavailable in the host environment (`cargo: command not found`).
