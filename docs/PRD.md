@@ -613,7 +613,7 @@ Administrators can revoke another user's active sessions through `POST /api/user
 
 ### Phase 4D.2 status: authenticated realtime updates
 
-Phase 4D.2 adds the authenticated `GET /api/events` Server-Sent Events (SSE) stream used by the dashboard to invalidate and reload proxy-host, certificate, user, role, session, and audit views without polling. Session-cookie authentication is required, and event payloads are intentionally redacted. The hub is process-local with bounded delivery; clients receive periodic heartbeats and use bounded automatic reconnects after disconnects. Cross-node fan-out and replay of events missed during a disconnect are deferred to the multi-node phase.
+Phase 4D.2 adds the authenticated `GET /api/events` Server-Sent Events (SSE) stream used by the dashboard to invalidate and reload proxy-host, certificate, user, role, and audit data without polling. Session changes are also emitted as invalidation notifications for session-view consumers. Session-cookie authentication is required, and event payloads are intentionally redacted. The hub is process-local with bounded delivery; clients receive periodic heartbeats and use bounded automatic reconnects after disconnects. Cross-node fan-out and replay of events missed during a disconnect are deferred to the multi-node phase.
 
 ---
 

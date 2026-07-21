@@ -1,12 +1,21 @@
-# Task 5 report
+# Task 5 report — Phase 4D.2 realtime updates
 
-Implemented administrative session revocation.
+## Documentation
 
-- Added `POST /api/users/{id}/sessions/revoke` using centralized `Permission::SessionsRevoke` authorization.
-- Rejects self-targeting, handles missing users and database failures with generic responses, revokes active sessions only, and returns `{ "revoked": <count> }`.
-- Added safe `sessions_revoked` and `session_revoke_denied` audit events without token/session material.
-- Added repository and HTTP-focused tests.
+- Added Phase 4D.2 status to `README.md` and `docs/PRD.md`.
+- Documented the authenticated `/api/events` SSE stream, session-cookie auth,
+  process-local bounded delivery, heartbeat and reconnect behavior, and the
+  deferred cross-node fan-out/replay scope.
 
-Verification: `cargo` is unavailable in the environment (`/bin/bash: cargo: command not found`), so focused tests could not run. `git diff --check` passed.
+## Verification
 
-Commit: `f2a4444 feat: add administrative session revocation`
+- Rust 1.88 Docker suite with required build packages: passed (`CARGO_STATUS=0`).
+- Frontend Vitest: 4 files / 18 tests passed.
+- Frontend production build: passed.
+- `git diff --check`: passed.
+
+No unrelated baseline files were formatted or changed.
+
+## Follow-up correction
+
+- Clarified that `sessions.changed` is emitted as a stream invalidation notification; the current dashboard does not claim to reload a session view for that event.
