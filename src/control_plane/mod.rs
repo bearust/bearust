@@ -205,7 +205,7 @@ pub async fn build_state(
         auth_attempts: Arc::new(Mutex::new(HashMap::new())),
         secrets,
         acme: Arc::new(CertificateAcmeAdapter::new(certificate_acme)),
-        realtime: realtime::RealtimeHub::new(256),
+        realtime: Arc::new(realtime::RealtimeHub::new(256)),
     })
 }
 

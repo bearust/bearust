@@ -1,5 +1,5 @@
 use chrono::{SecondsFormat, Utc};
-use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 
 /// Process-local event fan-out used to invalidate connected control-plane UIs.
@@ -18,9 +18,9 @@ pub struct RealtimeEvent {
 }
 
 impl RealtimeHub {
-    pub fn new(capacity: usize) -> Arc<Self> {
+    pub fn new(capacity: usize) -> Self {
         let (sender, _) = broadcast::channel(capacity);
-        Arc::new(Self { sender, sequence: AtomicU64::new(0) })
+        Self { sender, sequence: AtomicU64::new(0) }
     }
 
     pub fn publish(&self, kind: &'static str) -> RealtimeEvent {
