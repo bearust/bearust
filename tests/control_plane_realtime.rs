@@ -61,7 +61,7 @@ async fn events_endpoint_requires_auth_and_streams_ready_and_published_events() 
     state.realtime.publish("users.changed");
     let event = body.frame().await.unwrap().unwrap().into_data().unwrap();
     let event = String::from_utf8(event.to_vec()).unwrap();
-    assert!(event.contains("id: 1\n"));
+    assert!(event.lines().any(|line| line.starts_with("id: ")));
     assert!(event.contains("event: users.changed\n"));
 }
 
@@ -119,4 +119,43 @@ async fn state_audit_record_publishes_redacted_audit_event() {
     assert!(!serialized.contains("password"));
     assert!(!serialized.contains("setup-token"));
     assert!(!serialized.contains("private key"));
+}
+
+#[tokio::test]
+async fn publishes_domain_events_without_secrets() {
+    let (app, state, cookie) = authenticated_app().await;
+    let mut events = state.realtime.subscribe();
+
+    let create_user = app.clone().oneshot(Request::builder()
+        .method("POST")
+        .uri("/api/users")
+        .header("cookie", &cookie)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"email":"operator@example.com","password":"operator password 123","role":"operator"}"#))
+        .unwrap()).await.unwrap();
+    assert_eq!(create_user.status(), StatusCode::CREATED);
+
+    let audit = events.recv().await.unwrap();
+    let users = events.recv().await.unwrap();
+    assert_eq!(audit.kind, "audit");
+    assert_eq!(users.kind, "users.changed");
+
+    let invalid_user = app.clone().oneshot(Request::builder()
+        .method("POST")
+        .uri("/api/users")
+        .header("cookie", &cookie)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"email":"invalid","password":"short","role":"missing"}"#))
+        .unwrap()).await.unwrap();
+    assert_eq!(invalid_user.status(), StatusCode::BAD_REQUEST);
+    let denied = events.recv().await.unwrap();
+    assert_eq!(denied.kind, "audit");
+
+    for event in [audit, users, denied] {
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(!serialized.contains("operator password 123"));
+        assert!(!serialized.contains("setup-token"));
+        assert!(!serialized.contains("private key"));
+        assert!(!serialized.contains("-----BEGIN"));
+    }
 }

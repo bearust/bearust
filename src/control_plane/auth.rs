@@ -71,7 +71,7 @@ pub async fn login(
             }
         }
     }
-    audit::record(&state.db, None, "login_failed", "invalid_credentials").await;
+    audit::record_state(&state, None, "login_failed", "invalid_credentials").await;
     (
         StatusCode::UNAUTHORIZED,
         Json(ErrorEnvelope {
