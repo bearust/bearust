@@ -98,7 +98,7 @@ async fn user_lifecycle_updates_role_status_and_sessions() {
     repository::create_session(&pool, operator.id, "session-hash", "2999-01-01T00:00:00Z").await.unwrap();
     assert_eq!(repository::count_active_admins(&pool).await.unwrap(), 1);
     assert_eq!(repository::update_user_role(&pool, operator.id, "viewer").await.unwrap(), 1);
-    assert_eq!(repository::list_users(&pool).await.unwrap()[1].role, "viewer");
+    assert_eq!(repository::find_user(&pool, "operator@example.com").await.unwrap().unwrap().0.role, "viewer");
     assert_eq!(repository::set_user_disabled(&pool, operator.id, true).await.unwrap(), 1);
     assert!(repository::find_user(&pool, "operator@example.com").await.unwrap().is_none());
     assert!(repository::find_user_by_session(&pool, "session-hash").await.unwrap().is_none());

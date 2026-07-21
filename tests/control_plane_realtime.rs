@@ -134,6 +134,10 @@ async fn publishes_domain_events_without_secrets() {
         .body(Body::from(r#"{"email":"operator@example.com","password":"operator password 123","role":"operator"}"#))
         .unwrap()).await.unwrap();
     assert_eq!(create_user.status(), StatusCode::CREATED);
+    let created_user: serde_json::Value = serde_json::from_slice(
+        &create_user.into_body().collect().await.unwrap().to_bytes(),
+    ).unwrap();
+    let created_user_id = created_user["id"].as_i64().unwrap();
 
     let audit = events.recv().await.unwrap();
     let users = events.recv().await.unwrap();
@@ -142,7 +146,7 @@ async fn publishes_domain_events_without_secrets() {
 
     let update_user = app.clone().oneshot(Request::builder()
         .method("PATCH")
-        .uri("/api/users/2")
+        .uri(format!("/api/users/{created_user_id}"))
         .header("cookie", &cookie)
         .header("content-type", "application/json")
         .body(Body::from(r#"{"disabled":true}"#))

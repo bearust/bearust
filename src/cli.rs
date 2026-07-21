@@ -232,6 +232,17 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| format!("sqlite://{}", config.server.control_database.display()));
+        if std::env::var_os("DATABASE_URL").is_none()
+            && is_sqlite_database_url(&database_url)
+            && !database_url.contains(":memory:")
+        {
+            if let Some(parent) = config.server.control_database.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| AppError::Server(format!("create database directory: {e}")))?;
+            }
+            std::fs::File::create(&config.server.control_database)
+                .map_err(|e| AppError::Server(format!("create database file: {e}")))?;
+        }
         let setup_token_from_env = std::env::var("BEARUST_SETUP_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());

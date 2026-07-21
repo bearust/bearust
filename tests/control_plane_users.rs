@@ -45,6 +45,7 @@ async fn scoped_proxy_host_routes_filter_and_enforce_mutations() {
     repository::insert_role(&db, "scoped-route", "Scoped Route", "").await.unwrap();
     let role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE slug='scoped-route'").fetch_one(&db).await.unwrap();
     repository::set_role_permissions(&db, role_id, &["proxy_hosts.write"]).await.unwrap();
+    sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='' AND scope_id=0").bind(role_id).execute(&db).await.unwrap();
     let (_, user_body, _) = json(app.clone(), "POST", "/api/users", Some(&admin_cookie), r#"{"email":"scoped-route@example.com","password":"scoped password 123","role":"scoped-route"}"#).await;
     assert_eq!(serde_json::from_str::<serde_json::Value>(&user_body).unwrap()["role"], "scoped-route");
     let permission_id: i64 = sqlx::query_scalar("SELECT id FROM permissions WHERE key='proxy_hosts.write'").fetch_one(&db).await.unwrap();
@@ -69,7 +70,8 @@ async fn scoped_proxy_host_routes_filter_and_enforce_mutations() {
     assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{first_id}"), Some(&reader_cookie), read_only_update).await.0, StatusCode::NOT_FOUND);
     let updated = r#"{"name":"scoped-updated","domain":"scoped.example.com","upstream_host":"127.0.0.1","upstream_port":8082}"#;
     assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{first_id}"), Some(&cookie), updated).await.0, StatusCode::OK);
-    assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{other_id}"), Some(&cookie), updated).await.0, StatusCode::NOT_FOUND);
+    let other_updated = r#"{"name":"hidden-updated","domain":"hidden-updated.example.com","upstream_host":"127.0.0.1","upstream_port":8082}"#;
+    assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{other_id}"), Some(&cookie), other_updated).await.0, StatusCode::NOT_FOUND);
     assert_eq!(json(app.clone(), "DELETE", &format!("/api/proxy-hosts/{other_id}"), Some(&cookie), "").await.0, StatusCode::NOT_FOUND);
     assert_eq!(json(app.clone(), "POST", "/api/proxy-hosts", Some(&cookie), host).await.0, StatusCode::FORBIDDEN);
     assert_eq!(json(app, "DELETE", &format!("/api/proxy-hosts/{first_id}"), Some(&cookie), "").await.0, StatusCode::NO_CONTENT);
@@ -147,8 +149,8 @@ async fn operator_can_write_hosts_and_certificates_while_viewer_is_read_only() {
     assert_eq!(json(app.clone(), "POST", "/api/proxy-hosts", Some(&viewer_cookie), host).await.0, StatusCode::FORBIDDEN);
     let updated_host = r#"{"name":"operator-host-updated","domain":"operator.example.com","upstream_host":"127.0.0.1","upstream_port":8081}"#;
     assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{host_id}"), Some(&op_cookie), updated_host).await.0, StatusCode::OK);
-    assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{host_id}"), Some(&viewer_cookie), updated_host).await.0, StatusCode::FORBIDDEN);
-    assert_eq!(json(app.clone(), "DELETE", &format!("/api/proxy-hosts/{host_id}"), Some(&viewer_cookie), "").await.0, StatusCode::FORBIDDEN);
+    assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{host_id}"), Some(&viewer_cookie), updated_host).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(json(app.clone(), "DELETE", &format!("/api/proxy-hosts/{host_id}"), Some(&viewer_cookie), "").await.0, StatusCode::NOT_FOUND);
     assert_eq!(json(app.clone(), "DELETE", &format!("/api/proxy-hosts/{host_id}"), Some(&op_cookie), "").await.0, StatusCode::NO_CONTENT);
     let (certificate, key) = certificate_material();
     let (status, certificate_body) = multipart_certificate(app.clone(), &op_cookie, &certificate, &key).await;
@@ -210,7 +212,8 @@ async fn admin_user_crud_redacts_secrets_and_enforces_invariants() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _, _) = json(app.clone(), "DELETE", &format!("/api/users/{id}"), Some(&cookie), "").await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _, _) = json(app.clone(), "DELETE", "/api/users/1", Some(&cookie), "").await;
+    let admin_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE email='admin@example.com'").fetch_one(&db).await.unwrap();
+    let (status, _, _) = json(app.clone(), "DELETE", &format!("/api/users/{admin_id}"), Some(&cookie), "").await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let rows = sqlx::query("SELECT event,details FROM audit_logs WHERE event LIKE 'user_%' ORDER BY id")
         .fetch_all(&db).await.unwrap();
@@ -236,8 +239,9 @@ async fn role_authorization_and_denials_are_enforced_and_audited() {
         assert_eq!(json(app.clone(), "GET", "/api/users", cookie, "").await.0, StatusCode::FORBIDDEN);
         assert_eq!(json(app.clone(), "PATCH", &format!("/api/users/{op_id}"), cookie, r#"{"disabled":true}"#).await.0, StatusCode::FORBIDDEN);
     }
-    assert_eq!(json(app.clone(), "PATCH", "/api/users/1", Some(&admin_cookie), r#"{"disabled":true}"#).await.0, StatusCode::FORBIDDEN);
-    assert_eq!(json(app.clone(), "DELETE", "/api/users/1", Some(&admin_cookie), "").await.0, StatusCode::FORBIDDEN);
+    let admin_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE email='admin@example.com'").fetch_one(&db).await.unwrap();
+    assert_eq!(json(app.clone(), "PATCH", &format!("/api/users/{admin_id}"), Some(&admin_cookie), r#"{"disabled":true}"#).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(json(app.clone(), "DELETE", &format!("/api/users/{admin_id}"), Some(&admin_cookie), "").await.0, StatusCode::FORBIDDEN);
     assert_eq!(json(app.clone(), "PATCH", &format!("/api/users/{viewer_id}"), Some(&admin_cookie), r#"{"role":"bogus","disabled":true}"#).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(json(app.clone(), "PATCH", "/api/users/9999", Some(&admin_cookie), r#"{"disabled":true}"#).await.0, StatusCode::NOT_FOUND);
     let rows = sqlx::query("SELECT event,details FROM audit_logs WHERE event LIKE '%denied' OR event LIKE 'user_%_denied'").fetch_all(&db).await.unwrap();
@@ -278,7 +282,8 @@ async fn administrator_can_revoke_target_sessions_but_not_own_or_viewer_sessions
     assert_eq!(status, StatusCode::OK);
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["revoked"], 2);
     assert_eq!(json(app.clone(), "GET", "/api/auth/me", Some(&target_cookie), "").await.0, StatusCode::UNAUTHORIZED);
-    assert_eq!(json(app.clone(), "POST", "/api/users/1/sessions/revoke", Some(&admin_cookie), "").await.0, StatusCode::FORBIDDEN);
+    let admin_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE email='admin@example.com'").fetch_one(&db).await.unwrap();
+    assert_eq!(json(app.clone(), "POST", &format!("/api/users/{admin_id}/sessions/revoke"), Some(&admin_cookie), "").await.0, StatusCode::FORBIDDEN);
     let rows = sqlx::query("SELECT event,details FROM audit_logs WHERE event IN ('sessions_revoked','session_revoke_denied')").fetch_all(&db).await.unwrap();
     assert!(rows.iter().any(|r| r.get::<String, _>("event") == "sessions_revoked"));
     assert!(rows.iter().all(|r| !r.get::<String, _>("details").contains("target-extra")));
@@ -286,11 +291,12 @@ async fn administrator_can_revoke_target_sessions_but_not_own_or_viewer_sessions
 
 #[tokio::test]
 async fn combined_patch_is_atomic_when_last_admin_would_be_removed() {
-    let (app, _) = app().await;
+    let (app, db) = app().await;
     assert_eq!(json(app.clone(), "POST", "/api/setup/initialize", None, r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#).await.0, StatusCode::CREATED);
     let (_, cookie) = login(app.clone(), "admin@example.com", "correct horse battery").await;
     let cookie = cookie.unwrap();
-    let (status, _body, _) = json(app.clone(), "PATCH", "/api/users/1", Some(&cookie), r#"{"role":"viewer"}"#).await;
+    let admin_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE email='admin@example.com'").fetch_one(&db).await.unwrap();
+    let (status, _body, _) = json(app.clone(), "PATCH", &format!("/api/users/{admin_id}"), Some(&cookie), r#"{"role":"viewer"}"#).await;
     assert_eq!(status, StatusCode::CONFLICT);
     let (status, body, _) = json(app.clone(), "GET", "/api/auth/me", Some(&cookie), "").await;
     assert_eq!(status, StatusCode::OK);

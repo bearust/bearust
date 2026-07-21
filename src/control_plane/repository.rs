@@ -426,7 +426,7 @@ pub async fn role_permissions(pool: &DbPool, role_id: i64) -> Result<Vec<String>
 pub async fn role_permission_scopes(pool: &DbPool, role_id: i64) -> Result<Vec<RolePermissionScope>, sqlx::Error> {
     let rows = sqlx::query("SELECT p.key AS permission, rp.scope_id FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND rp.scope_type='proxy_host' ORDER BY p.key,rp.scope_id")
         .bind(role_id).fetch_all(pool).await?;
-    let mut scopes = Vec::new();
+    let mut scopes: Vec<RolePermissionScope> = Vec::new();
     for row in rows {
         let permission: String = row.get("permission");
         let host_id: i64 = row.get("scope_id");

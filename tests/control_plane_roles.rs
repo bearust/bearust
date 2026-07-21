@@ -28,6 +28,7 @@ async fn login(app: Router, email: &str, password: &str) -> String {
 async fn delete_role_rolls_back_when_commit_is_busy() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("roles.sqlite");
+    std::fs::File::create(&db_path).unwrap();
     let url = format!("sqlite://{}", db_path.display());
     static DRIVERS: Once = Once::new();
     DRIVERS.call_once(sqlx::any::install_default_drivers);
@@ -123,7 +124,8 @@ async fn built_in_update_and_assigned_custom_delete_conflict() {
     let (app, db) = app().await;
     request(app.clone(), "POST", "/api/setup/initialize", None, r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#).await;
     let admin = login(app.clone(), "admin@example.com", "correct horse battery").await;
-    let (status, _, _) = request(app.clone(), "PATCH", "/api/roles/1", Some(&admin), r#"{"name":"Nope"}"#).await;
+    let built_in_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE slug='admin'").fetch_one(&db).await.unwrap();
+    let (status, _, _) = request(app.clone(), "PATCH", &format!("/api/roles/{built_in_id}"), Some(&admin), r#"{"name":"Nope"}"#).await;
     assert_eq!(status, StatusCode::CONFLICT);
     let role = bearust::control_plane::repository::insert_role(&db, "assigned", "Assigned", "").await.unwrap();
     bearust::control_plane::repository::insert_user(&db, "assigned@example.com", "hash", &role.slug).await.unwrap();
