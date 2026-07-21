@@ -32,7 +32,7 @@ impl Router {
                 });
         }
         for routes in indexed.values_mut() {
-            routes.sort_by(|left, right| right.path_prefix.len().cmp(&left.path_prefix.len()));
+            routes.sort_by_key(|route| std::cmp::Reverse(route.path_prefix.len()));
         }
         Self { routes: indexed }
     }

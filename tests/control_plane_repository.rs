@@ -246,7 +246,7 @@ async fn role_lifecycle_contracts_exist_for_role_management() {
         .await
         .unwrap();
     assert_eq!(repository::role_permissions(&pool, role.id).await.unwrap().len(), 1);
-    assert_eq!(repository::list_roles(&pool).await.unwrap().iter().any(|r| r.slug == "security-auditor"), true);
+    assert!(repository::list_roles(&pool).await.unwrap().iter().any(|r| r.slug == "security-auditor"));
     let updated = repository::update_role(&pool, role.id, Some("Security Auditor"), Some("updated"))
         .await
         .unwrap()

@@ -305,9 +305,7 @@ impl AcmeTransport for LetsEncryptClient {
             };
             let mut metadata = Vec::new();
             for auth in auths {
-                let hostname = match auth.identifier {
-                    Identifier::Dns(value) => value,
-                };
+                let Identifier::Dns(hostname) = auth.identifier;
                 let challenge = auth
                     .challenges
                     .iter()

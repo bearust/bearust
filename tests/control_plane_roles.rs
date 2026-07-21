@@ -1,6 +1,6 @@
 use axum::{body::{to_bytes, Body}, http::{Request, StatusCode}, Router};
 use bearust::control_plane::{build_state, repository, router};
-use sqlx::{any::AnyPoolOptions, Row};
+use sqlx::any::AnyPoolOptions;
 use std::sync::Once;
 use tower::util::ServiceExt;
 

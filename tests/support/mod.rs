@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::any, Router};
 use std::{
     net::SocketAddr,

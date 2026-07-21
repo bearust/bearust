@@ -190,9 +190,9 @@ impl AcmeService {
         .await;
         self.reload(certificate_id).await?;
         self.publish_realtime("certificates.changed");
-        Ok(repository::get_acme_status(&self.db, certificate_id)
+        repository::get_acme_status(&self.db, certificate_id)
             .await?
-            .ok_or(AcmeServiceError::NotFound)?)
+            .ok_or(AcmeServiceError::NotFound)
     }
 
     pub async fn status(&self, certificate_id: i64) -> Result<AcmeStatus, AcmeServiceError> {
@@ -307,7 +307,7 @@ fn operation_key(request: &AcmeRequest) -> String {
 fn certificate_name(request: &AcmeRequest) -> String {
     let mut h = Sha256::new();
     h.update(request.hostnames.join("\n"));
-    format!("acme-{}", hex::encode(h.finalize())[..24].to_string())
+    format!("acme-{}", &hex::encode(h.finalize())[..24])
 }
 fn renewal_at(expiry: &str) -> Option<String> {
     DateTime::parse_from_str(expiry, "%b %e %H:%M:%S %Y GMT")

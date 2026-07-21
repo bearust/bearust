@@ -451,7 +451,7 @@ async fn role_slug_exists(s: &AppState, role: &str) -> Result<bool, sqlx::Error>
 async fn require_user_admin(s: &AppState, h: &HeaderMap) -> Result<User, axum::response::Response> {
     let user = current(s, h).await.map_err(|status| status.into_response())?;
     if !authorize(&s.db, &user, Permission::UsersManage, ResourceContext::GLOBAL).await.unwrap_or(false) {
-        audit::record_state(&s, Some(user.id), "user_mutation_denied", &user_audit(None, "authorization")).await;
+        audit::record_state(s, Some(user.id), "user_mutation_denied", &user_audit(None, "authorization")).await;
         return Err(user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required"));
     }
     Ok(user)
@@ -483,7 +483,7 @@ fn role_scope_error(error: &sqlx::Error) -> Option<StatusCode> {
 async fn require_role_admin(s: &AppState, h: &HeaderMap) -> Result<User, axum::response::Response> {
     let user = current(s, h).await.map_err(|status| user_error(status, "unauthorized", "Authentication required"))?;
     if !authorize(&s.db, &user, Permission::RolesManage, ResourceContext::GLOBAL).await.unwrap_or(false) {
-        audit::record_state(&s, Some(user.id), "role_mutation_denied", "authorization").await;
+        audit::record_state(s, Some(user.id), "role_mutation_denied", "authorization").await;
         return Err(user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required"));
     }
     Ok(user)
@@ -529,7 +529,7 @@ async fn create_role(State(s): State<AppState>, h: HeaderMap, input: Result<Json
 async fn update_role(State(s): State<AppState>, h: HeaderMap, path: Result<Path<i64>, PathRejection>, input: Result<Json<RolePatch>, JsonRejection>) -> impl IntoResponse {
     let actor = match require_role_admin(&s, &h).await { Ok(u) => u, Err(response) => return response };
     let Path(id) = match path { Ok(path) => path, Err(_) => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", "reason=invalid_input").await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role id"); } };
-    let Some(before) = (match repository::get_role(&s.db, id).await { Ok(role) => role, Err(_) => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &format!("role_id={id};reason=database_error")).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"); } }) else { audit::record_state(&s, Some(actor.id), &"role_mutation_denied", &format!("role_id={id};reason=not_found")).await; return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"); };
+    let Some(before) = (match repository::get_role(&s.db, id).await { Ok(role) => role, Err(_) => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &format!("role_id={id};reason=database_error")).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"); } }) else { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &format!("role_id={id};reason=not_found")).await; return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"); };
     if before.system_managed { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::CONFLICT, "conflict", "Built-in roles cannot be mutated"); }
     let input = match input { Ok(Json(input)) => input, Err(_) => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role request"); } };
     if input.name.as_deref().is_some_and(|name| name.trim().is_empty()) || input.permissions.as_ref().is_some_and(|permissions| validate_role_input("valid", permissions).is_err()) { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role update"); }
@@ -714,12 +714,8 @@ async fn issue_acme(
     }
     let req = match input.request().normalized() {
         Ok(r) => r,
-        Err(e) => {
-            let code = if e.contains("wildcard") || e.contains("hostname") {
-                "invalid_hostname"
-            } else {
-                "invalid_hostname"
-            };
+        Err(_e) => {
+            let code = "invalid_hostname";
             audit::record_state(&s, Some(user.id), "acme_issue_failed", code).await;
             return acme_error(StatusCode::BAD_REQUEST, code, "Invalid ACME hostname");
         }

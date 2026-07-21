@@ -300,7 +300,7 @@ pub async fn insert_acme_certificate(
     let request = request
         .clone()
         .normalized()
-        .map_err(|e| sqlx::Error::Protocol(e))?;
+        .map_err(sqlx::Error::Protocol)?;
     let environment = match request.environment {
         AcmeEnvironment::Staging => "staging",
         AcmeEnvironment::Production => "production",
@@ -494,7 +494,7 @@ async fn role_detail(pool: &DbPool, row: sqlx::any::AnyRow) -> Result<RoleDetail
 }
 
 pub async fn role_permissions(pool: &DbPool, role_id: i64) -> Result<Vec<String>, sqlx::Error> {
-    Ok(sqlx::query_scalar("SELECT p.key FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND rp.scope_type='' AND rp.scope_id=0 ORDER BY p.key").bind(role_id).fetch_all(pool).await?)
+    sqlx::query_scalar("SELECT p.key FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND rp.scope_type='' AND rp.scope_id=0 ORDER BY p.key").bind(role_id).fetch_all(pool).await
 }
 
 pub async fn role_permission_scopes(pool: &DbPool, role_id: i64) -> Result<Vec<RolePermissionScope>, sqlx::Error> {

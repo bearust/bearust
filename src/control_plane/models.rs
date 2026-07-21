@@ -67,11 +67,10 @@ impl AcmeRequest {
             if host.is_empty() || host.chars().any(|c| c.is_whitespace()) {
                 return Err("invalid hostname".into());
             }
-            if host.starts_with("*.") {
+            if let Some(suffix) = host.strip_prefix("*.") {
                 if self.challenge == AcmeChallenge::Http01 {
                     return Err("http-01 does not support wildcard hostnames".into());
                 }
-                let suffix = &host[2..];
                 if suffix.contains('*') || !valid_dns_name(suffix) || suffix.split('.').count() < 2
                 {
                     return Err("invalid wildcard hostname".into());

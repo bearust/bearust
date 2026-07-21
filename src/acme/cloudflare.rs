@@ -9,6 +9,8 @@ use std::{
     time::Duration,
 };
 
+type CreatedRecords = Arc<Mutex<HashMap<(String, String), Vec<String>>>>;
+
 #[derive(Clone)]
 pub struct CloudflareProvider {
     client: Client,
@@ -21,7 +23,7 @@ pub struct CloudflareProvider {
     // storing a single id would overwrite the first order and leak it on
     // cleanup.  Each cleanup call consumes one id, making cleanup idempotent
     // while preserving ownership of pre-existing records.
-    created_records: Arc<Mutex<HashMap<(String, String), Vec<String>>>>,
+    created_records: CreatedRecords,
 }
 
 #[derive(Debug, Deserialize)]
