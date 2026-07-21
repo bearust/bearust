@@ -10,4 +10,29 @@ ACME credentials are accepted only by the authenticated certificate API and are 
 
 The command is `bearust serve --config /etc/bearust/bearust.toml --json-logs`. The PID file defaults to `./bearust.pid` relative to `/run/bearust`; send `SIGHUP` (`docker compose kill -s HUP bearust`) after atomically replacing the mounted config. Shutdown is graceful: listeners stop accepting new work and in-flight requests drain.
 
+## Database profiles
+
+The default `docker compose up -d` keeps the control plane on SQLite at
+`/data/bearust.sqlite`, persisted by the `BEARUST_DATA` mount. PostgreSQL and
+MySQL are opt-in profiles with health checks and named volumes:
+
+```sh
+# PostgreSQL
+DATABASE_URL=postgres://bearust:change-me-in-development@postgres:5432/bearust \
+  docker compose --profile postgres up -d
+
+# MySQL
+DATABASE_URL=mysql://bearust:change-me-in-development@mysql:3306/bearust \
+  docker compose --profile mysql up -d
+```
+
+Set the corresponding `POSTGRES_*` or `MYSQL_*` credentials in `.env` (use a
+long random password in production). Migrations run automatically at startup;
+the database volume is retained across restarts and image upgrades. Switching
+between SQLite, PostgreSQL, and MySQL is not an in-place operation: perform an
+explicit, tested export/import outside this phase and keep the original volume
+as a rollback copy. Never paste `DATABASE_URL` values containing passwords into
+logs, issue reports, or support bundles; redact credentials before sharing
+Compose output or diagnostic archives.
+
 JSON logs include event, level, timestamp, request identifiers, route/upstream context, and error category. Unhealthy TCP/HTTP backends are removed from selection; no healthy backend returns `503`, while a route/host miss returns `404`. For `404`, verify `Host`, path prefix, and pool. For `503`, inspect health addresses/paths and reachability from the container. Roll back by restoring the prior image tag and config, then restart or issue `SIGHUP`.

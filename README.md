@@ -12,6 +12,23 @@ docker compose up -d --build
 curl -H 'Host: api.example.com' http://127.0.0.1:8080/v1/health
 ```
 
+SQLite is the default and is persisted under `./data`. External database
+profiles are opt-in; copy `.env.example`, replace the development passwords,
+and start one profile:
+
+```sh
+DATABASE_URL=postgres://bearust:${POSTGRES_PASSWORD}@postgres:5432/bearust \
+  docker compose --profile postgres up -d --build
+DATABASE_URL=mysql://bearust:${MYSQL_PASSWORD}@mysql:3306/bearust \
+  docker compose --profile mysql up -d --build
+```
+
+PostgreSQL data is stored in the `postgres-data` named volume and MySQL data in
+`mysql-data`. Migrations run automatically on application startup. Changing
+database backends requires a deliberate export/import procedure; do not delete
+the old volume until the new deployment has been verified. Redact passwords in
+`DATABASE_URL`, `.env`, Compose diagnostics, logs, and support bundles.
+
 For the development compose file, build the UI once before opening the management page:
 
 ```sh
