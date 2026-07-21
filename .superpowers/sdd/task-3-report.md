@@ -24,3 +24,14 @@ Concerns: broad mutation publication integration test from brief was not added; 
 - `cargo test --locked --test control_plane_realtime` (Rust 1.88 Docker): 6 passed.
 - `cargo test --locked --test control_plane_users --test control_plane_audit` (Rust 1.88 Docker): 13 passed.
 - `git diff --check`: passed.
+
+## Final review fixes
+
+- Certificate activation failures now record only stable reason codes (`reload_failed`, `activation_failed`, `database_error`) and never include reloader/DB error text.
+- Added state-aware audit records for mutation denial/failure paths across proxy host CRUD, certificate upload/activation, ACME issue/renew, user CRUD/session revocation, and role path validation. Domain invalidation events remain success-only.
+- Existing response status and error envelopes are unchanged.
+
+## Final verification
+
+- Docker Rust 1.88 focused suite: `control_plane_realtime` 6 passed, `control_plane_users` 9 passed, `control_plane_audit` 4 passed.
+- `git diff --check`: passed.

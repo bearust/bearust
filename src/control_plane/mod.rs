@@ -393,7 +393,7 @@ async fn create_user(
     }
     let hash = match auth::hash_password(&input.password) {
         Ok(hash) => hash,
-        Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Unable to create user"),
+        Err(_) => { audit::record_state(&s, Some(actor.id), "user_create_failed", &user_audit(None, "hashing_error")).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", "Unable to create user"); }
     };
     match repository::insert_user(&s.db, &email, &hash, role).await {
         Ok(user) => {
@@ -405,7 +405,7 @@ async fn create_user(
             audit::record_state(&s, Some(actor.id), "user_create_denied", &user_audit(None, "duplicate_email")).await;
             user_error(StatusCode::CONFLICT, "duplicate_email", "Email already exists")
         }
-        Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
+        Err(_) => { audit::record_state(&s, Some(actor.id), "user_create_failed", &user_audit(None, "database_error")).await; user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") },
     }
 }
 
@@ -443,7 +443,7 @@ async fn update_user(
             audit::record_state(&s, Some(actor.id), "user_update_denied", &user_audit(Some(id), "last_admin")).await;
             return user_error(StatusCode::CONFLICT, "last_admin", "Cannot remove the last active administrator");
         }
-        Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
+        Err(_) => { audit::record_state(&s, Some(actor.id), "user_update_failed", &user_audit(Some(id), "database_error")).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"); },
     };
     let detail = if input.disabled == Some(true) { "user_disabled" } else { "user_updated" };
     audit::record_state(&s, Some(actor.id), detail, &user_audit(Some(id), "success")).await;
@@ -512,7 +512,7 @@ async fn delete_user(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64
             audit::record_state(&s, Some(actor.id), "user_delete_denied", &user_audit(Some(id), "last_admin")).await;
             user_error(StatusCode::CONFLICT, "last_admin", "Cannot remove the last active administrator")
         }
-        Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
+        Err(_) => { audit::record_state(&s, Some(actor.id), "user_delete_failed", &user_audit(Some(id), "database_error")).await; user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") },
     }
 }
 
@@ -554,6 +554,7 @@ async fn issue_acme(
     if matches!(&req.challenge, AcmeChallenge::Http01)
         && req.hostnames.iter().any(|x| x.starts_with("*."))
     {
+        audit::record_state(&s, Some(user.id), "acme_issue_failed", "unsupported_challenge").await;
         return acme_error(
             StatusCode::BAD_REQUEST,
             "unsupported_challenge",
@@ -583,16 +584,14 @@ async fn issue_acme(
             )
                 .into_response()
         }
-        Err(AcmeServiceError::Busy) => acme_error(
-            StatusCode::CONFLICT,
-            "acme_busy",
-            "An ACME operation is already running",
-        ),
-        Err(_) => acme_error(
-            StatusCode::BAD_GATEWAY,
-            "acme_failed",
-            "ACME operation failed",
-        ),
+        Err(AcmeServiceError::Busy) => {
+            audit::record_state(&s, Some(user.id), "acme_issue_failed", "busy").await;
+            acme_error(StatusCode::CONFLICT, "acme_busy", "An ACME operation is already running")
+        }
+        Err(_) => {
+            audit::record_state(&s, Some(user.id), "acme_issue_failed", "service_error").await;
+            acme_error(StatusCode::BAD_GATEWAY, "acme_failed", "ACME operation failed")
+        }
     }
 }
 async fn renew_acme(
@@ -614,6 +613,7 @@ async fn renew_acme(
         .flatten()
         .is_none()
     {
+        audit::record_state(&s, Some(user.id), "acme_renew_failed", "not_found").await;
         return acme_error(StatusCode::NOT_FOUND, "not_found", "Certificate not found");
     }
     match s.acme.renew(id).await {
@@ -634,16 +634,14 @@ async fn renew_acme(
             )
                 .into_response()
         }
-        Err(AcmeServiceError::Busy) => acme_error(
-            StatusCode::CONFLICT,
-            "acme_busy",
-            "An ACME operation is already running",
-        ),
-        Err(_) => acme_error(
-            StatusCode::BAD_GATEWAY,
-            "acme_failed",
-            "ACME operation failed",
-        ),
+        Err(AcmeServiceError::Busy) => {
+            audit::record_state(&s, Some(user.id), "acme_renew_failed", "busy").await;
+            acme_error(StatusCode::CONFLICT, "acme_busy", "An ACME operation is already running")
+        }
+        Err(_) => {
+            audit::record_state(&s, Some(user.id), "acme_renew_failed", "service_error").await;
+            acme_error(StatusCode::BAD_GATEWAY, "acme_failed", "ACME operation failed")
+        }
     }
 }
 async fn acme_status(
@@ -923,6 +921,7 @@ async fn create_host(
         || req.upstream_host.trim().is_empty()
         || req.upstream_port == 0
     {
+        audit::record_state(&s, Some(u.id), "proxy_host_create_denied", "reason=invalid_input").await;
         return StatusCode::BAD_REQUEST.into_response();
     }
     let host = ProxyHost {
@@ -942,6 +941,7 @@ async fn create_host(
             };
             if s.reloader.apply(desired).await.is_err() {
                 let _ = repository::delete_host(&s.db, x.id).await;
+                audit::record_state(&s, Some(u.id), "proxy_host_create_failed", "reason=reload_failed").await;
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(ErrorEnvelope {
@@ -955,14 +955,17 @@ async fn create_host(
             s.realtime.publish("proxy_hosts.changed");
             (StatusCode::CREATED, Json(x)).into_response()
         }
-        Err(_) => (
-            StatusCode::CONFLICT,
-            Json(ErrorEnvelope {
-                code: "duplicate_domain".into(),
-                message: "Domain already exists".into(),
-            }),
-        )
-            .into_response(),
+        Err(_) => {
+            audit::record_state(&s, Some(u.id), "proxy_host_create_denied", "reason=duplicate_domain").await;
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorEnvelope {
+                    code: "duplicate_domain".into(),
+                    message: "Domain already exists".into(),
+                }),
+            )
+                .into_response()
+        }
     }
 }
 async fn update_host(
@@ -986,6 +989,7 @@ async fn update_host(
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
+        audit::record_state(&s, Some(u.id), "proxy_host_update_denied", "reason=not_found").await;
         return StatusCode::NOT_FOUND.into_response();
     };
     if req.name.trim().is_empty()
@@ -993,6 +997,7 @@ async fn update_host(
         || req.upstream_host.trim().is_empty()
         || req.upstream_port == 0
     {
+        audit::record_state(&s, Some(u.id), "proxy_host_update_denied", "reason=invalid_input").await;
         return StatusCode::BAD_REQUEST.into_response();
     }
     let next = ProxyHost {
@@ -1006,6 +1011,7 @@ async fn update_host(
         enabled: req.enabled,
     };
     if repository::update_host(&s.db, id, &next).await.is_err() {
+        audit::record_state(&s, Some(u.id), "proxy_host_update_failed", "reason=database_error").await;
         return StatusCode::CONFLICT.into_response();
     }
     let desired = DesiredConfig {
@@ -1013,6 +1019,7 @@ async fn update_host(
     };
     if s.reloader.apply(desired).await.is_err() {
         let _ = repository::update_host(&s.db, id, &previous).await;
+        audit::record_state(&s, Some(u.id), "proxy_host_update_failed", "reason=reload_failed").await;
         return (
             StatusCode::BAD_GATEWAY,
             Json(ErrorEnvelope {
@@ -1047,9 +1054,11 @@ async fn remove_host(
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
+        audit::record_state(&s, Some(u.id), "proxy_host_delete_denied", "reason=not_found").await;
         return StatusCode::NOT_FOUND.into_response();
     };
     if repository::delete_host(&s.db, id).await.is_err() {
+        audit::record_state(&s, Some(u.id), "proxy_host_delete_failed", "reason=database_error").await;
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     let desired = DesiredConfig {
@@ -1057,6 +1066,7 @@ async fn remove_host(
     };
     if s.reloader.apply(desired).await.is_err() {
         let _ = repository::insert_host(&s.db, &previous).await;
+        audit::record_state(&s, Some(u.id), "proxy_host_delete_failed", "reason=reload_failed").await;
         return (
             StatusCode::BAD_GATEWAY,
             Json(ErrorEnvelope {
@@ -1097,13 +1107,15 @@ async fn upload_certificate(
         let field_name = field.name().unwrap_or("").to_string();
         let bytes = match field.bytes().await {
             Ok(b) => b,
-            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+            Err(_) => { audit::record_state(&s, Some(u.id), "certificate_upload_denied", "reason=invalid_multipart").await; return StatusCode::BAD_REQUEST.into_response(); }
         };
         total += bytes.len();
         if total > 3 * 1024 * 1024 {
+            audit::record_state(&s, Some(u.id), "certificate_upload_denied", "reason=payload_too_large").await;
             return StatusCode::PAYLOAD_TOO_LARGE.into_response();
         }
         if bytes.len() > 1024 * 1024 {
+            audit::record_state(&s, Some(u.id), "certificate_upload_denied", "reason=field_too_large").await;
             return StatusCode::PAYLOAD_TOO_LARGE.into_response();
         }
         match field_name.as_str() {
@@ -1114,13 +1126,14 @@ async fn upload_certificate(
         }
     }
     let (Some(name), Some(cert), Some(key)) = (name, cert, key) else {
+        audit::record_state(&s, Some(u.id), "certificate_upload_denied", "reason=missing_fields").await;
         return StatusCode::BAD_REQUEST.into_response();
     };
     match s.certificates.import_custom(&name, &cert, &key) {
         Ok(record) => {
-            match repository::insert_certificate(&s.db,&record.name,"custom",&serde_json::to_string(&record.covered_hostnames).unwrap_or_default(),&record.expiry,&record.certificate_path.to_string_lossy(),&record.key_path.to_string_lossy()).await{Ok(id)=>{ audit::record_state(&s, Some(u.id), "certificate_uploaded", &format!("certificate_id={id}")).await; s.realtime.publish("certificates.changed"); (StatusCode::CREATED,Json(serde_json::json!({"id":id,"name":record.name,"source":"custom","covered_hostnames":record.covered_hostnames,"expiry":record.expiry}))).into_response() },Err(_)=>StatusCode::CONFLICT.into_response()}
+            match repository::insert_certificate(&s.db,&record.name,"custom",&serde_json::to_string(&record.covered_hostnames).unwrap_or_default(),&record.expiry,&record.certificate_path.to_string_lossy(),&record.key_path.to_string_lossy()).await{Ok(id)=>{ audit::record_state(&s, Some(u.id), "certificate_uploaded", &format!("certificate_id={id}")).await; s.realtime.publish("certificates.changed"); (StatusCode::CREATED,Json(serde_json::json!({"id":id,"name":record.name,"source":"custom","covered_hostnames":record.covered_hostnames,"expiry":record.expiry}))).into_response() },Err(_)=>{ audit::record_state(&s, Some(u.id), "certificate_upload_failed", "reason=database_error").await; StatusCode::CONFLICT.into_response() }}
         }
-        Err(_) => StatusCode::BAD_REQUEST.into_response(),
+        Err(_) => { audit::record_state(&s, Some(u.id), "certificate_upload_denied", "reason=invalid_certificate").await; StatusCode::BAD_REQUEST.into_response() },
     }
 }
 
@@ -1157,6 +1170,7 @@ async fn activate_certificate(
         .ok()
         .flatten()
     else {
+        audit::record_state(&s, Some(user.id), "certificate_activation_denied", "reason=not_found").await;
         return StatusCode::NOT_FOUND.into_response();
     };
     if CertificateStore::validate_material_paths(
@@ -1165,11 +1179,12 @@ async fn activate_certificate(
     )
     .is_err()
     {
+        audit::record_state(&s, Some(user.id), "certificate_activation_denied", "reason=invalid_material").await;
         return StatusCode::BAD_REQUEST.into_response();
     }
     let previous_id = match repository::active_certificate_id(&s.db).await {
         Ok(value) => value,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(_) => { audit::record_state(&s, Some(user.id), "certificate_activation_failed", "reason=database_error").await; return StatusCode::INTERNAL_SERVER_ERROR.into_response(); }
     };
     let previous_name = match previous_id {
         Some(previous_id) => repository::certificate_name(&s.db, previous_id)
@@ -1185,15 +1200,16 @@ async fn activate_certificate(
             .unwrap_or(true)
     {
         let _ = restore_certificate_activation(&s, previous_id, previous_name.as_deref()).await;
+        audit::record_state(&s, Some(user.id), "certificate_activation_failed", "reason=activation_failed").await;
         return StatusCode::BAD_REQUEST.into_response();
     }
-    if let Err(error) = s.reloader.apply_certificate_change(id).await {
+    if s.reloader.apply_certificate_change(id).await.is_err() {
         let _ = restore_certificate_activation(&s, previous_id, previous_name.as_deref()).await;
         audit::record_state(
             &s,
             Some(user.id),
             "certificate_activation_failed",
-            &format!("certificate_id={id};error={error}"),
+            &format!("certificate_id={id};reason=reload_failed"),
         )
         .await;
         return (
