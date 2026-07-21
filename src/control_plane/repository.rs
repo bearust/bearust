@@ -39,10 +39,17 @@ pub fn validate_database_url(url: &str) -> Result<(), sqlx::Error> {
 pub async fn connect(url: &str) -> Result<DbPool, sqlx::Error> {
     validate_database_url(url)?;
     ANY_DRIVERS.call_once(sqlx::any::install_default_drivers);
+    let max_connections = if is_in_memory_sqlite(url) { 1 } else { 8 };
     AnyPoolOptions::new()
-        .max_connections(8)
+        .max_connections(max_connections)
         .connect(url)
         .await
+}
+
+fn is_in_memory_sqlite(url: &str) -> bool {
+    let normalized = url.trim().to_ascii_lowercase();
+    normalized.starts_with("sqlite:")
+        && (normalized.contains(":memory:") || normalized.contains("mode=memory"))
 }
 pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
     sqlx::migrate!("./migrations").run(pool).await?;

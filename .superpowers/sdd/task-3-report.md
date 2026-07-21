@@ -53,3 +53,5 @@ Removed MySQL-incompatible `CREATE INDEX IF NOT EXISTS` from the initial migrati
 The role-scope index is created idempotently after the migrator with duplicate-index error handling, allowing pre-Phase-5 databases that already contain it to upgrade safely. The legacy fixture covers this pre-existing-index case.
 
 CLI startup now honors `DATABASE_URL`, falling back to the configured SQLite path when unset. Generated setup-token files are written only for SQLite URLs; external database URLs never derive filesystem paths from credentials or hostnames.
+
+SQLite in-memory URLs now use a single connection in `AnyPool`; file-backed SQLite and external databases retain the eight-connection pool. This prevents connection-local in-memory schemas from disappearing between queries.
