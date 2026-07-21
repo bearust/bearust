@@ -4,6 +4,7 @@ import React from 'react';
 import {act} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App';
+import { ThemeProvider } from './theme';
 import {api,User,RoleRecord} from './api';
 
 const admin:User={id:1,email:'admin@example.com',role:'admin',disabled:false};
@@ -22,7 +23,7 @@ async function renderDashboard(user:User,users:User[]=[admin,operator,viewer]) {
   vi.spyOn(api,'roles').mockResolvedValue([customRole]);
   const element=document.createElement('div');document.body.appendChild(element);
   const root=createRoot(element);
-  await act(async()=>{root.render(<App/>);});
+  await act(async()=>{root.render(<ThemeProvider><App/></ThemeProvider>);});
   return {element,root};
 }
 

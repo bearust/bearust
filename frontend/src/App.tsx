@@ -12,8 +12,7 @@ import {
   User,
 } from "./api";
 import { useRealtimeUpdates, RealtimeStatus } from "./realtime";
-import { Alert, Button, Card, Field, ThemeSelect } from "./ui";
-import { ThemeProvider } from "./theme";
+import { Alert, Button, Card, Field, SelectField, TextareaField, ThemeSelect } from "./ui";
 
 export const sanitizeError = (message: string) => {
   if (/internal stack|database|password\s*[:=]/i.test(message))
@@ -216,9 +215,7 @@ export function AcmeWizard({
           }
         }}
       >
-        <label>
-          Environment
-          <select
+        <SelectField label="Environment"
             value={environment}
             onChange={(e) =>
               setEnvironment(e.target.value as AcmeRequest["environment"])
@@ -226,11 +223,8 @@ export function AcmeWizard({
           >
             <option value="staging">Staging (safe default)</option>
             <option value="production">Production</option>
-          </select>
-        </label>
-        <label>
-          Challenge
-          <select
+          </SelectField>
+        <SelectField label="Challenge"
             value={challenge}
             onChange={(e) =>
               setChallenge(e.target.value as AcmeRequest["challenge"])
@@ -238,38 +232,30 @@ export function AcmeWizard({
           >
             <option value="http01">HTTP-01</option>
             <option value="cloudflare_dns01">Cloudflare DNS-01</option>
-          </select>
-        </label>
-        <label>
-          Domains (one per line or comma separated)
-          <textarea
+          </SelectField>
+        <TextareaField label="Domains (one per line or comma separated)"
             value={domains}
             onChange={(e) => setDomains(e.target.value)}
             required
             rows={3}
             placeholder="example.com\nwww.example.com"
           />
-        </label>
         {invalid && (
           <Alert variant="warning">
             Enter valid hostnames. Wildcards require Cloudflare DNS-01.
           </Alert>
         )}
         {challenge === "cloudflare_dns01" && (
-          <label>
-            Cloudflare API token
-            <input
+          <Field
+            label="Cloudflare API token"
               type="password"
               value={token}
               onChange={(e) => setToken(e.target.value)}
               autoComplete="off"
               placeholder="Required for DNS-01"
               required
-            />
-            {missingToken && (
-              <small className="block text-sm text-danger-foreground">Cloudflare API token is required.</small>
-            )}
-          </label>
+            error={missingToken ? "Cloudflare API token is required." : undefined}
+          />
         )}
         {error && <Alert variant="danger">{error}</Alert>}
         <Button type="submit"
@@ -464,7 +450,7 @@ export function UsersSection({
                   {self ? " (you)" : ""}
                 </td>
                 <td>
-                  <select
+                  <SelectField label="Role"
                     value={item.role}
                     disabled={self || busy === item.id}
                     onChange={(e) =>
@@ -476,7 +462,7 @@ export function UsersSection({
                     }
                   >
                     {roleOptions.map((role) => <option value={role.slug} key={role.slug}>{role.name}</option>)}
-                  </select>
+                  </SelectField>
                 </td>
                 <td>{item.disabled ? "Disabled" : "Active"}</td>
                 <td>
@@ -551,17 +537,14 @@ export function UsersSection({
           value={password}
           onChange={(e: any) => setPassword(e.target.value)}
         />
-        <label>
-          Role
-          <select
+        <SelectField label="Role"
             value={role}
             onChange={(e) => setRole(e.target.value as Role)}
           >
             <option value="admin">Admin</option>
             <option value="operator">Operator</option>
             <option value="viewer">Viewer</option>
-          </select>
-        </label>
+          </SelectField>
         <Button type="submit" disabled={busy === -1 || !email.trim() || password.length < 12}>
           Create user
         </Button>
@@ -767,9 +750,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
                 setForm({ ...form, upstream_port: Number(e.target.value) })
               }
             />
-            <label>
-              TLS mode
-              <select
+            <SelectField label="TLS mode"
                 value={form.tls_mode}
                 onChange={(e) =>
                   setForm({
@@ -785,12 +766,9 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
                 <option value="disabled">Disabled</option>
                 <option value="http">HTTP</option>
                 <option value="https">HTTPS</option>
-              </select>
-            </label>
+              </SelectField>
             {form.tls_mode !== "disabled" && (
-              <label>
-                Certificate
-                <select
+              <SelectField label="Certificate"
                   value={form.certificate_id ?? ""}
                   onChange={(e) =>
                     setForm({
@@ -808,13 +786,12 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
                       {c.name} ({c.covered_hostnames.join(", ")})
                     </option>
                   ))}
-                </select>
-              </label>
+                </SelectField>
             )}
             <Button type="submit">Add host</Button>
           </form>
         )}
-      </Card></div>
+      </Card>
       <UsersSection
         user={user}
         users={users}
@@ -824,6 +801,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
       />
       <RolesSection user={user} roles={roles} onChanged={() => void refresh()} />
       <AuditLogSection user={user} reloadRef={auditReloadRef} />
+      </div>
     </main>
   );
 }
@@ -843,7 +821,12 @@ function AppContent() {
       })
       .catch(() => setInitialized(true));
   }, []);
-  if (initialized === null) return <main>Loading…</main>;
+  if (initialized === null)
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-page px-4 py-8 text-foreground">
+        <Alert variant="info">Loading Bearust…</Alert>
+      </main>
+    );
   if (!initialized)
     return (
       <Setup
@@ -866,7 +849,7 @@ function AppContent() {
   );
 }
 export default function App() {
-  return <ThemeProvider><AppContent /></ThemeProvider>;
+  return <AppContent />;
 }
 export function AuditLogSection({ user, reloadRef }: { user: User; reloadRef?: MutableRefObject<(() => void) | null> }) {
   const [items, setItems] = useState<AuditLogItem[]>([]),
@@ -931,34 +914,19 @@ export function AuditLogSection({ user, reloadRef }: { user: User; reloadRef?: M
         </Button>
       </div>
       <div className="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        <label>
-          Event
-          <input
+        <Field label="Event"
             aria-label="Event filter"
             value={event}
             onChange={(e) => setEvent(e.target.value)}
           />
-        </label>
-        <label>
-          Text
-          <input
+        <Field label="Text"
             aria-label="Text filter"
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
-        </label>
-        <label>
-          Actor ID
-          <input aria-label="Actor ID filter" inputMode="numeric" value={actorId} onChange={(e) => setActorId(e.target.value)} />
-        </label>
-        <label>
-          From
-          <input aria-label="From filter" type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} />
-        </label>
-        <label>
-          To
-          <input aria-label="To filter" type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} />
-        </label>
+        <Field label="Actor ID" aria-label="Actor ID filter" inputMode="numeric" value={actorId} onChange={(e) => setActorId(e.target.value)} />
+        <Field label="From" aria-label="From filter" type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} />
+        <Field label="To" aria-label="To filter" type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} />
       </div>
       {error && <Alert variant="danger">{error}</Alert>}
       <div className="overflow-x-auto"><table className="min-w-full text-left text-sm">

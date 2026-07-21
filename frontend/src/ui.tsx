@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from 'react';
+import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react';
 import { useId } from 'react';
 import { useTheme, type ThemeMode } from './theme';
 
@@ -32,6 +32,32 @@ export function Field({ label, id, error, hint, className = '', ...props }: Fiel
     <input {...props} id={inputId} aria-invalid={error ? true : props['aria-invalid']} aria-describedby={describedBy} className={`min-h-11 w-full rounded-md border border-border bg-surface px-3 py-2 text-foreground placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus ${className}`} />
     {hint && <p id={hintId} className="text-sm text-muted">{hint}</p>}
     {error && <p id={errorId} className="text-sm text-danger-foreground" role="alert">{error}</p>}
+  </div>;
+}
+
+type SelectFieldProps = Omit<SelectHTMLAttributes<HTMLSelectElement>, 'id'> & { label: ReactNode; id?: string; hint?: ReactNode };
+
+export function SelectField({ label, id, hint, className = '', children, ...props }: SelectFieldProps) {
+  const generatedId = useId();
+  const selectId = id ?? `select-${generatedId.replace(/:/g, '')}`;
+  const hintId = hint ? `${selectId}-hint` : undefined;
+  return <div className="space-y-2">
+    <label htmlFor={selectId} className="block text-sm font-medium text-foreground">{label}</label>
+    <select {...props} id={selectId} aria-describedby={hintId} className={`min-h-11 w-full rounded-md border border-border bg-surface px-3 py-2 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus ${className}`}>
+      {children}
+    </select>
+    {hint && <p id={hintId} className="text-sm text-muted">{hint}</p>}
+  </div>;
+}
+
+type TextareaFieldProps = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'id'> & { label: ReactNode; id?: string };
+
+export function TextareaField({ label, id, className = '', ...props }: TextareaFieldProps) {
+  const generatedId = useId();
+  const textareaId = id ?? `textarea-${generatedId.replace(/:/g, '')}`;
+  return <div className="space-y-2">
+    <label htmlFor={textareaId} className="block text-sm font-medium text-foreground">{label}</label>
+    <textarea {...props} id={textareaId} className={`min-h-11 w-full rounded-md border border-border bg-surface px-3 py-2 text-foreground placeholder:text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus ${className}`} />
   </div>;
 }
 
