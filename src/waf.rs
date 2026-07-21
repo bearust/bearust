@@ -3,6 +3,9 @@ use regex::Regex;
 use serde::Deserialize;
 
 pub const MAX_INSPECTION_BODY_BYTES: usize = 8 * 1024;
+pub const MAX_NORMALIZED_FIELD_BYTES: usize = 4 * 1024;
+pub const MAX_NORMALIZED_HEADERS: usize = 64;
+pub const MAX_NORMALIZED_METADATA_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct InspectionContext {
@@ -177,12 +180,26 @@ fn decode_percent_once(value: &str) -> String {
         decoded.push(bytes[index]);
         index += 1;
     }
-    String::from_utf8_lossy(&decoded).into_owned()
+    // Keep malformed decoded byte sequences literal instead of introducing
+    // replacement characters that could alter detector semantics.
+    String::from_utf8(decoded).unwrap_or_else(|_| value.to_owned())
 }
 
-fn normalize_text(value: &str) -> String {
+fn bounded_prefix(value: &str, max_bytes: usize) -> &str {
+    let end = value
+        .char_indices()
+        .take_while(|(index, _)| *index < max_bytes)
+        .map(|(index, character)| index + character.len_utf8())
+        .last()
+        .unwrap_or(0)
+        .min(max_bytes);
+    &value[..end]
+}
+
+fn normalize_text(value: &str, max_bytes: usize) -> String {
     // Two decode passes handle double-encoded attacks while bounding work.
-    let decoded = decode_percent_once(&decode_percent_once(value));
+    let bounded = bounded_prefix(value, max_bytes);
+    let decoded = decode_percent_once(&decode_percent_once(bounded));
     let mut normalized = String::with_capacity(decoded.len());
     let mut whitespace = false;
     for character in decoded.chars() {
@@ -205,16 +222,24 @@ fn normalize_text(value: &str) -> String {
 
 fn normalize_context(context: &InspectionContext) -> NormalizedContext {
     let body = &context.body[..context.body.len().min(MAX_INSPECTION_BODY_BYTES)];
+    let mut remaining = MAX_NORMALIZED_METADATA_BYTES;
+    let mut normalize_metadata = |value: &str| {
+        let cap = remaining.min(MAX_NORMALIZED_FIELD_BYTES);
+        let normalized = normalize_text(value, cap);
+        remaining = remaining.saturating_sub(normalized.len());
+        normalized
+    };
     NormalizedContext {
-        method: normalize_text(&context.method),
-        path: normalize_text(&context.path),
-        query: normalize_text(&context.query),
+        method: normalize_metadata(&context.method),
+        path: normalize_metadata(&context.path),
+        query: normalize_metadata(&context.query),
         headers: context
             .headers
             .iter()
-            .map(|(name, value)| (normalize_text(name), normalize_text(value)))
+            .take(MAX_NORMALIZED_HEADERS)
+            .map(|(name, value)| (normalize_metadata(name), normalize_metadata(value)))
             .collect(),
-        body: normalize_text(&String::from_utf8_lossy(body)),
+        body: normalize_text(&String::from_utf8_lossy(body), MAX_INSPECTION_BODY_BYTES),
     }
 }
 

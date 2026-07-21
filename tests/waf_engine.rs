@@ -238,3 +238,57 @@ fn normalized_body_respects_existing_inspection_cap() {
     );
     assert_eq!(result.decision, WafDecision::Allow);
 }
+
+#[test]
+fn normalized_metadata_is_bounded_before_matching() {
+    let rules = vec![rule(
+        "custom",
+        r#"{"field":"query","pattern":"needle"}"#,
+        WafAction::Block,
+    )];
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::Block,
+            updated_at: String::new(),
+        },
+        rules,
+    )
+    .unwrap();
+    let query = format!(
+        "{}needle",
+        "a".repeat(bearust::waf::MAX_NORMALIZED_FIELD_BYTES)
+    );
+    assert_eq!(
+        evaluate(&snapshot, &context("/", &query, "")).decision,
+        WafDecision::Allow
+    );
+}
+
+#[test]
+fn normalized_header_count_is_bounded() {
+    let rules = vec![rule(
+        "custom",
+        r#"{"field":"headers","pattern":"needle"}"#,
+        WafAction::Block,
+    )];
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::Block,
+            updated_at: String::new(),
+        },
+        rules,
+    )
+    .unwrap();
+    let mut headers: Vec<(String, String)> = (0..bearust::waf::MAX_NORMALIZED_HEADERS)
+        .map(|index| (format!("x-{index}"), String::from("benign")))
+        .collect();
+    headers.push(("x-overflow".into(), "needle".into()));
+    let context = InspectionContext {
+        method: "GET".into(),
+        path: "/".into(),
+        query: String::new(),
+        headers,
+        body: Vec::new(),
+    };
+    assert_eq!(evaluate(&snapshot, &context).decision, WafDecision::Allow);
+}
