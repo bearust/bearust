@@ -16,18 +16,20 @@ The default `docker compose up -d` keeps the control plane on SQLite at
 `/data/bearust.sqlite`, persisted by the `BEARUST_DATA` mount. PostgreSQL and
 MySQL are opt-in profiles with health checks and named volumes:
 
-```sh
-# PostgreSQL
-DATABASE_URL=postgres://bearust:change-me-in-development@postgres:5432/bearust \
-  docker compose --profile postgres up -d
+Uncomment and set the matching `DATABASE_URL` and `POSTGRES_*` or `MYSQL_*`
+credentials in `.env` (use a long random password in production), then run
+exactly one profile:
 
-# MySQL
-DATABASE_URL=mysql://bearust:change-me-in-development@mysql:3306/bearust \
-  docker compose --profile mysql up -d
+```sh
+docker compose --profile postgres up -d
+# or, for MySQL:
+docker compose --profile mysql up -d
 ```
 
-Set the corresponding `POSTGRES_*` or `MYSQL_*` credentials in `.env` (use a
-long random password in production). Migrations run automatically at startup;
+For a non-default env file, use `--env-file`, for example
+`docker compose --env-file .env.production --profile postgres up -d`.
+Enabling both profiles makes Bearust wait for both health checks while
+`DATABASE_URL` selects the backend it uses. Migrations run automatically at startup;
 the database volume is retained across restarts and image upgrades. Switching
 between SQLite, PostgreSQL, and MySQL is not an in-place operation: perform an
 explicit, tested export/import outside this phase and keep the original volume

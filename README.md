@@ -13,14 +13,14 @@ curl -H 'Host: api.example.com' http://127.0.0.1:8080/v1/health
 ```
 
 SQLite is the default and is persisted under `./data`. External database
-profiles are opt-in; copy `.env.example`, replace the development passwords,
-and start one profile:
+profiles are opt-in; copy `.env.example`, uncomment the matching `DATABASE_URL`
+and credential lines, replace the development passwords, and start exactly one
+profile:
 
 ```sh
-DATABASE_URL=postgres://bearust:${POSTGRES_PASSWORD}@postgres:5432/bearust \
-  docker compose --profile postgres up -d --build
-DATABASE_URL=mysql://bearust:${MYSQL_PASSWORD}@mysql:3306/bearust \
-  docker compose --profile mysql up -d --build
+docker compose --profile postgres up -d --build
+# or
+docker compose --profile mysql up -d --build
 ```
 
 PostgreSQL data is stored in the `postgres-data` named volume and MySQL data in
@@ -28,6 +28,11 @@ PostgreSQL data is stored in the `postgres-data` named volume and MySQL data in
 database backends requires a deliberate export/import procedure; do not delete
 the old volume until the new deployment has been verified. Redact passwords in
 `DATABASE_URL`, `.env`, Compose diagnostics, logs, and support bundles.
+
+The application waits for the selected database health check. Enabling both
+profiles makes it wait for both services; `DATABASE_URL` still selects the
+backend it uses. For a non-default env file, pass it explicitly with
+`docker compose --env-file .env.production --profile postgres up -d`.
 
 For the development compose file, build the UI once before opening the management page:
 

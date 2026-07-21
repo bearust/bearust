@@ -22,3 +22,8 @@ Verification:
 Concern: runtime database URL wiring depends on the Phase 5 application
 configuration work; this task only supplies the Compose environment and
 deployment documentation.
+
+Review follow-up: profile commands now rely on Compose `.env` semantics instead
+of shell-only `${...}` expansion. Documentation recommends one database profile
+at a time and explains `--env-file` plus the behavior when both profiles are
+enabled.
