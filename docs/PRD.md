@@ -611,6 +611,10 @@ Phase 4D.1 adds additive, idempotent persistence for the ten global permission k
 
 Administrators can revoke another user's active sessions through `POST /api/users/{id}/sessions/revoke`; self-revocation is rejected. Role, user, session, proxy-host, certificate, and authorization-denial paths record safe audit events. The dashboard includes admin-only role and session controls. Per-host scopes, audit export, system settings, realtime updates, and frontend theme work remain deferred to later Phase 4 increments.
 
+### Phase 4D.2 status: authenticated realtime updates
+
+Phase 4D.2 adds the authenticated `GET /api/events` Server-Sent Events (SSE) stream used by the dashboard to invalidate and reload proxy-host, certificate, user, role, session, and audit views without polling. Session-cookie authentication is required, and event payloads are intentionally redacted. The hub is process-local with bounded delivery; clients receive periodic heartbeats and use bounded automatic reconnects after disconnects. Cross-node fan-out and replay of events missed during a disconnect are deferred to the multi-node phase.
+
 ---
 
 ## 13. Success Metrics (KPIs)
