@@ -311,7 +311,12 @@ async fn list_users(State(s): State<AppState>, h: HeaderMap) -> impl IntoRespons
 }
 
 fn role_audit(role: &RoleDetail, before: Option<&[String]>, after: Option<&[String]>) -> String {
-    serde_json::json!({"role_id": role.id, "slug": role.slug, "before": before.map(|x| x.to_vec()), "after": after.map(|x| x.to_vec())}).to_string()
+    serde_json::json!({"role_id": role.id, "slug": role.slug, "before": before.map(|x| x.to_vec()), "after": after.map(|x| x.to_vec()), "scopes": role.scopes}).to_string()
+}
+
+fn role_scope_error(error: &sqlx::Error) -> Option<StatusCode> {
+    let message = error.to_string().to_ascii_lowercase();
+    (message.contains("invalid role scope") || message.contains("duplicate") || message.contains("unknown proxy host") || message.contains("invalid permission")).then_some(StatusCode::BAD_REQUEST)
 }
 
 async fn require_role_admin(s: &AppState, h: &HeaderMap) -> Result<User, axum::response::Response> {
@@ -351,10 +356,11 @@ async fn create_role(State(s): State<AppState>, h: HeaderMap, input: Result<Json
     let Some(slug) = normalize_role_slug(&input.slug) else { audit::record_state(&s, Some(actor.id), "role_mutation_denied", "reason=invalid_slug").await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role slug"); };
     if validate_role_input(&input.name, &input.permissions).is_err() { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &format!("slug={slug};reason=invalid_input")).await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role name or permission"); }
     let keys = input.permissions.iter().map(String::as_str).collect::<Vec<_>>();
-    let role = match repository::insert_role_with_permissions(&s.db, &slug, input.name.trim(), input.description.trim(), &keys).await { Ok(role) => role, Err(error) if error.to_string().to_ascii_lowercase().contains("unique") => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &format!("slug={slug};reason=duplicate")).await; return user_error(StatusCode::CONFLICT, "conflict", "Role slug already exists") }, Err(_) => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &format!("slug={slug};reason=database_error")).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") } };
+    let role = match repository::insert_role_with_permissions_and_scopes(&s.db, &slug, input.name.trim(), input.description.trim(), &keys, &input.scopes).await { Ok(role) => role, Err(error) if error.to_string().to_ascii_lowercase().contains("unique") => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &format!("slug={slug};reason=duplicate")).await; return user_error(StatusCode::CONFLICT, "conflict", "Role slug already exists") }, Err(error) if role_scope_error(&error).is_some() => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &format!("slug={slug};reason=invalid_scope")).await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role scope") }, Err(_) => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &format!("slug={slug};reason=database_error")).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") } };
     let details = role_audit(&role, None, Some(&role.permissions));
     audit::record_state(&s, Some(actor.id), "role_created", &details).await;
     audit::record_state(&s, Some(actor.id), "role_permissions_changed", &details).await;
+    if !role.scopes.is_empty() { audit::record_state(&s, Some(actor.id), "role_scopes_changed", &details).await; }
     s.realtime.publish("roles.changed");
     (StatusCode::CREATED, Json(role)).into_response()
 }
@@ -367,10 +373,11 @@ async fn update_role(State(s): State<AppState>, h: HeaderMap, path: Result<Path<
     let input = match input { Ok(Json(input)) => input, Err(_) => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role request"); } };
     if input.name.as_deref().is_some_and(|name| name.trim().is_empty()) || input.permissions.as_ref().is_some_and(|permissions| validate_role_input("valid", permissions).is_err()) { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role update"); }
     let keys = input.permissions.as_ref().map(|permissions| permissions.iter().map(String::as_str).collect::<Vec<_>>());
-    let updated = match repository::update_role_with_permissions(&s.db, id, input.name.as_deref().map(str::trim), input.description.as_deref().map(str::trim), keys.as_deref()).await { Ok(Some(role)) => role, Ok(None) => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &format!("role_id={id};reason=not_found")).await; return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found") }, Err(_) => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") } };
+    let updated = match repository::update_role_with_permissions_and_scopes(&s.db, id, input.name.as_deref().map(str::trim), input.description.as_deref().map(str::trim), keys.as_deref(), input.scopes.as_deref()).await { Ok(Some(role)) => role, Ok(None) => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &format!("role_id={id};reason=not_found")).await; return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found") }, Err(error) if role_scope_error(&error).is_some() => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role scope") }, Err(_) => { audit::record_state(&s, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") } };
     let details = role_audit(&updated, Some(&before.permissions), Some(&updated.permissions));
     audit::record_state(&s, Some(actor.id), "role_updated", &details).await;
     if input.permissions.is_some() { audit::record_state(&s, Some(actor.id), "role_permissions_changed", &details).await; }
+    if input.scopes.is_some() { audit::record_state(&s, Some(actor.id), "role_scopes_changed", &details).await; }
     s.realtime.publish("roles.changed");
     if input.permissions.is_some() { s.realtime.publish("sessions.changed"); }
     Json(updated).into_response()

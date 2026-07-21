@@ -1,6 +1,6 @@
 use crate::control_plane::models::{
     AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AuditLogItem, AuditLogPage,
-    AuditLogQuery, CertificateMetadata, ProxyHost, RoleDetail, User,
+    AuditLogQuery, CertificateMetadata, ProxyHost, RoleDetail, RolePermissionScope, User,
 };
 use crate::control_plane::rbac::Role;
 use sqlx::{
@@ -43,6 +43,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query("CREATE TABLE IF NOT EXISTS roles (id INTEGER PRIMARY KEY AUTOINCREMENT,slug TEXT NOT NULL UNIQUE,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',system_managed INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS permissions (id INTEGER PRIMARY KEY AUTOINCREMENT,key TEXT NOT NULL UNIQUE,description TEXT NOT NULL DEFAULT '')").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS role_permissions (role_id INTEGER NOT NULL,permission_id INTEGER NOT NULL,scope_type TEXT,scope_id INTEGER,PRIMARY KEY (role_id,permission_id,scope_type,scope_id),FOREIGN KEY(role_id) REFERENCES roles(id) ON DELETE CASCADE,FOREIGN KEY(permission_id) REFERENCES permissions(id) ON DELETE CASCADE)").execute(pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_role_permissions_scope ON role_permissions(scope_type,scope_id,role_id,permission_id)").execute(pool).await?;
     let permissions = ["proxy_hosts.read","proxy_hosts.write","certificates.read","certificates.write","users.manage","roles.manage","audit_logs.read","audit_logs.export","system.settings.manage","sessions.revoke"];
     for key in &permissions { sqlx::query("INSERT OR IGNORE INTO permissions(key) VALUES(?)").bind(key).execute(pool).await?; }
     let now = chrono::Utc::now().to_rfc3339();
@@ -287,17 +288,79 @@ pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, sqlx::Error> {
     }).collect())
 }
 
-fn role_detail_from_row(row: &sqlx::sqlite::SqliteRow, permissions: Vec<String>) -> RoleDetail {
-    RoleDetail { id: row.get("id"), slug: row.get("slug"), name: row.get("name"), description: row.get("description"), system_managed: row.get::<i64, _>("system_managed") != 0, permissions }
+fn role_detail_from_row(row: &sqlx::sqlite::SqliteRow, permissions: Vec<String>, scopes: Vec<RolePermissionScope>) -> RoleDetail {
+    RoleDetail { id: row.get("id"), slug: row.get("slug"), name: row.get("name"), description: row.get("description"), system_managed: row.get::<i64, _>("system_managed") != 0, permissions, scopes }
 }
 
 async fn role_detail(pool: &SqlitePool, row: sqlx::sqlite::SqliteRow) -> Result<RoleDetail, sqlx::Error> {
     let permissions = role_permissions(pool, row.get("id")).await?;
-    Ok(role_detail_from_row(&row, permissions))
+    let scopes = role_permission_scopes(pool, row.get("id")).await?;
+    Ok(role_detail_from_row(&row, permissions, scopes))
 }
 
 pub async fn role_permissions(pool: &SqlitePool, role_id: i64) -> Result<Vec<String>, sqlx::Error> {
     Ok(sqlx::query_scalar("SELECT p.key FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND rp.scope_type IS NULL AND rp.scope_id IS NULL ORDER BY p.key").bind(role_id).fetch_all(pool).await?)
+}
+
+pub async fn role_permission_scopes(pool: &SqlitePool, role_id: i64) -> Result<Vec<RolePermissionScope>, sqlx::Error> {
+    let rows = sqlx::query("SELECT p.key AS permission, rp.scope_id FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND rp.scope_type='proxy_host' ORDER BY p.key,rp.scope_id")
+        .bind(role_id).fetch_all(pool).await?;
+    let mut scopes = Vec::new();
+    for row in rows {
+        let permission: String = row.get("permission");
+        let host_id: i64 = row.get("scope_id");
+        if let Some(index) = scopes.iter().position(|s| s.permission == permission) {
+            scopes[index].proxy_host_ids.push(host_id);
+        } else {
+            scopes.push(RolePermissionScope { permission, proxy_host_ids: vec![host_id] });
+        }
+    }
+    Ok(scopes)
+}
+
+fn normalize_scopes(scopes: &[RolePermissionScope]) -> Result<Vec<RolePermissionScope>, sqlx::Error> {
+    let mut normalized = Vec::with_capacity(scopes.len());
+    for scope in scopes {
+        if !matches!(scope.permission.as_str(), "proxy_hosts.read" | "proxy_hosts.write") || scope.proxy_host_ids.is_empty() {
+            return Err(sqlx::Error::Protocol("invalid role scope permission".into()));
+        }
+        let mut ids = scope.proxy_host_ids.clone();
+        ids.sort_unstable();
+        if ids.windows(2).any(|pair| pair[0] == pair[1]) || ids.iter().any(|id| *id <= 0) {
+            return Err(sqlx::Error::Protocol("duplicate or invalid role scope host id".into()));
+        }
+        normalized.push(RolePermissionScope { permission: scope.permission.clone(), proxy_host_ids: ids });
+    }
+    normalized.sort_by(|a, b| a.permission.cmp(&b.permission));
+    if normalized.windows(2).any(|pair| pair[0].permission == pair[1].permission) {
+        return Err(sqlx::Error::Protocol("duplicate role scope permission".into()));
+    }
+    Ok(normalized)
+}
+
+async fn replace_scopes_tx<'a>(tx: &mut sqlx::Transaction<'a, sqlx::Sqlite>, role_id: i64, scopes: &[RolePermissionScope]) -> Result<(), sqlx::Error> {
+    let scopes = normalize_scopes(scopes)?;
+    for scope in &scopes {
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM proxy_hosts WHERE id IN (SELECT value FROM json_each(?))")
+            .bind(serde_json::to_string(&scope.proxy_host_ids).unwrap()).fetch_one(&mut **tx).await?;
+        if exists != scope.proxy_host_ids.len() as i64 { return Err(sqlx::Error::Protocol("unknown proxy host id".into())); }
+        for host_id in &scope.proxy_host_ids {
+            sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'proxy_host',? FROM permissions WHERE key=?")
+                .bind(role_id).bind(host_id).bind(&scope.permission).execute(&mut **tx).await?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn replace_role_scopes(pool: &SqlitePool, role_id: i64, scopes: &[RolePermissionScope]) -> Result<RoleDetail, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(role_id).fetch_optional(&mut *tx).await?.ok_or(sqlx::Error::RowNotFound)?;
+    if row.get::<i64, _>("system_managed") != 0 { return Err(sqlx::Error::Protocol("system-managed role cannot be mutated".into())); }
+    normalize_scopes(scopes)?;
+    sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='proxy_host'").bind(role_id).execute(&mut *tx).await?;
+    replace_scopes_tx(&mut tx, role_id, scopes).await?;
+    tx.commit().await?;
+    get_role(pool, role_id).await?.ok_or(sqlx::Error::RowNotFound)
 }
 
 pub async fn list_roles(pool: &SqlitePool) -> Result<Vec<RoleDetail>, sqlx::Error> {
@@ -323,6 +386,10 @@ pub async fn insert_role(pool: &SqlitePool, slug: &str, name: &str, description:
 
 /// Atomically creates a role and installs its global permissions.
 pub async fn insert_role_with_permissions(pool: &SqlitePool, slug: &str, name: &str, description: &str, keys: &[&str]) -> Result<RoleDetail, sqlx::Error> {
+    insert_role_with_permissions_and_scopes(pool, slug, name, description, keys, &[]).await
+}
+
+pub async fn insert_role_with_permissions_and_scopes(pool: &SqlitePool, slug: &str, name: &str, description: &str, keys: &[&str], scopes: &[RolePermissionScope]) -> Result<RoleDetail, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let now = chrono::Utc::now().to_rfc3339();
     let row = sqlx::query("INSERT INTO roles(slug,name,description,created_at,updated_at) VALUES(?,?,?,?,?) RETURNING id,slug,name,description,system_managed")
@@ -335,12 +402,17 @@ pub async fn insert_role_with_permissions(pool: &SqlitePool, slug: &str, name: &
         sqlx::query("INSERT INTO role_permissions(role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?")
             .bind(id).bind(key).execute(&mut *tx).await?;
     }
+    replace_scopes_tx(&mut tx, id, scopes).await?;
     tx.commit().await?;
     get_role(pool, id).await?.ok_or(sqlx::Error::RowNotFound)
 }
 
 /// Atomically updates role metadata and replaces its global permissions.
 pub async fn update_role_with_permissions(pool: &SqlitePool, id: i64, name: Option<&str>, description: Option<&str>, keys: Option<&[&str]>) -> Result<Option<RoleDetail>, sqlx::Error> {
+    update_role_with_permissions_and_scopes(pool, id, name, description, keys, None).await
+}
+
+pub async fn update_role_with_permissions_and_scopes(pool: &SqlitePool, id: i64, name: Option<&str>, description: Option<&str>, keys: Option<&[&str]>, scopes: Option<&[RolePermissionScope]>) -> Result<Option<RoleDetail>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(id).fetch_optional(&mut *tx).await?;
     let Some(current) = current else { tx.rollback().await?; return Ok(None); };
@@ -357,6 +429,11 @@ pub async fn update_role_with_permissions(pool: &SqlitePool, id: i64, name: Opti
         for key in keys {
             sqlx::query("INSERT INTO role_permissions(role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?").bind(id).bind(key).execute(&mut *tx).await?;
         }
+    }
+    if let Some(scopes) = scopes {
+        normalize_scopes(scopes)?;
+        sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='proxy_host'").bind(id).execute(&mut *tx).await?;
+        replace_scopes_tx(&mut tx, id, scopes).await?;
     }
     tx.commit().await?;
     get_role(pool, id).await

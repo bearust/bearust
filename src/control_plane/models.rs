@@ -199,6 +199,14 @@ pub struct RoleDetail {
     pub description: String,
     pub system_managed: bool,
     pub permissions: Vec<String>,
+    #[serde(default)]
+    pub scopes: Vec<RolePermissionScope>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RolePermissionScope {
+    pub permission: String,
+    pub proxy_host_ids: Vec<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -210,6 +218,8 @@ pub struct RoleCreate {
     pub description: String,
     #[serde(default)]
     pub permissions: Vec<String>,
+    #[serde(default)]
+    pub scopes: Vec<RolePermissionScope>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -218,6 +228,8 @@ pub struct RolePatch {
     pub name: Option<String>,
     pub description: Option<String>,
     pub permissions: Option<Vec<String>>,
+    #[serde(default)]
+    pub scopes: Option<Vec<RolePermissionScope>>,
 }
 
 pub type UserSummary = User;
