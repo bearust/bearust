@@ -1,25 +1,41 @@
-# Task 4 report — admin role scope editor
+# Phase 5 Task 4 Report
 
-## Scope
+## Status
 
-Added per-role proxy-host read/write scope controls to `RolesSection`. Admins
-can select or clear hosts independently for each permission, normalized scope
-assignments are sent in role create/update payloads, and built-in roles remain
-read-only. Scope controls use responsive Tailwind v4 grid utilities and stable
-test IDs. Validation failures use the existing alert pattern and retain the
-unsaved draft selections.
+Complete. Added an opt-in external database integration test for PostgreSQL and
+MySQL, shared environment/diagnostic helpers, and developer commands.
+
+## Changes
+
+- Added `tests/external_database.rs`.
+  - Skips with an explicit message when `DATABASE_URL_EXTERNAL` is absent.
+  - Connects through `repository::connect`, runs migrations twice, and checks
+    idempotency.
+  - Verifies all ten seeded permissions, all three system-managed roles, and
+    the administrator role's complete permission set.
+  - Creates and reads a user, then deletes it for repeatability on shared test
+    databases.
+- Added `external_database_url` and `redacted_database_target` to
+  `tests/support/mod.rs`.
+- Documented opt-in PostgreSQL and MySQL commands in `DEVELOPMENT.md`.
+
+## Redaction review
+
+Connection and migration failures include only the parsed scheme and host in
+panic text. Credentials, ports, paths, query parameters, and the original URL
+are never formatted. A regression test covers password-bearing IPv6 URLs.
 
 ## Verification
 
-Command: `npm test -- --run` (from `frontend/`)
+- `git diff --check`: passed.
+- `cargo fmt --check`: not run; `cargo` is unavailable in this environment
+  (`/bin/bash: cargo: command not found`).
+- External PostgreSQL/MySQL integration commands: not run; no external
+  database services are configured in this environment.
 
-Result: **38 tests passed across 8 files**.
+## Commit
 
-Command: `npm run build` (from `frontend/`)
+`e5ba2a7 test: add external database integration harness`
 
-Result: **TypeScript and Vite production build passed**.
-
-## Notes
-
-Vitest may emit pre-existing React `act(...)` and Node localStorage warnings;
-they do not fail the suite.
+The pre-existing `.superpowers/sdd/task-1-report.md` modification was left
+unstaged and is unrelated to this task.
