@@ -112,3 +112,26 @@ Each row contains only `id`, `actor`, `event`, redacted `details`, and `created_
 ### Phase 4D.2 realtime updates
 
 The dashboard subscribes to `GET /api/events` using an authenticated session cookie. The endpoint uses Server-Sent Events (SSE) to deliver safe invalidation notifications for proxy hosts, certificates, users, roles, sessions, and audit activity; the dashboard reloads the corresponding proxy-host, certificate, user, role, and audit data, while session events are notified through the stream for future session-view consumers. Payloads never contain credentials, tokens, hashes, private keys, or request bodies. Delivery is process-local and bounded, so clients automatically reconnect after transient disconnects and receive a heartbeat roughly every 15 seconds. Cross-node fan-out and replay of events missed while disconnected are intentionally deferred until the multi-node phase.
+### Basic WAF
+
+Phase 6 adds a bounded in-process WAF for SQL injection, XSS, path traversal,
+and command injection. Fresh installations start in `monitor-only` mode; use
+the admin dashboard or `/api/waf/*` endpoints to review rules and switch to
+`block`. Custom rules support `inherit`, `allow`, `log`, and `block` actions.
+Request-body inspection is capped at 8 KiB, and audit records never contain
+credentials, tokens, or request bodies.
+
+TOML imports use a versioned schema:
+
+```toml
+version = 1
+mode = "monitor-only"
+
+[[rules]]
+name = "block suspicious query"
+category = "custom"
+severity = "medium"
+action = "block"
+field = "query"
+pattern = "evil"
+```

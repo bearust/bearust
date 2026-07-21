@@ -91,7 +91,7 @@ fn parse_field(value: &str) -> Result<MatchField, &'static str> {
     match value { "any" => Ok(MatchField::Any), "method" => Ok(MatchField::Method), "path" => Ok(MatchField::Path), "query" => Ok(MatchField::Query), "headers" => Ok(MatchField::Headers), "body" => Ok(MatchField::Body), _ => Err("invalid matcher definition") }
 }
 
-fn field_values<'a>(field: MatchField, context: &'a InspectionContext) -> Vec<String> {
+fn field_values(field: MatchField, context: &InspectionContext) -> Vec<String> {
     match field {
         MatchField::Any => {
             let mut values = vec![context.method.clone(), context.path.clone(), context.query.clone()];

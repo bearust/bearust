@@ -22,3 +22,17 @@ Phase 5 does not automate data export/import between backends, so verify a
 backup and restore plan before changing a production database URL.
 
 Focused TDD: add a minimal regression test, run it to observe failure, implement the smallest change, then rerun the focused test and the full suite.
+## Basic WAF
+
+Migration `0004_basic_waf.sql` seeds four built-in rules and defaults to
+`monitor-only`. Administrators manage configuration through `/api/waf/config`
+and `/api/waf/rules` or the dashboard. TOML imports use `version = 1` and are
+rejected when any matcher is invalid. The evaluator inspects bounded request
+fields and at most 8 KiB of body data.
+
+Focused checks:
+
+```bash
+cargo +stable test --test waf_repository --test waf_engine --test proxy_waf --test control_plane_waf
+npm test --prefix frontend -- --run waf.test.tsx
+```

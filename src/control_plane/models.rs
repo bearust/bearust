@@ -216,18 +216,16 @@ pub enum WafMode {
     Block,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum WafAction {
+    #[default]
     Inherit,
     Allow,
     Log,
     Block,
 }
 
-impl Default for WafAction {
-    fn default() -> Self { Self::Inherit }
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WafConfig {

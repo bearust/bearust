@@ -702,3 +702,12 @@ Phase 5.
 ---
 
 *This document is a living document — it will be updated as technical decisions and project scope evolve.*
+### Phase 6 status: basic WAF
+
+Phase 6 is complete for the basic in-process WAF scope. BeaRust persists and
+seeds common attack signatures; supports monitor-only and block modes; validates
+bounded custom rules; exposes admin CRUD and TOML import/export; publishes
+immutable proxy snapshots; records redacted audit events; emits SSE
+invalidation; and provides dashboard controls. Advanced OWASP CRS parity, bot
+management, adaptive rate limiting, distributed synchronization, and automatic
+rule updates remain future work.
