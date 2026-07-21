@@ -55,3 +55,12 @@ Implemented and committed as `0ee8f2b` (`feat: add portable control-plane migrat
   migration.
 - Verification: `git diff --check` passed; Rust tests remain unavailable because
   `cargo` is not installed in this environment.
+
+## Final robustness fix
+
+- Seed IDs now check for existing legacy rows with a colliding numeric ID and
+  fall back to a generated ID, avoiding accidental FK reassignment.
+- SQLite legacy duplicate NULL-global grants are deduplicated before sentinel
+  normalization; one grant is retained and scoped grants are untouched.
+- The legacy regression fixture now includes duplicate NULL grants and asserts
+  exactly one normalized global row.

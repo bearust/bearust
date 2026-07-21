@@ -195,7 +195,7 @@ async fn migration_preserves_legacy_records() {
     sqlx::query("CREATE TABLE role_permissions (role_id INTEGER NOT NULL, permission_id INTEGER NOT NULL, scope_type TEXT, scope_id INTEGER, PRIMARY KEY(role_id,permission_id,scope_type,scope_id))").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO roles(id,slug,name,created_at,updated_at) VALUES(42,'legacy-role','Legacy','2024-01-01','2024-01-01')").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO permissions(id,key) VALUES(43,'proxy_hosts.read')").execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(42,43,NULL,NULL),(42,43,'proxy_host',99)").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(42,43,NULL,NULL),(42,43,NULL,NULL),(42,43,'proxy_host',99)").execute(&pool).await.unwrap();
     repository::migrate(&pool).await.unwrap();
     let user: (String, i64) = sqlx::query_as("SELECT email,disabled FROM users WHERE id=7")
         .fetch_one(&pool).await.unwrap();
@@ -207,6 +207,8 @@ async fn migration_preserves_legacy_records() {
     let global: (String, i64) = sqlx::query_as("SELECT scope_type,scope_id FROM role_permissions WHERE role_id=42 AND permission_id=43 AND scope_id=0")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(global, (String::new(), 0));
+    let global_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM role_permissions WHERE role_id=42 AND permission_id=43 AND scope_type='' AND scope_id=0").fetch_one(&pool).await.unwrap();
+    assert_eq!(global_count, 1);
     let scoped: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM role_permissions WHERE role_id=42 AND permission_id=43 AND scope_type='proxy_host' AND scope_id=99")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(scoped, 1);

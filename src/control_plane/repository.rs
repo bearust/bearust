@@ -65,8 +65,13 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
     // databases use the non-null ('', 0) global representation.
     // Legacy schemas allow either scope column to be NULL. Normalize both
     // columns together so a partially-null row cannot remain ambiguous.
-    let _ = sqlx::query("UPDATE role_permissions SET scope_type='', scope_id=0 WHERE scope_type IS NULL OR scope_id IS NULL")
-        .execute(pool).await?;
+    // SQLite legacy tables can contain duplicate NULL-global rows; retain one
+    // before applying the non-null sentinel (which would otherwise hit PK).
+    if sqlx::query("SELECT sqlite_version() AS version").fetch_optional(pool).await.is_ok() {
+        sqlx::query("DELETE FROM role_permissions WHERE rowid NOT IN (SELECT MIN(rowid) FROM role_permissions WHERE scope_type IS NULL AND scope_id IS NULL GROUP BY role_id,permission_id) AND scope_type IS NULL AND scope_id IS NULL")
+            .execute(pool).await?;
+    }
+    sqlx::query("UPDATE role_permissions SET scope_type='', scope_id=0 WHERE scope_type IS NULL OR scope_id IS NULL").execute(pool).await?;
 
     let permissions = [
         "proxy_hosts.read",
@@ -84,7 +89,7 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
             sqlx::query(
                 "INSERT INTO permissions(id,key) SELECT ?,? WHERE NOT EXISTS (SELECT 1 FROM permissions WHERE key=?)",
             )
-        .bind(deterministic_id(key))
+        .bind(seed_id(pool, "permissions", "key", key, deterministic_id(key)).await?)
         .bind(key)
         .bind(key)
         .execute(pool)
@@ -96,7 +101,7 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO roles(id,slug,name,system_managed,created_at,updated_at) SELECT ?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM roles WHERE slug=?)",
         )
-        .bind(deterministic_id(slug))
+        .bind(seed_id(pool, "roles", "slug", slug, deterministic_id(slug)).await?)
         .bind(slug)
         .bind(name)
         .bind(1_i64)
@@ -133,6 +138,13 @@ fn deterministic_id(value: &str) -> i64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
     ((hasher.finish() as i64) & i64::MAX).max(1)
+}
+
+async fn seed_id(pool: &DbPool, table: &str, key_column: &str, key: &str, preferred: i64) -> Result<i64, sqlx::Error> {
+    if sqlx::query("SELECT 1").fetch_optional(pool).await.is_err() { return Ok(preferred); }
+    if sqlx::query(&format!("SELECT id FROM {table} WHERE {key_column}=?")).bind(key).fetch_optional(pool).await?.is_some() { return Ok(preferred); }
+    if sqlx::query(&format!("SELECT 1 FROM {table} WHERE id=?")).bind(preferred).fetch_optional(pool).await?.is_some() { return Ok(generated_id()); }
+    Ok(preferred)
 }
 
 fn generated_id() -> i64 {
