@@ -87,13 +87,17 @@ describe('theme persistence and resolution', () => {
   });
 
   it('does not throw when storage is unavailable', () => {
-    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('denied'); });
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('denied'); });
+    const storage = window.localStorage;
+    vi.spyOn(storage, 'getItem').mockImplementation(() => { throw new Error('denied'); });
+    vi.spyOn(storage, 'setItem').mockImplementation(() => { throw new Error('denied'); });
     installMediaQuery(false);
+    expect(() => readStoredTheme()).not.toThrow();
     expect(() => bootstrapTheme()).not.toThrow();
     const container = document.createElement('div'); document.body.append(container);
     const root = createRoot(container);
     expect(() => act(() => root.render(<ThemeProvider><Probe /></ThemeProvider>))).not.toThrow();
+    const probe = document.querySelector('output')!;
+    expect(() => act(() => probe.dispatchEvent(new MouseEvent('click', { bubbles: true })))).not.toThrow();
     root.unmount();
   });
 });
