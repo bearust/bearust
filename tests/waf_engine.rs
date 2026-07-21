@@ -317,3 +317,112 @@ fn normalized_header_count_is_bounded() {
     };
     assert_eq!(evaluate(&snapshot, &context).decision, WafDecision::Allow);
 }
+
+#[test]
+fn semantic_sqli_is_scored_without_raw_input_in_reason() {
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::MonitorOnly,
+            updated_at: String::new(),
+        },
+        Vec::new(),
+    )
+    .unwrap();
+    let result = evaluate(
+        &snapshot,
+        &context(
+            "/login",
+            "id=1%20UNION%20SELECT%20password%20FROM%20users",
+            "",
+        ),
+    );
+    assert_eq!(result.decision, WafDecision::Log);
+    assert_eq!(result.semantic_score, 6);
+    assert_eq!(result.categories, vec!["sqli"]);
+    assert_eq!(result.severity.as_deref(), Some("medium"));
+    assert!(result
+        .diagnostic
+        .as_deref()
+        .unwrap_or_default()
+        .contains("sqli"));
+    assert!(!result
+        .diagnostic
+        .as_deref()
+        .unwrap_or_default()
+        .contains("password"));
+}
+
+#[test]
+fn semantic_xss_traversal_command_and_protocol_signals_are_stable() {
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::MonitorOnly,
+            updated_at: String::new(),
+        },
+        Vec::new(),
+    )
+    .unwrap();
+    let mut request = context(
+        "/assets/../../etc/passwd",
+        "",
+        "<script>alert(1)</script>; cat /etc/passwd",
+    );
+    request.method = "TRACE".into();
+    let result = evaluate(&snapshot, &request);
+    assert_eq!(result.decision, WafDecision::Log);
+    assert_eq!(result.semantic_score, 18);
+    assert_eq!(
+        result.categories,
+        vec![
+            "xss",
+            "path_traversal",
+            "command_injection",
+            "protocol_anomaly"
+        ]
+    );
+    assert_eq!(result.severity.as_deref(), Some("critical"));
+}
+
+#[test]
+fn semantic_benign_request_is_allowed_with_no_signals() {
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::Block,
+            updated_at: String::new(),
+        },
+        Vec::new(),
+    )
+    .unwrap();
+    let result = evaluate(
+        &snapshot,
+        &context("/products", "page=2&sort=name", "hello world"),
+    );
+    assert_eq!(result.decision, WafDecision::Allow);
+    assert_eq!(result.semantic_score, 0);
+    assert!(result.categories.is_empty());
+    assert!(result.severity.is_none());
+    assert!(result.diagnostic.is_none());
+}
+
+#[test]
+fn semantic_score_reaches_block_threshold_only_in_block_mode() {
+    let monitor = compile_snapshot(
+        WafConfig {
+            mode: WafMode::MonitorOnly,
+            updated_at: String::new(),
+        },
+        Vec::new(),
+    )
+    .unwrap();
+    let block = compile_snapshot(
+        WafConfig {
+            mode: WafMode::Block,
+            updated_at: String::new(),
+        },
+        Vec::new(),
+    )
+    .unwrap();
+    let request = context("/download/../../etc/passwd", "q=1%20OR%201=1", "");
+    assert_eq!(evaluate(&monitor, &request).decision, WafDecision::Log);
+    assert_eq!(evaluate(&block, &request).decision, WafDecision::Block);
+}

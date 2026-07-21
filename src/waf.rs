@@ -1,11 +1,15 @@
 use crate::control_plane::models::{WafAction, WafConfig, WafMode, WafRule};
 use regex::Regex;
 use serde::Deserialize;
+use std::sync::LazyLock;
 
 pub const MAX_INSPECTION_BODY_BYTES: usize = 8 * 1024;
 pub const MAX_NORMALIZED_FIELD_BYTES: usize = 4 * 1024;
 pub const MAX_NORMALIZED_HEADERS: usize = 64;
 pub const MAX_NORMALIZED_METADATA_BYTES: usize = 16 * 1024;
+const MAX_SEMANTIC_SIGNALS: usize = 8;
+const MAX_SEMANTIC_REASON_BYTES: usize = 96;
+const SEMANTIC_BLOCK_THRESHOLD: u16 = 8;
 
 #[derive(Clone, Debug, Default)]
 pub struct InspectionContext {
@@ -38,6 +42,16 @@ pub struct Evaluation {
     pub matched_rule_ids: Vec<i64>,
     pub categories: Vec<String>,
     pub diagnostic: Option<String>,
+    pub semantic_score: u16,
+    pub severity: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticSignal {
+    pub category: String,
+    pub weight: u16,
+    pub field: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug)]
@@ -294,6 +308,87 @@ fn builtin_matches(kind: BuiltinKind, value: &str) -> bool {
     }
 }
 
+static SEMANTIC_SQLI: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:union\s+select|(?:'|\b)\s*(?:or|and)\s+\d+\s*=\s*\d+|select\s+[^ ]+\s+from)")
+        .expect("static semantic regex")
+});
+static SEMANTIC_XSS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:<\s*(?:script|svg|img)|javascript\s*:|on(?:error|load)\s*=)")
+        .expect("static semantic regex")
+});
+static SEMANTIC_TRAVERSAL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:\.\./|\.\.\\|%2e%2e%2f)").expect("static semantic regex"));
+static SEMANTIC_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|[;|&])\s*(?:cat|sh|bash|curl|wget|nc|python|perl)\b")
+        .expect("static semantic regex")
+});
+
+fn semantic_signal(category: &str, weight: u16, field: &str, reason: &str) -> SemanticSignal {
+    let reason = bounded_prefix(reason, MAX_SEMANTIC_REASON_BYTES).to_owned();
+    SemanticSignal {
+        category: category.to_owned(),
+        weight,
+        field: field.to_owned(),
+        reason,
+    }
+}
+
+fn semantic_signals(context: &NormalizedContext) -> Vec<SemanticSignal> {
+    let values = [
+        ("method", context.method.as_str()),
+        ("path", context.path.as_str()),
+        ("query", context.query.as_str()),
+        ("body", context.body.as_str()),
+    ];
+    let mut signals = Vec::new();
+    let detectors: [(&str, u16, &LazyLock<Regex>, &str); 4] = [
+        ("sqli", 6, &SEMANTIC_SQLI, "SQL injection indicator"),
+        ("xss", 5, &SEMANTIC_XSS, "cross-site scripting indicator"),
+        (
+            "path_traversal",
+            4,
+            &SEMANTIC_TRAVERSAL,
+            "path traversal indicator",
+        ),
+        (
+            "command_injection",
+            6,
+            &SEMANTIC_COMMAND,
+            "command injection indicator",
+        ),
+    ];
+    for (category, weight, detector, reason) in detectors {
+        if let Some((field, _)) = values.iter().find(|(_, value)| detector.is_match(value)) {
+            signals.push(semantic_signal(category, weight, field, reason));
+        }
+    }
+    // TRACE and unknown methods are valid in rare deployments but are unusual
+    // enough to surface as a low-confidence protocol anomaly.
+    if !matches!(
+        context.method.as_str(),
+        "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "connect"
+    ) {
+        signals.push(semantic_signal(
+            "protocol_anomaly",
+            3,
+            "method",
+            "uncommon HTTP method",
+        ));
+    }
+    signals.truncate(MAX_SEMANTIC_SIGNALS);
+    signals
+}
+
+fn severity_for_score(score: u16) -> Option<String> {
+    match score {
+        0 => None,
+        1..=4 => Some("low".into()),
+        5..=7 => Some("medium".into()),
+        8..=11 => Some("high".into()),
+        _ => Some("critical".into()),
+    }
+}
+
 pub fn evaluate(snapshot: &WafSnapshot, context: &InspectionContext) -> Evaluation {
     let normalized = normalize_context(context);
     let mut matched_rule_ids = Vec::new();
@@ -333,10 +428,44 @@ pub fn evaluate(snapshot: &WafSnapshot, context: &InspectionContext) -> Evaluati
             _ => WafDecision::Allow,
         });
     }
+    let signals = semantic_signals(&normalized);
+    let semantic_score = signals
+        .iter()
+        .fold(0u16, |score, signal| score.saturating_add(signal.weight));
+    for signal in &signals {
+        if !categories.contains(&signal.category) {
+            categories.push(signal.category.clone());
+        }
+    }
+    let semantic_decision = if semantic_score == 0 {
+        None
+    } else if snapshot.mode == WafMode::Block && semantic_score >= SEMANTIC_BLOCK_THRESHOLD {
+        Some(WafDecision::Block)
+    } else {
+        Some(WafDecision::Log)
+    };
+    let decision = match (effective.unwrap_or(WafDecision::Allow), semantic_decision) {
+        (WafDecision::Block, _) | (_, Some(WafDecision::Block)) => WafDecision::Block,
+        (WafDecision::Log, _) | (_, Some(WafDecision::Log)) => WafDecision::Log,
+        _ => WafDecision::Allow,
+    };
+    let diagnostic = if signals.is_empty() {
+        None
+    } else {
+        Some(
+            signals
+                .iter()
+                .map(|signal| format!("{}:{}", signal.category, signal.field))
+                .collect::<Vec<_>>()
+                .join(","),
+        )
+    };
     Evaluation {
-        decision: effective.unwrap_or(WafDecision::Allow),
+        decision,
         matched_rule_ids,
         categories,
-        diagnostic: None,
+        diagnostic,
+        semantic_score,
+        severity: severity_for_score(semantic_score),
     }
 }
