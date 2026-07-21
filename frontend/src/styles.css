@@ -1,1 +1,48 @@
 @import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --color-page: #f8fafc;
+  --color-panel: #ffffff;
+  --color-panel-muted: #f1f5f9;
+  --color-text: #0f172a;
+  --color-text-muted: #475569;
+  --color-border: #cbd5e1;
+  --color-focus: #2563eb;
+  --color-brand: #2563eb;
+  --color-success: #15803d;
+  --color-warning: #a16207;
+  --color-danger: #b91c1c;
+  --color-info: #0369a1;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --color-page: #0f172a;
+  --color-panel: #1e293b;
+  --color-panel-muted: #334155;
+  --color-text: #f8fafc;
+  --color-text-muted: #cbd5e1;
+  --color-border: #475569;
+  --color-focus: #60a5fa;
+  --color-brand: #60a5fa;
+  --color-success: #4ade80;
+  --color-warning: #facc15;
+  --color-danger: #f87171;
+  --color-info: #38bdf8;
+}
+
+@theme inline {
+  --color-page: var(--color-page);
+  --color-panel: var(--color-panel);
+  --color-panel-muted: var(--color-panel-muted);
+  --color-text: var(--color-text);
+  --color-text-muted: var(--color-text-muted);
+  --color-border: var(--color-border);
+  --color-focus: var(--color-focus);
+  --color-brand: var(--color-brand);
+  --color-success: var(--color-success);
+  --color-warning: var(--color-warning);
+  --color-danger: var(--color-danger);
+  --color-info: var(--color-info);
+}
