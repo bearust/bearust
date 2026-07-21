@@ -25,3 +25,11 @@ Verification:
 
 - `git diff --check` passed.
 - Native `cargo`/Docker toolchain unavailable in this environment; Rust tests could not be executed here.
+
+## Second review-fix wave
+
+- Preserved `403` for users who have host read access but lack write access; users with neither grant still receive safe `404`.
+- Scope-row lookup now fails closed on database errors.
+- Reload rollback now checks host, scope, and reloader restoration results and records `rollback_failed` when any restoration step fails.
+
+Verification: `git diff --check` passed. Native Cargo unavailable, so route integration tests could not be executed in this environment.

@@ -996,7 +996,8 @@ async fn update_host(
     };
     if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
         audit::record_state(&s, Some(u.id), "authorization_denied", r#"{"resource_type":"proxy_host","resource_id":"[REDACTED]"}"#).await;
-        return StatusCode::NOT_FOUND.into_response();
+        let status = if authorize(&s.db, &u, Permission::ProxyHostsRead, ResourceContext::ProxyHost(id)).await.unwrap_or(false) { StatusCode::FORBIDDEN } else { StatusCode::NOT_FOUND };
+        return status.into_response();
     }
     let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
         audit::record_state(&s, Some(u.id), "proxy_host_update_denied", "reason=not_found").await;
@@ -1061,13 +1062,20 @@ async fn remove_host(
     };
     if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
         audit::record_state(&s, Some(u.id), "authorization_denied", r#"{"resource_type":"proxy_host","resource_id":"[REDACTED]"}"#).await;
-        return StatusCode::NOT_FOUND.into_response();
+        let status = if authorize(&s.db, &u, Permission::ProxyHostsRead, ResourceContext::ProxyHost(id)).await.unwrap_or(false) { StatusCode::FORBIDDEN } else { StatusCode::NOT_FOUND };
+        return status.into_response();
     }
     let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
         audit::record_state(&s, Some(u.id), "proxy_host_delete_denied", "reason=not_found").await;
         return StatusCode::NOT_FOUND.into_response();
     };
-    let scope_rows = repository::host_scope_rows(&s.db, id).await.unwrap_or_default();
+    let scope_rows = match repository::host_scope_rows(&s.db, id).await {
+        Ok(rows) => rows,
+        Err(_) => {
+            audit::record_state(&s, Some(u.id), "proxy_host_delete_failed", "reason=database_error").await;
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
     if repository::delete_host_and_scopes(&s.db, id).await.is_err() {
         audit::record_state(&s, Some(u.id), "proxy_host_delete_failed", "reason=database_error").await;
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -1076,10 +1084,17 @@ async fn remove_host(
         proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default(),
     };
     if s.reloader.apply(desired).await.is_err() {
-        let _ = repository::insert_host(&s.db, &previous).await;
-        let _ = repository::restore_host_scopes(&s.db, id, &scope_rows).await;
-        let _ = s.reloader.apply(DesiredConfig { proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default() }).await;
-        audit::record_state(&s, Some(u.id), "proxy_host_delete_failed", "reason=reload_failed").await;
+        let host_restore = repository::insert_host(&s.db, &previous).await;
+        let scopes_restore = repository::restore_host_scopes(&s.db, id, &scope_rows).await;
+        let config_restore = repository::list_hosts(&s.db).await
+            .map(|hosts| DesiredConfig { proxy_hosts: hosts })
+            .map_err(|_| ());
+        let reload_restore = match config_restore {
+            Ok(config) => s.reloader.apply(config).await.map_err(|_| ()),
+            Err(_) => Err(()),
+        };
+        let rollback_ok = host_restore.is_ok() && scopes_restore.is_ok() && reload_restore.is_ok();
+        audit::record_state(&s, Some(u.id), "proxy_host_delete_failed", if rollback_ok { "reason=reload_failed" } else { "reason=rollback_failed" }).await;
         return (
             StatusCode::BAD_GATEWAY,
             Json(ErrorEnvelope {
