@@ -68,8 +68,8 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
     // SQLite legacy tables can contain duplicate NULL-global rows; retain one
     // before applying the non-null sentinel (which would otherwise hit PK).
     if sqlx::query("SELECT sqlite_version() AS version").fetch_optional(pool).await.is_ok() {
-        sqlx::query("DELETE FROM role_permissions WHERE rowid NOT IN (SELECT MIN(rowid) FROM role_permissions WHERE scope_type IS NULL AND scope_id IS NULL GROUP BY role_id,permission_id) AND scope_type IS NULL AND scope_id IS NULL")
-            .execute(pool).await?;
+        sqlx::query("DELETE FROM role_permissions WHERE (scope_type IS NULL OR scope_id IS NULL) AND EXISTS (SELECT 1 FROM role_permissions s WHERE s.role_id=role_permissions.role_id AND s.permission_id=role_permissions.permission_id AND s.scope_type='' AND s.scope_id=0)").execute(pool).await?;
+        sqlx::query("DELETE FROM role_permissions WHERE rowid NOT IN (SELECT MIN(rowid) FROM role_permissions WHERE scope_type IS NULL OR scope_id IS NULL GROUP BY role_id,permission_id) AND (scope_type IS NULL OR scope_id IS NULL)").execute(pool).await?;
     }
     sqlx::query("UPDATE role_permissions SET scope_type='', scope_id=0 WHERE scope_type IS NULL OR scope_id IS NULL").execute(pool).await?;
 
@@ -143,7 +143,13 @@ fn deterministic_id(value: &str) -> i64 {
 async fn seed_id(pool: &DbPool, table: &str, key_column: &str, key: &str, preferred: i64) -> Result<i64, sqlx::Error> {
     if sqlx::query("SELECT 1").fetch_optional(pool).await.is_err() { return Ok(preferred); }
     if sqlx::query(&format!("SELECT id FROM {table} WHERE {key_column}=?")).bind(key).fetch_optional(pool).await?.is_some() { return Ok(preferred); }
-    if sqlx::query(&format!("SELECT 1 FROM {table} WHERE id=?")).bind(preferred).fetch_optional(pool).await?.is_some() { return Ok(generated_id()); }
+    if sqlx::query(&format!("SELECT 1 FROM {table} WHERE id=?")).bind(preferred).fetch_optional(pool).await?.is_some() {
+        for _ in 0..32 {
+            let candidate = generated_id();
+            if sqlx::query(&format!("SELECT 1 FROM {table} WHERE id=?")).bind(candidate).fetch_optional(pool).await?.is_none() { return Ok(candidate); }
+        }
+        return Err(sqlx::Error::Protocol("unable to allocate seed ID".into()));
+    }
     Ok(preferred)
 }
 

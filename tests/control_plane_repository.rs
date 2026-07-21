@@ -195,7 +195,7 @@ async fn migration_preserves_legacy_records() {
     sqlx::query("CREATE TABLE role_permissions (role_id INTEGER NOT NULL, permission_id INTEGER NOT NULL, scope_type TEXT, scope_id INTEGER, PRIMARY KEY(role_id,permission_id,scope_type,scope_id))").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO roles(id,slug,name,created_at,updated_at) VALUES(42,'legacy-role','Legacy','2024-01-01','2024-01-01')").execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO permissions(id,key) VALUES(43,'proxy_hosts.read')").execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(42,43,NULL,NULL),(42,43,NULL,NULL),(42,43,'proxy_host',99)").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(42,43,NULL,NULL),(42,43,NULL,7),(42,43,'',0),(42,43,'proxy_host',99)").execute(&pool).await.unwrap();
     repository::migrate(&pool).await.unwrap();
     let user: (String, i64) = sqlx::query_as("SELECT email,disabled FROM users WHERE id=7")
         .fetch_one(&pool).await.unwrap();

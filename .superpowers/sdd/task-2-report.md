@@ -64,3 +64,11 @@ Implemented and committed as `0ee8f2b` (`feat: add portable control-plane migrat
   normalization; one grant is retained and scoped grants are untouched.
 - The legacy regression fixture now includes duplicate NULL grants and asserts
   exactly one normalized global row.
+
+## Final review adjustment
+
+- Legacy deduplication now covers partial-NULL scopes and removes them when a
+  normalized sentinel already exists, preventing primary-key conflicts while
+  retaining one global grant.
+- Seed-ID fallback now probes candidates in a bounded loop before returning an
+  allocation failure.
