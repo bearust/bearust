@@ -352,6 +352,7 @@ dependencies = [
  "pingora-error",
  "pingora-http",
  "pingora-proxy",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

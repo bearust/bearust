@@ -12,3 +12,4 @@ pub mod router;
 pub mod runtime;
 pub mod secrets;
 pub mod tls;
+pub mod waf;
