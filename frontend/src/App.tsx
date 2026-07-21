@@ -555,11 +555,38 @@ export function UsersSection({
 }
 
 const PERMISSIONS: PermissionKey[] = ["proxy_hosts.read","proxy_hosts.write","certificates.read","certificates.write","users.manage","roles.manage","audit_logs.read","audit_logs.export","system.settings.manage","sessions.revoke"];
-export function RolesSection({ user, roles, onChanged }: { user: User; roles: RoleRecord[]; onChanged: () => void | Promise<void> }) {
+type ScopeDraft = Record<number, Record<"proxy_hosts.read" | "proxy_hosts.write", number[]>>;
+export function RolesSection({ user, roles, hosts = [], onChanged }: { user: User; roles: RoleRecord[]; hosts?: Host[]; onChanged: () => void | Promise<void> }) {
   const [slug,setSlug]=useState(""), [name,setName]=useState(""), [error,setError]=useState(""), [busy,setBusy]=useState(false);
+  const [drafts, setDrafts] = useState<ScopeDraft>(() => Object.fromEntries(roles.map((role) => [role.id, {
+    "proxy_hosts.read": role.scopes?.find((s) => s.permission === "proxy_hosts.read")?.proxy_host_ids ?? [],
+    "proxy_hosts.write": role.scopes?.find((s) => s.permission === "proxy_hosts.write")?.proxy_host_ids ?? [],
+  }])) as ScopeDraft);
+  useEffect(() => {
+    setDrafts((current) => {
+      const next: ScopeDraft = {};
+      for (const role of roles) {
+        next[role.id] = {
+          "proxy_hosts.read": current[role.id]?.["proxy_hosts.read"] ?? role.scopes?.find((s) => s.permission === "proxy_hosts.read")?.proxy_host_ids ?? [],
+          "proxy_hosts.write": current[role.id]?.["proxy_hosts.write"] ?? role.scopes?.find((s) => s.permission === "proxy_hosts.write")?.proxy_host_ids ?? [],
+        };
+      }
+      return next;
+    });
+  }, [roles]);
   if (user.role !== "admin") return null;
-  const run=async (action:()=>Promise<unknown>)=>{setBusy(true);setError("");try{await action();await onChanged()}catch(e){setError(userError(e))}finally{setBusy(false)}};
-  return <Card><h2 className="mb-4 text-xl font-semibold">Roles</h2>{error&&<Alert variant="danger">{error}</Alert>}<div className="overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>Name</th><th>Slug</th><th>Permissions</th><th /></tr></thead><tbody>{roles.map(role=><tr key={role.id}><td>{role.name}</td><td>{role.slug}</td><td>{role.permissions.join(", ")}</td><td>{!role.system_managed&&<><Button variant="secondary" disabled={busy} onClick={()=>void run(()=>api.updateRole(role.id,{description:role.description}))}>Save</Button>{" "}<Button variant="danger" disabled={busy} onClick={()=>window.confirm("Delete this role?")&&void run(()=>api.deleteRole(role.id))}>Delete</Button></>}</td></tr>)}</tbody></table></div><form className="mt-6 grid gap-4 sm:grid-cols-2" onSubmit={e=>{e.preventDefault();if(!slug.trim()||!name.trim())return;void run(async()=>{await api.createRole({slug,name,description:"",permissions:["audit_logs.read"]});setSlug("");setName("")})}}><h3 className="sm:col-span-2 font-semibold">Add role</h3><Field label="Slug" value={slug} onChange={(e:any)=>setSlug(e.target.value)}/><Field label="Name" value={name} onChange={(e:any)=>setName(e.target.value)}/><Button type="submit" disabled={busy||!slug.trim()||!name.trim()}>Create role</Button></form><p className="mt-4 text-sm text-muted">Available permissions: {PERMISSIONS.join(", ")}</p></Card>;
+  const run=async (action:()=>Promise<unknown>)=>{setBusy(true);setError("");try{await action();await onChanged()}catch(e){setError((e as {status?:number})?.status === 400 || (e as {status?:number})?.status === 422 ? "Please check the submitted role details." : userError(e))}finally{setBusy(false)}};
+  const updateScope = (roleId: number, permission: "proxy_hosts.read" | "proxy_hosts.write", hostId: number, checked: boolean) => {
+    setDrafts((all) => {
+      const current = all[roleId] ?? { "proxy_hosts.read": [], "proxy_hosts.write": [] };
+      const ids = checked
+        ? [...new Set([...current[permission], hostId])].sort((a, b) => a - b)
+        : current[permission].filter((id) => id !== hostId);
+      return { ...all, [roleId]: { ...current, [permission]: ids } };
+    });
+  };
+  const scopePayload = (roleId: number) => (["proxy_hosts.read", "proxy_hosts.write"] as const).map((permission) => ({ permission, proxy_host_ids: [...new Set(drafts[roleId]?.[permission] ?? [])].sort((a,b)=>a-b) })).filter((scope) => scope.proxy_host_ids.length);
+  return <Card><h2 className="mb-4 text-xl font-semibold">Roles</h2>{error&&<Alert variant="danger">{error}</Alert>}<div className="overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>Name</th><th>Slug</th><th>Permissions</th><th /></tr></thead><tbody>{roles.map(role=><tr key={role.id}><td>{role.name}</td><td>{role.slug}</td><td>{role.permissions.join(", ")}<div data-testid={`role-scope-editor-${role.id}`} className="mt-3 grid gap-3 sm:grid-cols-2"><fieldset className="min-w-0"><legend className="font-medium">Proxy host read access</legend>{hosts.map((host)=><label className="flex items-center gap-2 text-sm" key={`read-${host.id}`}><input data-testid={`scope-read-host-${host.id}`} type="checkbox" disabled={role.system_managed || busy} checked={drafts[role.id]?.["proxy_hosts.read"]?.includes(host.id) ?? false} onChange={(e)=>updateScope(role.id,"proxy_hosts.read",host.id,e.target.checked)} /><span className="truncate">{host.domain}</span></label>)}</fieldset><fieldset className="min-w-0"><legend className="font-medium">Proxy host write access</legend>{hosts.map((host)=><label className="flex items-center gap-2 text-sm" key={`write-${host.id}`}><input data-testid={`scope-write-host-${host.id}`} type="checkbox" disabled={role.system_managed || busy} checked={drafts[role.id]?.["proxy_hosts.write"]?.includes(host.id) ?? false} onChange={(e)=>updateScope(role.id,"proxy_hosts.write",host.id,e.target.checked)} /><span className="truncate">{host.domain}</span></label>)}</fieldset>{!role.system_managed&&<div className="flex flex-wrap gap-2 sm:col-span-2"><Button data-testid={`role-scope-save-${role.id}`} variant="secondary" disabled={busy} onClick={()=>void run(()=>api.updateRole(role.id,{description:role.description,scopes:scopePayload(role.id)}))}>Save scopes</Button><Button data-testid={`role-scope-clear-${role.id}`} variant="secondary" disabled={busy} onClick={()=>setDrafts((all)=>({...all,[role.id]:{"proxy_hosts.read":[],"proxy_hosts.write":[]}}))}>Clear scopes</Button></div>}</div></td><td>{!role.system_managed&&<Button variant="danger" disabled={busy} onClick={()=>window.confirm("Delete this role?")&&void run(()=>api.deleteRole(role.id))}>Delete</Button>}</td></tr>)}</tbody></table></div><form className="mt-6 grid gap-4 sm:grid-cols-2" onSubmit={e=>{e.preventDefault();if(!slug.trim()||!name.trim())return;void run(async()=>{await api.createRole({slug:slug.trim(),name:name.trim(),description:"",permissions:["audit_logs.read"],scopes:[]});setSlug("");setName("")})}}><h3 className="sm:col-span-2 font-semibold">Add role</h3><Field label="Slug" value={slug} onChange={(e:any)=>setSlug(e.target.value)}/><Field label="Name" value={name} onChange={(e:any)=>setName(e.target.value)}/><Button type="submit" disabled={busy||!slug.trim()||!name.trim()}>Create role</Button></form><p className="mt-4 text-sm text-muted">Available permissions: {PERMISSIONS.join(", ")}</p></Card>;
 }
 
 function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: () => void; onUserRefresh: (user: User) => void }) {
@@ -800,7 +827,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
         userErrorMessage={usersError}
         onChanged={() => void refresh()}
       />
-      <RolesSection user={user} roles={roles} onChanged={() => void refresh()} />
+      <RolesSection user={user} roles={roles} hosts={hosts} onChanged={() => void refresh()} />
       <AuditLogSection user={user} reloadRef={auditReloadRef} />
       </div>
     </main>
