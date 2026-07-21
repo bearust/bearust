@@ -3,6 +3,7 @@ pub mod auth;
 pub mod models;
 pub mod rbac;
 pub mod repository;
+pub mod realtime;
 use crate::acme::{AcmeEnvironment, AcmeManager, LetsEncryptClient};
 use crate::certificates::{
     AcmeService as CertificateAcmeService, AcmeServiceError as CertificateAcmeError,
@@ -39,6 +40,7 @@ pub struct AppState {
     pub auth_attempts: Arc<Mutex<HashMap<String, (Instant, u32)>>>,
     pub secrets: SecretStore,
     pub acme: Arc<dyn AcmeService>,
+    pub realtime: Arc<realtime::RealtimeHub>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -203,6 +205,7 @@ pub async fn build_state(
         auth_attempts: Arc::new(Mutex::new(HashMap::new())),
         secrets,
         acme: Arc::new(CertificateAcmeAdapter::new(certificate_acme)),
+        realtime: realtime::RealtimeHub::new(256),
     })
 }
 
