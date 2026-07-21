@@ -53,3 +53,24 @@ async fn toml_import_is_atomic_and_export_round_trips() {
     assert!(!after.contains("name = 'bad'"));
 }
 
+#[tokio::test]
+async fn waf_mutations_publish_redacted_audit_and_realtime_events() {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let state = bearust::control_plane::build_state("sqlite::memory:", dir.path(), "setup-token").await.unwrap();
+    let db = state.db.clone();
+    let realtime = state.realtime.clone();
+    let app = router(state);
+    let setup = app.clone().oneshot(Request::builder().method("POST").uri("/api/setup/initialize").header("content-type", "application/json").body(Body::from(r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#)).unwrap()).await.unwrap();
+    assert_eq!(setup.status(), StatusCode::CREATED);
+    let login = app.clone().oneshot(Request::builder().method("POST").uri("/api/auth/login").header("content-type", "application/json").body(Body::from(r#"{"email":"admin@example.com","password":"correct horse battery"}"#)).unwrap()).await.unwrap();
+    let cookie = login.headers().get("set-cookie").unwrap().to_str().unwrap().split(';').next().unwrap().to_owned();
+    let mut events = realtime.subscribe();
+    assert_eq!(response(app, "PATCH", "/api/waf/config", &cookie, Body::from(r#"{"mode":"block"}"#)).await.0, StatusCode::OK);
+    let first = events.recv().await.unwrap();
+    let second = events.recv().await.unwrap();
+    assert!(first.kind == "audit" || second.kind == "audit");
+    assert!(first.kind == "waf.changed" || second.kind == "waf.changed");
+    let details: String = sqlx::query_scalar("SELECT details FROM audit_logs WHERE event='waf_config_updated' ORDER BY created_at DESC LIMIT 1").fetch_one(&db).await.unwrap();
+    assert!(!details.contains("token"));
+    assert!(!details.contains("body"));
+}
