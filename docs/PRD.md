@@ -721,8 +721,10 @@ bounded percent-decoding and separator/case canonicalization before evaluating
 SQL injection, XSS, path traversal, command injection, and protocol-anomaly
 signals. Scores, severities, and category identifiers are stable and bounded;
 explicit rule actions retain precedence, monitor-only remains the default, and
-block mode uses a conservative threshold. Proxy snapshots are immutable and
-reload atomically, while audit and realtime telemetry contain only redacted
+block mode uses a conservative threshold. The first 8 KiB of a request body
+are bounded-buffered and withheld until evaluation; larger bodies flush that
+prefix and continue streaming without unbounded memory. Proxy snapshots are
+immutable and reload atomically, while audit and realtime telemetry contain only redacted
 category/score/severity identifiers and never request bodies, credentials, or
 sensitive header values.
 
