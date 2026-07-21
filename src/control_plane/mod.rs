@@ -350,8 +350,9 @@ async fn create_role(State(s): State<AppState>, h: HeaderMap, input: Result<Json
     let keys = input.permissions.iter().map(String::as_str).collect::<Vec<_>>();
     let role = match repository::insert_role_with_permissions(&s.db, &slug, input.name.trim(), input.description.trim(), &keys).await { Ok(role) => role, Err(error) if error.to_string().to_ascii_lowercase().contains("unique") => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &format!("slug={slug};reason=duplicate")).await; return user_error(StatusCode::CONFLICT, "conflict", "Role slug already exists") }, Err(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &format!("slug={slug};reason=database_error")).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") } };
     let details = role_audit(&role, None, Some(&role.permissions));
-    audit::record(&s.db, Some(actor.id), "role_created", &details).await;
-    audit::record(&s.db, Some(actor.id), "role_permissions_changed", &details).await;
+    audit::record_state(&s, Some(actor.id), "role_created", &details).await;
+    audit::record_state(&s, Some(actor.id), "role_permissions_changed", &details).await;
+    s.realtime.publish("roles.changed");
     (StatusCode::CREATED, Json(role)).into_response()
 }
 
@@ -365,8 +366,9 @@ async fn update_role(State(s): State<AppState>, h: HeaderMap, path: Result<Path<
     let keys = input.permissions.as_ref().map(|permissions| permissions.iter().map(String::as_str).collect::<Vec<_>>());
     let updated = match repository::update_role_with_permissions(&s.db, id, input.name.as_deref().map(str::trim), input.description.as_deref().map(str::trim), keys.as_deref()).await { Ok(Some(role)) => role, Ok(None) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &format!("role_id={id};reason=not_found")).await; return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found") }, Err(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&before, None, None)).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") } };
     let details = role_audit(&updated, Some(&before.permissions), Some(&updated.permissions));
-    audit::record(&s.db, Some(actor.id), "role_updated", &details).await;
-    if input.permissions.is_some() { audit::record(&s.db, Some(actor.id), "role_permissions_changed", &details).await; }
+    audit::record_state(&s, Some(actor.id), "role_updated", &details).await;
+    if input.permissions.is_some() { audit::record_state(&s, Some(actor.id), "role_permissions_changed", &details).await; }
+    s.realtime.publish("roles.changed");
     Json(updated).into_response()
 }
 
@@ -375,7 +377,7 @@ async fn delete_role(State(s): State<AppState>, h: HeaderMap, path: Result<Path<
     let Path(id) = match path { Ok(path) => path, Err(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", "reason=invalid_input").await; return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role id"); } };
     let Some(role) = (match repository::get_role(&s.db, id).await { Ok(role) => role, Err(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &format!("role_id={id};reason=database_error")).await; return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"); } }) else { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &format!("role_id={id};reason=not_found")).await; return user_error(StatusCode::NOT_FOUND, "not_found", "Role not found"); };
     if role.system_managed { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, None, None)).await; return user_error(StatusCode::CONFLICT, "conflict", "Built-in roles cannot be deleted"); }
-    match repository::delete_role(&s.db, id).await { Ok(1) => { audit::record(&s.db, Some(actor.id), "role_deleted", &role_audit(&role, Some(&role.permissions), None)).await; StatusCode::NO_CONTENT.into_response() }, Ok(count) if count == 0 || count > 1 => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, None, None)).await; user_error(StatusCode::NOT_FOUND, "not_found", "Role not found") }, Ok(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, None, None)).await; user_error(StatusCode::NOT_FOUND, "not_found", "Role not found") }, Err(error) if error.to_string().contains("assigned") => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, Some(&role.permissions), None)).await; user_error(StatusCode::CONFLICT, "conflict", "Role is assigned to users") }, Err(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, Some(&role.permissions), None)).await; user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") } }
+    match repository::delete_role(&s.db, id).await { Ok(1) => { audit::record_state(&s, Some(actor.id), "role_deleted", &role_audit(&role, Some(&role.permissions), None)).await; s.realtime.publish("roles.changed"); StatusCode::NO_CONTENT.into_response() }, Ok(count) if count == 0 || count > 1 => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, None, None)).await; user_error(StatusCode::NOT_FOUND, "not_found", "Role not found") }, Ok(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, None, None)).await; user_error(StatusCode::NOT_FOUND, "not_found", "Role not found") }, Err(error) if error.to_string().contains("assigned") => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, Some(&role.permissions), None)).await; user_error(StatusCode::CONFLICT, "conflict", "Role is assigned to users") }, Err(_) => { audit::record(&s.db, Some(actor.id), "role_mutation_denied", &role_audit(&role, Some(&role.permissions), None)).await; user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") } }
 }
 
 
@@ -395,7 +397,8 @@ async fn create_user(
     };
     match repository::insert_user(&s.db, &email, &hash, role).await {
         Ok(user) => {
-            audit::record(&s.db, Some(actor.id), "user_created", &user_audit(Some(user.id), "success")).await;
+            audit::record_state(&s, Some(actor.id), "user_created", &user_audit(Some(user.id), "success")).await;
+            s.realtime.publish("users.changed");
             (StatusCode::CREATED, Json(user)).into_response()
         }
         Err(error) if error.to_string().to_ascii_lowercase().contains("unique") => {
@@ -443,7 +446,8 @@ async fn update_user(
         Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
     };
     let detail = if input.disabled == Some(true) { "user_disabled" } else { "user_updated" };
-    audit::record(&s.db, Some(actor.id), detail, &user_audit(Some(id), "success")).await;
+    audit::record_state(&s, Some(actor.id), detail, &user_audit(Some(id), "success")).await;
+    s.realtime.publish("users.changed");
     Json(updated).into_response()
 }
 
@@ -484,7 +488,8 @@ async fn revoke_user_sessions(
     }
     match repository::revoke_user_sessions(&s.db, id).await {
         Ok(revoked) => {
-            audit::record(&s.db, Some(actor.id), "sessions_revoked", &format!("target_user_id={id};count={revoked}")).await;
+            audit::record_state(&s, Some(actor.id), "sessions_revoked", &format!("target_user_id={id};count={revoked}")).await;
+            s.realtime.publish("sessions.changed");
             Json(SessionsRevokeResponse { revoked }).into_response()
         }
         Err(_) => {
@@ -502,7 +507,7 @@ async fn delete_user(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64
     }
     match repository::delete_user(&s.db, id).await {
         Ok(0) => { audit::record(&s.db, Some(actor.id), "user_delete_denied", &user_audit(Some(id), "not_found")).await; user_error(StatusCode::NOT_FOUND, "not_found", "User not found") }
-        Ok(_) => { audit::record(&s.db, Some(actor.id), "user_deleted", &user_audit(Some(id), "success")).await; StatusCode::NO_CONTENT.into_response() }
+        Ok(_) => { audit::record_state(&s, Some(actor.id), "user_deleted", &user_audit(Some(id), "success")).await; s.realtime.publish("users.changed"); StatusCode::NO_CONTENT.into_response() }
         Err(error) if error.to_string().contains("last active") => {
             audit::record(&s.db, Some(actor.id), "user_delete_denied", &user_audit(Some(id), "last_admin")).await;
             user_error(StatusCode::CONFLICT, "last_admin", "Cannot remove the last active administrator")
@@ -946,6 +951,8 @@ async fn create_host(
                 )
                     .into_response();
             }
+            audit::record_state(&s, Some(u.id), "proxy_host_created", "configuration_changed").await;
+            s.realtime.publish("proxy_hosts.changed");
             (StatusCode::CREATED, Json(x)).into_response()
         }
         Err(_) => (
@@ -1015,13 +1022,14 @@ async fn update_host(
         )
             .into_response();
     }
-    audit::record(
-        &s.db,
+    audit::record_state(
+        &s,
         Some(u.id),
         "proxy_host_updated",
         "configuration_changed",
     )
     .await;
+    s.realtime.publish("proxy_hosts.changed");
     Json(next).into_response()
 }
 
@@ -1058,13 +1066,14 @@ async fn remove_host(
         )
             .into_response();
     }
-    audit::record(
-        &s.db,
+    audit::record_state(
+        &s,
         Some(u.id),
         "proxy_host_deleted",
         "configuration_changed",
     )
     .await;
+    s.realtime.publish("proxy_hosts.changed");
     StatusCode::NO_CONTENT.into_response()
 }
 async fn upload_certificate(
@@ -1109,7 +1118,7 @@ async fn upload_certificate(
     };
     match s.certificates.import_custom(&name, &cert, &key) {
         Ok(record) => {
-            match repository::insert_certificate(&s.db,&record.name,"custom",&serde_json::to_string(&record.covered_hostnames).unwrap_or_default(),&record.expiry,&record.certificate_path.to_string_lossy(),&record.key_path.to_string_lossy()).await{Ok(id)=>(StatusCode::CREATED,Json(serde_json::json!({"id":id,"name":record.name,"source":"custom","covered_hostnames":record.covered_hostnames,"expiry":record.expiry}))).into_response(),Err(_)=>StatusCode::CONFLICT.into_response()}
+            match repository::insert_certificate(&s.db,&record.name,"custom",&serde_json::to_string(&record.covered_hostnames).unwrap_or_default(),&record.expiry,&record.certificate_path.to_string_lossy(),&record.key_path.to_string_lossy()).await{Ok(id)=>{ audit::record_state(&s, Some(u.id), "certificate_uploaded", &format!("certificate_id={id}")).await; s.realtime.publish("certificates.changed"); (StatusCode::CREATED,Json(serde_json::json!({"id":id,"name":record.name,"source":"custom","covered_hostnames":record.covered_hostnames,"expiry":record.expiry}))).into_response() },Err(_)=>StatusCode::CONFLICT.into_response()}
         }
         Err(_) => StatusCode::BAD_REQUEST.into_response(),
     }
@@ -1196,13 +1205,14 @@ async fn activate_certificate(
         )
             .into_response();
     }
-    audit::record(
-        &s.db,
+    audit::record_state(
+        &s,
         Some(user.id),
         "certificate_activated",
         &format!("certificate_id={id}"),
     )
     .await;
+    s.realtime.publish("certificates.changed");
     StatusCode::NO_CONTENT.into_response()
 }
 

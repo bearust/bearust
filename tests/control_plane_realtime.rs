@@ -1,5 +1,5 @@
 use axum::{body::Body, http::{Request, StatusCode}};
-use bearust::control_plane::{auth, build_state, repository, router};
+use bearust::control_plane::{auth, audit, build_state, repository, router};
 use bearust::control_plane::realtime::RealtimeHub;
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
@@ -105,4 +105,18 @@ async fn events_stream_closes_after_session_revocation() {
         }
     }).await.expect("SSE stream did not close after session revocation");
     assert!(closed);
+}
+
+#[tokio::test]
+async fn state_audit_record_publishes_redacted_audit_event() {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let state = build_state("sqlite::memory:", dir.path(), "setup-token").await.unwrap();
+    let mut events = state.realtime.subscribe();
+    audit::record_state(&state, Some(7), "user_created", "user_id=8").await;
+    let event = events.recv().await.unwrap();
+    assert_eq!(event.kind, "audit");
+    let serialized = serde_json::to_string(&event).unwrap();
+    assert!(!serialized.contains("password"));
+    assert!(!serialized.contains("setup-token"));
+    assert!(!serialized.contains("private key"));
 }

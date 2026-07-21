@@ -63,7 +63,8 @@ pub async fn login(
                 .await
                 .is_ok()
             {
-                audit::record(&state.db, Some(user.id), "login_success", "session_created").await;
+                audit::record_state(&state, Some(user.id), "login_success", "session_created").await;
+                state.realtime.publish("sessions.changed");
                 let mut h = HeaderMap::new();
                 h.insert(header::SET_COOKIE,format!("bearust_session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=86400").parse().unwrap());
                 return (h, Json(user)).into_response();
@@ -88,7 +89,8 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> impl I
             .flatten()
             .map(|user| user.id);
         let _ = repository::revoke_session(&state.db, &token_hash(t)).await;
-        audit::record(&state.db, actor_id, "logout", "session_revoked").await;
+        audit::record_state(&state, actor_id, "logout", "session_revoked").await;
+        state.realtime.publish("sessions.changed");
     }
     StatusCode::NO_CONTENT
 }
