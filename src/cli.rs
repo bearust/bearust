@@ -228,12 +228,15 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
     let rt = tokio::runtime::Runtime::new().map_err(|e| AppError::Server(e.to_string()))?;
     rt.block_on(async move {
         let store = Arc::new(RuntimeStore::from_path(&path).await?);
-        let database_url = format!("sqlite://{}", config.server.control_database.display());
+        let database_url = std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| format!("sqlite://{}", config.server.control_database.display()));
         let setup_token_from_env = std::env::var("BEARUST_SETUP_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
         let setup_token = setup_token_from_env.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        if setup_token_from_env.is_none() {
+        if setup_token_from_env.is_none() && is_sqlite_database_url(&database_url) {
             let token_path = config.server.control_database.parent().unwrap_or(std::path::Path::new(".")).join("setup-token");
             if let Some(parent) = token_path.parent() { std::fs::create_dir_all(parent).map_err(|e| AppError::Server(format!("create setup token directory: {e}")))?; }
             std::fs::write(&token_path, format!("{setup_token}\n")).map_err(|e| AppError::Server(format!("write setup token: {e}")))?;
@@ -368,4 +371,8 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         tracing::info!(event = "server_stop");
         Ok(())
     })
+}
+
+fn is_sqlite_database_url(url: &str) -> bool {
+    url.trim_start().to_ascii_lowercase().starts_with("sqlite:")
 }
