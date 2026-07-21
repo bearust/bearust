@@ -45,3 +45,7 @@ Added migration `0003_setup_lock.sql` with an idempotent singleton sentinel row.
 ## Final review fixes
 
 Migration-order coverage now expects version 3 and verifies the setup sentinel. Every built-in role-permission insert explicitly writes the global scope sentinel (`scope_type=''`, `scope_id=0`), including seed, create, update, and set operations; this prevents nullable legacy schemas from producing grants invisible to RBAC queries.
+
+## Cross-vendor cleanup
+
+Removed MySQL-incompatible `CREATE INDEX IF NOT EXISTS` from the initial migration (migrations are applied once by SQLx). Legacy nullable scope normalization now enumerates role/permission pairs and uses portable `DELETE` plus conditional sentinel insertion, avoiding SQLite `rowid`/PostgreSQL `ctid` assumptions while retaining existing global and scoped grants.

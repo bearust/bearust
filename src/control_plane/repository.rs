@@ -61,17 +61,16 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
             Err(error) => return Err(error),
         }
     }
-    // Normalize nullable scope values left by the pre-migration schema. Fresh
-    // databases use the non-null ('', 0) global representation.
-    // Legacy schemas allow either scope column to be NULL. Normalize both
-    // columns together so a partially-null row cannot remain ambiguous.
-    // SQLite legacy tables can contain duplicate NULL-global rows; retain one
-    // before applying the non-null sentinel (which would otherwise hit PK).
-    if sqlx::query("SELECT sqlite_version() AS version").fetch_optional(pool).await.is_ok() {
-        sqlx::query("DELETE FROM role_permissions WHERE (scope_type IS NULL OR scope_id IS NULL) AND EXISTS (SELECT 1 FROM role_permissions s WHERE s.role_id=role_permissions.role_id AND s.permission_id=role_permissions.permission_id AND s.scope_type='' AND s.scope_id=0)").execute(pool).await?;
-        sqlx::query("DELETE FROM role_permissions WHERE rowid NOT IN (SELECT MIN(rowid) FROM role_permissions WHERE scope_type IS NULL OR scope_id IS NULL GROUP BY role_id,permission_id) AND (scope_type IS NULL OR scope_id IS NULL)").execute(pool).await?;
+    // Normalize legacy partial-NULL scope rows without rowid/ctid syntax.
+    // Delete all nullable variants for each role/permission, then restore one
+    // portable global sentinel when no global grant already exists.
+    let nullable_pairs = sqlx::query("SELECT DISTINCT role_id,permission_id FROM role_permissions WHERE scope_type IS NULL OR scope_id IS NULL").fetch_all(pool).await?;
+    for pair in nullable_pairs {
+        let role_id: i64 = pair.get("role_id");
+        let permission_id: i64 = pair.get("permission_id");
+        sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND permission_id=? AND (scope_type IS NULL OR scope_id IS NULL)").bind(role_id).bind(permission_id).execute(pool).await?;
+        sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,?,'',0 WHERE NOT EXISTS (SELECT 1 FROM role_permissions WHERE role_id=? AND permission_id=? AND scope_type='' AND scope_id=0)").bind(role_id).bind(permission_id).bind(role_id).bind(permission_id).execute(pool).await?;
     }
-    sqlx::query("UPDATE role_permissions SET scope_type='', scope_id=0 WHERE scope_type IS NULL OR scope_id IS NULL").execute(pool).await?;
 
     let permissions = [
         "proxy_hosts.read",
