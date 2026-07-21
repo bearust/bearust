@@ -15,4 +15,10 @@ DATABASE_URL_EXTERNAL=mysql://bearust:bearust@127.0.0.1:3306/bearust cargo test 
 When `DATABASE_URL_EXTERNAL` is absent, the external test reports an explicit
 skip and exits successfully.
 
+The application runs the checked-in SQLx migrations during startup. SQLite
+remains the default for local development; switching to PostgreSQL or MySQL
+requires setting `DATABASE_URL` and starting the matching Compose profile.
+Phase 5 does not automate data export/import between backends, so verify a
+backup and restore plan before changing a production database URL.
+
 Focused TDD: add a minimal regression test, run it to observe failure, implement the smallest change, then rerun the focused test and the full suite.
