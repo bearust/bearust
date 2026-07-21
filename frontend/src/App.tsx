@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import {
   api,
   AcmeRequest,
@@ -11,6 +11,7 @@ import {
   Role,
   User,
 } from "./api";
+import { useRealtimeUpdates, RealtimeStatus } from "./realtime";
 
 export const sanitizeError = (message: string) => {
   if (/internal stack|database|password\s*[:=]/i.test(message))
@@ -593,7 +594,49 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
     tls_mode: "disabled",
     certificate_id: null as number | null,
   });
+  const auditReloadRef = useRef<(() => void) | null>(null);
   const canWrite = user.role !== "viewer";
+  const loadHosts = async () => {
+    try {
+      setHosts(await api.hosts());
+      setError("");
+    } catch (e) {
+      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+    }
+  };
+  const loadCertificates = async () => {
+    try {
+      setCerts(await api.certificates());
+      setError("");
+    } catch (e) {
+      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+    }
+  };
+  const loadUsers = async () => {
+    if (user.role !== "admin") return;
+    try {
+      setUsers(await api.users());
+      setUsersError("");
+    } catch (e) {
+      setUsersError(userError(e));
+    }
+  };
+  const loadRoles = async () => {
+    if (user.role !== "admin") return;
+    try {
+      setRoles(await api.roles());
+      setUsersError("");
+    } catch (e) {
+      setUsersError(userError(e));
+    }
+  };
+  const realtimeStatus: RealtimeStatus = useRealtimeUpdates({
+    hosts: loadHosts,
+    certificates: loadCertificates,
+    users: loadUsers,
+    roles: loadRoles,
+    auditLogs: () => auditReloadRef.current?.(),
+  });
   const refresh = async () => {
     try {
       const [h, c] = await Promise.all([api.hosts(), api.certificates()]);
@@ -625,6 +668,9 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
           {user.email} ({user.role})
         </span>
         <button onClick={onLogout}>Sign out</button>
+        <span className="realtime-status" aria-label="Realtime status">
+          Realtime: {realtimeStatus}
+        </span>
       </header>
       {error && <p className="error">{error}</p>}
       <CertificateTable user={user} onChanged={() => void refresh()} />
@@ -769,7 +815,7 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
         onChanged={() => void refresh()}
       />
       <RolesSection user={user} roles={roles} onChanged={() => void refresh()} />
-      <AuditLogSection user={user} />
+      <AuditLogSection user={user} reloadRef={auditReloadRef} />
     </main>
   );
 }
@@ -808,7 +854,7 @@ export default function App() {
     <Login onDone={setUser} />
   );
 }
-export function AuditLogSection({ user }: { user: User }) {
+export function AuditLogSection({ user, reloadRef }: { user: User; reloadRef?: MutableRefObject<(() => void) | null> }) {
   const [items, setItems] = useState<AuditLogItem[]>([]),
     [total, setTotal] = useState(0),
     [page, setPage] = useState(1),
@@ -848,6 +894,13 @@ export function AuditLogSection({ user }: { user: User }) {
       if (requestId === requestSeq.current) setLoading(false);
     }
   };
+  useEffect(() => {
+    if (!reloadRef) return;
+    reloadRef.current = () => void load();
+    return () => {
+      reloadRef.current = null;
+    };
+  });
   useEffect(() => {
     void load();
   }, [page, event, q, actorId, from, to]);

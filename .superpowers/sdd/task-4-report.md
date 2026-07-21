@@ -1,15 +1,21 @@
-# Task 4 report
+# Task 4 report: React realtime subscription
 
-Implemented administrator-protected role management routes in `/home/rizalord/Projects/personal/bearust/.claude/worktrees/agent-a29ab37850b7f2c6c/src/control_plane/mod.rs`.
+Implemented the authenticated dashboard realtime subscription.
 
-- Added GET/POST `/api/roles` and GET/PATCH/DELETE `/api/roles/{id}`.
-- All role endpoints use centralized `authorize` with `Permission::RolesManage`.
-- Added lowercase kebab-case slug normalization, non-empty name validation, unknown permission rejection, and `deny_unknown_fields` payload validation (including scope-field rejection).
-- Malformed JSON, unknown fields, malformed role IDs, and unauthenticated role requests now return stable JSON error envelopes.
-- Role-ID parse failures and nonexistent mutation targets are covered by HTTP tests and safe denial audits.
-- Added safe `role_mutation_denied` audits for authorization, validation, duplicate, built-in, assigned, not-found, and database failure branches.
-- Added HTTP integration coverage for seeded roles/permissions, admin lifecycle, permissions, non-admin denial, built-in rejection, assigned deletion conflict, invalid permissions, and audit events in `tests/control_plane_roles.rs`.
-- Role create/update metadata and permissions now use transactional repository operations for atomicity.
-- Preserved persistent RBAC repository/authorization prerequisite commits from the approved Task 2/3 chain.
+## Changes
 
-Validation: `cargo test --test control_plane_roles` could not run because Cargo is not installed (`cargo: command not found`). `git diff --check` should be run in a Cargo-capable environment as well.
+- Added `frontend/src/realtime.ts` with `useRealtimeUpdates(loaders)` and `RealtimeStatus`.
+- Opens one credentialed `EventSource` at `/api/events` for the dashboard lifecycle.
+- Maps `proxy_hosts.changed`, `certificates.changed`, `users.changed`, `roles.changed`, and `audit` events to the corresponding loaders.
+- Tracks numeric SSE event IDs and ignores duplicate/older events and unknown event kinds.
+- Reports `connecting`, `connected`, and `disconnected` status, with bounded explicit reconnect scheduling and cleanup on unmount.
+- Integrated host, certificate, user, role, and audit loaders into the authenticated dashboard and added a non-blocking status label.
+- Added mocked-`EventSource` Vitest coverage for event mapping, deduplication, credentials, status, reconnect cap, and cleanup.
+
+## Verification
+
+- `cd frontend && npm test -- --run src/realtime.test.tsx` — passed (2 tests)
+- `cd frontend && npm test -- --run` — passed (4 files, 18 tests)
+- `cd frontend && npm run build` — passed
+- `git diff --check` — passed
+
