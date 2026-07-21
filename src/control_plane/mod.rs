@@ -252,6 +252,7 @@ pub async fn build_state(
         secrets.clone(),
     ));
     let realtime = Arc::new(realtime::RealtimeHub::new(256));
+    waf.configure_audit_sink(db.clone(), realtime.clone());
     certificate_acme.attach_realtime(realtime.clone());
     Ok(AppState {
         db,

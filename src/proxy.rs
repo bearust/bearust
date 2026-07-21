@@ -4,7 +4,7 @@ use crate::{
     observability::{append_forwarded_for, classify_error, log_request, validated_request_id},
     router::{normalize_host, ResolvedRoute},
     runtime::{RuntimeSnapshot, RuntimeStore},
-    waf::{evaluate, Evaluation, InspectionContext, WafDecision},
+    waf::{evaluate, Evaluation, InspectionContext, WafDecision, WafSnapshot},
     waf_store::WafStore,
 };
 use async_trait::async_trait;
@@ -31,6 +31,7 @@ pub struct RequestContext {
     /// without re-reading or retaining the request payload.
     pub waf_evaluation: Option<Evaluation>,
     pub waf_telemetry_emitted: bool,
+    pub waf_snapshot: Option<Arc<WafSnapshot>>,
 }
 
 impl Default for RequestContext {
@@ -49,6 +50,7 @@ impl Default for RequestContext {
             waf_blocked: false,
             waf_evaluation: None,
             waf_telemetry_emitted: false,
+            waf_snapshot: None,
         }
     }
 }
@@ -89,7 +91,7 @@ pub fn http_service(
 /// but is not an audit payload contract.  Categories are normalized into
 /// identifiers and capped so custom rule names cannot become an unbounded log
 /// injection vector.
-fn emit_waf_telemetry(request_id: &str, evaluation: &Evaluation) {
+fn emit_waf_telemetry(request_id: &str, waf: &WafStore, evaluation: &Evaluation) {
     if evaluation.semantic_score == 0 && evaluation.matched_rule_ids.is_empty() {
         return;
     }
@@ -103,6 +105,7 @@ fn emit_waf_telemetry(request_id: &str, evaluation: &Evaluation) {
         reason_ids = %details.reason_ids,
         decision = ?evaluation.decision,
     );
+    waf.record_detection(evaluation);
 }
 
 #[async_trait]
@@ -132,6 +135,8 @@ impl ProxyHttp for BeaRustProxy {
         let challenge_host = normalize_host(host).unwrap_or_default();
         let method = session.req_header().method.as_str();
         if let Some(waf) = &self.waf {
+            let waf_snapshot = waf.snapshot();
+            ctx.waf_snapshot = Some(waf_snapshot.clone());
             let context = InspectionContext {
                 method: method.to_owned(),
                 path: path.clone(),
@@ -139,11 +144,11 @@ impl ProxyHttp for BeaRustProxy {
                 headers: session.req_header().headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_owned(), value.to_owned()))).collect(),
                 body: Vec::new(),
             };
-            let evaluation = evaluate(&waf.snapshot(), &context);
+            let evaluation = evaluate(&waf_snapshot, &context);
             ctx.waf_blocked = evaluation.decision == WafDecision::Block;
             ctx.waf_evaluation = Some(evaluation.clone());
             if !ctx.waf_telemetry_emitted {
-                emit_waf_telemetry(&ctx.request_id, &evaluation);
+                emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
                 ctx.waf_telemetry_emitted = evaluation.semantic_score > 0
                     || !evaluation.matched_rule_ids.is_empty();
             }
@@ -252,13 +257,34 @@ impl ProxyHttp for BeaRustProxy {
             if let Some(waf) = &self.waf {
                 let header_values = session.req_header().headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_owned(), value.to_owned()))).collect();
                 let context = InspectionContext { method: session.req_header().method.as_str().to_owned(), path: session.req_header().uri.path().to_owned(), query: session.req_header().uri.query().unwrap_or_default().to_owned(), headers: header_values, body: ctx.waf_body.clone() };
-                let evaluation = evaluate(&waf.snapshot(), &context);
+                let evaluation = ctx
+                    .waf_snapshot
+                    .as_ref()
+                    .map(|snapshot| evaluate(snapshot, &context))
+                    .unwrap_or_else(|| evaluate(&waf.snapshot(), &context));
                 ctx.waf_blocked = evaluation.decision == WafDecision::Block;
                 ctx.waf_evaluation = Some(evaluation.clone());
                 if !ctx.waf_telemetry_emitted {
-                    emit_waf_telemetry(&ctx.request_id, &evaluation);
+                    emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
                     ctx.waf_telemetry_emitted = evaluation.semantic_score > 0
                         || !evaluation.matched_rule_ids.is_empty();
+                }
+                if ctx.waf_blocked {
+                    // Body-only detections are evaluated after bounded
+                    // collection. Return a typed 403 before the body can be
+                    // forwarded upstream; no request material is retained.
+                    *body = None;
+                    ctx.completion_logged = true;
+                    session
+                        .respond_error_with_body(403, Bytes::from_static(b"Request blocked"))
+                        .await?;
+                    // Returning an error is required here: `Ok(())` would let
+                    // Pingora continue its upstream body pipeline after the
+                    // downstream response was written.
+                    return Err(pingora_core::Error::explain(
+                        ErrorType::HTTPStatus(403),
+                        "request blocked by waf",
+                    ));
                 }
             }
         }
