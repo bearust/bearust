@@ -171,3 +171,49 @@ async fn publishes_domain_events_without_secrets() {
         assert!(!serialized.contains("-----BEGIN"));
     }
 }
+
+#[tokio::test]
+async fn role_scope_changes_publish_redacted_invalidation_and_audit_events() {
+    let (app, state, cookie) = authenticated_app().await;
+    sqlx::query("INSERT INTO proxy_hosts(name,domain,upstream_host,upstream_port,tls_mode,created_at,updated_at) VALUES(?,?,?,?,?,datetime('now'),datetime('now'))")
+        .bind("internal-admin-host")
+        .bind("internal.example.test")
+        .bind("10.0.0.9")
+        .bind(8443_i64)
+        .bind("disabled")
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let mut events = state.realtime.subscribe();
+    let response = app.oneshot(Request::builder()
+        .method("POST")
+        .uri("/api/roles")
+        .header("cookie", &cookie)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"slug":"host-auditor","name":"Host Auditor","permissions":["proxy_hosts.read"],"scopes":[{"permission":"proxy_hosts.read","proxy_host_ids":[1]}]}"#))
+        .unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Each audit write publishes only a kind/id event; request bodies and role
+    // scope details never cross the realtime boundary.
+    let mut kinds = Vec::new();
+    for _ in 0..4 {
+        let event = events.recv().await.unwrap();
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(!serialized.contains("internal.example.test"));
+        assert!(!serialized.contains("10.0.0.9"));
+        assert!(!serialized.contains("proxy_host_ids"));
+        kinds.push(event.kind);
+    }
+    assert_eq!(kinds.iter().map(String::as_str).collect::<Vec<_>>(), ["audit", "audit", "audit", "roles.changed"]);
+
+    let details: Vec<String> = sqlx::query_scalar("SELECT details FROM audit_logs WHERE event='role_scopes_changed'")
+        .fetch_all(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(details.len(), 1);
+    assert!(details[0].contains("proxy_host_ids"));
+    assert!(!details[0].contains("internal.example.test"));
+    assert!(!details[0].contains("10.0.0.9"));
+}

@@ -619,6 +619,12 @@ Phase 4D.2 adds the authenticated `GET /api/events` Server-Sent Events (SSE) str
 
 Phase 4D.3 completes the frontend migration to Tailwind CSS v4 across all existing management pages. Shared semantic design tokens and accessible UI primitives provide consistent responsive layouts, focus states, and status treatments. Theme selection supports `system`, `light`, and `dark` modes with local persistence; account-level preference synchronization remains deferred to the future system-settings capability.
 
+### Phase 4E status: per-host RBAC scopes
+
+Phase 4E completes the first per-resource authorization increment. Custom roles can grant `proxy_hosts.read` and `proxy_hosts.write` for an explicit set of proxy-host IDs while retaining the existing global permissions. Scoped users see only assigned hosts and cannot create, read, update, or delete unassigned hosts; global administrators and legacy global role assignments remain backward-compatible. Scope replacements are validated and committed atomically, proxy-host deletion removes stale assignments, and role-scope mutations emit redacted audit records plus authenticated realtime invalidation events.
+
+Phase 4E deliberately keeps certificate permissions global and does not introduce per-certificate or per-upstream scopes. It also does not provide cross-node realtime delivery, event replay after disconnect, audit export, delegated role administration, or a general-purpose policy language; those capabilities remain future work in the multi-node and later control-plane phases.
+
 ---
 
 ## 13. Success Metrics (KPIs)
