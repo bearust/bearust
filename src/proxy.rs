@@ -25,6 +25,7 @@ pub struct RequestContext {
     pub excluded_backend: Option<BackendId>,
     pub completion_logged: bool,
     pub waf_body: Vec<u8>,
+    pub waf_buffering: bool,
     pub waf_blocked: bool,
     /// The most recent bounded WAF result.  Keeping the result in the request
     /// context lets the body callback enrich the initial header-only check
@@ -48,6 +49,7 @@ impl Default for RequestContext {
             excluded_backend: None,
             completion_logged: false,
             waf_body: Vec::new(),
+            waf_buffering: true,
             waf_blocked: false,
             waf_evaluation: None,
             waf_telemetry_emitted: false,
@@ -259,9 +261,22 @@ impl ProxyHttp for BeaRustProxy {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         if self.waf.is_none() { return Ok(()); }
-        if let Some(chunk) = body.as_ref() {
-            let remaining = crate::waf::MAX_INSPECTION_BODY_BYTES.saturating_sub(ctx.waf_body.len());
-            ctx.waf_body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if ctx.waf_buffering {
+            if let Some(chunk) = body.as_ref() {
+                let remaining = crate::waf::MAX_INSPECTION_BODY_BYTES.saturating_sub(ctx.waf_body.len());
+                let take = chunk.len().min(remaining);
+                ctx.waf_body.extend_from_slice(&chunk[..take]);
+                if take < chunk.len() {
+                    let mut forwarded = Vec::with_capacity(ctx.waf_body.len() + chunk.len() - take);
+                    forwarded.extend_from_slice(&ctx.waf_body);
+                    forwarded.extend_from_slice(&chunk[take..]);
+                    ctx.waf_body.clear();
+                    ctx.waf_buffering = false;
+                    *body = Some(Bytes::from(forwarded));
+                } else {
+                    *body = Some(Bytes::new());
+                }
+            }
         }
         if let Some(waf) = &self.waf {
                 let header_values = session.req_header().headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_owned(), value.to_owned()))).collect();
@@ -292,6 +307,11 @@ impl ProxyHttp for BeaRustProxy {
                 }
                 if end_of_stream && (evaluation.semantic_score > 0 || !evaluation.matched_rule_ids.is_empty()) {
                     emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
+                }
+                if end_of_stream && !ctx.waf_blocked && ctx.waf_buffering {
+                    *body = Some(Bytes::from(ctx.waf_body.clone()));
+                    ctx.waf_body.clear();
+                    ctx.waf_buffering = false;
                 }
         }
         Ok(())
