@@ -15,11 +15,13 @@ use axum::{
     extract::DefaultBodyLimit,
     extract::{rejection::{JsonRejection, PathRejection}, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response, sse::{Event, KeepAlive, Sse}},
     routing::{get, post},
     Json, Router,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
+use futures_util::stream::unfold;
+use std::convert::Infallible;
 use models::*;
 use rbac::{authorize, Permission, ResourceContext, Role};
 use std::sync::Arc;
@@ -242,6 +244,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(me))
+        .route("/api/events", get(events))
         .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{id}", axum::routing::patch(update_user).delete(delete_user))
@@ -737,6 +740,42 @@ async fn current(s: &AppState, h: &HeaderMap) -> Result<User, StatusCode> {
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?
         .ok_or(StatusCode::UNAUTHORIZED)
+}
+
+async fn events(State(s): State<AppState>, h: HeaderMap) -> Response {
+    if current(&s, &h).await.is_err() {
+        return user_error(StatusCode::UNAUTHORIZED, "unauthorized", "Authentication required");
+    }
+
+    // Authentication is checked before subscribing.  Last-Event-ID is
+    // intentionally ignored: the process-local hub does not provide replay.
+    let receiver = s.realtime.subscribe();
+    let stream = unfold((receiver, true), |(mut receiver, ready)| async move {
+        if ready {
+            let event = Event::default().event("ready").data("{}");
+            return Some((Ok::<Event, Infallible>(event), (receiver, false)));
+        }
+        let next = match receiver.recv().await {
+            Ok(value) => Event::default()
+                .id(value.id.to_string())
+                .event(value.kind.clone())
+                .json_data(value)
+                .unwrap_or_else(|_| Event::default().event("reconnect").data("{}")),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                Event::default().event("reconnect").data(r#"{"reason":"lagged"}"#)
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+        };
+        Some((Ok::<Event, Infallible>(next), (receiver, false)))
+    });
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("heartbeat"))
+        .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, no-transform"),
+    );
+    response
 }
 async fn me(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
     match current(&s, &h).await {
