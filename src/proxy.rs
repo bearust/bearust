@@ -328,15 +328,11 @@ impl ProxyHttp for BeaRustProxy {
                 if end_of_stream && (evaluation.semantic_score > 0 || !evaluation.matched_rule_ids.is_empty()) {
                     emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
                 }
-                if end_of_stream && !ctx.waf_blocked && ctx.waf_buffering {
-                    let mut forwarded = Vec::with_capacity(ctx.waf_body.len() + ctx.waf_pending_suffix.len());
-                    forwarded.extend_from_slice(&ctx.waf_body);
-                    forwarded.extend_from_slice(&ctx.waf_pending_suffix);
-                    *body = Some(Bytes::from(forwarded));
-                    ctx.waf_body.clear();
-                    ctx.waf_pending_suffix.clear();
-                    ctx.waf_buffering = false;
-                } else if !ctx.waf_blocked && ctx.waf_buffering && ctx.waf_body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES {
+                let should_flush_buffer = !ctx.waf_blocked
+                    && ctx.waf_buffering
+                    && (end_of_stream
+                        || ctx.waf_body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES);
+                if should_flush_buffer {
                     let mut forwarded = Vec::with_capacity(ctx.waf_body.len() + ctx.waf_pending_suffix.len());
                     forwarded.extend_from_slice(&ctx.waf_body);
                     forwarded.extend_from_slice(&ctx.waf_pending_suffix);
