@@ -49,3 +49,5 @@ Migration-order coverage now expects version 3 and verifies the setup sentinel. 
 ## Cross-vendor cleanup
 
 Removed MySQL-incompatible `CREATE INDEX IF NOT EXISTS` from the initial migration (migrations are applied once by SQLx). Legacy nullable scope normalization now enumerates role/permission pairs and uses portable `DELETE` plus conditional sentinel insertion, avoiding SQLite `rowid`/PostgreSQL `ctid` assumptions while retaining existing global and scoped grants.
+
+The role-scope index is created idempotently after the migrator with duplicate-index error handling, allowing pre-Phase-5 databases that already contain it to upgrade safely. The legacy fixture covers this pre-existing-index case.

@@ -47,6 +47,14 @@ pub async fn connect(url: &str) -> Result<DbPool, sqlx::Error> {
 pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
     sqlx::migrate!("./migrations").run(pool).await?;
 
+    // Keep this outside the migration SQL so legacy databases that already
+    // have the index can be upgraded safely on every supported backend.
+    match sqlx::query("CREATE INDEX idx_role_permissions_scope ON role_permissions(scope_type, scope_id, role_id, permission_id)").execute(pool).await {
+        Ok(_) => {}
+        Err(error) if error.to_string().to_ascii_lowercase().contains("already exists") || error.to_string().to_ascii_lowercase().contains("duplicate") => {}
+        Err(error) => return Err(error),
+    }
+
     // The first release created these columns inline. Add them for those
     // databases without dropping or rewriting existing rows. Each backend
     // reports a duplicate-column error differently, so only that error is

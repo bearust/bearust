@@ -81,5 +81,3 @@ CREATE TABLE IF NOT EXISTS role_permissions (
     FOREIGN KEY(role_id) REFERENCES roles(id) ON DELETE CASCADE,
     FOREIGN KEY(permission_id) REFERENCES permissions(id) ON DELETE CASCADE
 );
-CREATE INDEX idx_role_permissions_scope
-    ON role_permissions(scope_type, scope_id, role_id, permission_id);
