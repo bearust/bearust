@@ -4,6 +4,8 @@ use crate::{
     observability::{append_forwarded_for, classify_error, log_request, validated_request_id},
     router::{normalize_host, ResolvedRoute},
     runtime::{RuntimeSnapshot, RuntimeStore},
+    waf::{evaluate, InspectionContext, WafDecision},
+    waf_store::WafStore,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -43,6 +45,7 @@ impl Default for RequestContext {
 pub struct BeaRustProxy {
     pub runtime: Arc<RuntimeStore>,
     pub challenges: Http01Store,
+    pub waf: Option<Arc<WafStore>>,
 }
 
 impl BeaRustProxy {
@@ -50,10 +53,15 @@ impl BeaRustProxy {
         Self {
             runtime,
             challenges: Http01Store::default(),
+            waf: None,
         }
     }
     pub fn with_challenge_store(mut self, challenges: Http01Store) -> Self {
         self.challenges = challenges;
+        self
+    }
+    pub fn with_waf_store(mut self, waf: Arc<WafStore>) -> Self {
+        self.waf = Some(waf);
         self
     }
 }
@@ -91,6 +99,21 @@ impl ProxyHttp for BeaRustProxy {
         );
         let challenge_host = normalize_host(host).unwrap_or_default();
         let method = session.req_header().method.as_str();
+        if let Some(waf) = &self.waf {
+            let context = InspectionContext {
+                method: method.to_owned(),
+                path: path.clone(),
+                query: session.req_header().uri.query().unwrap_or_default().to_owned(),
+                headers: session.req_header().headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_owned(), value.to_owned()))).collect(),
+                body: Vec::new(),
+            };
+            let evaluation = evaluate(&waf.snapshot(), &context);
+            if evaluation.decision == WafDecision::Block {
+                session.respond_error_with_body(403, Bytes::from_static(b"Request blocked")).await?;
+                ctx.completion_logged = true;
+                return Ok(true);
+            }
+        }
         if matches!(method, "GET" | "HEAD") {
             if let Some(value) = lookup_http01_for_host(&path, &challenge_host, &self.challenges) {
                 session

@@ -13,3 +13,4 @@ pub mod runtime;
 pub mod secrets;
 pub mod tls;
 pub mod waf;
+pub mod waf_store;

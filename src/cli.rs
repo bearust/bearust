@@ -258,6 +258,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         tracing::info!(event = "control_plane_start", bind = %config.server.control_bind, setup_token_configured = setup_token_from_env.is_some(), generated_setup_token = setup_token_from_env.is_none());
         let control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
+        let waf_store = control_state.waf.clone();
         let control_listener = tokio::net::TcpListener::bind(config.server.control_bind).await
             .map_err(|e| AppError::Server(format!("control plane bind: {e}")))?;
         let control_task = tokio::spawn(async move {
@@ -280,7 +281,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             Some(config.server.graceful_shutdown_seconds);
         let ready_path = std::env::var_os("BEARUST_UPGRADE_READY").map(PathBuf::from);
         let mut service = proxy::http_service(
-            crate::proxy::BeaRustProxy::new(store.clone()),
+            crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store),
             &server.configuration,
         );
         if let Some(tls_config) = &config.server.tls {

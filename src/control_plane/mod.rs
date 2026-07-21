@@ -10,6 +10,7 @@ use crate::certificates::{
     CertificateStore,
 };
 use crate::secrets::SecretStore;
+use crate::waf_store::WafStore;
 use async_trait::async_trait;
 use axum::{
     extract::DefaultBodyLimit,
@@ -43,6 +44,7 @@ pub struct AppState {
     pub secrets: SecretStore,
     pub acme: Arc<dyn AcmeService>,
     pub realtime: Arc<realtime::RealtimeHub>,
+    pub waf: Arc<WafStore>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -175,6 +177,7 @@ pub async fn build_state(
     }
     let db = repository::connect(database_url).await?;
     repository::migrate(&db).await?;
+    let waf = Arc::new(WafStore::load(&db).await.map_err(sqlx::Error::Protocol)?);
     let certificates = CertificateStore::new(certificate_root)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     let certificates = Arc::new(certificates);
@@ -210,6 +213,7 @@ pub async fn build_state(
         secrets,
         acme: Arc::new(CertificateAcmeAdapter::new(certificate_acme)),
         realtime,
+        waf,
     })
 }
 
