@@ -1,5 +1,5 @@
 use axum::{body::Body, http::{Request, StatusCode}};
-use bearust::control_plane::{build_state, router};
+use bearust::control_plane::{auth, build_state, repository, router};
 use bearust::control_plane::realtime::RealtimeHub;
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
@@ -79,4 +79,30 @@ async fn events_endpoint_ignores_last_event_id_and_does_not_replay_history() {
     let ready = String::from_utf8(ready.to_vec()).unwrap();
     assert!(ready.starts_with("event: ready\n"));
     assert!(!ready.contains("17"));
+}
+
+#[tokio::test]
+async fn events_stream_closes_after_session_revocation() {
+    let (app, state, cookie) = authenticated_app().await;
+    let response = app.oneshot(Request::builder()
+        .method("GET").uri("/api/events")
+        .header("cookie", &cookie).body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let ready = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(String::from_utf8(ready.to_vec()).unwrap().starts_with("event: ready\n"));
+
+    let token = cookie.strip_prefix("bearust_session=").unwrap();
+    repository::revoke_session(&state.db, &auth::token_hash(token)).await.unwrap();
+
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(18), async {
+        loop {
+            match body.frame().await {
+                None => break true,
+                Some(Ok(_)) => {}
+                Some(Err(_)) => break true,
+            }
+        }
+    }).await.expect("SSE stream did not close after session revocation");
+    assert!(closed);
 }

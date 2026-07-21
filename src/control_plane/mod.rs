@@ -750,23 +750,40 @@ async fn events(State(s): State<AppState>, h: HeaderMap) -> Response {
     // Authentication is checked before subscribing.  Last-Event-ID is
     // intentionally ignored: the process-local hub does not provide replay.
     let receiver = s.realtime.subscribe();
-    let stream = unfold((receiver, true), |(mut receiver, ready)| async move {
+    // Keep the stream authenticated for its entire lifetime.  The first tick
+    // is consumed before constructing the stream because `interval` otherwise
+    // fires immediately; subsequent ticks revalidate the same session without
+    // interfering with broadcast delivery.
+    let mut revalidation = tokio::time::interval(Duration::from_secs(15));
+    revalidation.tick().await;
+    revalidation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let stream = unfold((receiver, true, s, h, revalidation), |(mut receiver, ready, state, headers, mut revalidation)| async move {
         if ready {
             let event = Event::default().event("ready").data("{}");
-            return Some((Ok::<Event, Infallible>(event), (receiver, false)));
+            return Some((Ok::<Event, Infallible>(event), (receiver, false, state, headers, revalidation)));
         }
-        let next = match receiver.recv().await {
-            Ok(value) => Event::default()
-                .id(value.id.to_string())
-                .event(value.kind.clone())
-                .json_data(value)
-                .unwrap_or_else(|_| Event::default().event("reconnect").data("{}")),
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                Event::default().event("reconnect").data(r#"{"reason":"lagged"}"#)
+        tokio::select! {
+            next = receiver.recv() => {
+                let next = match next {
+                    Ok(value) => Event::default()
+                        .id(value.id.to_string())
+                        .event(value.kind.clone())
+                        .json_data(value)
+                        .unwrap_or_else(|_| Event::default().event("reconnect").data("{}")),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        Event::default().event("reconnect").data(r#"{"reason":"lagged"}"#)
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                };
+                Some((Ok::<Event, Infallible>(next), (receiver, false, state, headers, revalidation)))
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-        };
-        Some((Ok::<Event, Infallible>(next), (receiver, false)))
+            _ = revalidation.tick() => {
+                if current(&state, &headers).await.is_err() {
+                    return None;
+                }
+                Some((Ok::<Event, Infallible>(Event::default().comment("heartbeat")), (receiver, false, state, headers, revalidation)))
+            }
+        }
     });
     let mut response = Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("heartbeat"))
