@@ -44,3 +44,14 @@ Implemented and committed as `0ee8f2b` (`feat: add portable control-plane migrat
 - Cargo tests/checks: unavailable (`cargo: command not found`); run the focused
   repository migration tests with the project's Rust 1.88 builder and external
   PostgreSQL/MySQL containers before merging.
+
+## Follow-up review fix
+
+- Corrected legacy scope normalization to match `NULL` values (including
+  partially-null rows) instead of the already-normalized sentinel, preserving
+  global grants as `('', 0)` while leaving per-host grants unchanged.
+- Expanded the legacy fixture with existing roles, permissions, global NULL
+  scope rows, scoped rows, and audit data; assertions verify every record after
+  migration.
+- Verification: `git diff --check` passed; Rust tests remain unavailable because
+  `cargo` is not installed in this environment.

@@ -62,7 +62,9 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
     }
     // Normalize nullable scope values left by the pre-migration schema. Fresh
     // databases use the non-null ('', 0) global representation.
-    let _ = sqlx::query("UPDATE role_permissions SET scope_type='', scope_id=0 WHERE scope_type='' AND scope_id=0")
+    // Legacy schemas allow either scope column to be NULL. Normalize both
+    // columns together so a partially-null row cannot remain ambiguous.
+    let _ = sqlx::query("UPDATE role_permissions SET scope_type='', scope_id=0 WHERE scope_type IS NULL OR scope_id IS NULL")
         .execute(pool).await?;
 
     let permissions = [

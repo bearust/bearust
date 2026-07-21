@@ -190,6 +190,12 @@ async fn migration_preserves_legacy_records() {
         .execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO audit_logs(id,user_id,event,details,created_at) VALUES(9,7,'legacy.event','{}','2024-01-01T00:00:00Z')")
         .execute(&pool).await.unwrap();
+    sqlx::query("CREATE TABLE roles (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', system_managed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)").execute(&pool).await.unwrap();
+    sqlx::query("CREATE TABLE permissions (id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '')").execute(&pool).await.unwrap();
+    sqlx::query("CREATE TABLE role_permissions (role_id INTEGER NOT NULL, permission_id INTEGER NOT NULL, scope_type TEXT, scope_id INTEGER, PRIMARY KEY(role_id,permission_id,scope_type,scope_id))").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO roles(id,slug,name,created_at,updated_at) VALUES(42,'legacy-role','Legacy','2024-01-01','2024-01-01')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO permissions(id,key) VALUES(43,'proxy_hosts.read')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(42,43,NULL,NULL),(42,43,'proxy_host',99)").execute(&pool).await.unwrap();
     repository::migrate(&pool).await.unwrap();
     let user: (String, i64) = sqlx::query_as("SELECT email,disabled FROM users WHERE id=7")
         .fetch_one(&pool).await.unwrap();
@@ -198,6 +204,12 @@ async fn migration_preserves_legacy_records() {
     let audit_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE id=9")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(audit_count, 1);
+    let global: (String, i64) = sqlx::query_as("SELECT scope_type,scope_id FROM role_permissions WHERE role_id=42 AND permission_id=43 AND scope_id=0")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(global, (String::new(), 0));
+    let scoped: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM role_permissions WHERE role_id=42 AND permission_id=43 AND scope_type='proxy_host' AND scope_id=99")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(scoped, 1);
 }
 
 #[tokio::test]
