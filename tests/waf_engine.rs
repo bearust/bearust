@@ -265,6 +265,31 @@ fn normalized_metadata_is_bounded_before_matching() {
 }
 
 #[test]
+fn normalized_metadata_cap_respects_utf8_boundaries() {
+    let rules = vec![rule(
+        "custom",
+        r#"{"field":"query","pattern":"needle"}"#,
+        WafAction::Block,
+    )];
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::Block,
+            updated_at: String::new(),
+        },
+        rules,
+    )
+    .unwrap();
+    let query = format!(
+        "{}éneedle",
+        "a".repeat(bearust::waf::MAX_NORMALIZED_FIELD_BYTES - 1)
+    );
+    assert_eq!(
+        evaluate(&snapshot, &context("/", &query, "")).decision,
+        WafDecision::Allow
+    );
+}
+
+#[test]
 fn normalized_header_count_is_bounded() {
     let rules = vec![rule(
         "custom",

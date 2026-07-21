@@ -188,7 +188,7 @@ fn decode_percent_once(value: &str) -> String {
 fn bounded_prefix(value: &str, max_bytes: usize) -> &str {
     let end = value
         .char_indices()
-        .take_while(|(index, _)| *index < max_bytes)
+        .take_while(|(index, character)| *index + character.len_utf8() <= max_bytes)
         .map(|(index, character)| index + character.len_utf8())
         .last()
         .unwrap_or(0)
