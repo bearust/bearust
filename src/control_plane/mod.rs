@@ -13,6 +13,7 @@ use crate::secrets::SecretStore;
 use crate::waf_store::WafStore;
 use async_trait::async_trait;
 use axum::{
+    body::Bytes,
     extract::DefaultBodyLimit,
     extract::{rejection::{JsonRejection, PathRejection}, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -33,6 +34,7 @@ use std::{
 use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 use uuid::Uuid;
+use serde::Deserialize;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -45,6 +47,53 @@ pub struct AppState {
     pub acme: Arc<dyn AcmeService>,
     pub realtime: Arc<realtime::RealtimeHub>,
     pub waf: Arc<WafStore>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WafConfigPatch { mode: WafMode }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WafRuleCreate {
+    name: String,
+    category: String,
+    severity: String,
+    #[serde(default)]
+    action: WafAction,
+    matcher: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WafRulePatch {
+    name: Option<String>,
+    category: Option<String>,
+    severity: Option<String>,
+    enabled: Option<bool>,
+    action: Option<WafAction>,
+    matcher: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WafToml {
+    version: u32,
+    mode: Option<WafMode>,
+    #[serde(default)]
+    rules: Vec<WafTomlRule>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WafTomlRule {
+    name: String,
+    category: String,
+    severity: String,
+    #[serde(default)]
+    action: WafAction,
+    field: String,
+    pattern: Option<String>,
+    builtin: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -252,6 +301,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(me))
         .route("/api/events", get(events))
+        .route("/api/waf/config", get(get_waf_config).patch(update_waf_config))
+        .route("/api/waf/rules", get(list_waf_rules).post(create_waf_rule))
+        .route("/api/waf/rules/{id}", axum::routing::patch(update_waf_rule).delete(delete_waf_rule))
+        .route("/api/waf/rules/import", post(import_waf_rules))
+        .route("/api/waf/rules/export", get(export_waf_rules))
         .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{id}", axum::routing::patch(update_user).delete(delete_user))
@@ -277,6 +331,103 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
         .fallback_service(ServeDir::new("/usr/share/bearust/frontend"))
+}
+
+async fn get_waf_config(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
+    if let Err(response) = require_role_admin(&s, &h).await { return response; }
+    match repository::get_waf_config(&s.db).await { Ok(config) => Json(config).into_response(), Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") }
+}
+
+async fn update_waf_config(State(s): State<AppState>, h: HeaderMap, input: Result<Json<WafConfigPatch>, JsonRejection>) -> impl IntoResponse {
+    let actor = match require_role_admin(&s, &h).await { Ok(user) => user, Err(response) => return response };
+    let Json(input) = match input { Ok(value) => value, Err(_) => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid WAF configuration") };
+    if repository::update_waf_mode(&s.db, input.mode).await.is_err() || s.waf.reload(&s.db).await.is_err() { return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Unable to update WAF configuration"); }
+    audit::record_state(&s, Some(actor.id), "waf_config_updated", "mode_changed").await;
+    s.realtime.publish("waf.changed");
+    Json(repository::get_waf_config(&s.db).await.unwrap()).into_response()
+}
+
+async fn list_waf_rules(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
+    if let Err(response) = require_role_admin(&s, &h).await { return response; }
+    match repository::list_waf_rules(&s.db).await { Ok(rules) => Json(rules).into_response(), Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") }
+}
+
+fn validate_waf_rule(rule: &WafRule) -> Result<(), ()> {
+    crate::waf::compile_snapshot(WafConfig { mode: WafMode::MonitorOnly, updated_at: String::new() }, vec![rule.clone()]).map(|_| ()).map_err(|_| ())
+}
+
+async fn create_waf_rule(State(s): State<AppState>, h: HeaderMap, input: Result<Json<WafRuleCreate>, JsonRejection>) -> impl IntoResponse {
+    let actor = match require_role_admin(&s, &h).await { Ok(user) => user, Err(response) => return response };
+    let Json(input) = match input { Ok(value) => value, Err(_) => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid WAF rule") };
+    if input.name.trim().is_empty() || input.name.len() > 128 || input.category.len() > 64 || input.severity.len() > 16 { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid WAF rule"); }
+    let rule = WafRule { id: 0, name: input.name.trim().into(), source: "custom".into(), category: input.category, severity: input.severity, enabled: true, action: input.action, matcher_json: input.matcher.to_string(), created_at: String::new(), updated_at: String::new() };
+    if validate_waf_rule(&rule).is_err() { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid matcher definition"); }
+    let id = match repository::insert_waf_rule(&s.db, &rule).await { Ok(id) => id, Err(_) => return user_error(StatusCode::CONFLICT, "conflict", "Unable to create WAF rule") };
+    if s.waf.reload(&s.db).await.is_err() { return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Unable to reload WAF rules"); }
+    audit::record_state(&s, Some(actor.id), "waf_rule_created", &format!("rule_id={id};category={}", rule.category)).await;
+    s.realtime.publish("waf.changed");
+    (StatusCode::CREATED, Json(repository::list_waf_rules(&s.db).await.unwrap().into_iter().find(|item| item.id == id).unwrap())).into_response()
+}
+
+async fn update_waf_rule(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, input: Result<Json<WafRulePatch>, JsonRejection>) -> impl IntoResponse {
+    let actor = match require_role_admin(&s, &h).await { Ok(user) => user, Err(response) => return response };
+    let Json(input) = match input { Ok(value) => value, Err(_) => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid WAF rule") };
+    let Some(mut rule) = repository::list_waf_rules(&s.db).await.unwrap_or_default().into_iter().find(|item| item.id == id) else { return user_error(StatusCode::NOT_FOUND, "not_found", "WAF rule not found"); };
+    if rule.source != "custom" { return user_error(StatusCode::CONFLICT, "conflict", "Built-in WAF rules cannot be changed"); }
+    if let Some(name) = input.name { rule.name = name; }
+    if let Some(category) = input.category { rule.category = category; }
+    if let Some(severity) = input.severity { rule.severity = severity; }
+    if let Some(enabled) = input.enabled { rule.enabled = enabled; }
+    if let Some(action) = input.action { rule.action = action; }
+    if let Some(matcher) = input.matcher { rule.matcher_json = matcher.to_string(); }
+    if validate_waf_rule(&rule).is_err() || repository::update_waf_rule(&s.db, id, &rule).await.unwrap_or(0) != 1 { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid WAF rule"); }
+    if s.waf.reload(&s.db).await.is_err() { return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Unable to reload WAF rules"); }
+    audit::record_state(&s, Some(actor.id), "waf_rule_updated", &format!("rule_id={id};category={}", rule.category)).await;
+    s.realtime.publish("waf.changed");
+    Json(rule).into_response()
+}
+
+async fn delete_waf_rule(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse {
+    let actor = match require_role_admin(&s, &h).await { Ok(user) => user, Err(response) => return response };
+    let Some(rule) = repository::list_waf_rules(&s.db).await.unwrap_or_default().into_iter().find(|item| item.id == id) else { return user_error(StatusCode::NOT_FOUND, "not_found", "WAF rule not found"); };
+    if rule.source != "custom" { return user_error(StatusCode::CONFLICT, "conflict", "Built-in WAF rules cannot be deleted"); }
+    if repository::delete_waf_rule(&s.db, id).await.unwrap_or(0) != 1 { return user_error(StatusCode::NOT_FOUND, "not_found", "WAF rule not found"); }
+    let _ = s.waf.reload(&s.db).await;
+    audit::record_state(&s, Some(actor.id), "waf_rule_deleted", &format!("rule_id={id};category={}", rule.category)).await;
+    s.realtime.publish("waf.changed");
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn import_waf_rules(State(s): State<AppState>, h: HeaderMap, body: Bytes) -> impl IntoResponse {
+    let actor = match require_role_admin(&s, &h).await { Ok(user) => user, Err(response) => return response };
+    let document: WafToml = match String::from_utf8(body.to_vec()).ok().and_then(|text| toml::from_str::<WafToml>(&text).ok()) { Some(value) if value.version == 1 => value, _ => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid WAF TOML") };
+    let mut rules = Vec::new();
+    for item in document.rules {
+        let matcher = serde_json::json!({"field": item.field, "pattern": item.pattern, "builtin": item.builtin});
+        let rule = WafRule { id: 0, name: item.name, source: "custom".into(), category: item.category, severity: item.severity, enabled: true, action: item.action, matcher_json: matcher.to_string(), created_at: String::new(), updated_at: String::new() };
+        if validate_waf_rule(&rule).is_err() { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid WAF matcher"); }
+        rules.push(rule);
+    }
+    for rule in &rules { if repository::insert_waf_rule(&s.db, rule).await.is_err() { return user_error(StatusCode::CONFLICT, "conflict", "Unable to import WAF rules"); } }
+    if let Some(mode) = document.mode { let _ = repository::update_waf_mode(&s.db, mode).await; }
+    if s.waf.reload(&s.db).await.is_err() { return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Unable to reload WAF rules"); }
+    audit::record_state(&s, Some(actor.id), "waf_rules_imported", &format!("count={}", rules.len())).await;
+    s.realtime.publish("waf.changed");
+    StatusCode::OK.into_response()
+}
+
+async fn export_waf_rules(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
+    if let Err(response) = require_role_admin(&s, &h).await { return response; }
+    let config = match repository::get_waf_config(&s.db).await { Ok(value) => value, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") };
+    let rules = match repository::list_waf_rules(&s.db).await { Ok(value) => value, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") };
+    let mut output = format!("version = 1\nmode = '{}'\n", serde_json::to_string(&config.mode).unwrap().trim_matches('"'));
+    for rule in rules.into_iter().filter(|rule| rule.source == "custom") {
+        if let Ok(matcher) = serde_json::from_str::<serde_json::Value>(&rule.matcher_json) {
+            output.push_str(&format!("\n[[rules]]\nname = '{}'\ncategory = '{}'\nseverity = '{}'\naction = '{}'\nfield = '{}'\n", rule.name.replace('\'', "''"), rule.category, rule.severity, serde_json::to_string(&rule.action).unwrap().trim_matches('"'), matcher["field"].as_str().unwrap_or("any")));
+            if let Some(pattern) = matcher["pattern"].as_str() { output.push_str(&format!("pattern = '{}'\n", pattern.replace('\'', "''"))); }
+        }
+    }
+    ([(axum::http::header::CONTENT_TYPE, "application/toml")], output).into_response()
 }
 
 fn user_error(status: StatusCode, code: &str, message: &str) -> axum::response::Response {

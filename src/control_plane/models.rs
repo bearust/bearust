@@ -225,6 +225,10 @@ pub enum WafAction {
     Block,
 }
 
+impl Default for WafAction {
+    fn default() -> Self { Self::Inherit }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WafConfig {
     pub mode: WafMode,
