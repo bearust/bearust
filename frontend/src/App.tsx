@@ -12,6 +12,8 @@ import {
   User,
 } from "./api";
 import { useRealtimeUpdates, RealtimeStatus } from "./realtime";
+import { Alert, Button, Card, Field, ThemeSelect } from "./ui";
+import { ThemeProvider } from "./theme";
 
 export const sanitizeError = (message: string) => {
   if (/internal stack|database|password\s*[:=]/i.test(message))
@@ -75,21 +77,16 @@ export const acmeSubmissionReady = (
   hosts.length > 0 &&
   hosts.every((host) => validHostname(host, challenge)) &&
   (challenge !== "cloudflare_dns01" || token.trim().length > 0);
-const Field = ({ label, ...p }: any) => (
-  <label>
-    {label}
-    <input required {...p} />
-  </label>
-);
 function Setup({ onDone }: { onDone: (u: User) => void }) {
   const [email, setEmail] = useState(""),
     [password, setPassword] = useState(""),
     [token, setToken] = useState(""),
     [error, setError] = useState("");
   return (
-    <main>
-      <h1>Bearust Setup</h1>
-      <p>Create the first administrator account.</p>
+    <main className="min-h-screen bg-page px-4 py-8 text-foreground sm:px-6 lg:px-8">
+      <Card className="mx-auto max-w-lg">
+      <h1 className="mb-2 text-2xl font-semibold">Bearust Setup</h1>
+      <p className="mb-6 text-muted">Create the first administrator account.</p>
       <form
         onSubmit={async (e) => {
           e.preventDefault();
@@ -117,9 +114,10 @@ function Setup({ onDone }: { onDone: (u: User) => void }) {
           value={token}
           onChange={(e: any) => setToken(e.target.value)}
         />
-        {error && <p className="error">{error}</p>}
-        <button>Create account</button>
+        {error && <Alert variant="danger">{error}</Alert>}
+        <Button type="submit">Create account</Button>
       </form>
+      </Card>
     </main>
   );
 }
@@ -128,8 +126,9 @@ function Login({ onDone }: { onDone: (u: User) => void }) {
     [password, setPassword] = useState(""),
     [error, setError] = useState("");
   return (
-    <main>
-      <h1>Bearust Login</h1>
+    <main className="min-h-screen bg-page px-4 py-8 text-foreground sm:px-6 lg:px-8">
+      <Card className="mx-auto max-w-lg">
+      <h1 className="mb-6 text-2xl font-semibold">Bearust Login</h1>
       <form
         onSubmit={async (e) => {
           e.preventDefault();
@@ -152,9 +151,10 @@ function Login({ onDone }: { onDone: (u: User) => void }) {
           value={password}
           onChange={(e: any) => setPassword(e.target.value)}
         />
-        {error && <p className="error">{error}</p>}
-        <button>Sign in</button>
+        {error && <Alert variant="danger">{error}</Alert>}
+        <Button type="submit">Sign in</Button>
       </form>
+      </Card>
     </main>
   );
 }
@@ -182,8 +182,8 @@ export function AcmeWizard({
   const invalid = hosts.some((h) => !validHostname(h, challenge));
   const missingToken = challenge === "cloudflare_dns01" && !token.trim();
   return (
-    <section className="card">
-      <h2>Issue Let's Encrypt certificate</h2>
+    <Card>
+      <h2 className="mb-4 text-xl font-semibold">Issue Let's Encrypt certificate</h2>
       <form
         onSubmit={async (e) => {
           e.preventDefault();
@@ -251,9 +251,9 @@ export function AcmeWizard({
           />
         </label>
         {invalid && (
-          <p className="error">
+          <Alert variant="warning">
             Enter valid hostnames. Wildcards require Cloudflare DNS-01.
-          </p>
+          </Alert>
         )}
         {challenge === "cloudflare_dns01" && (
           <label>
@@ -267,18 +267,18 @@ export function AcmeWizard({
               required
             />
             {missingToken && (
-              <small className="error">Cloudflare API token is required.</small>
+              <small className="block text-sm text-danger-foreground">Cloudflare API token is required.</small>
             )}
           </label>
         )}
-        {error && <p className="error">{error}</p>}
-        <button
+        {error && <Alert variant="danger">{error}</Alert>}
+        <Button type="submit"
           disabled={busy || invalid || missingToken || hosts.length === 0}
         >
           {busy ? "Issuing…" : "Issue certificate"}
-        </button>
+        </Button>
       </form>
-    </section>
+    </Card>
   );
 }
 
@@ -341,35 +341,35 @@ export function CertificateTable({
     void refresh();
   }, []);
   return (
-    <section className="card">
-      <div className="section-heading">
-        <h2>Certificates</h2>
-        <button onClick={() => void refresh()} disabled={refreshing}>
+    <Card>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-xl font-semibold">Certificates</h2>
+        <Button variant="secondary" onClick={() => void refresh()} disabled={refreshing}>
           {refreshing ? "Refreshing…" : "Refresh"}
-        </button>
+        </Button>
       </div>
-      {error && <p className="error">{error}</p>}
-      <div className="certificate-grid">
+      {error && <Alert variant="danger">{error}</Alert>}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {items.map((c) => (
-          <article className="certificate" key={c.id}>
-            <strong>{c.name}</strong>
-            <span>
+          <article className="flex flex-col gap-2 rounded-md border border-border bg-surface-muted p-4" key={c.id}>
+            <strong className="font-semibold">{c.name}</strong>
+            <span className="text-sm text-muted">
               {c.source} · {c.covered_hostnames.join(", ")}
             </span>
-            <span>Expires: {c.expiry}</span>
-            <span>
+            <span className="text-sm text-muted">Expires: {c.expiry}</span>
+            <span className="text-sm">
               Status: {c.active ? "Active" : "Inactive"}
               {c.acme && ` · Renewal: ${c.acme.renewal_state}`}
             </span>
             {c.acme?.last_error_code && (
-              <span className="error">
+              <span className="text-sm text-danger-foreground">
                 Last error: {sanitizeError(c.acme.last_error_code)}
               </span>
             )}
             <div>
               {canWrite && (
                 <>
-                  <button
+                  <Button variant="secondary"
                     disabled={!!busy[c.id]}
                     onClick={() =>
                       void action(c.id, "renew", () =>
@@ -378,9 +378,9 @@ export function CertificateTable({
                     }
                   >
                     {busy[c.id] === "renew" ? "Renewing…" : "Renew"}
-                  </button>
+                  </Button>
                   {!c.active && (
-                    <button
+                    <Button variant="secondary"
                       disabled={!!busy[c.id]}
                       onClick={() =>
                         void action(c.id, "activate", () =>
@@ -389,7 +389,7 @@ export function CertificateTable({
                       }
                     >
                       {busy[c.id] === "activate" ? "Activating…" : "Activate"}
-                    </button>
+                    </Button>
                   )}
                 </>
               )}
@@ -398,7 +398,7 @@ export function CertificateTable({
         ))}
       </div>
       {items.length === 0 && <p>No certificates yet.</p>}
-    </section>
+    </Card>
   );
 }
 
@@ -435,17 +435,17 @@ export function UsersSection({
   };
   const roleOptions = [...roles, ...["admin", "operator", "viewer"].filter((slug) => !roles.some((role) => role.slug === slug)).map((slug) => ({ slug, name: slug[0].toUpperCase() + slug.slice(1) }))];
   return (
-    <section className="card users-card">
-      <div className="section-heading">
-        <h2>Users</h2>
-        <button onClick={() => void run(-2, () => Promise.resolve())}>
+    <Card className="users-card">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-xl font-semibold">Users</h2>
+        <Button variant="secondary" onClick={() => void run(-2, () => Promise.resolve())}>
           Refresh
-        </button>
+        </Button>
       </div>
       {(error || userErrorMessage) && (
-        <p className="error">{error || userErrorMessage}</p>
+        <Alert variant="danger">{error || userErrorMessage}</Alert>
       )}
-      <table>
+      <div className="overflow-x-auto"><table className="min-w-full text-left text-sm">
         <thead>
           <tr>
             <th>Email</th>
@@ -482,7 +482,7 @@ export function UsersSection({
                 <td>
                   {!self && (
                     <>
-                      <button
+                      <Button variant="secondary"
                         disabled={busy === item.id}
                         onClick={() => {
                           if (
@@ -500,16 +500,15 @@ export function UsersSection({
                         }}
                       >
                         {item.disabled ? "Enable" : "Disable"}
-                      </button>{" "}
-                      <button
+                      </Button>{" "}
+                      <Button variant="secondary"
                         disabled={busy === item.id}
                         onClick={() => void run(item.id, async () => {
                           const result = await api.revokeUserSessions(item.id);
                           window.alert(`Revoked ${result.revoked} session(s).`);
                         })}
-                      >Revoke sessions</button>{" "}
-                      <button
-                        className="danger"
+                      >Revoke sessions</Button>{" "}
+                      <Button variant="danger"
                         disabled={busy === item.id}
                         onClick={() => {
                           if (window.confirm("Delete this account?"))
@@ -517,7 +516,7 @@ export function UsersSection({
                         }}
                       >
                         Delete
-                      </button>
+                      </Button>
                     </>
                   )}
                 </td>
@@ -525,9 +524,9 @@ export function UsersSection({
             );
           })}
         </tbody>
-      </table>
+      </table></div>
       <form
-        className="user-form"
+        className="user-form mt-6 grid gap-4 sm:grid-cols-2"
         onSubmit={async (e) => {
           e.preventDefault();
           if (!email.trim() || password.length < 12) return;
@@ -563,11 +562,11 @@ export function UsersSection({
             <option value="viewer">Viewer</option>
           </select>
         </label>
-        <button disabled={busy === -1 || !email.trim() || password.length < 12}>
+        <Button type="submit" disabled={busy === -1 || !email.trim() || password.length < 12}>
           Create user
-        </button>
+        </Button>
       </form>
-    </section>
+    </Card>
   );
 }
 
@@ -576,7 +575,7 @@ export function RolesSection({ user, roles, onChanged }: { user: User; roles: Ro
   const [slug,setSlug]=useState(""), [name,setName]=useState(""), [error,setError]=useState(""), [busy,setBusy]=useState(false);
   if (user.role !== "admin") return null;
   const run=async (action:()=>Promise<unknown>)=>{setBusy(true);setError("");try{await action();await onChanged()}catch(e){setError(userError(e))}finally{setBusy(false)}};
-  return <section className="card roles-card"><h2>Roles</h2>{error&&<p className="error">{error}</p>}<table><thead><tr><th>Name</th><th>Slug</th><th>Permissions</th><th /></tr></thead><tbody>{roles.map(role=><tr key={role.id}><td>{role.name}</td><td>{role.slug}</td><td>{role.permissions.join(", ")}</td><td>{!role.system_managed&&<><button disabled={busy} onClick={()=>void run(()=>api.updateRole(role.id,{description:role.description}))}>Save</button>{" "}<button className="danger" disabled={busy} onClick={()=>window.confirm("Delete this role?")&&void run(()=>api.deleteRole(role.id))}>Delete</button></>}</td></tr>)}</tbody></table><form onSubmit={e=>{e.preventDefault();if(!slug.trim()||!name.trim())return;void run(async()=>{await api.createRole({slug,name,description:"",permissions:["audit_logs.read"]});setSlug("");setName("")})}}><h3>Add role</h3><Field label="Slug" value={slug} onChange={(e:any)=>setSlug(e.target.value)}/><Field label="Name" value={name} onChange={(e:any)=>setName(e.target.value)}/><button disabled={busy||!slug.trim()||!name.trim()}>Create role</button></form><p className="muted">Available permissions: {PERMISSIONS.join(", ")}</p></section>;
+  return <Card><h2 className="mb-4 text-xl font-semibold">Roles</h2>{error&&<Alert variant="danger">{error}</Alert>}<div className="overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>Name</th><th>Slug</th><th>Permissions</th><th /></tr></thead><tbody>{roles.map(role=><tr key={role.id}><td>{role.name}</td><td>{role.slug}</td><td>{role.permissions.join(", ")}</td><td>{!role.system_managed&&<><Button variant="secondary" disabled={busy} onClick={()=>void run(()=>api.updateRole(role.id,{description:role.description}))}>Save</Button>{" "}<Button variant="danger" disabled={busy} onClick={()=>window.confirm("Delete this role?")&&void run(()=>api.deleteRole(role.id))}>Delete</Button></>}</td></tr>)}</tbody></table></div><form className="mt-6 grid gap-4 sm:grid-cols-2" onSubmit={e=>{e.preventDefault();if(!slug.trim()||!name.trim())return;void run(async()=>{await api.createRole({slug,name,description:"",permissions:["audit_logs.read"]});setSlug("");setName("")})}}><h3 className="sm:col-span-2 font-semibold">Add role</h3><Field label="Slug" value={slug} onChange={(e:any)=>setSlug(e.target.value)}/><Field label="Name" value={name} onChange={(e:any)=>setName(e.target.value)}/><Button type="submit" disabled={busy||!slug.trim()||!name.trim()}>Create role</Button></form><p className="mt-4 text-sm text-muted">Available permissions: {PERMISSIONS.join(", ")}</p></Card>;
 }
 
 function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: () => void; onUserRefresh: (user: User) => void }) {
@@ -669,25 +668,26 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
     void refresh();
   }, []);
   return (
-    <main>
-      <header>
-        <h1>Bearust</h1>
-        <span>
+    <main className="min-h-screen bg-page px-4 py-6 text-foreground sm:px-6 lg:px-8">
+      <header className="mx-auto mb-6 flex max-w-7xl flex-wrap items-center gap-4 border-b border-border pb-4">
+        <h1 className="mr-auto text-2xl font-bold text-brand">Bearust</h1>
+        <span className="text-sm text-muted">
           {user.email} ({user.role})
         </span>
-        <button onClick={onLogout}>Sign out</button>
-        <span className="realtime-status" aria-label="Realtime status">
+        <ThemeSelect />
+        <Button variant="secondary" onClick={onLogout}>Sign out</Button>
+        <span className="text-sm text-muted" aria-label="Realtime status">
           Realtime: {realtimeStatus}
         </span>
       </header>
-      {error && <p className="error">{error}</p>}
+      <div className="mx-auto grid max-w-7xl gap-6">{error && <Alert variant="danger">{error}</Alert>}
       <CertificateTable user={user} onChanged={() => void refresh()} />
       {canWrite && (
         <AcmeWizard canWrite={canWrite} onIssued={() => void refresh()} />
       )}
-      <section className="card">
-        <h2>Proxy Hosts</h2>
-        <table>
+      <Card>
+        <h2 className="mb-4 text-xl font-semibold">Proxy Hosts</h2>
+        <div className="overflow-x-auto"><table className="min-w-full text-left text-sm">
           <thead>
             <tr>
               <th>Name</th>
@@ -708,18 +708,18 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
                 <td>{h.tls_mode}</td>
                 <td>
                   {canWrite && (
-                    <button onClick={() => api.deleteHost(h.id).then(refresh)}>
+                    <Button variant="danger" onClick={() => api.deleteHost(h.id).then(refresh)}>
                       Delete
-                    </button>
+                    </Button>
                   )}
                 </td>
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
         {canWrite && (
           <form
-            className="host-form"
+            className="mt-6 grid gap-4 sm:grid-cols-2"
             onSubmit={async (e) => {
               e.preventDefault();
               try {
@@ -811,10 +811,10 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
                 </select>
               </label>
             )}
-            <button>Add host</button>
+            <Button type="submit">Add host</Button>
           </form>
         )}
-      </section>
+      </Card></div>
       <UsersSection
         user={user}
         users={users}
@@ -827,7 +827,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
     </main>
   );
 }
-export default function App() {
+function AppContent() {
   const [user, setUser] = useState<User | null>(null),
     [initialized, setInitialized] = useState<boolean | null>(null);
   useEffect(() => {
@@ -864,6 +864,9 @@ export default function App() {
   ) : (
     <Login onDone={setUser} />
   );
+}
+export default function App() {
+  return <ThemeProvider><AppContent /></ThemeProvider>;
 }
 export function AuditLogSection({ user, reloadRef }: { user: User; reloadRef?: MutableRefObject<(() => void) | null> }) {
   const [items, setItems] = useState<AuditLogItem[]>([]),
@@ -920,14 +923,14 @@ export function AuditLogSection({ user, reloadRef }: { user: User; reloadRef?: M
   }, [event, q, actorId, from, to]);
   const hasNext = page * pageSize < total;
   return (
-    <section className="card audit-card">
-      <div className="section-heading">
-        <h2>Audit Log</h2>
-        <button onClick={() => void load()} disabled={loading}>
+    <Card>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-xl font-semibold">Audit Log</h2>
+        <Button variant="secondary" onClick={() => void load()} disabled={loading}>
           {loading ? "Refreshing…" : "Refresh"}
-        </button>
+        </Button>
       </div>
-      <div className="audit-filters">
+      <div className="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <label>
           Event
           <input
@@ -957,8 +960,8 @@ export function AuditLogSection({ user, reloadRef }: { user: User; reloadRef?: M
           <input aria-label="To filter" type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} />
         </label>
       </div>
-      {error && <p className="error">{error}</p>}
-      <table>
+      {error && <Alert variant="danger">{error}</Alert>}
+      <div className="overflow-x-auto"><table className="min-w-full text-left text-sm">
         <thead>
           <tr>
             <th>Actor</th>
@@ -977,27 +980,27 @@ export function AuditLogSection({ user, reloadRef }: { user: User; reloadRef?: M
             </tr>
           ))}
         </tbody>
-      </table>
+      </table></div>
       {!loading && !error && items.length === 0 && (
         <p>No audit log entries found.</p>
       )}
-      <div className="audit-pagination">
-        <button
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <Button variant="secondary"
           onClick={() => setPage((value) => value - 1)}
           disabled={page === 1 || loading}
         >
           Previous
-        </button>
+        </Button>
         <span>
           Page {page} · {total} total
         </span>
-        <button
+        <Button variant="secondary"
           onClick={() => setPage((value) => value + 1)}
           disabled={!hasNext || loading}
         >
           Next
-        </button>
+        </Button>
       </div>
-    </section>
+    </Card>
   );
 }

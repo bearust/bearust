@@ -1,21 +1,37 @@
-# Task 4 report: React realtime subscription
+# Task 4 report — application shell and page migration
 
-Implemented the authenticated dashboard realtime subscription.
+## Scope
 
-## Changes
-
-- Added `frontend/src/realtime.ts` with `useRealtimeUpdates(loaders)` and `RealtimeStatus`.
-- Opens one credentialed `EventSource` at `/api/events` for the dashboard lifecycle.
-- Maps `proxy_hosts.changed`, `certificates.changed`, `users.changed`, `roles.changed`, and `audit` events to the corresponding loaders.
-- Tracks numeric SSE event IDs and ignores duplicate/older events and unknown event kinds.
-- Reports `connecting`, `connected`, and `disconnected` status, with bounded explicit reconnect scheduling and cleanup on unmount.
-- Integrated host, certificate, user, role, and audit loaders into the authenticated dashboard and added a non-blocking status label.
-- Added mocked-`EventSource` Vitest coverage for event mapping, deduplication, credentials, status, reconnect cap, and cleanup.
+Migrated setup, login, authenticated shell, proxy hosts, certificates, ACME,
+users, roles, and audit log views in `frontend/src/App.tsx` to Tailwind v4
+utilities and shared UI primitives. API calls, auth/session handling, RBAC
+visibility, realtime reload callbacks, filters, pagination, and redacted error
+messages were preserved. Legacy CSS selectors were removed from JSX; the
+stylesheet retains Tailwind import, semantic tokens/theme overrides, and
+reduced-motion behavior from the design-system tasks.
 
 ## Verification
 
-- `cd frontend && npm test -- --run src/realtime.test.tsx` — passed (2 tests)
-- `cd frontend && npm test -- --run` — passed (4 files, 18 tests)
-- `cd frontend && npm run build` — passed
-- `git diff --check` — passed
+Command: `npm test -- --run` (from `frontend/`)
 
+Result: **29 tests passed across 6 files**.
+
+Command: `npm run build` (from `frontend/`)
+
+Result: **TypeScript and Vite production build passed**; generated bundle:
+`dist/assets/index-CRS5IakZ.js` and `dist/assets/index-BtF9hMrk.css`.
+
+Command: `rg -n 'className="(card|error|section-heading|certificate|certificate-grid|danger|muted|host-form|audit-|realtime-status)' frontend/src`
+
+Result: no obsolete selector references found. Existing test-only hooks
+(`users-card`, `user-form`) remain as stable selectors and have no stylesheet
+rules.
+
+## Concerns
+
+- Existing Vitest/jsdom setup emits React `act(...)` and Node localStorage
+  warnings; these are pre-existing test-environment warnings and do not fail
+  the suite.
+- The root `main.tsx` still wraps `App` in `ThemeProvider`; `App` also wraps
+  itself so direct component tests receive theme context. This is harmless but
+  can be simplified in a follow-up cleanup.
