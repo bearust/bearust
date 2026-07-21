@@ -26,6 +26,9 @@ pub struct RequestContext {
     pub completion_logged: bool,
     pub waf_body: Vec<u8>,
     pub waf_buffering: bool,
+    pub waf_pending_suffix: Vec<u8>,
+    pub waf_large_chunk: bool,
+    pub waf_large_chunk_includes_prefix: bool,
     pub waf_blocked: bool,
     /// The most recent bounded WAF result.  Keeping the result in the request
     /// context lets the body callback enrich the initial header-only check
@@ -50,6 +53,9 @@ impl Default for RequestContext {
             completion_logged: false,
             waf_body: Vec::new(),
             waf_buffering: true,
+            waf_pending_suffix: Vec::new(),
+            waf_large_chunk: false,
+            waf_large_chunk_includes_prefix: false,
             waf_blocked: false,
             waf_evaluation: None,
             waf_telemetry_emitted: false,
@@ -267,12 +273,12 @@ impl ProxyHttp for BeaRustProxy {
                 let take = chunk.len().min(remaining);
                 ctx.waf_body.extend_from_slice(&chunk[..take]);
                 if take < chunk.len() {
-                    let mut forwarded = Vec::with_capacity(ctx.waf_body.len() + chunk.len() - take);
-                    forwarded.extend_from_slice(&ctx.waf_body);
-                    forwarded.extend_from_slice(&chunk[take..]);
-                    ctx.waf_body.clear();
+                    // Keep the original chunk untouched while the retained
+                    // prefix is evaluated below. If allowed, it can stream
+                    // immediately without retaining an unbounded suffix.
+                    ctx.waf_large_chunk = true;
+                    ctx.waf_large_chunk_includes_prefix = take > 0;
                     ctx.waf_buffering = false;
-                    *body = Some(Bytes::from(forwarded));
                 } else {
                     *body = Some(Bytes::new());
                 }
@@ -305,12 +311,38 @@ impl ProxyHttp for BeaRustProxy {
                         "request blocked by waf",
                     ));
                 }
+                if ctx.waf_large_chunk {
+                    if !ctx.waf_large_chunk_includes_prefix && !ctx.waf_body.is_empty() {
+                        let mut forwarded = Vec::with_capacity(ctx.waf_body.len() + body.as_ref().map_or(0, |bytes| bytes.len()));
+                        forwarded.extend_from_slice(&ctx.waf_body);
+                        if let Some(chunk) = body.as_ref() {
+                            forwarded.extend_from_slice(chunk);
+                        }
+                        *body = Some(Bytes::from(forwarded));
+                    }
+                    ctx.waf_body.clear();
+                    ctx.waf_pending_suffix.clear();
+                    ctx.waf_large_chunk = false;
+                    ctx.waf_large_chunk_includes_prefix = false;
+                }
                 if end_of_stream && (evaluation.semantic_score > 0 || !evaluation.matched_rule_ids.is_empty()) {
                     emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
                 }
                 if end_of_stream && !ctx.waf_blocked && ctx.waf_buffering {
-                    *body = Some(Bytes::from(ctx.waf_body.clone()));
+                    let mut forwarded = Vec::with_capacity(ctx.waf_body.len() + ctx.waf_pending_suffix.len());
+                    forwarded.extend_from_slice(&ctx.waf_body);
+                    forwarded.extend_from_slice(&ctx.waf_pending_suffix);
+                    *body = Some(Bytes::from(forwarded));
                     ctx.waf_body.clear();
+                    ctx.waf_pending_suffix.clear();
+                    ctx.waf_buffering = false;
+                } else if !ctx.waf_blocked && ctx.waf_buffering && ctx.waf_body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES {
+                    let mut forwarded = Vec::with_capacity(ctx.waf_body.len() + ctx.waf_pending_suffix.len());
+                    forwarded.extend_from_slice(&ctx.waf_body);
+                    forwarded.extend_from_slice(&ctx.waf_pending_suffix);
+                    *body = Some(Bytes::from(forwarded));
+                    ctx.waf_body.clear();
+                    ctx.waf_pending_suffix.clear();
                     ctx.waf_buffering = false;
                 }
         }
