@@ -344,12 +344,41 @@ fn semantic_sqli_is_scored_without_raw_input_in_reason() {
         .diagnostic
         .as_deref()
         .unwrap_or_default()
-        .contains("sqli"));
+        .contains("sqli:query:SQL injection indicator"));
     assert!(!result
         .diagnostic
         .as_deref()
         .unwrap_or_default()
         .contains("password"));
+}
+
+#[test]
+fn semantic_detector_inspects_bounded_headers_with_redacted_reason() {
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::MonitorOnly,
+            updated_at: String::new(),
+        },
+        Vec::new(),
+    )
+    .unwrap();
+    let mut request = context("/", "", "");
+    request
+        .headers
+        .push(("x-client-hint".into(), "javascript:alert(1)".into()));
+    let result = evaluate(&snapshot, &request);
+    assert_eq!(result.semantic_score, 5);
+    assert_eq!(result.categories, vec!["xss"]);
+    assert!(result
+        .diagnostic
+        .as_deref()
+        .unwrap_or_default()
+        .contains("xss:headers:cross-site scripting indicator"));
+    assert!(!result
+        .diagnostic
+        .as_deref()
+        .unwrap_or_default()
+        .contains("javascript"));
 }
 
 #[test]
@@ -425,4 +454,23 @@ fn semantic_score_reaches_block_threshold_only_in_block_mode() {
     let request = context("/download/../../etc/passwd", "q=1%20OR%201=1", "");
     assert_eq!(evaluate(&monitor, &request).decision, WafDecision::Log);
     assert_eq!(evaluate(&block, &request).decision, WafDecision::Block);
+}
+
+#[test]
+fn semantic_detection_cannot_override_explicit_block_precedence() {
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::MonitorOnly,
+            updated_at: String::new(),
+        },
+        vec![rule(
+            "explicit",
+            r#"{"field":"query","pattern":"marker"}"#,
+            WafAction::Block,
+        )],
+    )
+    .unwrap();
+    let result = evaluate(&snapshot, &context("/", "marker", ""));
+    assert_eq!(result.decision, WafDecision::Block);
+    assert_eq!(result.semantic_score, 0);
 }

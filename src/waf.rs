@@ -334,12 +334,16 @@ fn semantic_signal(category: &str, weight: u16, field: &str, reason: &str) -> Se
 }
 
 fn semantic_signals(context: &NormalizedContext) -> Vec<SemanticSignal> {
-    let values = [
+    let mut values = vec![
         ("method", context.method.as_str()),
         ("path", context.path.as_str()),
         ("query", context.query.as_str()),
-        ("body", context.body.as_str()),
     ];
+    for (name, value) in &context.headers {
+        values.push(("headers", name.as_str()));
+        values.push(("headers", value.as_str()));
+    }
+    values.push(("body", context.body.as_str()));
     let mut signals = Vec::new();
     let detectors: [(&str, u16, &LazyLock<Regex>, &str); 4] = [
         ("sqli", 6, &SEMANTIC_SQLI, "SQL injection indicator"),
@@ -455,7 +459,7 @@ pub fn evaluate(snapshot: &WafSnapshot, context: &InspectionContext) -> Evaluati
         Some(
             signals
                 .iter()
-                .map(|signal| format!("{}:{}", signal.category, signal.field))
+                .map(|signal| format!("{}:{}:{}", signal.category, signal.field, signal.reason))
                 .collect::<Vec<_>>()
                 .join(","),
         )
