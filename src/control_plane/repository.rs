@@ -123,7 +123,7 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
     for (slug, keys) in assignments {
         for key in keys {
             sqlx::query(
-                "INSERT INTO role_permissions(role_id,permission_id) SELECT r.id,p.id FROM roles r,permissions p WHERE r.slug=? AND p.key=? AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id=r.id AND rp.permission_id=p.id AND rp.scope_type='' AND rp.scope_id=0)",
+                "INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT r.id,p.id,'',0 FROM roles r,permissions p WHERE r.slug=? AND p.key=? AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id=r.id AND rp.permission_id=p.id AND rp.scope_type='' AND rp.scope_id=0)",
             )
             .bind(slug)
             .bind(*key)
@@ -508,7 +508,7 @@ pub async fn insert_role_with_permissions_and_scopes(pool: &DbPool, slug: &str, 
         if sqlx::query("SELECT 1 FROM permissions WHERE key=?").bind(key).fetch_optional(&mut *tx).await?.is_none() {
             return Err(sqlx::Error::Protocol("invalid permission".into()));
         }
-        sqlx::query("INSERT INTO role_permissions(role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?")
+        sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'',0 FROM permissions WHERE key=?")
             .bind(id).bind(key).execute(&mut *tx).await?;
     }
     replace_scopes_tx(&mut tx, id, scopes).await?;
@@ -536,7 +536,7 @@ pub async fn update_role_with_permissions_and_scopes(pool: &DbPool, id: i64, nam
         }
         sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='' AND scope_id=0").bind(id).execute(&mut *tx).await?;
         for key in keys {
-            sqlx::query("INSERT INTO role_permissions(role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?").bind(id).bind(key).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'',0 FROM permissions WHERE key=?").bind(id).bind(key).execute(&mut *tx).await?;
         }
     }
     if let Some(scopes) = scopes {
@@ -562,7 +562,7 @@ pub async fn set_role_permissions(pool: &DbPool, role_id: i64, keys: &[&str]) ->
     let mut tx = pool.begin().await?;
     for key in keys { if sqlx::query("SELECT 1 FROM permissions WHERE key=?").bind(key).fetch_optional(&mut *tx).await?.is_none() { return Err(sqlx::Error::Protocol(format!("invalid permission: {key}"))); } }
     sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='' AND scope_id=0").bind(role_id).execute(&mut *tx).await?;
-    for key in keys { sqlx::query("INSERT INTO role_permissions(role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?").bind(role_id).bind(key).execute(&mut *tx).await?; }
+    for key in keys { sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'',0 FROM permissions WHERE key=?").bind(role_id).bind(key).execute(&mut *tx).await?; }
     tx.commit().await?;
     get_role(pool, role_id).await?.ok_or(sqlx::Error::RowNotFound)
 }

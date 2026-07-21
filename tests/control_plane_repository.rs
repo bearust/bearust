@@ -159,7 +159,10 @@ async fn migrations_record_order_and_seed_exact_permissions() {
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert_eq!(versions, vec![1, 2]);
+    assert_eq!(versions, vec![1, 2, 3]);
+    let lock_row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM setup_lock WHERE id=1")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(lock_row, 1);
     let permission_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM permissions")
         .fetch_one(&pool)
         .await

@@ -41,3 +41,7 @@ The external-database harness task should add PostgreSQL/MySQL matrix coverage; 
 ## Final concurrency hardening
 
 Added migration `0003_setup_lock.sql` with an idempotent singleton sentinel row. First-admin setup now updates that row inside its transaction before checking the user count; the row update acquires the selected backend's write/row lock, preventing concurrent processes from both creating an administrator without backend-specific SQL. The process-local mutex was removed.
+
+## Final review fixes
+
+Migration-order coverage now expects version 3 and verifies the setup sentinel. Every built-in role-permission insert explicitly writes the global scope sentinel (`scope_type=''`, `scope_id=0`), including seed, create, update, and set operations; this prevents nullable legacy schemas from producing grants invisible to RBAC queries.
