@@ -199,6 +199,8 @@ pub async fn build_state(
         reloader.clone(),
         secrets.clone(),
     ));
+    let realtime = Arc::new(realtime::RealtimeHub::new(256));
+    certificate_acme.attach_realtime(realtime.clone());
     Ok(AppState {
         db,
         certificates,
@@ -207,7 +209,7 @@ pub async fn build_state(
         auth_attempts: Arc::new(Mutex::new(HashMap::new())),
         secrets,
         acme: Arc::new(CertificateAcmeAdapter::new(certificate_acme)),
-        realtime: Arc::new(realtime::RealtimeHub::new(256)),
+        realtime,
     })
 }
 
@@ -221,6 +223,7 @@ pub async fn build_state_with_acme(
     certificate_acme: Arc<CertificateAcmeService>,
 ) -> Result<AppState, sqlx::Error> {
     let mut state = build_state(database_url, certificate_root, setup_token).await?;
+    certificate_acme.attach_realtime(state.realtime.clone());
     state.acme = Arc::new(CertificateAcmeAdapter::new(certificate_acme));
     Ok(state)
 }
@@ -369,6 +372,7 @@ async fn update_role(State(s): State<AppState>, h: HeaderMap, path: Result<Path<
     audit::record_state(&s, Some(actor.id), "role_updated", &details).await;
     if input.permissions.is_some() { audit::record_state(&s, Some(actor.id), "role_permissions_changed", &details).await; }
     s.realtime.publish("roles.changed");
+    if input.permissions.is_some() { s.realtime.publish("sessions.changed"); }
     Json(updated).into_response()
 }
 
@@ -448,6 +452,7 @@ async fn update_user(
     let detail = if input.disabled == Some(true) { "user_disabled" } else { "user_updated" };
     audit::record_state(&s, Some(actor.id), detail, &user_audit(Some(id), "success")).await;
     s.realtime.publish("users.changed");
+    if input.role.is_some() || input.disabled.is_some() { s.realtime.publish("sessions.changed"); }
     Json(updated).into_response()
 }
 

@@ -13,13 +13,14 @@ use crate::{
         audit,
         models::{AcmeChallenge, AcmeRequest, AcmeStatus},
         repository,
+        realtime::RealtimeHub,
     },
     secrets::SecretStore,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::{Arc, RwLock}};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -49,6 +50,7 @@ pub struct AcmeService {
     reloader: Arc<dyn ConfigReloader>,
     jobs: Arc<Mutex<HashSet<String>>>,
     secrets: SecretStore,
+    realtime: Arc<RwLock<Option<Arc<RealtimeHub>>>>,
 }
 
 impl AcmeService {
@@ -66,6 +68,17 @@ impl AcmeService {
             reloader,
             jobs: Arc::new(Mutex::new(HashSet::new())),
             secrets,
+            realtime: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Attach the process-local event hub after the service is constructed.
+    /// This keeps the certificate service usable by embedded callers that do
+    /// not run a control plane while allowing background renewals to notify
+    /// connected dashboards.
+    pub fn attach_realtime(&self, hub: Arc<RealtimeHub>) {
+        if let Ok(mut slot) = self.realtime.write() {
+            *slot = Some(hub);
         }
     }
 
@@ -176,6 +189,7 @@ impl AcmeService {
         )
         .await;
         self.reload(certificate_id).await?;
+        self.publish_realtime("certificates.changed");
         Ok(repository::get_acme_status(&self.db, certificate_id)
             .await?
             .ok_or(AcmeServiceError::NotFound)?)
@@ -244,6 +258,14 @@ impl AcmeService {
             .apply_certificate_change(certificate_id)
             .await
             .map_err(|e| AcmeServiceError::Reload(e.to_string()))
+    }
+
+    fn publish_realtime(&self, kind: &'static str) {
+        if let Ok(slot) = self.realtime.read() {
+            if let Some(hub) = slot.as_ref() {
+                hub.publish(kind);
+            }
+        }
     }
 }
 

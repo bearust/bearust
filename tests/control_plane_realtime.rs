@@ -140,6 +140,18 @@ async fn publishes_domain_events_without_secrets() {
     assert_eq!(audit.kind, "audit");
     assert_eq!(users.kind, "users.changed");
 
+    let update_user = app.clone().oneshot(Request::builder()
+        .method("PATCH")
+        .uri("/api/users/2")
+        .header("cookie", &cookie)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"disabled":true}"#))
+        .unwrap()).await.unwrap();
+    assert_eq!(update_user.status(), StatusCode::OK);
+    assert_eq!(events.recv().await.unwrap().kind, "audit");
+    assert_eq!(events.recv().await.unwrap().kind, "users.changed");
+    assert_eq!(events.recv().await.unwrap().kind, "sessions.changed");
+
     let invalid_user = app.clone().oneshot(Request::builder()
         .method("POST")
         .uri("/api/users")
