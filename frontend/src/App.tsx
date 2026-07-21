@@ -10,6 +10,8 @@ import {
   RoleRecord,
   Role,
   User,
+  WafConfig,
+  WafRule,
 } from "./api";
 import { useRealtimeUpdates, RealtimeStatus } from "./realtime";
 import { Alert, Button, Card, Field, SelectField, TextareaField, ThemeSelect } from "./ui";
@@ -589,6 +591,17 @@ export function RolesSection({ user, roles, hosts = [], onChanged }: { user: Use
   return <Card><h2 className="mb-4 text-xl font-semibold">Roles</h2>{error&&<Alert variant="danger">{error}</Alert>}<div className="overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>Name</th><th>Slug</th><th>Permissions</th><th /></tr></thead><tbody>{roles.map(role=><tr key={role.id}><td>{role.name}</td><td>{role.slug}</td><td>{role.permissions.join(", ")}<div data-testid={`role-scope-editor-${role.id}`} className="mt-3 grid gap-3 sm:grid-cols-2"><fieldset className="min-w-0"><legend className="font-medium">Proxy host read access</legend>{hosts.map((host)=><label className="flex items-center gap-2 text-sm" key={`read-${host.id}`}><input data-testid={`scope-read-host-${host.id}`} type="checkbox" disabled={role.system_managed || busy} checked={drafts[role.id]?.["proxy_hosts.read"]?.includes(host.id) ?? false} onChange={(e)=>updateScope(role.id,"proxy_hosts.read",host.id,e.target.checked)} /><span className="truncate">{host.domain}</span></label>)}</fieldset><fieldset className="min-w-0"><legend className="font-medium">Proxy host write access</legend>{hosts.map((host)=><label className="flex items-center gap-2 text-sm" key={`write-${host.id}`}><input data-testid={`scope-write-host-${host.id}`} type="checkbox" disabled={role.system_managed || busy} checked={drafts[role.id]?.["proxy_hosts.write"]?.includes(host.id) ?? false} onChange={(e)=>updateScope(role.id,"proxy_hosts.write",host.id,e.target.checked)} /><span className="truncate">{host.domain}</span></label>)}</fieldset>{!role.system_managed&&<div className="flex flex-wrap gap-2 sm:col-span-2"><Button data-testid={`role-scope-save-${role.id}`} variant="secondary" disabled={busy} onClick={()=>void run(()=>api.updateRole(role.id,{description:role.description,scopes:scopePayload(role.id)}))}>Save scopes</Button><Button data-testid={`role-scope-clear-${role.id}`} variant="secondary" disabled={busy} onClick={()=>setDrafts((all)=>({...all,[role.id]:{"proxy_hosts.read":[],"proxy_hosts.write":[]}}))}>Clear scopes</Button></div>}</div></td><td>{!role.system_managed&&<Button variant="danger" disabled={busy} onClick={()=>window.confirm("Delete this role?")&&void run(()=>api.deleteRole(role.id))}>Delete</Button>}</td></tr>)}</tbody></table></div><form className="mt-6 grid gap-4 sm:grid-cols-2" onSubmit={e=>{e.preventDefault();if(!slug.trim()||!name.trim())return;void run(async()=>{await api.createRole({slug:slug.trim(),name:name.trim(),description:"",permissions:["audit_logs.read"],scopes:[]});setSlug("");setName("")})}}><h3 className="sm:col-span-2 font-semibold">Add role</h3><Field label="Slug" value={slug} onChange={(e:any)=>setSlug(e.target.value)}/><Field label="Name" value={name} onChange={(e:any)=>setName(e.target.value)}/><Button type="submit" disabled={busy||!slug.trim()||!name.trim()}>Create role</Button></form><p className="mt-4 text-sm text-muted">Available permissions: {PERMISSIONS.join(", ")}</p></Card>;
 }
 
+export function WafSection({ user, refreshToken = 0 }: { user: User; refreshToken?: number }) {
+  const [config, setConfig] = useState<WafConfig | null>(null), [rules, setRules] = useState<WafRule[]>([]), [error, setError] = useState(""), [busy, setBusy] = useState(false), [toml, setToml] = useState("");
+  const admin = user.role === "admin";
+  const reload = async () => { try { const [nextConfig, nextRules] = await Promise.all([api.wafConfig(), api.wafRules()]); setConfig(nextConfig); setRules(nextRules); setError(""); } catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); } };
+  useEffect(() => { void reload(); }, [refreshToken]);
+  const changeMode = async () => { if (!config || !admin) return; setBusy(true); try { setConfig(await api.updateWafConfig({ mode: config.mode === "block" ? "monitor-only" : "block" })); } catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); } finally { setBusy(false); } };
+  const importToml = async () => { setBusy(true); try { await api.importWafRules(toml); setToml(""); await reload(); } catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); } finally { setBusy(false); } };
+  const exportToml = async () => { try { setToml(await api.exportWafRules()); } catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); } };
+  return <Card data-testid="waf-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">Basic WAF</h2><span className="rounded-full border border-border px-3 py-1 text-sm" data-testid="waf-mode">{config?.mode === "block" ? "Block" : "Monitor-only"}</span>{admin && <Button variant="secondary" disabled={busy || !config} onClick={() => void changeMode()}>{config?.mode === "block" ? "Monitor-only" : "Block"}</Button>}</div>{error && <Alert variant="danger">{error}</Alert>}<div className="mt-4 overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>Name</th><th>Category</th><th>Severity</th><th>Action</th><th>Status</th><th /></tr></thead><tbody>{rules.map(rule => <tr key={rule.id}><td>{rule.name}</td><td>{rule.category}</td><td>{rule.severity}</td><td>{rule.action}</td><td>{rule.enabled ? "Enabled" : "Disabled"}</td><td>{admin && rule.source === "custom" && <Button variant="danger" disabled={busy} onClick={() => void api.deleteWafRule(rule.id).then(reload).catch(e => setError(sanitizeError(e instanceof Error ? e.message : String(e))))}>Delete</Button>}</td></tr>)}</tbody></table></div>{admin && <div className="mt-5 grid gap-3"><TextareaField label="WAF TOML import/export" value={toml} onChange={e => setToml(e.target.value)} rows={8} placeholder="version = 1" /><div className="flex flex-wrap gap-2"><Button variant="secondary" disabled={busy || !toml.trim()} onClick={() => void importToml()}>Import TOML</Button><Button variant="secondary" disabled={busy} onClick={() => void exportToml()}>Export TOML</Button></div></div>}</Card>;
+}
+
 function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: () => void; onUserRefresh: (user: User) => void }) {
   const [hosts, setHosts] = useState<Host[]>([]),
     [certs, setCerts] = useState<Certificate[]>([]),
@@ -596,6 +609,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
     [roles, setRoles] = useState<RoleRecord[]>([]),
     [error, setError] = useState(""),
     [usersError, setUsersError] = useState("");
+  const [wafRefresh, setWafRefresh] = useState(0);
   const [form, setForm] = useState({
     name: "",
     domain: "",
@@ -654,6 +668,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
     roles: loadRoles,
     auditLogs: () => auditReloadRef.current?.(),
     sessions: loadSession,
+    waf: () => setWafRefresh(value => value + 1),
   });
   const refresh = async () => {
     try {
@@ -693,6 +708,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
       </header>
       <div className="mx-auto grid max-w-7xl gap-6">{error && <Alert variant="danger">{error}</Alert>}
       <CertificateTable user={user} onChanged={() => void refresh()} />
+      <WafSection user={user} refreshToken={wafRefresh} />
       {canWrite && (
         <AcmeWizard canWrite={canWrite} onIssued={() => void refresh()} />
       )}
