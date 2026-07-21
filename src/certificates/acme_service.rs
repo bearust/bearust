@@ -19,7 +19,7 @@ use crate::{
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
+use crate::control_plane::repository::DbPool;
 use std::{collections::HashSet, sync::{Arc, RwLock}};
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -44,7 +44,7 @@ pub enum AcmeServiceError {
 
 #[derive(Clone)]
 pub struct AcmeService {
-    db: SqlitePool,
+    db: DbPool,
     certificates: Arc<CertificateStore>,
     manager: Arc<AcmeManager>,
     reloader: Arc<dyn ConfigReloader>,
@@ -55,7 +55,7 @@ pub struct AcmeService {
 
 impl AcmeService {
     pub fn new(
-        db: SqlitePool,
+        db: DbPool,
         certificates: Arc<CertificateStore>,
         manager: Arc<AcmeManager>,
         reloader: Arc<dyn ConfigReloader>,

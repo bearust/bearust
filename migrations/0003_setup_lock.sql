@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS setup_lock (
+    id INTEGER PRIMARY KEY
+);
+INSERT INTO setup_lock(id) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM setup_lock WHERE id = 1);

@@ -8,6 +8,27 @@ use bearust::control_plane::repository;
 use tower::util::ServiceExt;
 use sqlx::Row;
 
+#[test]
+fn database_url_validation_accepts_supported_backends() {
+    for url in [
+        "sqlite://./data.db",
+        "postgres://user:secret@localhost/db",
+        "mysql://user:secret@localhost/db",
+    ] {
+        repository::validate_database_url(url).expect(url);
+    }
+}
+
+#[test]
+fn database_url_validation_rejects_unsupported_urls_without_credentials() {
+    for url in ["redis://user:super-secret@example.test/cache", ""] {
+        let error = repository::validate_database_url(url).expect_err("URL should be rejected");
+        let message = error.to_string();
+        assert!(message.contains("unsupported database URL"));
+        assert!(!message.contains("super-secret"));
+    }
+}
+
 #[tokio::test]
 async fn creates_schema_and_reports_first_run_status() {
     let dir = tempfile::tempdir().unwrap();
@@ -31,7 +52,7 @@ async fn creates_schema_and_reports_first_run_status() {
     assert_eq!(&body[..], br#"{"initialized":false}"#);
 }
 
-async fn test_pool() -> sqlx::SqlitePool {
+async fn test_pool() -> repository::DbPool {
     let pool = repository::connect("sqlite::memory:").await.unwrap();
     repository::migrate(&pool).await.unwrap();
     pool
@@ -128,6 +149,73 @@ async fn migration_seeds_builtin_roles_and_all_permissions_idempotently() {
     assert_eq!(roles, 3);
     assert_eq!(permissions, 10);
     assert_eq!(repository::role_by_slug(&pool, "admin").await.unwrap().unwrap().slug, "admin");
+}
+
+#[tokio::test]
+async fn migrations_record_order_and_seed_exact_permissions() {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+    let versions: Vec<i64> = sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(versions, vec![1, 2, 3]);
+    let lock_row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM setup_lock WHERE id=1")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(lock_row, 1);
+    let permission_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM permissions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(permission_count, 10);
+    repository::migrate(&pool).await.unwrap();
+    let role_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM roles WHERE system_managed=1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(role_count, 3);
+    let global_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM role_permissions WHERE scope_type='' AND scope_id=0")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(global_rows, 18, "built-in roles must retain every expected global grant");
+    let nullable_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM role_permissions WHERE scope_type IS NULL OR scope_id IS NULL")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(nullable_rows, 0, "global scopes use the portable non-null sentinel");
+}
+
+#[tokio::test]
+async fn migration_preserves_legacy_records() {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL, created_at TEXT NOT NULL)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("CREATE TABLE audit_logs (id INTEGER PRIMARY KEY, user_id INTEGER, event TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users(id,email,password_hash,role,created_at) VALUES(7,'legacy@example.test','hash','admin','2024-01-01T00:00:00Z')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO audit_logs(id,user_id,event,details,created_at) VALUES(9,7,'legacy.event','{}','2024-01-01T00:00:00Z')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("CREATE TABLE roles (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', system_managed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)").execute(&pool).await.unwrap();
+    sqlx::query("CREATE TABLE permissions (id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, description TEXT NOT NULL DEFAULT '')").execute(&pool).await.unwrap();
+    sqlx::query("CREATE TABLE role_permissions (role_id INTEGER NOT NULL, permission_id INTEGER NOT NULL, scope_type TEXT, scope_id INTEGER, PRIMARY KEY(role_id,permission_id,scope_type,scope_id))").execute(&pool).await.unwrap();
+    sqlx::query("CREATE INDEX idx_role_permissions_scope ON role_permissions(scope_type, scope_id, role_id, permission_id)").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO roles(id,slug,name,created_at,updated_at) VALUES(42,'legacy-role','Legacy','2024-01-01','2024-01-01')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO permissions(id,key) VALUES(43,'proxy_hosts.read')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(42,43,NULL,NULL),(42,43,NULL,7),(42,43,'',0),(42,43,'proxy_host',99)").execute(&pool).await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+    let user: (String, i64) = sqlx::query_as("SELECT email,disabled FROM users WHERE id=7")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(user.0, "legacy@example.test");
+    assert_eq!(user.1, 0);
+    let audit_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE id=9")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(audit_count, 1);
+    let global: (String, i64) = sqlx::query_as("SELECT scope_type,scope_id FROM role_permissions WHERE role_id=42 AND permission_id=43 AND scope_id=0")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(global, (String::new(), 0));
+    let global_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM role_permissions WHERE role_id=42 AND permission_id=43 AND scope_type='' AND scope_id=0").fetch_one(&pool).await.unwrap();
+    assert_eq!(global_count, 1);
+    let scoped: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM role_permissions WHERE role_id=42 AND permission_id=43 AND scope_type='proxy_host' AND scope_id=99")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(scoped, 1);
 }
 
 #[tokio::test]

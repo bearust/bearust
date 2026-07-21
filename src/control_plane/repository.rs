@@ -3,70 +3,189 @@ use crate::control_plane::models::{
     AuditLogQuery, CertificateMetadata, ProxyHost, RoleDetail, RolePermissionScope, User,
 };
 use crate::control_plane::rbac::Role;
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    Row, SqlitePool,
-};
-use std::str::FromStr;
+use sqlx::{any::AnyPoolOptions, Row};
+use std::sync::Once;
+use std::hash::{Hash, Hasher};
+use uuid::Uuid;
 
-pub async fn connect(url: &str) -> Result<SqlitePool, sqlx::Error> {
-    let opts = SqliteConnectOptions::from_str(url)?
-        .create_if_missing(true)
-        .foreign_keys(true);
-    SqlitePoolOptions::new()
-        .max_connections(8)
-        .connect_with(opts)
-        .await
-}
-pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    sqlx::query("PRAGMA foreign_keys=ON").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,created_at TEXT NOT NULL)").execute(pool).await?;
-    match sqlx::query("ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0").execute(pool).await {
-        Ok(_) => {}
-        Err(error) if error.as_database_error().is_some_and(|db| {
-            db.message().to_ascii_lowercase().contains("duplicate column name")
-        }) => {}
-        Err(error) => return Err(error),
+/// Database pool type used by the control plane once all repositories have
+/// been migrated to SQLx's backend-agnostic driver.
+pub type DbPool = sqlx::AnyPool;
+
+static ANY_DRIVERS: Once = Once::new();
+
+/// Validate a database URL without including credentials in the resulting
+/// error.  Only the backends supported by the application are accepted.
+pub fn validate_database_url(url: &str) -> Result<(), sqlx::Error> {
+    let scheme = url
+        .split_once("://")
+        .map(|(scheme, _)| scheme)
+        .or_else(|| url.split_once(':').map(|(scheme, _)| scheme))
+        .unwrap_or("");
+    if url.is_empty()
+        || !matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "sqlite" | "postgres" | "postgresql" | "mysql"
+        )
+    {
+        return Err(sqlx::Error::Configuration(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsupported database URL",
+        ))));
     }
-    sqlx::query("CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,token_hash TEXT NOT NULL UNIQUE,expires_at TEXT NOT NULL,revoked_at TEXT,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS proxy_hosts (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,domain TEXT NOT NULL UNIQUE,upstream_host TEXT NOT NULL,upstream_port INTEGER NOT NULL,tls_mode TEXT NOT NULL,certificate_id INTEGER,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS certificates (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,source TEXT NOT NULL,covered_hostnames TEXT NOT NULL,expiry TEXT NOT NULL,certificate_path TEXT NOT NULL,key_path TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL)").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS acme_certificates (certificate_id INTEGER PRIMARY KEY,environment TEXT NOT NULL CHECK(environment IN ('staging','production')),challenge TEXT NOT NULL CHECK(challenge IN ('http01','cloudflare_dns01')),renewal_state TEXT NOT NULL,next_renewal_at TEXT,last_attempt_at TEXT,last_error_code TEXT,FOREIGN KEY(certificate_id) REFERENCES certificates(id) ON DELETE CASCADE)").execute(pool).await?;
-    match sqlx::query("ALTER TABLE acme_certificates ADD COLUMN secret_ref TEXT").execute(pool).await {
-        Ok(_) => {}
-        Err(error) if error.as_database_error().is_some_and(|db| {
-            db.message().to_ascii_lowercase().contains("duplicate column name")
-        }) => {}
-        Err(error) => return Err(error),
-    }
-    sqlx::query("CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,event TEXT NOT NULL,details TEXT NOT NULL,created_at TEXT NOT NULL)").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS roles (id INTEGER PRIMARY KEY AUTOINCREMENT,slug TEXT NOT NULL UNIQUE,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',system_managed INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS permissions (id INTEGER PRIMARY KEY AUTOINCREMENT,key TEXT NOT NULL UNIQUE,description TEXT NOT NULL DEFAULT '')").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS role_permissions (role_id INTEGER NOT NULL,permission_id INTEGER NOT NULL,scope_type TEXT,scope_id INTEGER,PRIMARY KEY (role_id,permission_id,scope_type,scope_id),FOREIGN KEY(role_id) REFERENCES roles(id) ON DELETE CASCADE,FOREIGN KEY(permission_id) REFERENCES permissions(id) ON DELETE CASCADE)").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_role_permissions_scope ON role_permissions(scope_type,scope_id,role_id,permission_id)").execute(pool).await?;
-    let permissions = ["proxy_hosts.read","proxy_hosts.write","certificates.read","certificates.write","users.manage","roles.manage","audit_logs.read","audit_logs.export","system.settings.manage","sessions.revoke"];
-    for key in &permissions { sqlx::query("INSERT OR IGNORE INTO permissions(key) VALUES(?)").bind(key).execute(pool).await?; }
-    let now = chrono::Utc::now().to_rfc3339();
-    for (slug, name) in [("admin","Administrator"),("operator","Operator"),("viewer","Viewer")] {
-        sqlx::query("INSERT OR IGNORE INTO roles(slug,name,system_managed,created_at,updated_at) VALUES(?,?,1,?,?)").bind(slug).bind(name).bind(&now).bind(&now).execute(pool).await?;
-    }
-    let assignments: [(&str, &[&str]); 3] = [
-        ("admin", &permissions),
-        ("operator", &["proxy_hosts.read","proxy_hosts.write","certificates.read","certificates.write","audit_logs.read"]),
-        ("viewer", &["proxy_hosts.read","certificates.read","audit_logs.read"]),
-    ];
-    for (slug, keys) in assignments { for key in keys { sqlx::query("INSERT OR IGNORE INTO role_permissions(role_id,permission_id) SELECT r.id,p.id FROM roles r,permissions p WHERE r.slug=? AND p.key=? AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id=r.id AND rp.permission_id=p.id AND rp.scope_type IS NULL AND rp.scope_id IS NULL)").bind(slug).bind(key).execute(pool).await?; } }
     Ok(())
 }
 
-pub async fn set_acme_secret_ref(pool: &SqlitePool, certificate_id: i64, secret_ref: &str) -> Result<u64, sqlx::Error> {
+pub async fn connect(url: &str) -> Result<DbPool, sqlx::Error> {
+    validate_database_url(url)?;
+    ANY_DRIVERS.call_once(sqlx::any::install_default_drivers);
+    let max_connections = if is_in_memory_sqlite(url) { 1 } else { 8 };
+    AnyPoolOptions::new()
+        .max_connections(max_connections)
+        .connect(url)
+        .await
+}
+
+fn is_in_memory_sqlite(url: &str) -> bool {
+    let normalized = url.trim().to_ascii_lowercase();
+    normalized.starts_with("sqlite:")
+        && (normalized.contains(":memory:") || normalized.contains("mode=memory"))
+}
+pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
+    sqlx::migrate!("./migrations").run(pool).await?;
+
+    // Keep this outside the migration SQL so legacy databases that already
+    // have the index can be upgraded safely on every supported backend.
+    match sqlx::query("CREATE INDEX idx_role_permissions_scope ON role_permissions(scope_type, scope_id, role_id, permission_id)").execute(pool).await {
+        Ok(_) => {}
+        Err(error) if error.to_string().to_ascii_lowercase().contains("already exists") || error.to_string().to_ascii_lowercase().contains("duplicate") => {}
+        Err(error) => return Err(error),
+    }
+
+    // The first release created these columns inline. Add them for those
+    // databases without dropping or rewriting existing rows. Each backend
+    // reports a duplicate-column error differently, so only that error is
+    // ignored; all other failures abort startup.
+    for statement in [
+        "ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE acme_certificates ADD COLUMN secret_ref TEXT",
+    ] {
+        match sqlx::query(statement).execute(pool).await {
+            Ok(_) => {}
+            Err(error) if is_duplicate_column(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    // Normalize legacy partial-NULL scope rows without rowid/ctid syntax.
+    // Delete all nullable variants for each role/permission, then restore one
+    // portable global sentinel when no global grant already exists.
+    let nullable_pairs = sqlx::query("SELECT DISTINCT role_id,permission_id FROM role_permissions WHERE scope_type IS NULL OR scope_id IS NULL").fetch_all(pool).await?;
+    for pair in nullable_pairs {
+        let role_id: i64 = pair.get("role_id");
+        let permission_id: i64 = pair.get("permission_id");
+        sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND permission_id=? AND (scope_type IS NULL OR scope_id IS NULL)").bind(role_id).bind(permission_id).execute(pool).await?;
+        sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,?,'',0 WHERE NOT EXISTS (SELECT 1 FROM role_permissions WHERE role_id=? AND permission_id=? AND scope_type='' AND scope_id=0)").bind(role_id).bind(permission_id).bind(role_id).bind(permission_id).execute(pool).await?;
+    }
+
+    let permissions = [
+        "proxy_hosts.read",
+        "proxy_hosts.write",
+        "certificates.read",
+        "certificates.write",
+        "users.manage",
+        "roles.manage",
+        "audit_logs.read",
+        "audit_logs.export",
+        "system.settings.manage",
+        "sessions.revoke",
+    ];
+    for key in permissions {
+            sqlx::query(
+                "INSERT INTO permissions(id,key) SELECT ?,? WHERE NOT EXISTS (SELECT 1 FROM permissions WHERE key=?)",
+            )
+        .bind(seed_id(pool, "permissions", "key", key, deterministic_id(key)).await?)
+        .bind(key)
+        .bind(key)
+        .execute(pool)
+        .await?;
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for (slug, name) in [("admin", "Administrator"), ("operator", "Operator"), ("viewer", "Viewer")] {
+        sqlx::query(
+            "INSERT INTO roles(id,slug,name,system_managed,created_at,updated_at) SELECT ?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM roles WHERE slug=?)",
+        )
+        .bind(seed_id(pool, "roles", "slug", slug, deterministic_id(slug)).await?)
+        .bind(slug)
+        .bind(name)
+        .bind(1_i64)
+        .bind(&now)
+        .bind(&now)
+        .bind(slug)
+        .execute(pool)
+        .await?;
+    }
+
+    let assignments: [(&str, &[&str]); 3] = [
+        ("admin", &permissions),
+        (
+            "operator",
+            &["proxy_hosts.read", "proxy_hosts.write", "certificates.read", "certificates.write", "audit_logs.read"],
+        ),
+        ("viewer", &["proxy_hosts.read", "certificates.read", "audit_logs.read"]),
+    ];
+    for (slug, keys) in assignments {
+        for key in keys {
+            sqlx::query(
+                "INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT r.id,p.id,'',0 FROM roles r,permissions p WHERE r.slug=? AND p.key=? AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id=r.id AND rp.permission_id=p.id AND rp.scope_type='' AND rp.scope_id=0)",
+            )
+            .bind(slug)
+            .bind(*key)
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+fn deterministic_id(value: &str) -> i64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    ((hasher.finish() as i64) & i64::MAX).max(1)
+}
+
+async fn seed_id(pool: &DbPool, table: &str, key_column: &str, key: &str, preferred: i64) -> Result<i64, sqlx::Error> {
+    if sqlx::query("SELECT 1").fetch_optional(pool).await.is_err() { return Ok(preferred); }
+    if sqlx::query(&format!("SELECT id FROM {table} WHERE {key_column}=?")).bind(key).fetch_optional(pool).await?.is_some() { return Ok(preferred); }
+    if sqlx::query(&format!("SELECT 1 FROM {table} WHERE id=?")).bind(preferred).fetch_optional(pool).await?.is_some() {
+        for _ in 0..32 {
+            let candidate = generated_id();
+            if sqlx::query(&format!("SELECT 1 FROM {table} WHERE id=?")).bind(candidate).fetch_optional(pool).await?.is_none() { return Ok(candidate); }
+        }
+        return Err(sqlx::Error::Protocol("unable to allocate seed ID".into()));
+    }
+    Ok(preferred)
+}
+
+fn generated_id() -> i64 {
+    let bytes = *Uuid::new_v4().as_bytes();
+    let mut raw = [0u8; 8]; raw.copy_from_slice(&bytes[..8]);
+    (i64::from_be_bytes(raw) & i64::MAX).max(1)
+}
+
+fn is_duplicate_column(error: &sqlx::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("duplicate column") || message.contains("already exists") || message.contains("1060") || message.contains("42701")
+}
+
+pub async fn set_acme_secret_ref(pool: &DbPool, certificate_id: i64, secret_ref: &str) -> Result<u64, sqlx::Error> {
     Ok(sqlx::query("UPDATE acme_certificates SET secret_ref=? WHERE certificate_id=?").bind(secret_ref).bind(certificate_id).execute(pool).await?.rows_affected())
 }
-pub async fn acme_secret_ref(pool: &SqlitePool, certificate_id: i64) -> Result<Option<String>, sqlx::Error> {
+pub async fn acme_secret_ref(pool: &DbPool, certificate_id: i64) -> Result<Option<String>, sqlx::Error> {
     Ok(sqlx::query("SELECT secret_ref FROM acme_certificates WHERE certificate_id=?").bind(certificate_id).fetch_optional(pool).await?.and_then(|r| r.get::<Option<String>, _>("secret_ref")))
 }
 
-fn acme_status_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<AcmeStatus, sqlx::Error> {
+fn acme_status_from_row(r: &sqlx::any::AnyRow) -> Result<AcmeStatus, sqlx::Error> {
     let environment = match r.get::<String, _>("environment").as_str() {
         "staging" => AcmeEnvironment::Staging,
         "production" => AcmeEnvironment::Production,
@@ -100,7 +219,7 @@ fn acme_status_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<AcmeStatus, sqlx:
 }
 
 pub async fn insert_acme_certificate(
-    pool: &SqlitePool,
+    pool: &DbPool,
     certificate_id: i64,
     request: &AcmeRequest,
 ) -> Result<AcmeStatus, sqlx::Error> {
@@ -140,7 +259,7 @@ pub async fn insert_acme_certificate(
 }
 
 pub async fn update_acme_status(
-    pool: &SqlitePool,
+    pool: &DbPool,
     certificate_id: i64,
     renewal_state: &str,
     next_renewal_at: Option<&str>,
@@ -152,7 +271,7 @@ pub async fn update_acme_status(
 }
 
 pub async fn get_acme_status(
-    pool: &SqlitePool,
+    pool: &DbPool,
     certificate_id: i64,
 ) -> Result<Option<AcmeStatus>, sqlx::Error> {
     let row = sqlx::query("SELECT a.certificate_id,a.environment,a.challenge,c.covered_hostnames AS hostnames,a.renewal_state,a.next_renewal_at,a.last_attempt_at,a.last_error_code FROM acme_certificates a JOIN certificates c ON c.id=a.certificate_id WHERE a.certificate_id=?")
@@ -161,21 +280,21 @@ pub async fn get_acme_status(
 }
 
 pub async fn list_due_acme_certificates(
-    pool: &SqlitePool,
+    pool: &DbPool,
     at: &str,
 ) -> Result<Vec<AcmeStatus>, sqlx::Error> {
     let rows = sqlx::query("SELECT a.certificate_id,a.environment,a.challenge,c.covered_hostnames AS hostnames,a.renewal_state,a.next_renewal_at,a.last_attempt_at,a.last_error_code FROM acme_certificates a JOIN certificates c ON c.id=a.certificate_id WHERE a.next_renewal_at IS NOT NULL AND a.next_renewal_at<=? ORDER BY a.next_renewal_at,a.certificate_id")
         .bind(at).fetch_all(pool).await?;
     rows.iter().map(acme_status_from_row).collect()
 }
-pub async fn user_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+pub async fn user_count(pool: &DbPool) -> Result<i64, sqlx::Error> {
     Ok(sqlx::query("SELECT COUNT(*) c FROM users")
         .fetch_one(pool)
         .await?
         .get("c"))
 }
 pub async fn insert_user(
-    pool: &SqlitePool,
+    pool: &DbPool,
     email: &str,
     hash: &str,
     role: &str,
@@ -191,17 +310,16 @@ pub async fn insert_user(
         return Err(sqlx::Error::Protocol("invalid role".into()));
     }
     let now = chrono::Utc::now().to_rfc3339();
-    let r = sqlx::query(
-        "INSERT INTO users(email,password_hash,role,created_at,disabled) VALUES(?,?,?, ?,0) RETURNING id",
-    )
+    let id = generated_id();
+    sqlx::query("INSERT INTO users(id,email,password_hash,role,created_at,disabled) VALUES(?,?,?,?,?,0)")
+    .bind(id)
     .bind(email)
     .bind(hash)
     .bind(role_name)
     .bind(&now)
-    .fetch_one(pool)
-    .await?;
+    .execute(pool).await?;
     Ok(User {
-        id: r.get("id"),
+        id,
         email: email.into(),
         role: role_name.into(),
         created_at: now,
@@ -212,12 +330,16 @@ pub async fn insert_user(
 /// Create the first administrator while holding SQLite's write lock.
 /// Returning `Ok(None)` means another request completed setup first.
 pub async fn insert_initial_admin(
-    pool: &SqlitePool,
+    pool: &DbPool,
     email: &str,
     hash: &str,
 ) -> Result<Option<User>, sqlx::Error> {
     let mut conn = pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    sqlx::query("BEGIN").execute(&mut *conn).await?;
+    // Lock the single sentinel row. UPDATE obtains a row/write lock on
+    // PostgreSQL, MySQL, and SQLite without backend-specific syntax.
+    sqlx::query("UPDATE setup_lock SET id=id WHERE id=1")
+        .execute(&mut *conn).await?;
     let count = sqlx::query("SELECT COUNT(*) c FROM users")
         .fetch_one(&mut *conn).await?.get::<i64, _>("c");
     if count != 0 {
@@ -226,13 +348,12 @@ pub async fn insert_initial_admin(
     }
     let role = "admin";
     let now = chrono::Utc::now().to_rfc3339();
-    let result = sqlx::query(
-        "INSERT INTO users(email,password_hash,role,created_at,disabled) VALUES(?,?,?, ?,0) RETURNING id",
-    )
-    .bind(email).bind(hash).bind(role).bind(&now)
-    .fetch_one(&mut *conn).await;
-    let row = match result {
-        Ok(row) => row,
+    let id = generated_id();
+    let result = sqlx::query("INSERT INTO users(id,email,password_hash,role,created_at,disabled) VALUES(?,?,?,?,?,0)")
+    .bind(id).bind(email).bind(hash).bind(role).bind(&now)
+    .execute(&mut *conn).await;
+    match result {
+        Ok(_) => {},
         Err(error) => {
             let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
             return Err(error);
@@ -240,12 +361,12 @@ pub async fn insert_initial_admin(
     };
     sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(Some(User {
-        id: row.get("id"), email: email.into(), role: role.into(),
+        id, email: email.into(), role: role.into(),
         created_at: now, disabled: false,
     }))
 }
 pub async fn find_user(
-    pool: &SqlitePool,
+    pool: &DbPool,
     email: &str,
 ) -> Result<Option<(User, String)>, sqlx::Error> {
     let r = sqlx::query("SELECT id,email,password_hash,role,created_at,disabled FROM users WHERE email=? AND disabled=0")
@@ -266,7 +387,7 @@ pub async fn find_user(
     }))
 }
 pub async fn find_user_by_session(
-    pool: &SqlitePool,
+    pool: &DbPool,
     hash: &str,
 ) -> Result<Option<User>, sqlx::Error> {
     let r=sqlx::query("SELECT u.id,u.email,u.role,u.created_at,u.disabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>? AND u.disabled=0").bind(hash).bind(chrono::Utc::now().to_rfc3339()).fetch_optional(pool).await?;
@@ -279,7 +400,7 @@ pub async fn find_user_by_session(
     }))
 }
 
-pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, sqlx::Error> {
+pub async fn list_users(pool: &DbPool) -> Result<Vec<User>, sqlx::Error> {
     let rows = sqlx::query("SELECT id,email,role,created_at,disabled FROM users ORDER BY id")
         .fetch_all(pool).await?;
     Ok(rows.into_iter().map(|x| User {
@@ -288,21 +409,21 @@ pub async fn list_users(pool: &SqlitePool) -> Result<Vec<User>, sqlx::Error> {
     }).collect())
 }
 
-fn role_detail_from_row(row: &sqlx::sqlite::SqliteRow, permissions: Vec<String>, scopes: Vec<RolePermissionScope>) -> RoleDetail {
+fn role_detail_from_row(row: &sqlx::any::AnyRow, permissions: Vec<String>, scopes: Vec<RolePermissionScope>) -> RoleDetail {
     RoleDetail { id: row.get("id"), slug: row.get("slug"), name: row.get("name"), description: row.get("description"), system_managed: row.get::<i64, _>("system_managed") != 0, permissions, scopes }
 }
 
-async fn role_detail(pool: &SqlitePool, row: sqlx::sqlite::SqliteRow) -> Result<RoleDetail, sqlx::Error> {
+async fn role_detail(pool: &DbPool, row: sqlx::any::AnyRow) -> Result<RoleDetail, sqlx::Error> {
     let permissions = role_permissions(pool, row.get("id")).await?;
     let scopes = role_permission_scopes(pool, row.get("id")).await?;
     Ok(role_detail_from_row(&row, permissions, scopes))
 }
 
-pub async fn role_permissions(pool: &SqlitePool, role_id: i64) -> Result<Vec<String>, sqlx::Error> {
-    Ok(sqlx::query_scalar("SELECT p.key FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND rp.scope_type IS NULL AND rp.scope_id IS NULL ORDER BY p.key").bind(role_id).fetch_all(pool).await?)
+pub async fn role_permissions(pool: &DbPool, role_id: i64) -> Result<Vec<String>, sqlx::Error> {
+    Ok(sqlx::query_scalar("SELECT p.key FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND rp.scope_type='' AND rp.scope_id=0 ORDER BY p.key").bind(role_id).fetch_all(pool).await?)
 }
 
-pub async fn role_permission_scopes(pool: &SqlitePool, role_id: i64) -> Result<Vec<RolePermissionScope>, sqlx::Error> {
+pub async fn role_permission_scopes(pool: &DbPool, role_id: i64) -> Result<Vec<RolePermissionScope>, sqlx::Error> {
     let rows = sqlx::query("SELECT p.key AS permission, rp.scope_id FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND rp.scope_type='proxy_host' ORDER BY p.key,rp.scope_id")
         .bind(role_id).fetch_all(pool).await?;
     let mut scopes = Vec::new();
@@ -339,13 +460,13 @@ fn normalize_scopes(scopes: &[RolePermissionScope]) -> Result<Vec<RolePermission
     Ok(normalized)
 }
 
-async fn replace_scopes_tx<'a>(tx: &mut sqlx::Transaction<'a, sqlx::Sqlite>, role_id: i64, scopes: &[RolePermissionScope]) -> Result<(), sqlx::Error> {
+async fn replace_scopes_tx<'a>(tx: &mut sqlx::Transaction<'a, sqlx::Any>, role_id: i64, scopes: &[RolePermissionScope]) -> Result<(), sqlx::Error> {
     let scopes = normalize_scopes(scopes)?;
     for scope in &scopes {
-        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM proxy_hosts WHERE id IN (SELECT value FROM json_each(?))")
-            .bind(serde_json::to_string(&scope.proxy_host_ids).unwrap()).fetch_one(&mut **tx).await?;
-        if exists != scope.proxy_host_ids.len() as i64 { return Err(sqlx::Error::Protocol("unknown proxy host id".into())); }
         for host_id in &scope.proxy_host_ids {
+            let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM proxy_hosts WHERE id=?")
+                .bind(host_id).fetch_optional(&mut **tx).await?;
+            if exists.is_none() { return Err(sqlx::Error::Protocol("unknown proxy host id".into())); }
             sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'proxy_host',? FROM permissions WHERE key=?")
                 .bind(role_id).bind(host_id).bind(&scope.permission).execute(&mut **tx).await?;
         }
@@ -353,7 +474,7 @@ async fn replace_scopes_tx<'a>(tx: &mut sqlx::Transaction<'a, sqlx::Sqlite>, rol
     Ok(())
 }
 
-pub async fn replace_role_scopes(pool: &SqlitePool, role_id: i64, scopes: &[RolePermissionScope]) -> Result<RoleDetail, sqlx::Error> {
+pub async fn replace_role_scopes(pool: &DbPool, role_id: i64, scopes: &[RolePermissionScope]) -> Result<RoleDetail, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let row = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(role_id).fetch_optional(&mut *tx).await?.ok_or(sqlx::Error::RowNotFound)?;
     if row.get::<i64, _>("system_managed") != 0 { return Err(sqlx::Error::Protocol("system-managed role cannot be mutated".into())); }
@@ -364,43 +485,44 @@ pub async fn replace_role_scopes(pool: &SqlitePool, role_id: i64, scopes: &[Role
     get_role(pool, role_id).await?.ok_or(sqlx::Error::RowNotFound)
 }
 
-pub async fn list_roles(pool: &SqlitePool) -> Result<Vec<RoleDetail>, sqlx::Error> {
+pub async fn list_roles(pool: &DbPool) -> Result<Vec<RoleDetail>, sqlx::Error> {
     let rows = sqlx::query("SELECT id,slug,name,description,system_managed FROM roles ORDER BY id").fetch_all(pool).await?;
     let mut result = Vec::with_capacity(rows.len());
     for row in rows { result.push(role_detail(pool, row).await?); }
     Ok(result)
 }
 
-pub async fn role_by_slug(pool: &SqlitePool, slug: &str) -> Result<Option<RoleDetail>, sqlx::Error> {
+pub async fn role_by_slug(pool: &DbPool, slug: &str) -> Result<Option<RoleDetail>, sqlx::Error> {
     match sqlx::query("SELECT id,slug,name,description,system_managed FROM roles WHERE slug=?").bind(slug).fetch_optional(pool).await? { Some(row) => Ok(Some(role_detail(pool, row).await?)), None => Ok(None) }
 }
 
-pub async fn get_role(pool: &SqlitePool, id: i64) -> Result<Option<RoleDetail>, sqlx::Error> {
+pub async fn get_role(pool: &DbPool, id: i64) -> Result<Option<RoleDetail>, sqlx::Error> {
     match sqlx::query("SELECT id,slug,name,description,system_managed FROM roles WHERE id=?").bind(id).fetch_optional(pool).await? { Some(row) => Ok(Some(role_detail(pool, row).await?)), None => Ok(None) }
 }
 
-pub async fn insert_role(pool: &SqlitePool, slug: &str, name: &str, description: &str) -> Result<RoleDetail, sqlx::Error> {
+pub async fn insert_role(pool: &DbPool, slug: &str, name: &str, description: &str) -> Result<RoleDetail, sqlx::Error> {
     let now = chrono::Utc::now().to_rfc3339();
-    let row = sqlx::query("INSERT INTO roles(slug,name,description,created_at,updated_at) VALUES(?,?,?,?,?) RETURNING id,slug,name,description,system_managed").bind(slug).bind(name).bind(description).bind(&now).bind(&now).fetch_one(pool).await?;
-    role_detail(pool, row).await
+    let id = generated_id();
+    sqlx::query("INSERT INTO roles(id,slug,name,description,created_at,updated_at) VALUES(?,?,?,?,?,?)").bind(id).bind(slug).bind(name).bind(description).bind(&now).bind(&now).execute(pool).await?;
+    get_role(pool, id).await?.ok_or(sqlx::Error::RowNotFound)
 }
 
 /// Atomically creates a role and installs its global permissions.
-pub async fn insert_role_with_permissions(pool: &SqlitePool, slug: &str, name: &str, description: &str, keys: &[&str]) -> Result<RoleDetail, sqlx::Error> {
+pub async fn insert_role_with_permissions(pool: &DbPool, slug: &str, name: &str, description: &str, keys: &[&str]) -> Result<RoleDetail, sqlx::Error> {
     insert_role_with_permissions_and_scopes(pool, slug, name, description, keys, &[]).await
 }
 
-pub async fn insert_role_with_permissions_and_scopes(pool: &SqlitePool, slug: &str, name: &str, description: &str, keys: &[&str], scopes: &[RolePermissionScope]) -> Result<RoleDetail, sqlx::Error> {
+pub async fn insert_role_with_permissions_and_scopes(pool: &DbPool, slug: &str, name: &str, description: &str, keys: &[&str], scopes: &[RolePermissionScope]) -> Result<RoleDetail, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let now = chrono::Utc::now().to_rfc3339();
-    let row = sqlx::query("INSERT INTO roles(slug,name,description,created_at,updated_at) VALUES(?,?,?,?,?) RETURNING id,slug,name,description,system_managed")
-        .bind(slug).bind(name).bind(description).bind(&now).bind(&now).fetch_one(&mut *tx).await?;
-    let id: i64 = row.get("id");
+    let id = generated_id();
+    sqlx::query("INSERT INTO roles(id,slug,name,description,created_at,updated_at) VALUES(?,?,?,?,?,?)")
+        .bind(id).bind(slug).bind(name).bind(description).bind(&now).bind(&now).execute(&mut *tx).await?;
     for key in keys {
         if sqlx::query("SELECT 1 FROM permissions WHERE key=?").bind(key).fetch_optional(&mut *tx).await?.is_none() {
             return Err(sqlx::Error::Protocol("invalid permission".into()));
         }
-        sqlx::query("INSERT INTO role_permissions(role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?")
+        sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'',0 FROM permissions WHERE key=?")
             .bind(id).bind(key).execute(&mut *tx).await?;
     }
     replace_scopes_tx(&mut tx, id, scopes).await?;
@@ -409,11 +531,11 @@ pub async fn insert_role_with_permissions_and_scopes(pool: &SqlitePool, slug: &s
 }
 
 /// Atomically updates role metadata and replaces its global permissions.
-pub async fn update_role_with_permissions(pool: &SqlitePool, id: i64, name: Option<&str>, description: Option<&str>, keys: Option<&[&str]>) -> Result<Option<RoleDetail>, sqlx::Error> {
+pub async fn update_role_with_permissions(pool: &DbPool, id: i64, name: Option<&str>, description: Option<&str>, keys: Option<&[&str]>) -> Result<Option<RoleDetail>, sqlx::Error> {
     update_role_with_permissions_and_scopes(pool, id, name, description, keys, None).await
 }
 
-pub async fn update_role_with_permissions_and_scopes(pool: &SqlitePool, id: i64, name: Option<&str>, description: Option<&str>, keys: Option<&[&str]>, scopes: Option<&[RolePermissionScope]>) -> Result<Option<RoleDetail>, sqlx::Error> {
+pub async fn update_role_with_permissions_and_scopes(pool: &DbPool, id: i64, name: Option<&str>, description: Option<&str>, keys: Option<&[&str]>, scopes: Option<&[RolePermissionScope]>) -> Result<Option<RoleDetail>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(id).fetch_optional(&mut *tx).await?;
     let Some(current) = current else { tx.rollback().await?; return Ok(None); };
@@ -426,9 +548,9 @@ pub async fn update_role_with_permissions_and_scopes(pool: &SqlitePool, id: i64,
                 return Err(sqlx::Error::Protocol("invalid permission".into()));
             }
         }
-        sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type IS NULL AND scope_id IS NULL").bind(id).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='' AND scope_id=0").bind(id).execute(&mut *tx).await?;
         for key in keys {
-            sqlx::query("INSERT INTO role_permissions(role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?").bind(id).bind(key).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'',0 FROM permissions WHERE key=?").bind(id).bind(key).execute(&mut *tx).await?;
         }
     }
     if let Some(scopes) = scopes {
@@ -440,7 +562,7 @@ pub async fn update_role_with_permissions_and_scopes(pool: &SqlitePool, id: i64,
     get_role(pool, id).await
 }
 
-pub async fn update_role(pool: &SqlitePool, id: i64, name: Option<&str>, description: Option<&str>) -> Result<Option<RoleDetail>, sqlx::Error> {
+pub async fn update_role(pool: &DbPool, id: i64, name: Option<&str>, description: Option<&str>) -> Result<Option<RoleDetail>, sqlx::Error> {
     let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(id).fetch_optional(pool).await?;
     let Some(current) = current else { return Ok(None); };
     if current.get::<i64, _>("system_managed") != 0 { return Err(sqlx::Error::Protocol("system-managed role cannot be mutated".into())); }
@@ -448,20 +570,20 @@ pub async fn update_role(pool: &SqlitePool, id: i64, name: Option<&str>, descrip
     get_role(pool, id).await
 }
 
-pub async fn set_role_permissions(pool: &SqlitePool, role_id: i64, keys: &[&str]) -> Result<RoleDetail, sqlx::Error> {
+pub async fn set_role_permissions(pool: &DbPool, role_id: i64, keys: &[&str]) -> Result<RoleDetail, sqlx::Error> {
     let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(role_id).fetch_optional(pool).await?.ok_or(sqlx::Error::RowNotFound)?;
     if current.get::<i64, _>("system_managed") != 0 { return Err(sqlx::Error::Protocol("system-managed role cannot be mutated".into())); }
     let mut tx = pool.begin().await?;
     for key in keys { if sqlx::query("SELECT 1 FROM permissions WHERE key=?").bind(key).fetch_optional(&mut *tx).await?.is_none() { return Err(sqlx::Error::Protocol(format!("invalid permission: {key}"))); } }
-    sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type IS NULL AND scope_id IS NULL").bind(role_id).execute(&mut *tx).await?;
-    for key in keys { sqlx::query("INSERT INTO role_permissions(role_id,permission_id) SELECT ?,id FROM permissions WHERE key=?").bind(role_id).bind(key).execute(&mut *tx).await?; }
+    sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='' AND scope_id=0").bind(role_id).execute(&mut *tx).await?;
+    for key in keys { sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'',0 FROM permissions WHERE key=?").bind(role_id).bind(key).execute(&mut *tx).await?; }
     tx.commit().await?;
     get_role(pool, role_id).await?.ok_or(sqlx::Error::RowNotFound)
 }
 
-pub async fn delete_role(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
+pub async fn delete_role(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
     let mut conn = pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    sqlx::query("BEGIN").execute(&mut *conn).await?;
 
     let row = match sqlx::query("SELECT slug,system_managed FROM roles WHERE id=?")
         .bind(id)
@@ -519,10 +641,10 @@ pub async fn delete_role(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error>
     Ok(changed)
 }
 
-pub async fn user_has_permission(pool: &SqlitePool, user_id: i64, key: &str, scope: Option<(&str, i64)>) -> Result<bool, sqlx::Error> {
+pub async fn user_has_permission(pool: &DbPool, user_id: i64, key: &str, scope: Option<(&str, i64)>) -> Result<bool, sqlx::Error> {
     let allowed = match scope {
         None => sqlx::query(
-            "SELECT 1 FROM users u JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.id=? AND u.disabled=0 AND p.key=? AND rp.scope_type IS NULL AND rp.scope_id IS NULL LIMIT 1",
+            "SELECT 1 FROM users u JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.id=? AND u.disabled=0 AND p.key=? AND rp.scope_type='' AND rp.scope_id=0 LIMIT 1",
         )
         .bind(user_id)
         .bind(key)
@@ -530,7 +652,7 @@ pub async fn user_has_permission(pool: &SqlitePool, user_id: i64, key: &str, sco
         .await?
         .is_some(),
         Some(("proxy_host", host_id)) => sqlx::query(
-            "SELECT 1 FROM users u JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.id=? AND u.disabled=0 AND p.key=? AND ((rp.scope_type IS NULL AND rp.scope_id IS NULL) OR (rp.scope_type=? AND rp.scope_id=?)) LIMIT 1",
+            "SELECT 1 FROM users u JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.id=? AND u.disabled=0 AND p.key=? AND ((rp.scope_type='' AND rp.scope_id=0) OR (rp.scope_type=? AND rp.scope_id=?)) LIMIT 1",
         )
         .bind(user_id)
         .bind(key)
@@ -545,7 +667,7 @@ pub async fn user_has_permission(pool: &SqlitePool, user_id: i64, key: &str, sco
     Ok(allowed)
 }
 
-pub async fn user_has_scoped_permission(pool: &SqlitePool, user_id: i64, key: &str) -> Result<bool, sqlx::Error> {
+pub async fn user_has_scoped_permission(pool: &DbPool, user_id: i64, key: &str) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query("SELECT 1 FROM users u JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.id=? AND u.disabled=0 AND p.key=? AND rp.scope_type='proxy_host' AND rp.scope_id IS NOT NULL LIMIT 1")
         .bind(user_id).bind(key).fetch_optional(pool).await?.is_some())
 }
@@ -661,7 +783,7 @@ fn audit_where(query: &AuditLogQuery) -> (String, Vec<AuditFilter>) {
 }
 
 pub async fn list_audit_logs(
-    pool: &SqlitePool,
+    pool: &DbPool,
     query: &AuditLogQuery,
 ) -> Result<AuditLogPage, sqlx::Error> {
     let (where_clause, filters) = audit_where(query);
@@ -706,7 +828,7 @@ pub async fn list_audit_logs(
     Ok(AuditLogPage { items, page, page_size, total })
 }
 
-pub async fn count_active_admins(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+pub async fn count_active_admins(pool: &DbPool) -> Result<i64, sqlx::Error> {
     Ok(sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0")
         .fetch_one(pool).await?.get("c"))
 }
@@ -715,7 +837,7 @@ pub async fn count_active_admins(pool: &SqlitePool) -> Result<i64, sqlx::Error> 
 /// invariant is checked while holding SQLite's write lock so a combined PATCH
 /// can never leave a partially updated account behind.
 pub async fn update_user(
-    pool: &SqlitePool,
+    pool: &DbPool,
     id: i64,
     role: Option<&str>,
     disabled: Option<bool>,
@@ -732,7 +854,7 @@ pub async fn update_user(
         }
     }
     let mut conn = pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    sqlx::query("BEGIN").execute(&mut *conn).await?;
     let current = sqlx::query("SELECT id,email,role,created_at,disabled FROM users WHERE id=?")
         .bind(id).fetch_optional(&mut *conn).await?;
     let Some(current) = current else {
@@ -773,7 +895,7 @@ fn last_admin_error() -> sqlx::Error {
     sqlx::Error::Protocol("cannot remove the last active administrator".into())
 }
 
-pub async fn update_user_role(pool: &SqlitePool, id: i64, role: &str) -> Result<u64, sqlx::Error> {
+pub async fn update_user_role(pool: &DbPool, id: i64, role: &str) -> Result<u64, sqlx::Error> {
     if Role::parse(role).is_none()
         && sqlx::query("SELECT 1 FROM roles WHERE slug=?")
             .bind(role)
@@ -784,7 +906,7 @@ pub async fn update_user_role(pool: &SqlitePool, id: i64, role: &str) -> Result<
         return Err(sqlx::Error::Protocol("invalid role".into()));
     }
     let mut conn = pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    sqlx::query("BEGIN").execute(&mut *conn).await?;
     let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *conn).await?;
     if let Some(row) = current {
         let was_admin = row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0;
@@ -801,14 +923,14 @@ pub async fn update_user_role(pool: &SqlitePool, id: i64, role: &str) -> Result<
     Ok(changed)
 }
 
-pub async fn revoke_user_sessions(pool: &SqlitePool, user_id: i64) -> Result<u64, sqlx::Error> {
+pub async fn revoke_user_sessions(pool: &DbPool, user_id: i64) -> Result<u64, sqlx::Error> {
     Ok(sqlx::query("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL")
         .bind(chrono::Utc::now().to_rfc3339()).bind(user_id).execute(pool).await?.rows_affected())
 }
 
-pub async fn set_user_disabled(pool: &SqlitePool, id: i64, disabled: bool) -> Result<u64, sqlx::Error> {
+pub async fn set_user_disabled(pool: &DbPool, id: i64, disabled: bool) -> Result<u64, sqlx::Error> {
     let mut conn = pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    sqlx::query("BEGIN").execute(&mut *conn).await?;
     let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *conn).await?;
     if let Some(row) = current {
         let was_active_admin = row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0;
@@ -828,9 +950,9 @@ pub async fn set_user_disabled(pool: &SqlitePool, id: i64, disabled: bool) -> Re
     Ok(changed)
 }
 
-pub async fn delete_user(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
+pub async fn delete_user(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
     let mut conn = pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    sqlx::query("BEGIN").execute(&mut *conn).await?;
     let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *conn).await?;
     if let Some(row) = current {
         if row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0 {
@@ -847,12 +969,13 @@ pub async fn delete_user(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error>
     Ok(changed)
 }
 pub async fn create_session(
-    pool: &SqlitePool,
+    pool: &DbPool,
     user_id: i64,
     hash: &str,
     expires: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO sessions(user_id,token_hash,expires_at) VALUES(?,?,?)")
+    sqlx::query("INSERT INTO sessions(id,user_id,token_hash,expires_at) VALUES(?,?,?,?)")
+        .bind(generated_id())
         .bind(user_id)
         .bind(hash)
         .bind(expires)
@@ -860,7 +983,7 @@ pub async fn create_session(
         .await?;
     Ok(())
 }
-pub async fn revoke_session(pool: &SqlitePool, hash: &str) -> Result<(), sqlx::Error> {
+pub async fn revoke_session(pool: &DbPool, hash: &str) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE sessions SET revoked_at=? WHERE token_hash=?")
         .bind(chrono::Utc::now().to_rfc3339())
         .bind(hash)
@@ -868,12 +991,12 @@ pub async fn revoke_session(pool: &SqlitePool, hash: &str) -> Result<(), sqlx::E
         .await?;
     Ok(())
 }
-pub async fn list_hosts(pool: &SqlitePool) -> Result<Vec<ProxyHost>, sqlx::Error> {
+pub async fn list_hosts(pool: &DbPool) -> Result<Vec<ProxyHost>, sqlx::Error> {
     let rows=sqlx::query("SELECT id,name,domain,upstream_host,upstream_port,tls_mode,certificate_id,enabled FROM proxy_hosts ORDER BY id").fetch_all(pool).await?;
     Ok(rows.into_iter().map(proxy_host_from_row).collect())
 }
 
-fn proxy_host_from_row(x: sqlx::sqlite::SqliteRow) -> ProxyHost {
+fn proxy_host_from_row(x: sqlx::any::AnyRow) -> ProxyHost {
     ProxyHost {
             id: x.get("id"),
             name: x.get("name"),
@@ -887,23 +1010,20 @@ fn proxy_host_from_row(x: sqlx::sqlite::SqliteRow) -> ProxyHost {
 }
 
 /// Lists only hosts visible through a user's global or per-host read grants.
-pub async fn list_hosts_for_user(pool: &SqlitePool, user_id: i64) -> Result<Vec<ProxyHost>, sqlx::Error> {
-    let rows = sqlx::query("SELECT DISTINCT h.id,h.name,h.domain,h.upstream_host,h.upstream_port,h.tls_mode,h.certificate_id,h.enabled FROM proxy_hosts h JOIN users u ON u.id=? JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.disabled=0 AND p.key='proxy_hosts.read' AND ((rp.scope_type IS NULL AND rp.scope_id IS NULL) OR (rp.scope_type='proxy_host' AND rp.scope_id=h.id)) ORDER BY h.id")
+pub async fn list_hosts_for_user(pool: &DbPool, user_id: i64) -> Result<Vec<ProxyHost>, sqlx::Error> {
+    let rows = sqlx::query("SELECT DISTINCT h.id,h.name,h.domain,h.upstream_host,h.upstream_port,h.tls_mode,h.certificate_id,h.enabled FROM proxy_hosts h JOIN users u ON u.id=? JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.disabled=0 AND p.key='proxy_hosts.read' AND ((rp.scope_type='' AND rp.scope_id=0) OR (rp.scope_type='proxy_host' AND rp.scope_id=h.id)) ORDER BY h.id")
         .bind(user_id).fetch_all(pool).await?;
     Ok(rows.into_iter().map(proxy_host_from_row).collect())
 }
-pub async fn insert_host(pool: &SqlitePool, h: &ProxyHost) -> Result<ProxyHost, sqlx::Error> {
+pub async fn insert_host(pool: &DbPool, h: &ProxyHost) -> Result<ProxyHost, sqlx::Error> {
     let now = chrono::Utc::now().to_rfc3339();
-    let r=if h.id > 0 {
-        sqlx::query("INSERT INTO proxy_hosts(id,name,domain,upstream_host,upstream_port,tls_mode,certificate_id,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING id").bind(h.id).bind(&h.name).bind(&h.domain).bind(&h.upstream_host).bind(h.upstream_port as i64).bind(&h.tls_mode).bind(h.certificate_id).bind(h.enabled as i64).bind(&now).bind(&now).fetch_one(pool).await?
-    } else {
-        sqlx::query("INSERT INTO proxy_hosts(name,domain,upstream_host,upstream_port,tls_mode,certificate_id,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) RETURNING id").bind(&h.name).bind(&h.domain).bind(&h.upstream_host).bind(h.upstream_port as i64).bind(&h.tls_mode).bind(h.certificate_id).bind(h.enabled as i64).bind(&now).bind(&now).fetch_one(pool).await?
-    };
+    let id = if h.id > 0 { h.id } else { generated_id() };
+    sqlx::query("INSERT INTO proxy_hosts(id,name,domain,upstream_host,upstream_port,tls_mode,certificate_id,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(id).bind(&h.name).bind(&h.domain).bind(&h.upstream_host).bind(h.upstream_port as i64).bind(&h.tls_mode).bind(h.certificate_id).bind(h.enabled as i64).bind(&now).bind(&now).execute(pool).await?;
     let mut x = h.clone();
-    x.id = r.get("id");
+    x.id = id;
     Ok(x)
 }
-pub async fn delete_host(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
+pub async fn delete_host(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
     Ok(sqlx::query("DELETE FROM proxy_hosts WHERE id=?")
         .bind(id)
         .execute(pool)
@@ -914,9 +1034,9 @@ pub async fn delete_host(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error>
 /// Removes a proxy host and every per-host role assignment in one transaction.
 /// Callers can safely restore the host if the transaction fails; no partial
 /// cleanup is committed.
-pub async fn delete_host_and_scopes(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
+pub async fn delete_host_and_scopes(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
     let mut conn = pool.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    sqlx::query("BEGIN").execute(&mut *conn).await?;
     let result = async {
         let changed = sqlx::query("DELETE FROM proxy_hosts WHERE id=?")
             .bind(id).execute(&mut *conn).await?.rows_affected();
@@ -935,21 +1055,23 @@ pub async fn delete_host_and_scopes(pool: &SqlitePool, id: i64) -> Result<u64, s
     }
 }
 
-pub async fn host_scope_rows(pool: &SqlitePool, id: i64) -> Result<Vec<(i64, i64, String)>, sqlx::Error> {
+pub async fn host_scope_rows(pool: &DbPool, id: i64) -> Result<Vec<(i64, i64, String)>, sqlx::Error> {
     let rows = sqlx::query("SELECT role_id,permission_id,scope_type FROM role_permissions WHERE scope_type='proxy_host' AND scope_id=?")
         .bind(id).fetch_all(pool).await?;
     Ok(rows.into_iter().map(|row| (row.get("role_id"), row.get("permission_id"), row.get("scope_type"))).collect())
 }
 
-pub async fn restore_host_scopes(pool: &SqlitePool, id: i64, rows: &[(i64, i64, String)]) -> Result<(), sqlx::Error> {
+pub async fn restore_host_scopes(pool: &DbPool, id: i64, rows: &[(i64, i64, String)]) -> Result<(), sqlx::Error> {
     for (role_id, permission_id, scope_type) in rows {
-        sqlx::query("INSERT OR IGNORE INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(?,?,?,?)")
-            .bind(role_id).bind(permission_id).bind(scope_type).bind(id).execute(pool).await?;
+        sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM role_permissions WHERE role_id=? AND permission_id=? AND scope_type=? AND scope_id=?)")
+            .bind(role_id).bind(permission_id).bind(scope_type).bind(id)
+            .bind(role_id).bind(permission_id).bind(scope_type).bind(id)
+            .execute(pool).await?;
     }
     Ok(())
 }
 
-pub async fn get_host(pool: &SqlitePool, id: i64) -> Result<Option<ProxyHost>, sqlx::Error> {
+pub async fn get_host(pool: &DbPool, id: i64) -> Result<Option<ProxyHost>, sqlx::Error> {
     let row = sqlx::query("SELECT id,name,domain,upstream_host,upstream_port,tls_mode,certificate_id,enabled FROM proxy_hosts WHERE id=?")
         .bind(id).fetch_optional(pool).await?;
     Ok(row.map(|x| ProxyHost {
@@ -964,14 +1086,14 @@ pub async fn get_host(pool: &SqlitePool, id: i64) -> Result<Option<ProxyHost>, s
     }))
 }
 
-pub async fn update_host(pool: &SqlitePool, id: i64, h: &ProxyHost) -> Result<u64, sqlx::Error> {
+pub async fn update_host(pool: &DbPool, id: i64, h: &ProxyHost) -> Result<u64, sqlx::Error> {
     Ok(sqlx::query("UPDATE proxy_hosts SET name=?,domain=?,upstream_host=?,upstream_port=?,tls_mode=?,certificate_id=?,enabled=?,updated_at=? WHERE id=?")
         .bind(&h.name).bind(&h.domain).bind(&h.upstream_host).bind(h.upstream_port as i64)
         .bind(&h.tls_mode).bind(h.certificate_id).bind(h.enabled as i64)
         .bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(pool).await?.rows_affected())
 }
 pub async fn insert_certificate(
-    pool: &SqlitePool,
+    pool: &DbPool,
     name: &str,
     source: &str,
     hosts: &str,
@@ -979,11 +1101,12 @@ pub async fn insert_certificate(
     cert_path: &str,
     key_path: &str,
 ) -> Result<i64, sqlx::Error> {
-    let r=sqlx::query("INSERT INTO certificates(name,source,covered_hostnames,expiry,certificate_path,key_path,created_at) VALUES(?,?,?,?,?,?,?) RETURNING id").bind(name).bind(source).bind(hosts).bind(expiry).bind(cert_path).bind(key_path).bind(chrono::Utc::now().to_rfc3339()).fetch_one(pool).await?;
-    Ok(r.get("id"))
+    let id = generated_id();
+    sqlx::query("INSERT INTO certificates(id,name,source,covered_hostnames,expiry,certificate_path,key_path,created_at) VALUES(?,?,?,?,?,?,?,?)").bind(id).bind(name).bind(source).bind(hosts).bind(expiry).bind(cert_path).bind(key_path).bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?;
+    Ok(id)
 }
 
-pub async fn list_certificates(pool: &SqlitePool) -> Result<Vec<CertificateMetadata>, sqlx::Error> {
+pub async fn list_certificates(pool: &DbPool) -> Result<Vec<CertificateMetadata>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT id,name,source,covered_hostnames,expiry,active FROM certificates ORDER BY id",
     )
@@ -1003,7 +1126,7 @@ pub async fn list_certificates(pool: &SqlitePool) -> Result<Vec<CertificateMetad
         .collect())
 }
 
-pub async fn certificate_name(pool: &SqlitePool, id: i64) -> Result<Option<String>, sqlx::Error> {
+pub async fn certificate_name(pool: &DbPool, id: i64) -> Result<Option<String>, sqlx::Error> {
     Ok(sqlx::query("SELECT name FROM certificates WHERE id=?")
         .bind(id)
         .fetch_optional(pool)
@@ -1013,7 +1136,7 @@ pub async fn certificate_name(pool: &SqlitePool, id: i64) -> Result<Option<Strin
 
 /// Return the certificate storage paths for activation validation.
 pub async fn certificate_paths(
-    pool: &SqlitePool,
+    pool: &DbPool,
     id: i64,
 ) -> Result<Option<(String, String, String)>, sqlx::Error> {
     Ok(
@@ -1025,7 +1148,7 @@ pub async fn certificate_paths(
     )
 }
 
-pub async fn active_certificate_id(pool: &SqlitePool) -> Result<Option<i64>, sqlx::Error> {
+pub async fn active_certificate_id(pool: &DbPool) -> Result<Option<i64>, sqlx::Error> {
     Ok(
         sqlx::query("SELECT id FROM certificates WHERE active=1 ORDER BY id LIMIT 1")
             .fetch_optional(pool)
@@ -1036,7 +1159,7 @@ pub async fn active_certificate_id(pool: &SqlitePool) -> Result<Option<i64>, sql
 
 /// Set exactly one active certificate (or none), in one transaction.
 pub async fn set_active_certificate(
-    pool: &SqlitePool,
+    pool: &DbPool,
     id: Option<i64>,
 ) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -1056,6 +1179,6 @@ pub async fn set_active_certificate(
     Ok(changed)
 }
 
-pub async fn activate_certificate(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
+pub async fn activate_certificate(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
     set_active_certificate(pool, Some(id)).await
 }

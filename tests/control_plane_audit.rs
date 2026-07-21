@@ -1,18 +1,18 @@
 use bearust::control_plane::models::AuditLogQuery;
 use bearust::control_plane::repository;
-use sqlx::SqlitePool;
+use bearust::control_plane::repository::DbPool;
 use axum::{body::{to_bytes, Body}, http::{Request, StatusCode}};
 use tower::util::ServiceExt;
 use bearust::control_plane::{build_state, router};
 use bearust::control_plane::auth;
 
-async fn pool() -> SqlitePool {
+async fn pool() -> DbPool {
     let pool = repository::connect("sqlite::memory:").await.unwrap();
     repository::migrate(&pool).await.unwrap();
     pool
 }
 
-async fn insert_audit(pool: &SqlitePool, user_id: Option<i64>, event: &str, details: &str, created_at: &str) {
+async fn insert_audit(pool: &DbPool, user_id: Option<i64>, event: &str, details: &str, created_at: &str) {
     sqlx::query("INSERT INTO audit_logs(user_id,event,details,created_at) VALUES(?,?,?,?)")
         .bind(user_id)
         .bind(event)

@@ -625,6 +625,24 @@ Phase 4E completes the first per-resource authorization increment. Custom roles 
 
 Phase 4E deliberately keeps certificate permissions global and does not introduce per-certificate or per-upstream scopes. It also does not provide cross-node realtime delivery, event replay after disconnect, audit export, delegated role administration, or a general-purpose policy language; those capabilities remain future work in the multi-node and later control-plane phases.
 
+### Phase 5 status: external database support
+
+Phase 5 is complete for the control-plane database layer. BeaRust supports
+SQLite (the default, including existing file-backed installations), PostgreSQL,
+and MySQL through `DATABASE_URL`; the repository and services use a database-
+agnostic pool and portable SQL. Versioned SQLx migrations are applied
+automatically before the control plane serves requests, are tracked by SQLx,
+and preserve existing SQLite data while adding the current schema. PostgreSQL
+and MySQL Compose services are opt-in profiles with persistent volumes.
+
+External-driver integration tests are opt-in through `DATABASE_URL_EXTERNAL` so
+the normal test suite never mutates a developer-managed database. The harness
+verifies migration idempotency, RBAC seeds, and a basic user round trip; an
+unset variable produces an explicit skip. Database export/import, read
+replicas, clustering or replication, backup automation, online migration
+orchestration, and cross-node database coordination are intentionally outside
+Phase 5.
+
 ---
 
 ## 13. Success Metrics (KPIs)

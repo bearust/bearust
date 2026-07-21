@@ -8,6 +8,33 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::oneshot};
 
+/// Return the opt-in external database URL used by integration tests.
+///
+/// Keeping this lookup in the shared test support module makes the opt-in
+/// contract consistent across external-backend tests and avoids accidentally
+/// providing a default that could mutate a developer's database.
+pub fn external_database_url() -> Option<String> {
+    std::env::var("DATABASE_URL_EXTERNAL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+}
+
+/// Render a database URL without credentials or path/query components.
+/// This is suitable for diagnostics when an external test cannot connect.
+pub fn redacted_database_target(url: &str) -> String {
+    let (scheme, remainder) = url
+        .split_once("://")
+        .map_or(("unknown", url), |parts| parts);
+    let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = if host.starts_with('[') {
+        host.find(']').map_or(host, |end| &host[..=end])
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    format!("{scheme}://{host}")
+}
+
 pub struct TestServer {
     pub address: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
