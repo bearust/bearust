@@ -35,7 +35,7 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub db: sqlx::SqlitePool,
+    pub db: repository::DbPool,
     pub certificates: Arc<CertificateStore>,
     pub reloader: Arc<dyn ConfigReloader>,
     pub setup_token: Arc<str>,

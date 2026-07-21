@@ -3,19 +3,43 @@ use crate::control_plane::models::{
     AuditLogQuery, CertificateMetadata, ProxyHost, RoleDetail, RolePermissionScope, User,
 };
 use crate::control_plane::rbac::Role;
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    Row, SqlitePool,
-};
-use std::str::FromStr;
+use sqlx::{any::AnyPoolOptions, Row, SqlitePool};
+use std::sync::Once;
 
-pub async fn connect(url: &str) -> Result<SqlitePool, sqlx::Error> {
-    let opts = SqliteConnectOptions::from_str(url)?
-        .create_if_missing(true)
-        .foreign_keys(true);
-    SqlitePoolOptions::new()
+/// Database pool type used by the control plane once all repositories have
+/// been migrated to SQLx's backend-agnostic driver.
+pub type DbPool = sqlx::AnyPool;
+
+static ANY_DRIVERS: Once = Once::new();
+
+/// Validate a database URL without including credentials in the resulting
+/// error.  Only the backends supported by the application are accepted.
+pub fn validate_database_url(url: &str) -> Result<(), sqlx::Error> {
+    let scheme = url
+        .split_once("://")
+        .map(|(scheme, _)| scheme)
+        .or_else(|| url.split_once(':').map(|(scheme, _)| scheme))
+        .unwrap_or("");
+    if url.is_empty()
+        || !matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "sqlite" | "postgres" | "postgresql" | "mysql"
+        )
+    {
+        return Err(sqlx::Error::Configuration(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsupported database URL",
+        ))));
+    }
+    Ok(())
+}
+
+pub async fn connect(url: &str) -> Result<DbPool, sqlx::Error> {
+    validate_database_url(url)?;
+    ANY_DRIVERS.call_once(sqlx::any::install_default_drivers);
+    AnyPoolOptions::new()
         .max_connections(8)
-        .connect_with(opts)
+        .connect(url)
         .await
 }
 pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {

@@ -8,6 +8,27 @@ use bearust::control_plane::repository;
 use tower::util::ServiceExt;
 use sqlx::Row;
 
+#[test]
+fn database_url_validation_accepts_supported_backends() {
+    for url in [
+        "sqlite://./data.db",
+        "postgres://user:secret@localhost/db",
+        "mysql://user:secret@localhost/db",
+    ] {
+        repository::validate_database_url(url).expect(url);
+    }
+}
+
+#[test]
+fn database_url_validation_rejects_unsupported_urls_without_credentials() {
+    for url in ["redis://user:super-secret@example.test/cache", ""] {
+        let error = repository::validate_database_url(url).expect_err("URL should be rejected");
+        let message = error.to_string();
+        assert!(message.contains("unsupported database URL"));
+        assert!(!message.contains("super-secret"));
+    }
+}
+
 #[tokio::test]
 async fn creates_schema_and_reports_first_run_status() {
     let dir = tempfile::tempdir().unwrap();
