@@ -891,11 +891,13 @@ fn normalize_audit_timestamp(value: &str) -> Result<String, chrono::ParseError> 
 }
 async fn list_hosts(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
     let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };
-    if !authorize(&s.db, &user, Permission::ProxyHostsRead, ResourceContext::GLOBAL).await.unwrap_or(false) {
+    let global_read = authorize(&s.db, &user, Permission::ProxyHostsRead, ResourceContext::GLOBAL).await.unwrap_or(false);
+    let scoped_read = repository::user_has_scoped_permission(&s.db, user.id, Permission::ProxyHostsRead.key()).await.unwrap_or(false);
+    if !global_read && !scoped_read {
         audit::record_state(&s, Some(user.id), "authorization_denied", "ProxyHostsRead").await;
         return StatusCode::FORBIDDEN.into_response();
     }
-    match repository::list_hosts(&s.db).await {
+    match repository::list_hosts_for_user(&s.db, user.id).await {
         Ok(x) => Json(x).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -907,9 +909,9 @@ async fn get_host(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };
-    if !authorize(&s.db, &user, Permission::ProxyHostsRead, ResourceContext::GLOBAL).await.unwrap_or(false) {
-        audit::record_state(&s, Some(user.id), "authorization_denied", "ProxyHostsRead").await;
-        return StatusCode::FORBIDDEN.into_response();
+    if !authorize(&s.db, &user, Permission::ProxyHostsRead, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
+        audit::record_state(&s, Some(user.id), "proxy_host_read_denied", "reason=not_found").await;
+        return StatusCode::NOT_FOUND.into_response();
     }
     match repository::get_host(&s.db, id).await {
         Ok(Some(host)) => Json(host).into_response(),
@@ -992,7 +994,11 @@ async fn update_host(
         Ok(x) => x,
         Err(c) => return c.into_response(),
     };
-    if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
+    if !authorize(&s.db, &u, Permission::ProxyHostsRead, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
+        audit::record_state(&s, Some(u.id), "proxy_host_update_denied", "reason=not_found").await;
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
         audit::record_state(
             &s,
             Some(u.id),
@@ -1063,7 +1069,11 @@ async fn remove_host(
         Ok(x) => x,
         Err(c) => return c.into_response(),
     };
-    if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::GLOBAL).await.unwrap_or(false) {
+    if !authorize(&s.db, &u, Permission::ProxyHostsRead, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
+        audit::record_state(&s, Some(u.id), "proxy_host_delete_denied", "reason=not_found").await;
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
         audit::record_state(&s, Some(u.id), "authorization_denied", "ProxyHostsWrite").await;
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -1089,6 +1099,10 @@ async fn remove_host(
             }),
         )
             .into_response();
+    }
+    if repository::delete_host_scopes(&s.db, id).await.is_err() {
+        audit::record_state(&s, Some(u.id), "proxy_host_delete_failed", "reason=database_error").await;
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     audit::record_state(
         &s,

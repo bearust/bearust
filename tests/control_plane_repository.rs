@@ -38,6 +38,22 @@ async fn test_pool() -> sqlx::SqlitePool {
 }
 
 #[tokio::test]
+async fn scoped_user_lists_only_assigned_proxy_hosts() {
+    let pool = test_pool().await;
+    sqlx::query("INSERT INTO proxy_hosts(name,domain,upstream_host,upstream_port,tls_mode,created_at,updated_at) VALUES ('one','one.test','127.0.0.1',80,'disabled',datetime('now'),datetime('now')),('two','two.test','127.0.0.1',80,'disabled',datetime('now'),datetime('now'))")
+        .execute(&pool).await.unwrap();
+    repository::insert_role(&pool, "scoped-list", "Scoped list", "").await.unwrap();
+    repository::insert_user(&pool, "scoped-list@example.test", "hash", "scoped-list").await.unwrap();
+    let role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE slug='scoped-list'").fetch_one(&pool).await.unwrap();
+    let permission_id: i64 = sqlx::query_scalar("SELECT id FROM permissions WHERE key='proxy_hosts.read'").fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES (?,?, 'proxy_host',1)")
+        .bind(role_id).bind(permission_id).execute(&pool).await.unwrap();
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE email='scoped-list@example.test'").fetch_one(&pool).await.unwrap();
+    let hosts = repository::list_hosts_for_user(&pool, user_id).await.unwrap();
+    assert_eq!(hosts.iter().map(|host| host.id).collect::<Vec<_>>(), vec![1]);
+}
+
+#[tokio::test]
 async fn existing_users_migrate_to_default_enabled_and_list_without_hashes() {
     let pool = repository::connect("sqlite::memory:").await.unwrap();
     sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,created_at TEXT NOT NULL)")
