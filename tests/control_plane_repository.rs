@@ -152,6 +152,49 @@ async fn migration_seeds_builtin_roles_and_all_permissions_idempotently() {
 }
 
 #[tokio::test]
+async fn migrations_record_order_and_seed_exact_permissions() {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+    let versions: Vec<i64> = sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(versions, vec![1, 2]);
+    let permission_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM permissions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(permission_count, 10);
+    repository::migrate(&pool).await.unwrap();
+    let role_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM roles WHERE system_managed=1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(role_count, 3);
+}
+
+#[tokio::test]
+async fn migration_preserves_legacy_records() {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL, created_at TEXT NOT NULL)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("CREATE TABLE audit_logs (id INTEGER PRIMARY KEY, user_id INTEGER, event TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL)")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users(id,email,password_hash,role,created_at) VALUES(7,'legacy@example.test','hash','admin','2024-01-01T00:00:00Z')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO audit_logs(id,user_id,event,details,created_at) VALUES(9,7,'legacy.event','{}','2024-01-01T00:00:00Z')")
+        .execute(&pool).await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+    let user: (String, i64) = sqlx::query_as("SELECT email,disabled FROM users WHERE id=7")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(user.0, "legacy@example.test");
+    assert_eq!(user.1, 0);
+    let audit_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE id=9")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(audit_count, 1);
+}
+
+#[tokio::test]
 async fn update_user_accepts_existing_custom_role_slug() {
     let pool = test_pool().await;
     let role = repository::insert_role(&pool, "security-auditor", "Security Auditor", "custom role")

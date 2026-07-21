@@ -1,18 +1,23 @@
-# Phase 4E Task 2 Report
+# Task 2 report: portable control-plane migrations
 
-Implemented scoped role persistence and API support.
+## Status
+
+Implemented and committed as `0ee8f2b` (`feat: add portable control-plane migrations`).
 
 ## Changes
 
-- Added serializable `RolePermissionScope` and additive `scopes` fields to role create, patch, and detail models.
-- Added normalized scope reads and atomic replacement in the repository. Global role permission rows are preserved while only `proxy_host` rows are replaced.
-- Validates supported scoped permissions, positive/unique host IDs, existing proxy hosts, and rejects built-in role mutation.
-- Added scoped role creation/update repository variants and wired HTTP handlers to return validation errors.
-- Role responses now include scopes; successful scoped mutations emit `role_scopes_changed` and `roles.changed` after commit.
-- Added repository regression tests for replacement/clear, global-row preservation, unknown hosts, invalid permissions, duplicate IDs, and built-in role rejection.
-- Added a query index for scope lookups.
+- Added ordered SQLx migrations `0001_initial.sql` and `0002_add_disabled_and_secret_ref.sql`.
+- Moved schema creation out of `repository::migrate`; it now runs `sqlx::migrate!("./migrations")` and idempotently seeds ten permissions, three built-in roles, and role-permission assignments with `INSERT ... SELECT ... WHERE NOT EXISTS`.
+- Added migration-order, seed-idempotency, and legacy-record-preservation tests.
+- Kept the pre-existing unrelated `.superpowers/sdd/task-1-report.md` working-tree change unstaged.
 
 ## Verification
 
-- `git diff --check` passed.
-- `cargo check` / tests could not run because `cargo` is unavailable in this environment (`cargo: command not found`).
+- `git diff --check`: passed.
+- `cargo test --locked --test control_plane_repository migration_seeds_builtin_roles_and_all_permissions_idempotently -- --nocapture`: not run; `cargo` is unavailable in this environment (`/bin/bash: cargo: command not found`).
+
+## Concerns for follow-up
+
+- Task 1/Task 3 must finish converting repository APIs and tests from `SqlitePool` to `DbPool`; this task only changes the migration entry point and seed logic.
+- The additive compatibility migration is a deliberate no-op because columns are present in the initial portable schema. This avoids non-portable conditional `ALTER TABLE` behavior while upgrading legacy databases through the initial migration.
+- `INTEGER PRIMARY KEY` is used as requested for portable DDL; verify identity/auto-generation semantics against PostgreSQL and MySQL integration containers in the external-database test task.

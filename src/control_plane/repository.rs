@@ -42,44 +42,65 @@ pub async fn connect(url: &str) -> Result<DbPool, sqlx::Error> {
         .connect(url)
         .await
 }
-pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    sqlx::query("PRAGMA foreign_keys=ON").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,created_at TEXT NOT NULL)").execute(pool).await?;
-    match sqlx::query("ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0").execute(pool).await {
-        Ok(_) => {}
-        Err(error) if error.as_database_error().is_some_and(|db| {
-            db.message().to_ascii_lowercase().contains("duplicate column name")
-        }) => {}
-        Err(error) => return Err(error),
+pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
+    sqlx::migrate!("./migrations").run(pool).await?;
+
+    let permissions = [
+        "proxy_hosts.read",
+        "proxy_hosts.write",
+        "certificates.read",
+        "certificates.write",
+        "users.manage",
+        "roles.manage",
+        "audit_logs.read",
+        "audit_logs.export",
+        "system.settings.manage",
+        "sessions.revoke",
+    ];
+    for key in permissions {
+        sqlx::query(
+            "INSERT INTO permissions(key) SELECT ? WHERE NOT EXISTS (SELECT 1 FROM permissions WHERE key=?)",
+        )
+        .bind(key)
+        .bind(key)
+        .execute(pool)
+        .await?;
     }
-    sqlx::query("CREATE TABLE IF NOT EXISTS sessions (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,token_hash TEXT NOT NULL UNIQUE,expires_at TEXT NOT NULL,revoked_at TEXT,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS proxy_hosts (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,domain TEXT NOT NULL UNIQUE,upstream_host TEXT NOT NULL,upstream_port INTEGER NOT NULL,tls_mode TEXT NOT NULL,certificate_id INTEGER,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS certificates (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,source TEXT NOT NULL,covered_hostnames TEXT NOT NULL,expiry TEXT NOT NULL,certificate_path TEXT NOT NULL,key_path TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL)").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS acme_certificates (certificate_id INTEGER PRIMARY KEY,environment TEXT NOT NULL CHECK(environment IN ('staging','production')),challenge TEXT NOT NULL CHECK(challenge IN ('http01','cloudflare_dns01')),renewal_state TEXT NOT NULL,next_renewal_at TEXT,last_attempt_at TEXT,last_error_code TEXT,FOREIGN KEY(certificate_id) REFERENCES certificates(id) ON DELETE CASCADE)").execute(pool).await?;
-    match sqlx::query("ALTER TABLE acme_certificates ADD COLUMN secret_ref TEXT").execute(pool).await {
-        Ok(_) => {}
-        Err(error) if error.as_database_error().is_some_and(|db| {
-            db.message().to_ascii_lowercase().contains("duplicate column name")
-        }) => {}
-        Err(error) => return Err(error),
-    }
-    sqlx::query("CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,event TEXT NOT NULL,details TEXT NOT NULL,created_at TEXT NOT NULL)").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS roles (id INTEGER PRIMARY KEY AUTOINCREMENT,slug TEXT NOT NULL UNIQUE,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',system_managed INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS permissions (id INTEGER PRIMARY KEY AUTOINCREMENT,key TEXT NOT NULL UNIQUE,description TEXT NOT NULL DEFAULT '')").execute(pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS role_permissions (role_id INTEGER NOT NULL,permission_id INTEGER NOT NULL,scope_type TEXT,scope_id INTEGER,PRIMARY KEY (role_id,permission_id,scope_type,scope_id),FOREIGN KEY(role_id) REFERENCES roles(id) ON DELETE CASCADE,FOREIGN KEY(permission_id) REFERENCES permissions(id) ON DELETE CASCADE)").execute(pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_role_permissions_scope ON role_permissions(scope_type,scope_id,role_id,permission_id)").execute(pool).await?;
-    let permissions = ["proxy_hosts.read","proxy_hosts.write","certificates.read","certificates.write","users.manage","roles.manage","audit_logs.read","audit_logs.export","system.settings.manage","sessions.revoke"];
-    for key in &permissions { sqlx::query("INSERT OR IGNORE INTO permissions(key) VALUES(?)").bind(key).execute(pool).await?; }
+
     let now = chrono::Utc::now().to_rfc3339();
-    for (slug, name) in [("admin","Administrator"),("operator","Operator"),("viewer","Viewer")] {
-        sqlx::query("INSERT OR IGNORE INTO roles(slug,name,system_managed,created_at,updated_at) VALUES(?,?,1,?,?)").bind(slug).bind(name).bind(&now).bind(&now).execute(pool).await?;
+    for (slug, name) in [("admin", "Administrator"), ("operator", "Operator"), ("viewer", "Viewer")] {
+        sqlx::query(
+            "INSERT INTO roles(slug,name,system_managed,created_at,updated_at) SELECT ?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM roles WHERE slug=?)",
+        )
+        .bind(slug)
+        .bind(name)
+        .bind(1_i64)
+        .bind(&now)
+        .bind(&now)
+        .bind(slug)
+        .execute(pool)
+        .await?;
     }
+
     let assignments: [(&str, &[&str]); 3] = [
         ("admin", &permissions),
-        ("operator", &["proxy_hosts.read","proxy_hosts.write","certificates.read","certificates.write","audit_logs.read"]),
-        ("viewer", &["proxy_hosts.read","certificates.read","audit_logs.read"]),
+        (
+            "operator",
+            &["proxy_hosts.read", "proxy_hosts.write", "certificates.read", "certificates.write", "audit_logs.read"],
+        ),
+        ("viewer", &["proxy_hosts.read", "certificates.read", "audit_logs.read"]),
     ];
-    for (slug, keys) in assignments { for key in keys { sqlx::query("INSERT OR IGNORE INTO role_permissions(role_id,permission_id) SELECT r.id,p.id FROM roles r,permissions p WHERE r.slug=? AND p.key=? AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id=r.id AND rp.permission_id=p.id AND rp.scope_type IS NULL AND rp.scope_id IS NULL)").bind(slug).bind(key).execute(pool).await?; } }
+    for (slug, keys) in assignments {
+        for key in keys {
+            sqlx::query(
+                "INSERT INTO role_permissions(role_id,permission_id) SELECT r.id,p.id FROM roles r,permissions p WHERE r.slug=? AND p.key=? AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.role_id=r.id AND rp.permission_id=p.id AND rp.scope_type IS NULL AND rp.scope_id IS NULL)",
+            )
+            .bind(slug)
+            .bind(*key)
+            .execute(pool)
+            .await?;
+        }
+    }
     Ok(())
 }
 
