@@ -326,8 +326,9 @@ fn normalize_scopes(scopes: &[RolePermissionScope]) -> Result<Vec<RolePermission
         }
         let mut ids = scope.proxy_host_ids.clone();
         ids.sort_unstable();
-        if ids.windows(2).any(|pair| pair[0] == pair[1]) || ids.iter().any(|id| *id <= 0) {
-            return Err(sqlx::Error::Protocol("duplicate or invalid role scope host id".into()));
+        ids.dedup();
+        if ids.iter().any(|id| *id <= 0) {
+            return Err(sqlx::Error::Protocol("invalid role scope host id".into()));
         }
         normalized.push(RolePermissionScope { permission: scope.permission.clone(), proxy_host_ids: ids });
     }
@@ -908,10 +909,6 @@ pub async fn delete_host(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error>
         .execute(pool)
         .await?
         .rows_affected())
-}
-
-pub async fn delete_host_scopes(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
-    Ok(sqlx::query("DELETE FROM role_permissions WHERE scope_type='proxy_host' AND scope_id=?").bind(id).execute(pool).await?.rows_affected())
 }
 
 /// Removes a proxy host and every per-host role assignment in one transaction.

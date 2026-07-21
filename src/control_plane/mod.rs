@@ -314,6 +314,12 @@ fn role_audit(role: &RoleDetail, before: Option<&[String]>, after: Option<&[Stri
     serde_json::json!({"role_id": role.id, "slug": role.slug, "before": before.map(|x| x.to_vec()), "after": after.map(|x| x.to_vec()), "scopes": role.scopes}).to_string()
 }
 
+fn role_scope_audit(role: &RoleDetail) -> String {
+    let read_assignments = role.scopes.iter().find(|scope| scope.permission == "proxy_hosts.read").map_or(0, |scope| scope.proxy_host_ids.len());
+    let write_assignments = role.scopes.iter().find(|scope| scope.permission == "proxy_hosts.write").map_or(0, |scope| scope.proxy_host_ids.len());
+    serde_json::json!({"role_id": role.id, "read_assignments": read_assignments, "write_assignments": write_assignments}).to_string()
+}
+
 fn role_scope_error(error: &sqlx::Error) -> Option<StatusCode> {
     let message = error.to_string().to_ascii_lowercase();
     (message.contains("invalid role scope") || message.contains("duplicate") || message.contains("unknown proxy host") || message.contains("invalid permission")).then_some(StatusCode::BAD_REQUEST)
@@ -360,7 +366,7 @@ async fn create_role(State(s): State<AppState>, h: HeaderMap, input: Result<Json
     let details = role_audit(&role, None, Some(&role.permissions));
     audit::record_state(&s, Some(actor.id), "role_created", &details).await;
     audit::record_state(&s, Some(actor.id), "role_permissions_changed", &details).await;
-    if !role.scopes.is_empty() { audit::record_state(&s, Some(actor.id), "role_scopes_changed", &details).await; }
+    if !role.scopes.is_empty() { audit::record_state(&s, Some(actor.id), "role_scopes_changed", &role_scope_audit(&role)).await; }
     s.realtime.publish("roles.changed");
     (StatusCode::CREATED, Json(role)).into_response()
 }
@@ -377,7 +383,7 @@ async fn update_role(State(s): State<AppState>, h: HeaderMap, path: Result<Path<
     let details = role_audit(&updated, Some(&before.permissions), Some(&updated.permissions));
     audit::record_state(&s, Some(actor.id), "role_updated", &details).await;
     if input.permissions.is_some() { audit::record_state(&s, Some(actor.id), "role_permissions_changed", &details).await; }
-    if input.scopes.is_some() { audit::record_state(&s, Some(actor.id), "role_scopes_changed", &details).await; }
+    if input.scopes.is_some() { audit::record_state(&s, Some(actor.id), "role_scopes_changed", &role_scope_audit(&updated)).await; }
     s.realtime.publish("roles.changed");
     if input.permissions.is_some() { s.realtime.publish("sessions.changed"); }
     Json(updated).into_response()
@@ -996,8 +1002,7 @@ async fn update_host(
     };
     if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
         audit::record_state(&s, Some(u.id), "authorization_denied", r#"{"resource_type":"proxy_host","resource_id":"[REDACTED]"}"#).await;
-        let status = if authorize(&s.db, &u, Permission::ProxyHostsRead, ResourceContext::ProxyHost(id)).await.unwrap_or(false) { StatusCode::FORBIDDEN } else { StatusCode::NOT_FOUND };
-        return status.into_response();
+        return StatusCode::NOT_FOUND.into_response();
     }
     let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
         audit::record_state(&s, Some(u.id), "proxy_host_update_denied", "reason=not_found").await;
@@ -1062,8 +1067,7 @@ async fn remove_host(
     };
     if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
         audit::record_state(&s, Some(u.id), "authorization_denied", r#"{"resource_type":"proxy_host","resource_id":"[REDACTED]"}"#).await;
-        let status = if authorize(&s.db, &u, Permission::ProxyHostsRead, ResourceContext::ProxyHost(id)).await.unwrap_or(false) { StatusCode::FORBIDDEN } else { StatusCode::NOT_FOUND };
-        return status.into_response();
+        return StatusCode::NOT_FOUND.into_response();
     }
     let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
         audit::record_state(&s, Some(u.id), "proxy_host_delete_denied", "reason=not_found").await;

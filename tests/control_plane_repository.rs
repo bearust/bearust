@@ -187,15 +187,22 @@ async fn role_scopes_replace_atomically_and_preserve_global_permissions() {
 }
 
 #[tokio::test]
-async fn role_scopes_reject_unknown_hosts_invalid_permissions_duplicates_and_builtin_roles() {
+async fn role_scopes_reject_unknown_hosts_invalid_permissions_and_duplicate_permissions() {
     let pool = test_pool().await;
+    sqlx::query("INSERT INTO proxy_hosts(name,domain,upstream_host,upstream_port,tls_mode,created_at,updated_at) VALUES('one','one.test','127.0.0.1',80,'disabled',datetime('now'),datetime('now'))").execute(&pool).await.unwrap();
     let role = repository::insert_role(&pool, "scoped-role", "Scoped", "").await.unwrap();
     let unknown = bearust::control_plane::models::RolePermissionScope { permission: "proxy_hosts.read".into(), proxy_host_ids: vec![999] };
     assert!(repository::replace_role_scopes(&pool, role.id, &[unknown]).await.is_err());
     let invalid = bearust::control_plane::models::RolePermissionScope { permission: "certificates.read".into(), proxy_host_ids: vec![1] };
     assert!(repository::replace_role_scopes(&pool, role.id, &[invalid]).await.is_err());
-    let duplicate = bearust::control_plane::models::RolePermissionScope { permission: "proxy_hosts.read".into(), proxy_host_ids: vec![1, 1] };
-    assert!(repository::replace_role_scopes(&pool, role.id, &[duplicate]).await.is_err());
+    let duplicate_hosts = bearust::control_plane::models::RolePermissionScope { permission: "proxy_hosts.read".into(), proxy_host_ids: vec![1, 1] };
+    let normalized = repository::replace_role_scopes(&pool, role.id, &[duplicate_hosts]).await.unwrap();
+    assert_eq!(normalized.scopes[0].proxy_host_ids, vec![1]);
+    let duplicate_permissions = vec![
+        bearust::control_plane::models::RolePermissionScope { permission: "proxy_hosts.read".into(), proxy_host_ids: vec![1] },
+        bearust::control_plane::models::RolePermissionScope { permission: "proxy_hosts.read".into(), proxy_host_ids: vec![1] },
+    ];
+    assert!(repository::replace_role_scopes(&pool, role.id, &duplicate_permissions).await.is_err());
     let admin_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE slug='admin'").fetch_one(&pool).await.unwrap();
     assert!(repository::replace_role_scopes(&pool, admin_id, &[]).await.is_err());
 }

@@ -213,7 +213,10 @@ async fn role_scope_changes_publish_redacted_invalidation_and_audit_events() {
         .await
         .unwrap();
     assert_eq!(details.len(), 1);
-    assert!(details[0].contains("proxy_host_ids"));
+    assert!(details[0].contains("\"role_id\""));
+    assert!(details[0].contains("\"read_assignments\":1"));
+    assert!(details[0].contains("\"write_assignments\":0"));
+    assert!(!details[0].contains("proxy_host_ids"));
     assert!(!details[0].contains("internal.example.test"));
     assert!(!details[0].contains("10.0.0.9"));
 }

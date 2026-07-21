@@ -51,12 +51,22 @@ async fn scoped_proxy_host_routes_filter_and_enforce_mutations() {
     sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(?,?, 'proxy_host',?)").bind(role_id).bind(permission_id).bind(first_id).execute(&db).await.unwrap();
     let read_permission_id: i64 = sqlx::query_scalar("SELECT id FROM permissions WHERE key='proxy_hosts.read'").fetch_one(&db).await.unwrap();
     sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(?,?, 'proxy_host',?)").bind(role_id).bind(read_permission_id).bind(first_id).execute(&db).await.unwrap();
+
+    repository::insert_role(&db, "scoped-reader", "Scoped Reader", "").await.unwrap();
+    let reader_role_id: i64 = sqlx::query_scalar("SELECT id FROM roles WHERE slug='scoped-reader'").fetch_one(&db).await.unwrap();
+    let (_, reader_body, _) = json(app.clone(), "POST", "/api/users", Some(&admin_cookie), r#"{"email":"scoped-reader@example.com","password":"reader password 123","role":"scoped-reader"}"#).await;
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&reader_body).unwrap()["role"], "scoped-reader");
+    sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(?,?, 'proxy_host',?)").bind(reader_role_id).bind(read_permission_id).bind(first_id).execute(&db).await.unwrap();
     let (_, cookie) = login(app.clone(), "scoped-route@example.com", "scoped password 123").await;
     let cookie = cookie.unwrap();
+    let (_, reader_cookie) = login(app.clone(), "scoped-reader@example.com", "reader password 123").await;
+    let reader_cookie = reader_cookie.unwrap();
     let (status, body, _) = json(app.clone(), "GET", "/api/proxy-hosts", Some(&cookie), "").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap().as_array().unwrap().len(), 1);
     assert_eq!(json(app.clone(), "GET", &format!("/api/proxy-hosts/{other_id}"), Some(&cookie), "").await.0, StatusCode::NOT_FOUND);
+    let read_only_update = r#"{"name":"should-not-update","domain":"scoped.example.com","upstream_host":"127.0.0.1","upstream_port":8083}"#;
+    assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{first_id}"), Some(&reader_cookie), read_only_update).await.0, StatusCode::NOT_FOUND);
     let updated = r#"{"name":"scoped-updated","domain":"scoped.example.com","upstream_host":"127.0.0.1","upstream_port":8082}"#;
     assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{first_id}"), Some(&cookie), updated).await.0, StatusCode::OK);
     assert_eq!(json(app.clone(), "PATCH", &format!("/api/proxy-hosts/{other_id}"), Some(&cookie), updated).await.0, StatusCode::NOT_FOUND);
