@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use crate::control_plane::repository::DbPool;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -25,7 +25,7 @@ impl ResourceContext {
 
 pub fn allowed(role: Role, permission: Permission) -> bool { match permission { Permission::ProxyHostsRead | Permission::CertificatesRead | Permission::AuditLogsRead => true, Permission::ProxyHostsWrite | Permission::CertificatesWrite => matches!(role, Role::Admin | Role::Operator), Permission::UsersManage | Permission::RolesManage | Permission::AuditLogsExport | Permission::SystemSettingsManage | Permission::SessionsRevoke => matches!(role, Role::Admin) } }
 
-pub async fn authorize(pool: &SqlitePool, user: &crate::control_plane::models::User, permission: PermissionKey, context: ResourceContext) -> Result<bool, sqlx::Error> {
+pub async fn authorize(pool: &DbPool, user: &crate::control_plane::models::User, permission: PermissionKey, context: ResourceContext) -> Result<bool, sqlx::Error> {
     let scope = match context {
         ResourceContext::Global => None,
         ResourceContext::ProxyHost(id) => Some(("proxy_host", id)),
@@ -37,10 +37,15 @@ pub async fn authorize(pool: &SqlitePool, user: &crate::control_plane::models::U
 mod tests {
     use super::*;
     use crate::control_plane::repository;
-    use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
+    use sqlx::{any::AnyPoolOptions, Row};
+    use crate::control_plane::repository::DbPool;
+    use std::sync::Once;
 
-    async fn pool() -> SqlitePool {
-        let pool = SqlitePoolOptions::new()
+    static DRIVERS: Once = Once::new();
+
+    async fn pool() -> DbPool {
+        DRIVERS.call_once(sqlx::any::install_default_drivers);
+        let pool = AnyPoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
@@ -49,11 +54,12 @@ mod tests {
         pool
     }
 
-    async fn scoped_user(pool: &SqlitePool, scope_id: i64) -> crate::control_plane::models::User {
-        sqlx::query("INSERT INTO roles(slug,name,created_at,updated_at) VALUES('scoped','Scoped',datetime('now'),datetime('now'))")
-            .execute(pool).await.expect("role");
-        sqlx::query("INSERT INTO users(email,password_hash,role,created_at,disabled) VALUES('scoped@example.test','hash','scoped',datetime('now'),0)")
-            .execute(pool).await.expect("user");
+    async fn scoped_user(pool: &DbPool, scope_id: i64) -> crate::control_plane::models::User {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO roles(slug,name,created_at,updated_at) VALUES('scoped','Scoped',?,?)")
+            .bind(&now).bind(&now).execute(pool).await.expect("role");
+        sqlx::query("INSERT INTO users(email,password_hash,role,created_at,disabled) VALUES('scoped@example.test','hash','scoped',?,0)")
+            .bind(&now).execute(pool).await.expect("user");
         let permission_id: i64 = sqlx::query("SELECT id FROM permissions WHERE key=?")
             .bind(Permission::ProxyHostsRead.key()).fetch_one(pool).await.expect("permission").get("id");
         let role_id: i64 = sqlx::query("SELECT id FROM roles WHERE slug='scoped'")
