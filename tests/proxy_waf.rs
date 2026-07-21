@@ -13,6 +13,25 @@ async fn waf_store_loads_monitor_mode_and_reload_publishes_block_snapshot() {
 }
 
 #[tokio::test]
+async fn proxy_snapshot_reload_keeps_benign_requests_allowed() {
+    let db = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&db).await.unwrap();
+    let store = WafStore::load(&db).await.unwrap();
+    let benign = InspectionContext {
+        method: "GET".into(),
+        path: "/healthz".into(),
+        query: "check=ready".into(),
+        headers: vec![("accept".into(), "application/json".into())],
+        body: Vec::new(),
+    };
+
+    assert_eq!(evaluate(&store.snapshot(), &benign).decision, WafDecision::Allow);
+    repository::update_waf_mode(&db, WafMode::Block).await.unwrap();
+    store.reload(&db).await.unwrap();
+    assert_eq!(evaluate(&store.snapshot(), &benign).decision, WafDecision::Allow);
+}
+
+#[tokio::test]
 async fn invalid_custom_rule_does_not_replace_last_valid_snapshot() {
     let db = repository::connect("sqlite::memory:").await.unwrap();
     repository::migrate(&db).await.unwrap();

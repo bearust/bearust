@@ -32,6 +32,7 @@ pub struct RequestContext {
     pub waf_evaluation: Option<Evaluation>,
     pub waf_telemetry_emitted: bool,
     pub waf_snapshot: Option<Arc<WafSnapshot>>,
+    pub waf_body_expected: bool,
 }
 
 impl Default for RequestContext {
@@ -51,6 +52,7 @@ impl Default for RequestContext {
             waf_evaluation: None,
             waf_telemetry_emitted: false,
             waf_snapshot: None,
+            waf_body_expected: false,
         }
     }
 }
@@ -137,6 +139,14 @@ impl ProxyHttp for BeaRustProxy {
         if let Some(waf) = &self.waf {
             let waf_snapshot = waf.snapshot();
             ctx.waf_snapshot = Some(waf_snapshot.clone());
+            ctx.waf_body_expected = session
+                .req_header()
+                .headers
+                .get("content-length")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<usize>().ok())
+                .is_some_and(|length| length > 0)
+                || session.req_header().headers.get("transfer-encoding").is_some();
             let context = InspectionContext {
                 method: method.to_owned(),
                 path: path.clone(),
@@ -147,7 +157,7 @@ impl ProxyHttp for BeaRustProxy {
             let evaluation = evaluate(&waf_snapshot, &context);
             ctx.waf_blocked = evaluation.decision == WafDecision::Block;
             ctx.waf_evaluation = Some(evaluation.clone());
-            if !ctx.waf_telemetry_emitted {
+            if !ctx.waf_body_expected && !ctx.waf_telemetry_emitted {
                 emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
                 ctx.waf_telemetry_emitted = evaluation.semantic_score > 0
                     || !evaluation.matched_rule_ids.is_empty();
@@ -253,8 +263,7 @@ impl ProxyHttp for BeaRustProxy {
             let remaining = crate::waf::MAX_INSPECTION_BODY_BYTES.saturating_sub(ctx.waf_body.len());
             ctx.waf_body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
         }
-        if end_of_stream {
-            if let Some(waf) = &self.waf {
+        if let Some(waf) = &self.waf {
                 let header_values = session.req_header().headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_owned(), value.to_owned()))).collect();
                 let context = InspectionContext { method: session.req_header().method.as_str().to_owned(), path: session.req_header().uri.path().to_owned(), query: session.req_header().uri.query().unwrap_or_default().to_owned(), headers: header_values, body: ctx.waf_body.clone() };
                 let evaluation = ctx
@@ -264,15 +273,10 @@ impl ProxyHttp for BeaRustProxy {
                     .unwrap_or_else(|| evaluate(&waf.snapshot(), &context));
                 ctx.waf_blocked = evaluation.decision == WafDecision::Block;
                 ctx.waf_evaluation = Some(evaluation.clone());
-                if !ctx.waf_telemetry_emitted {
-                    emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
-                    ctx.waf_telemetry_emitted = evaluation.semantic_score > 0
-                        || !evaluation.matched_rule_ids.is_empty();
-                }
+                // Evaluate every bounded chunk before forwarding it. This
+                // catches body-only attacks without requiring replay/buffering.
                 if ctx.waf_blocked {
-                    // Body-only detections are evaluated after bounded
-                    // collection. Return a typed 403 before the body can be
-                    // forwarded upstream; no request material is retained.
+                    emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
                     *body = None;
                     ctx.completion_logged = true;
                     session
@@ -286,7 +290,9 @@ impl ProxyHttp for BeaRustProxy {
                         "request blocked by waf",
                     ));
                 }
-            }
+                if end_of_stream && (evaluation.semantic_score > 0 || !evaluation.matched_rule_ids.is_empty()) {
+                    emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
+                }
         }
         Ok(())
     }

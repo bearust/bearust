@@ -711,3 +711,20 @@ immutable proxy snapshots; records redacted audit events; emits SSE
 invalidation; and provides dashboard controls. Advanced OWASP CRS parity, bot
 management, adaptive rate limiting, distributed synchronization, and automatic
 rule updates remain future work.
+
+### Phase 7A status: bounded semantic WAF detection
+
+Phase 7A delivers the first increment of Advanced WAF: a deterministic,
+in-process semantic evaluator layered on the existing signature rules. Request
+method, path, query, headers, and up to 8 KiB of body data are normalized with
+bounded percent-decoding and separator/case canonicalization before evaluating
+SQL injection, XSS, path traversal, command injection, and protocol-anomaly
+signals. Scores, severities, and category identifiers are stable and bounded;
+explicit rule actions retain precedence, monitor-only remains the default, and
+block mode uses a conservative threshold. Proxy snapshots are immutable and
+reload atomically, while audit and realtime telemetry contain only redacted
+category/score/severity identifiers and never request bodies, credentials, or
+sensitive header values.
+
+Bot challenges/management (Phase 7B) and adaptive rate limiting with tuning
+feedback (Phase 7C) are intentionally deferred to subsequent increments.
