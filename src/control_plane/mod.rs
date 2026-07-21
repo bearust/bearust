@@ -910,7 +910,7 @@ async fn get_host(
 ) -> impl IntoResponse {
     let user = match current(&s, &h).await { Ok(u) => u, Err(c) => return c.into_response() };
     if !authorize(&s.db, &user, Permission::ProxyHostsRead, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
-        audit::record_state(&s, Some(user.id), "proxy_host_read_denied", "reason=not_found").await;
+        audit::record_state(&s, Some(user.id), "authorization_denied", r#"{"resource_type":"proxy_host","resource_id":"[REDACTED]"}"#).await;
         return StatusCode::NOT_FOUND.into_response();
     }
     match repository::get_host(&s.db, id).await {
@@ -994,19 +994,9 @@ async fn update_host(
         Ok(x) => x,
         Err(c) => return c.into_response(),
     };
-    if !authorize(&s.db, &u, Permission::ProxyHostsRead, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
-        audit::record_state(&s, Some(u.id), "proxy_host_update_denied", "reason=not_found").await;
-        return StatusCode::NOT_FOUND.into_response();
-    }
     if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
-        audit::record_state(
-            &s,
-            Some(u.id),
-            "authorization_denied",
-            "proxy_host_update",
-        )
-        .await;
-        return StatusCode::FORBIDDEN.into_response();
+        audit::record_state(&s, Some(u.id), "authorization_denied", r#"{"resource_type":"proxy_host","resource_id":"[REDACTED]"}"#).await;
+        return StatusCode::NOT_FOUND.into_response();
     }
     let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
         audit::record_state(&s, Some(u.id), "proxy_host_update_denied", "reason=not_found").await;
@@ -1069,19 +1059,16 @@ async fn remove_host(
         Ok(x) => x,
         Err(c) => return c.into_response(),
     };
-    if !authorize(&s.db, &u, Permission::ProxyHostsRead, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
-        audit::record_state(&s, Some(u.id), "proxy_host_delete_denied", "reason=not_found").await;
-        return StatusCode::NOT_FOUND.into_response();
-    }
     if !authorize(&s.db, &u, Permission::ProxyHostsWrite, ResourceContext::ProxyHost(id)).await.unwrap_or(false) {
-        audit::record_state(&s, Some(u.id), "authorization_denied", "ProxyHostsWrite").await;
-        return StatusCode::FORBIDDEN.into_response();
+        audit::record_state(&s, Some(u.id), "authorization_denied", r#"{"resource_type":"proxy_host","resource_id":"[REDACTED]"}"#).await;
+        return StatusCode::NOT_FOUND.into_response();
     }
     let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
         audit::record_state(&s, Some(u.id), "proxy_host_delete_denied", "reason=not_found").await;
         return StatusCode::NOT_FOUND.into_response();
     };
-    if repository::delete_host(&s.db, id).await.is_err() {
+    let scope_rows = repository::host_scope_rows(&s.db, id).await.unwrap_or_default();
+    if repository::delete_host_and_scopes(&s.db, id).await.is_err() {
         audit::record_state(&s, Some(u.id), "proxy_host_delete_failed", "reason=database_error").await;
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -1090,6 +1077,8 @@ async fn remove_host(
     };
     if s.reloader.apply(desired).await.is_err() {
         let _ = repository::insert_host(&s.db, &previous).await;
+        let _ = repository::restore_host_scopes(&s.db, id, &scope_rows).await;
+        let _ = s.reloader.apply(DesiredConfig { proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default() }).await;
         audit::record_state(&s, Some(u.id), "proxy_host_delete_failed", "reason=reload_failed").await;
         return (
             StatusCode::BAD_GATEWAY,
@@ -1099,10 +1088,6 @@ async fn remove_host(
             }),
         )
             .into_response();
-    }
-    if repository::delete_host_scopes(&s.db, id).await.is_err() {
-        audit::record_state(&s, Some(u.id), "proxy_host_delete_failed", "reason=database_error").await;
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     audit::record_state(
         &s,

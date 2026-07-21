@@ -914,6 +914,39 @@ pub async fn delete_host_scopes(pool: &SqlitePool, id: i64) -> Result<u64, sqlx:
     Ok(sqlx::query("DELETE FROM role_permissions WHERE scope_type='proxy_host' AND scope_id=?").bind(id).execute(pool).await?.rows_affected())
 }
 
+/// Removes a proxy host and every per-host role assignment in one transaction.
+/// Callers can safely restore the host if the transaction fails; no partial
+/// cleanup is committed.
+pub async fn delete_host_and_scopes(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let result = async {
+        let changed = sqlx::query("DELETE FROM proxy_hosts WHERE id=?")
+            .bind(id).execute(&mut *conn).await?.rows_affected();
+        sqlx::query("DELETE FROM role_permissions WHERE scope_type='proxy_host' AND scope_id=?")
+            .bind(id).execute(&mut *conn).await?;
+        Ok::<u64, sqlx::Error>(changed)
+    }.await;
+    match result {
+        Ok(changed) => { sqlx::query("COMMIT").execute(&mut *conn).await?; Ok(changed) }
+        Err(error) => { let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await; Err(error) }
+    }
+}
+
+pub async fn host_scope_rows(pool: &SqlitePool, id: i64) -> Result<Vec<(i64, i64, String)>, sqlx::Error> {
+    let rows = sqlx::query("SELECT role_id,permission_id,scope_type FROM role_permissions WHERE scope_type='proxy_host' AND scope_id=?")
+        .bind(id).fetch_all(pool).await?;
+    Ok(rows.into_iter().map(|row| (row.get("role_id"), row.get("permission_id"), row.get("scope_type"))).collect())
+}
+
+pub async fn restore_host_scopes(pool: &SqlitePool, id: i64, rows: &[(i64, i64, String)]) -> Result<(), sqlx::Error> {
+    for (role_id, permission_id, scope_type) in rows {
+        sqlx::query("INSERT OR IGNORE INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(?,?,?,?)")
+            .bind(role_id).bind(permission_id).bind(scope_type).bind(id).execute(pool).await?;
+    }
+    Ok(())
+}
+
 pub async fn get_host(pool: &SqlitePool, id: i64) -> Result<Option<ProxyHost>, sqlx::Error> {
     let row = sqlx::query("SELECT id,name,domain,upstream_host,upstream_port,tls_mode,certificate_id,enabled FROM proxy_hosts WHERE id=?")
         .bind(id).fetch_optional(pool).await?;

@@ -85,6 +85,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_only_host_grant_authorizes_mutation_context() {
+        let pool = pool().await;
+        let user = scoped_user(&pool, 42).await;
+        let permission_id: i64 = sqlx::query("SELECT id FROM permissions WHERE key=?")
+            .bind(Permission::ProxyHostsWrite.key()).fetch_one(&pool).await.expect("permission").get("id");
+        let role_id: i64 = sqlx::query("SELECT id FROM roles WHERE slug='scoped'")
+            .fetch_one(&pool).await.expect("role id").get("id");
+        sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) VALUES(?,?,?,?)")
+            .bind(role_id).bind(permission_id).bind("proxy_host").bind(42).execute(&pool).await.expect("scope");
+        assert!(authorize(&pool, &user, Permission::ProxyHostsWrite, ResourceContext::ProxyHost(42)).await.expect("auth"));
+    }
+
+    #[tokio::test]
     async fn unknown_scope_is_denied() {
         let pool = pool().await;
         let user = repository::insert_user(&pool, "admin@example.test", "hash", "admin").await.expect("user");

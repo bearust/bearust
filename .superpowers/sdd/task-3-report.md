@@ -14,3 +14,14 @@ Verification:
 - `git diff --check`: passed.
 - `cargo test --locked --test control_plane_repository scoped_user_lists_only_assigned_proxy_hosts` could not complete in the available Docker environment: the repository toolchain pins Rust 1.84.1, which cannot parse the dependency's Edition 2024 manifest; retrying with stable Rust 1.97.1 then failed because the image lacks `cmake` while compiling `libz-ng-sys`.
 - Native `cargo` is unavailable in the host environment.
+
+## Review-fix report
+
+- Mutation authorization now checks only the scoped `proxy_hosts.write` grant, so write-only users can update/delete assigned hosts; denied detail/update/delete return safe `404` and emit `authorization_denied` with redacted resource metadata.
+- Host deletion now removes the host and per-host role assignments in one SQLite transaction before reloading. Reload failure restores the host, scope rows, and active configuration.
+- Added regression coverage for write-only host authorization.
+
+Verification:
+
+- `git diff --check` passed.
+- Native `cargo`/Docker toolchain unavailable in this environment; Rust tests could not be executed here.
