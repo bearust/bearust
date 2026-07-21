@@ -575,6 +575,7 @@ async fn issue_acme(
                 "certificate_job_created",
             )
             .await;
+            s.realtime.publish("certificates.changed");
             (
                 StatusCode::ACCEPTED,
                 Json(AcmeJobResponse {
@@ -625,6 +626,7 @@ async fn renew_acme(
                 "certificate_job_created",
             )
             .await;
+            s.realtime.publish("certificates.changed");
             (
                 StatusCode::ACCEPTED,
                 Json(AcmeJobResponse {

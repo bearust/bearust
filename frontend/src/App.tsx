@@ -579,7 +579,7 @@ export function RolesSection({ user, roles, onChanged }: { user: User; roles: Ro
   return <section className="card roles-card"><h2>Roles</h2>{error&&<p className="error">{error}</p>}<table><thead><tr><th>Name</th><th>Slug</th><th>Permissions</th><th /></tr></thead><tbody>{roles.map(role=><tr key={role.id}><td>{role.name}</td><td>{role.slug}</td><td>{role.permissions.join(", ")}</td><td>{!role.system_managed&&<><button disabled={busy} onClick={()=>void run(()=>api.updateRole(role.id,{description:role.description}))}>Save</button>{" "}<button className="danger" disabled={busy} onClick={()=>window.confirm("Delete this role?")&&void run(()=>api.deleteRole(role.id))}>Delete</button></>}</td></tr>)}</tbody></table><form onSubmit={e=>{e.preventDefault();if(!slug.trim()||!name.trim())return;void run(async()=>{await api.createRole({slug,name,description:"",permissions:["audit_logs.read"]});setSlug("");setName("")})}}><h3>Add role</h3><Field label="Slug" value={slug} onChange={(e:any)=>setSlug(e.target.value)}/><Field label="Name" value={name} onChange={(e:any)=>setName(e.target.value)}/><button disabled={busy||!slug.trim()||!name.trim()}>Create role</button></form><p className="muted">Available permissions: {PERMISSIONS.join(", ")}</p></section>;
 }
 
-function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
+function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: () => void; onUserRefresh: (user: User) => void }) {
   const [hosts, setHosts] = useState<Host[]>([]),
     [certs, setCerts] = useState<Certificate[]>([]),
     [users, setUsers] = useState<User[]>([]),
@@ -630,12 +630,20 @@ function Dashboard({ user, onLogout }: { user: User; onLogout: () => void }) {
       setUsersError(userError(e));
     }
   };
+  const loadSession = async () => {
+    try {
+      onUserRefresh(await api.me());
+    } catch (e) {
+      if ((e as Error & { status?: number }).status === 401) onLogout();
+    }
+  };
   const realtimeStatus: RealtimeStatus = useRealtimeUpdates({
     hosts: loadHosts,
     certificates: loadCertificates,
     users: loadUsers,
     roles: loadRoles,
     auditLogs: () => auditReloadRef.current?.(),
+    sessions: loadSession,
   });
   const refresh = async () => {
     try {
@@ -848,7 +856,10 @@ export default function App() {
   return user ? (
     <Dashboard
       user={user}
-      onLogout={() => api.logout().then(() => setUser(null))}
+      onLogout={() => {
+        void api.logout().catch(() => undefined).finally(() => setUser(null));
+      }}
+      onUserRefresh={setUser}
     />
   ) : (
     <Login onDone={setUser} />

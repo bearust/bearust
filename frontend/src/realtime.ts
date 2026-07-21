@@ -7,6 +7,7 @@ export type RealtimeLoaders = Partial<{
   users: () => unknown | Promise<unknown>;
   roles: () => unknown | Promise<unknown>;
   auditLogs: () => unknown | Promise<unknown>;
+  sessions: () => unknown | Promise<unknown>;
 }>;
 
 const EVENT_LOADERS: Record<string, keyof RealtimeLoaders> = {
@@ -15,6 +16,7 @@ const EVENT_LOADERS: Record<string, keyof RealtimeLoaders> = {
   "users.changed": "users",
   "roles.changed": "roles",
   audit: "auditLogs",
+  "sessions.changed": "sessions",
 };
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;

@@ -55,11 +55,12 @@ describe("useRealtimeUpdates", () => {
     const certificates = vi.fn().mockResolvedValue(undefined);
     const users = vi.fn().mockResolvedValue(undefined);
     const roles = vi.fn().mockResolvedValue(undefined);
+    const sessions = vi.fn().mockResolvedValue(undefined);
     const statuses: string[] = [];
     const element = document.createElement("div");
     document.body.appendChild(element);
     const root = createRoot(element);
-    await act(async () => root.render(<Harness loaders={{ auditLogs, hosts, certificates, users, roles }} onStatus={(s) => statuses.push(s)} />));
+    await act(async () => root.render(<Harness loaders={{ auditLogs, hosts, certificates, users, roles, sessions }} onStatus={(s) => statuses.push(s)} />));
     const source = sources[0];
     expect(source.url).toBe("/api/events");
     expect(source.options).toEqual({ withCredentials: true });
@@ -69,11 +70,13 @@ describe("useRealtimeUpdates", () => {
     await act(async () => source.emit("certificates.changed", "3"));
     await act(async () => source.emit("audit", "4"));
     await act(async () => source.emit("audit", "4"));
-    await act(async () => source.emit("unknown", "5"));
+    await act(async () => source.emit("sessions.changed", "5"));
+    await act(async () => source.emit("unknown", "6"));
     expect(users).toHaveBeenCalledTimes(1);
     expect(hosts).toHaveBeenCalledTimes(1);
     expect(certificates).toHaveBeenCalledTimes(1);
     expect(auditLogs).toHaveBeenCalledTimes(1);
+    expect(sessions).toHaveBeenCalledTimes(1);
     expect(statuses).toContain("connected");
     root.unmount();
     expect(source.close).toHaveBeenCalled();
