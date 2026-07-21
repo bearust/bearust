@@ -29,33 +29,106 @@ fn context(path: &str, query: &str, body: &str) -> InspectionContext {
 #[test]
 fn builtins_match_sql_xss_traversal_and_command_signatures() {
     let rules = [
-        rule("sqli", r#"{"field":"any","builtin":"sqli"}"#, WafAction::Inherit),
-        rule("xss", r#"{"field":"any","builtin":"xss"}"#, WafAction::Inherit),
-        rule("path_traversal", r#"{"field":"path","builtin":"path_traversal"}"#, WafAction::Inherit),
-        rule("command_injection", r#"{"field":"any","builtin":"command_injection"}"#, WafAction::Inherit),
+        rule(
+            "sqli",
+            r#"{"field":"any","builtin":"sqli"}"#,
+            WafAction::Inherit,
+        ),
+        rule(
+            "xss",
+            r#"{"field":"any","builtin":"xss"}"#,
+            WafAction::Inherit,
+        ),
+        rule(
+            "path_traversal",
+            r#"{"field":"path","builtin":"path_traversal"}"#,
+            WafAction::Inherit,
+        ),
+        rule(
+            "command_injection",
+            r#"{"field":"any","builtin":"command_injection"}"#,
+            WafAction::Inherit,
+        ),
     ];
-    let snapshot = compile_snapshot(WafConfig { mode: WafMode::MonitorOnly, updated_at: String::new() }, rules.to_vec()).unwrap();
-    let result = evaluate(&snapshot, &context("/../../etc/passwd", "q=' OR 1=1", "<script>alert(1)</script>; cat /etc/passwd"));
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::MonitorOnly,
+            updated_at: String::new(),
+        },
+        rules.to_vec(),
+    )
+    .unwrap();
+    let result = evaluate(
+        &snapshot,
+        &context(
+            "/../../etc/passwd",
+            "q=' OR 1=1",
+            "<script>alert(1)</script>; cat /etc/passwd",
+        ),
+    );
     assert_eq!(result.decision, WafDecision::Log);
     assert_eq!(result.matched_rule_ids.len(), 4);
 }
 
 #[test]
 fn monitor_only_logs_matches_while_block_mode_blocks() {
-    let rules = vec![rule("custom", r#"{"field":"query","pattern":"evil"}"#, WafAction::Inherit)];
-    let monitor = compile_snapshot(WafConfig { mode: WafMode::MonitorOnly, updated_at: String::new() }, rules.clone()).unwrap();
-    assert_eq!(evaluate(&monitor, &context("/", "q=evil", "")).decision, WafDecision::Log);
-    let block = compile_snapshot(WafConfig { mode: WafMode::Block, updated_at: String::new() }, rules).unwrap();
-    assert_eq!(evaluate(&block, &context("/", "q=evil", "")).decision, WafDecision::Block);
+    let rules = vec![rule(
+        "custom",
+        r#"{"field":"query","pattern":"evil"}"#,
+        WafAction::Inherit,
+    )];
+    let monitor = compile_snapshot(
+        WafConfig {
+            mode: WafMode::MonitorOnly,
+            updated_at: String::new(),
+        },
+        rules.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        evaluate(&monitor, &context("/", "q=evil", "")).decision,
+        WafDecision::Log
+    );
+    let block = compile_snapshot(
+        WafConfig {
+            mode: WafMode::Block,
+            updated_at: String::new(),
+        },
+        rules,
+    )
+    .unwrap();
+    assert_eq!(
+        evaluate(&block, &context("/", "q=evil", "")).decision,
+        WafDecision::Block
+    );
 }
 
 #[test]
 fn disabled_rules_do_not_match_and_precedence_is_deterministic() {
-    let mut disabled = rule("disabled", r#"{"field":"query","pattern":"evil"}"#, WafAction::Block);
+    let mut disabled = rule(
+        "disabled",
+        r#"{"field":"query","pattern":"evil"}"#,
+        WafAction::Block,
+    );
     disabled.enabled = false;
-    let allow = rule("allow", r#"{"field":"query","pattern":"evil"}"#, WafAction::Allow);
-    let block = rule("block", r#"{"field":"query","pattern":"evil"}"#, WafAction::Block);
-    let snapshot = compile_snapshot(WafConfig { mode: WafMode::MonitorOnly, updated_at: String::new() }, vec![disabled, allow, block]).unwrap();
+    let allow = rule(
+        "allow",
+        r#"{"field":"query","pattern":"evil"}"#,
+        WafAction::Allow,
+    );
+    let block = rule(
+        "block",
+        r#"{"field":"query","pattern":"evil"}"#,
+        WafAction::Block,
+    );
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::MonitorOnly,
+            updated_at: String::new(),
+        },
+        vec![disabled, allow, block],
+    )
+    .unwrap();
     let result = evaluate(&snapshot, &context("/", "q=evil", ""));
     assert_eq!(result.decision, WafDecision::Block);
     assert_eq!(result.matched_rule_ids, vec![1, 1]);
@@ -63,8 +136,105 @@ fn disabled_rules_do_not_match_and_precedence_is_deterministic() {
 
 #[test]
 fn invalid_regex_is_rejected_and_runtime_diagnostics_are_sanitized() {
-    let invalid = rule("custom", r#"{"field":"query","pattern":"("}"#, WafAction::Block);
-    let error = compile_snapshot(WafConfig { mode: WafMode::Block, updated_at: String::new() }, vec![invalid]).unwrap_err();
+    let invalid = rule(
+        "custom",
+        r#"{"field":"query","pattern":"("}"#,
+        WafAction::Block,
+    );
+    let error = compile_snapshot(
+        WafConfig {
+            mode: WafMode::Block,
+            updated_at: String::new(),
+        },
+        vec![invalid],
+    )
+    .unwrap_err();
     assert_eq!(error, "invalid matcher definition");
 }
 
+#[test]
+fn normalized_one_level_percent_decoding_matches_custom_signatures() {
+    let rules = vec![rule(
+        "custom",
+        r#"{"field":"query","pattern":"../"}"#,
+        WafAction::Block,
+    )];
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::Block,
+            updated_at: String::new(),
+        },
+        rules,
+    )
+    .unwrap();
+    let result = evaluate(&snapshot, &context("/", "file=%2e%2e%2fsecret", ""));
+    assert_eq!(result.decision, WafDecision::Block);
+}
+
+#[test]
+fn normalized_case_folding_and_separator_normalization_match_builtins() {
+    let rules = vec![rule(
+        "path_traversal",
+        r#"{"field":"path","builtin":"path_traversal"}"#,
+        WafAction::Block,
+    )];
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::Block,
+            updated_at: String::new(),
+        },
+        rules,
+    )
+    .unwrap();
+    let result = evaluate(&snapshot, &context(r"/safe/%2E%2E%5Cetc%5Cpasswd", "", ""));
+    assert_eq!(result.decision, WafDecision::Block);
+}
+
+#[test]
+fn normalized_malformed_encoding_tolerance_keeps_literal_input() {
+    let rules = vec![rule(
+        "custom",
+        r#"{"field":"query","pattern":"%ZZ"}"#,
+        WafAction::Block,
+    )];
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::Block,
+            updated_at: String::new(),
+        },
+        rules,
+    )
+    .unwrap();
+    let result = evaluate(&snapshot, &context("/", "value=%ZZ", ""));
+    assert_eq!(result.decision, WafDecision::Block);
+}
+
+#[test]
+fn normalized_body_respects_existing_inspection_cap() {
+    let rules = vec![rule(
+        "custom",
+        r#"{"field":"body","pattern":"needle"}"#,
+        WafAction::Block,
+    )];
+    let snapshot = compile_snapshot(
+        WafConfig {
+            mode: WafMode::Block,
+            updated_at: String::new(),
+        },
+        rules,
+    )
+    .unwrap();
+    let mut body = vec![b'a'; bearust::waf::MAX_INSPECTION_BODY_BYTES];
+    body.extend_from_slice(b"needle");
+    let result = evaluate(
+        &snapshot,
+        &InspectionContext {
+            method: "POST".into(),
+            path: "/".into(),
+            query: String::new(),
+            headers: Vec::new(),
+            body,
+        },
+    );
+    assert_eq!(result.decision, WafDecision::Allow);
+}

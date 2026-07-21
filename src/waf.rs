@@ -13,8 +13,21 @@ pub struct InspectionContext {
     pub body: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+struct NormalizedContext {
+    method: String,
+    path: String,
+    query: String,
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WafDecision { Allow, Log, Block }
+pub enum WafDecision {
+    Allow,
+    Log,
+    Block,
+}
 
 #[derive(Clone, Debug)]
 pub struct Evaluation {
@@ -41,15 +54,33 @@ pub struct CompiledRule {
 
 #[derive(Clone, Debug)]
 enum MatcherDefinition {
-    Builtin { kind: BuiltinKind, field: MatchField },
-    Regex { field: MatchField, regex: Regex },
+    Builtin {
+        kind: BuiltinKind,
+        field: MatchField,
+    },
+    Regex {
+        field: MatchField,
+        regex: Regex,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
-enum BuiltinKind { Sqli, Xss, PathTraversal, CommandInjection }
+enum BuiltinKind {
+    Sqli,
+    Xss,
+    PathTraversal,
+    CommandInjection,
+}
 
 #[derive(Clone, Copy, Debug)]
-enum MatchField { Any, Method, Path, Query, Headers, Body }
+enum MatchField {
+    Any,
+    Method,
+    Path,
+    Query,
+    Headers,
+    Body,
+}
 
 #[derive(Deserialize)]
 struct MatcherInput {
@@ -60,7 +91,8 @@ struct MatcherInput {
 
 impl CompiledRule {
     fn compile(rule: &WafRule) -> Result<Self, &'static str> {
-        let input: MatcherInput = serde_json::from_str(&rule.matcher_json).map_err(|_| "invalid matcher definition")?;
+        let input: MatcherInput =
+            serde_json::from_str(&rule.matcher_json).map_err(|_| "invalid matcher definition")?;
         let field = parse_field(input.field.as_deref().unwrap_or("any"))?;
         let matcher = if let Some(name) = input.builtin {
             let kind = match name.as_str() {
@@ -72,66 +104,214 @@ impl CompiledRule {
             };
             MatcherDefinition::Builtin { kind, field }
         } else if let Some(pattern) = input.pattern {
-            if pattern.len() > 2048 { return Err("invalid matcher definition"); }
-            MatcherDefinition::Regex { field, regex: Regex::new(&format!("(?i:{pattern})")).map_err(|_| "invalid matcher definition")? }
+            if pattern.len() > 2048 {
+                return Err("invalid matcher definition");
+            }
+            MatcherDefinition::Regex {
+                field,
+                regex: Regex::new(&format!("(?i:{pattern})"))
+                    .map_err(|_| "invalid matcher definition")?,
+            }
         } else {
             return Err("invalid matcher definition");
         };
-        Ok(Self { id: rule.id, category: rule.category.clone(), enabled: rule.enabled, action: rule.action, matcher })
+        Ok(Self {
+            id: rule.id,
+            category: rule.category.clone(),
+            enabled: rule.enabled,
+            action: rule.action,
+            matcher,
+        })
     }
 }
 
-pub fn compile_snapshot(config: WafConfig, rules: Vec<WafRule>) -> Result<WafSnapshot, &'static str> {
+pub fn compile_snapshot(
+    config: WafConfig,
+    rules: Vec<WafRule>,
+) -> Result<WafSnapshot, &'static str> {
     let mut compiled = Vec::with_capacity(rules.len());
-    for rule in rules { compiled.push(CompiledRule::compile(&rule)?); }
-    Ok(WafSnapshot { mode: config.mode, rules: compiled })
+    for rule in rules {
+        compiled.push(CompiledRule::compile(&rule)?);
+    }
+    Ok(WafSnapshot {
+        mode: config.mode,
+        rules: compiled,
+    })
 }
 
 fn parse_field(value: &str) -> Result<MatchField, &'static str> {
-    match value { "any" => Ok(MatchField::Any), "method" => Ok(MatchField::Method), "path" => Ok(MatchField::Path), "query" => Ok(MatchField::Query), "headers" => Ok(MatchField::Headers), "body" => Ok(MatchField::Body), _ => Err("invalid matcher definition") }
+    match value {
+        "any" => Ok(MatchField::Any),
+        "method" => Ok(MatchField::Method),
+        "path" => Ok(MatchField::Path),
+        "query" => Ok(MatchField::Query),
+        "headers" => Ok(MatchField::Headers),
+        "body" => Ok(MatchField::Body),
+        _ => Err("invalid matcher definition"),
+    }
 }
 
-fn field_values(field: MatchField, context: &InspectionContext) -> Vec<String> {
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_percent_once(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            {
+                decoded.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn normalize_text(value: &str) -> String {
+    // Two decode passes handle double-encoded attacks while bounding work.
+    let decoded = decode_percent_once(&decode_percent_once(value));
+    let mut normalized = String::with_capacity(decoded.len());
+    let mut whitespace = false;
+    for character in decoded.chars() {
+        if character.is_ascii_whitespace() {
+            whitespace = true;
+            continue;
+        }
+        if whitespace {
+            normalized.push(' ');
+            whitespace = false;
+        }
+        if character == '\\' {
+            normalized.push('/');
+        } else {
+            normalized.push(character.to_ascii_lowercase());
+        }
+    }
+    normalized
+}
+
+fn normalize_context(context: &InspectionContext) -> NormalizedContext {
+    let body = &context.body[..context.body.len().min(MAX_INSPECTION_BODY_BYTES)];
+    NormalizedContext {
+        method: normalize_text(&context.method),
+        path: normalize_text(&context.path),
+        query: normalize_text(&context.query),
+        headers: context
+            .headers
+            .iter()
+            .map(|(name, value)| (normalize_text(name), normalize_text(value)))
+            .collect(),
+        body: normalize_text(&String::from_utf8_lossy(body)),
+    }
+}
+
+fn field_values(field: MatchField, context: &NormalizedContext) -> Vec<String> {
     match field {
         MatchField::Any => {
-            let mut values = vec![context.method.clone(), context.path.clone(), context.query.clone()];
-            values.extend(context.headers.iter().flat_map(|(name, value)| [name.clone(), value.clone()]));
-            values.push(String::from_utf8_lossy(&context.body[..context.body.len().min(MAX_INSPECTION_BODY_BYTES)]).into_owned());
+            let mut values = vec![
+                context.method.clone(),
+                context.path.clone(),
+                context.query.clone(),
+            ];
+            values.extend(
+                context
+                    .headers
+                    .iter()
+                    .flat_map(|(name, value)| [name.clone(), value.clone()]),
+            );
+            values.push(context.body.clone());
             values
         }
         MatchField::Method => vec![context.method.clone()],
         MatchField::Path => vec![context.path.clone()],
         MatchField::Query => vec![context.query.clone()],
-        MatchField::Headers => context.headers.iter().flat_map(|(name, value)| [name.clone(), value.clone()]).collect(),
-        MatchField::Body => vec![String::from_utf8_lossy(&context.body[..context.body.len().min(MAX_INSPECTION_BODY_BYTES)]).into_owned()],
+        MatchField::Headers => context
+            .headers
+            .iter()
+            .flat_map(|(name, value)| [name.clone(), value.clone()])
+            .collect(),
+        MatchField::Body => vec![context.body.clone()],
     }
 }
 
 fn builtin_matches(kind: BuiltinKind, value: &str) -> bool {
     let value = value.to_ascii_lowercase();
     match kind {
-        BuiltinKind::Sqli => Regex::new(r"(?:union\s+select|(?:'|%27)\s*(?:or|and)\s+\d+\s*=\s*\d+|select\s+.+\s+from)").expect("static regex").is_match(&value),
-        BuiltinKind::Xss => Regex::new(r"(?:<\s*script|javascript\s*:|on(?:error|load)\s*=)").expect("static regex").is_match(&value),
-        BuiltinKind::PathTraversal => Regex::new(r"(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/)").expect("static regex").is_match(&value),
-        BuiltinKind::CommandInjection => Regex::new(r"(?:;|\||&&)\s*(?:cat|sh|bash|curl|wget|nc)\b").expect("static regex").is_match(&value),
+        BuiltinKind::Sqli => Regex::new(
+            r"(?:union\s+select|(?:'|%27)\s*(?:or|and)\s+\d+\s*=\s*\d+|select\s+.+\s+from)",
+        )
+        .expect("static regex")
+        .is_match(&value),
+        BuiltinKind::Xss => Regex::new(r"(?:<\s*script|javascript\s*:|on(?:error|load)\s*=)")
+            .expect("static regex")
+            .is_match(&value),
+        BuiltinKind::PathTraversal => Regex::new(r"(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/)")
+            .expect("static regex")
+            .is_match(&value),
+        BuiltinKind::CommandInjection => {
+            Regex::new(r"(?:;|\||&&)\s*(?:cat|sh|bash|curl|wget|nc)\b")
+                .expect("static regex")
+                .is_match(&value)
+        }
     }
 }
 
 pub fn evaluate(snapshot: &WafSnapshot, context: &InspectionContext) -> Evaluation {
+    let normalized = normalize_context(context);
     let mut matched_rule_ids = Vec::new();
     let mut categories = Vec::new();
     let mut effective = None;
     for rule in &snapshot.rules {
-        if !rule.enabled { continue; }
+        if !rule.enabled {
+            continue;
+        }
         let matched = match &rule.matcher {
-            MatcherDefinition::Builtin { kind, field } => field_values(*field, context).iter().any(|value| builtin_matches(*kind, value)),
-            MatcherDefinition::Regex { field, regex } => field_values(*field, context).iter().any(|value| regex.is_match(value)),
+            MatcherDefinition::Builtin { kind, field } => field_values(*field, &normalized)
+                .iter()
+                .any(|value| builtin_matches(*kind, value)),
+            MatcherDefinition::Regex { field, regex } => field_values(*field, &normalized)
+                .iter()
+                .any(|value| regex.is_match(value)),
         };
-        if !matched { continue; }
+        if !matched {
+            continue;
+        }
         matched_rule_ids.push(rule.id);
-        if !categories.contains(&rule.category) { categories.push(rule.category.clone()); }
-        let action = match rule.action { WafAction::Inherit => match snapshot.mode { WafMode::MonitorOnly => WafDecision::Log, WafMode::Block => WafDecision::Block }, WafAction::Allow => WafDecision::Allow, WafAction::Log => WafDecision::Log, WafAction::Block => WafDecision::Block };
-        effective = Some(match (effective, action) { (Some(WafDecision::Block), _) | (_, WafDecision::Block) => WafDecision::Block, (Some(WafDecision::Log), _) | (_, WafDecision::Log) => WafDecision::Log, _ => WafDecision::Allow });
+        if !categories.contains(&rule.category) {
+            categories.push(rule.category.clone());
+        }
+        let action = match rule.action {
+            WafAction::Inherit => match snapshot.mode {
+                WafMode::MonitorOnly => WafDecision::Log,
+                WafMode::Block => WafDecision::Block,
+            },
+            WafAction::Allow => WafDecision::Allow,
+            WafAction::Log => WafDecision::Log,
+            WafAction::Block => WafDecision::Block,
+        };
+        effective = Some(match (effective, action) {
+            (Some(WafDecision::Block), _) | (_, WafDecision::Block) => WafDecision::Block,
+            (Some(WafDecision::Log), _) | (_, WafDecision::Log) => WafDecision::Log,
+            _ => WafDecision::Allow,
+        });
     }
-    Evaluation { decision: effective.unwrap_or(WafDecision::Allow), matched_rule_ids, categories, diagnostic: None }
+    Evaluation {
+        decision: effective.unwrap_or(WafDecision::Allow),
+        matched_rule_ids,
+        categories,
+        diagnostic: None,
+    }
 }
