@@ -442,7 +442,28 @@ pub async fn delete_role(pool: &SqlitePool, id: i64) -> Result<u64, sqlx::Error>
 }
 
 pub async fn user_has_permission(pool: &SqlitePool, user_id: i64, key: &str, scope: Option<(&str, i64)>) -> Result<bool, sqlx::Error> {
-    let allowed = match scope { Some(_) => false, None => sqlx::query("SELECT 1 FROM users u JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.id=? AND u.disabled=0 AND p.key=? AND rp.scope_type IS NULL AND rp.scope_id IS NULL LIMIT 1").bind(user_id).bind(key).fetch_optional(pool).await?.is_some() };
+    let allowed = match scope {
+        None => sqlx::query(
+            "SELECT 1 FROM users u JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.id=? AND u.disabled=0 AND p.key=? AND rp.scope_type IS NULL AND rp.scope_id IS NULL LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(key)
+        .fetch_optional(pool)
+        .await?
+        .is_some(),
+        Some(("proxy_host", host_id)) => sqlx::query(
+            "SELECT 1 FROM users u JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.id=? AND u.disabled=0 AND p.key=? AND ((rp.scope_type IS NULL AND rp.scope_id IS NULL) OR (rp.scope_type=? AND rp.scope_id=?)) LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(key)
+        .bind("proxy_host")
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await?
+        .is_some(),
+        // Scope types are an allow-list. Unknown values must never broaden access.
+        Some(_) => false,
+    };
     Ok(allowed)
 }
 
