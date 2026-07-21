@@ -1,19 +1,44 @@
-# Task 3 Fix Report
+# Task 3 review fixes
 
-## Findings addressed
+Addressed the Task 3 review findings for the shared Tailwind v4 UI primitives.
 
-- Cloudflare challenge tracking previously stored one record ID per `(name,
-  value)`, so concurrent ACME orders overwrote one another and leaked a TXT
-  record during cleanup.
-- Challenge cleanup now tracks a list of provider-created IDs and consumes one
-  ID per cleanup call. Missing IDs remain a no-op, so pre-existing records are
-  never deleted.
-- Added deterministic local-server regression tests for partial `present`
-  failure and concurrent identical challenges.
+- Added all semantic aliases used by `frontend/src/ui.tsx` to the light and dark token maps: action, action-hover, action-foreground, surface, surface-muted, foreground, muted, focus offset, and info/success/warning/danger border, surface, foreground, and hover tokens.
+- Kept the existing canonical token names (`page`, `panel`, `text`, `brand`, etc.) for compatibility.
+- Set the global brand/action primary to `#D99906` in both themes, with a dark accessible foreground and hover value.
+- Updated `ThemeSelect` to invoke a caller-provided `onChange` handler after synchronizing theme state.
+- Added a regression test for the caller `onChange` behavior.
 
 ## Verification
 
-The focused Cargo test could not be run in this environment because the
-available Docker image does not contain `cargo` (`cargo: command not found`).
-Run `cargo test --locked --test acme_dns01` (and the normal workspace checks)
-in the Rust toolchain image before integration.
+Command:
+
+```text
+npm test -- --run src/ui.test.tsx src/theme.test.tsx
+```
+
+Output summary:
+
+```text
+Test Files  2 passed (2)
+Tests       11 passed (11)
+```
+
+Command:
+
+```text
+npm run build
+```
+
+Output summary:
+
+```text
+✓ built in 85ms
+```
+
+Command:
+
+```text
+git diff --check
+```
+
+Output: passed (no output).

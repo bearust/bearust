@@ -9,11 +9,36 @@
   --color-text-muted: #475569;
   --color-border: #cbd5e1;
   --color-focus: #2563eb;
-  --color-brand: #2563eb;
+  --color-focus-offset: #ffffff;
+  /* Semantic aliases consumed by the shared UI primitives. */
+  --color-surface: #ffffff;
+  --color-surface-muted: #f1f5f9;
+  --color-foreground: #0f172a;
+  --color-muted: #475569;
+  --color-action: #d99906;
+  --color-action-hover: #b87d05;
+  --color-action-foreground: #1f2937;
+  --color-brand: #d99906;
   --color-success: #15803d;
+  --color-success-border: #86efac;
+  --color-success-surface: #f0fdf4;
+  --color-success-foreground: #166534;
+  --color-success-hover: #dcfce7;
   --color-warning: #a16207;
+  --color-warning-border: #facc15;
+  --color-warning-surface: #fefce8;
+  --color-warning-foreground: #854d0e;
+  --color-warning-hover: #fef9c3;
   --color-danger: #b91c1c;
+  --color-danger-border: #fca5a5;
+  --color-danger-surface: #fef2f2;
+  --color-danger-foreground: #991b1b;
+  --color-danger-hover: #fee2e2;
   --color-info: #0369a1;
+  --color-info-border: #7dd3fc;
+  --color-info-surface: #e0f2fe;
+  --color-info-foreground: #075985;
+  --color-info-hover: #bae6fd;
 }
 
 [data-theme="dark"] {
@@ -25,11 +50,35 @@
   --color-text-muted: #cbd5e1;
   --color-border: #475569;
   --color-focus: #60a5fa;
-  --color-brand: #60a5fa;
+  --color-focus-offset: #1e293b;
+  --color-surface: #1e293b;
+  --color-surface-muted: #334155;
+  --color-foreground: #f8fafc;
+  --color-muted: #cbd5e1;
+  --color-action: #d99906;
+  --color-action-hover: #b87d05;
+  --color-action-foreground: #1f2937;
+  --color-brand: #d99906;
   --color-success: #4ade80;
+  --color-success-border: #4ade80;
+  --color-success-surface: #14532d;
+  --color-success-foreground: #dcfce7;
+  --color-success-hover: #166534;
   --color-warning: #facc15;
+  --color-warning-border: #facc15;
+  --color-warning-surface: #713f12;
+  --color-warning-foreground: #fef9c3;
+  --color-warning-hover: #854d0e;
   --color-danger: #f87171;
+  --color-danger-border: #f87171;
+  --color-danger-surface: #7f1d1d;
+  --color-danger-foreground: #fee2e2;
+  --color-danger-hover: #991b1b;
   --color-info: #38bdf8;
+  --color-info-border: #38bdf8;
+  --color-info-surface: #0c4a6e;
+  --color-info-foreground: #e0f2fe;
+  --color-info-hover: #075985;
 }
 
 @theme inline {
@@ -40,9 +89,33 @@
   --color-text-muted: var(--color-text-muted);
   --color-border: var(--color-border);
   --color-focus: var(--color-focus);
+  --color-focus-offset: var(--color-focus-offset);
+  --color-surface: var(--color-surface);
+  --color-surface-muted: var(--color-surface-muted);
+  --color-foreground: var(--color-foreground);
+  --color-muted: var(--color-muted);
+  --color-action: var(--color-action);
+  --color-action-hover: var(--color-action-hover);
+  --color-action-foreground: var(--color-action-foreground);
   --color-brand: var(--color-brand);
   --color-success: var(--color-success);
+  --color-success-border: var(--color-success-border);
+  --color-success-surface: var(--color-success-surface);
+  --color-success-foreground: var(--color-success-foreground);
+  --color-success-hover: var(--color-success-hover);
   --color-warning: var(--color-warning);
+  --color-warning-border: var(--color-warning-border);
+  --color-warning-surface: var(--color-warning-surface);
+  --color-warning-foreground: var(--color-warning-foreground);
+  --color-warning-hover: var(--color-warning-hover);
   --color-danger: var(--color-danger);
+  --color-danger-border: var(--color-danger-border);
+  --color-danger-surface: var(--color-danger-surface);
+  --color-danger-foreground: var(--color-danger-foreground);
+  --color-danger-hover: var(--color-danger-hover);
   --color-info: var(--color-info);
+  --color-info-border: var(--color-info-border);
+  --color-info-surface: var(--color-info-surface);
+  --color-info-foreground: var(--color-info-foreground);
+  --color-info-hover: var(--color-info-hover);
 }

@@ -50,6 +50,15 @@ describe('accessible Tailwind UI primitives', () => {
     root.unmount();
   });
 
+  it('preserves a caller-provided ThemeSelect change handler', () => {
+    let called = false;
+    const { container, root } = render(<ThemeProvider><ThemeSelect onChange={() => { called = true; }} /></ThemeProvider>);
+    const select = container.querySelector('select')!;
+    act(() => { select.value = 'light'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(called).toBe(true);
+    root.unmount();
+  });
+
   it('renders Card as a semantic section', () => {
     const { container, root } = render(<Card aria-label="Summary">Content</Card>);
     expect(container.querySelector('section')?.textContent).toBe('Content');

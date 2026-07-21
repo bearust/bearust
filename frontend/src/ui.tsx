@@ -52,9 +52,13 @@ export function Alert({ variant = 'info', title, children, className = '', ...pr
 
 export function ThemeSelect({ className = '', ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
   const { mode, setMode } = useTheme();
+  const handleChange: SelectHTMLAttributes<HTMLSelectElement>['onChange'] = (event) => {
+    setMode(event.target.value as ThemeMode);
+    props.onChange?.(event);
+  };
   return <label className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground">
     <span>Theme</span>
-    <select {...props} aria-label={props['aria-label'] ?? 'Theme'} value={mode} onChange={(event) => setMode(event.target.value as ThemeMode)} className={`min-h-11 rounded-md border border-border bg-surface px-3 py-2 text-foreground ${focusRing} ${className}`}>
+    <select {...props} aria-label={props['aria-label'] ?? 'Theme'} value={mode} onChange={handleChange} className={`min-h-11 rounded-md border border-border bg-surface px-3 py-2 text-foreground ${focusRing} ${className}`}>
       <option value="system">System</option>
       <option value="light">Light</option>
       <option value="dark">Dark</option>
