@@ -1,10 +1,10 @@
 use axum::{body::{to_bytes, Body}, http::{Request, StatusCode}, Router};
 use bearust::control_plane::{build_state, repository, router};
-use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, Row};
-use std::{str::FromStr, time::Duration};
+use sqlx::{any::AnyPoolOptions, Row};
+use std::sync::Once;
 use tower::util::ServiceExt;
 
-async fn app() -> (Router, sqlx::SqlitePool) {
+async fn app() -> (Router, repository::DbPool) {
     let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let state = build_state("sqlite::memory:", dir.path(), "setup-token").await.unwrap();
     (router(state.clone()), state.db)
@@ -29,15 +29,11 @@ async fn delete_role_rolls_back_when_commit_is_busy() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("roles.sqlite");
     let url = format!("sqlite://{}", db_path.display());
-    let pool = SqlitePoolOptions::new()
+    static DRIVERS: Once = Once::new();
+    DRIVERS.call_once(sqlx::any::install_default_drivers);
+    let pool = AnyPoolOptions::new()
         .max_connections(1)
-        .connect_with(
-            SqliteConnectOptions::from_str(&url)
-                .unwrap()
-                .create_if_missing(true)
-                .foreign_keys(true)
-                .busy_timeout(Duration::from_millis(0)),
-        )
+        .connect(&url)
         .await
         .unwrap();
     repository::migrate(&pool).await.unwrap();
@@ -45,15 +41,9 @@ async fn delete_role_rolls_back_when_commit_is_busy() {
         .await
         .unwrap();
 
-    let blocker = SqlitePoolOptions::new()
+    let blocker = AnyPoolOptions::new()
         .max_connections(1)
-        .connect_with(
-            SqliteConnectOptions::from_str(&url)
-                .unwrap()
-                .create_if_missing(true)
-                .foreign_keys(true)
-                .busy_timeout(Duration::from_millis(0)),
-        )
+        .connect(&url)
         .await
         .unwrap();
     let mut blocker_conn = blocker.acquire().await.unwrap();
@@ -73,7 +63,7 @@ async fn delete_role_rolls_back_when_commit_is_busy() {
     assert!(repository::get_role(&pool, role.id).await.unwrap().is_some());
 
     let mut conn = pool.acquire().await.unwrap();
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await.unwrap();
+    sqlx::query("BEGIN").execute(&mut *conn).await.unwrap();
     sqlx::query("ROLLBACK").execute(&mut *conn).await.unwrap();
 }
 

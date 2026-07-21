@@ -4,7 +4,8 @@ use crate::control_plane::models::{
 };
 use crate::control_plane::rbac::Role;
 use sqlx::{any::AnyPoolOptions, Row};
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
+use tokio::sync::Mutex;
 use std::hash::{Hash, Hasher};
 use uuid::Uuid;
 
@@ -13,6 +14,11 @@ use uuid::Uuid;
 pub type DbPool = sqlx::AnyPool;
 
 static ANY_DRIVERS: Once = Once::new();
+static FIRST_ADMIN_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn first_admin_mutex() -> &'static Mutex<()> {
+    FIRST_ADMIN_MUTEX.get_or_init(|| Mutex::new(()))
+}
 
 /// Validate a database URL without including credentials in the resulting
 /// error.  Only the backends supported by the application are accepted.
@@ -320,6 +326,7 @@ pub async fn insert_initial_admin(
     email: &str,
     hash: &str,
 ) -> Result<Option<User>, sqlx::Error> {
+    let _guard = first_admin_mutex().lock().await;
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN").execute(&mut *conn).await?;
     let count = sqlx::query("SELECT COUNT(*) c FROM users")
@@ -445,10 +452,10 @@ fn normalize_scopes(scopes: &[RolePermissionScope]) -> Result<Vec<RolePermission
 async fn replace_scopes_tx<'a>(tx: &mut sqlx::Transaction<'a, sqlx::Any>, role_id: i64, scopes: &[RolePermissionScope]) -> Result<(), sqlx::Error> {
     let scopes = normalize_scopes(scopes)?;
     for scope in &scopes {
-        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM proxy_hosts WHERE id IN (SELECT value FROM json_each(?))")
-            .bind(serde_json::to_string(&scope.proxy_host_ids).unwrap()).fetch_one(&mut **tx).await?;
-        if exists != scope.proxy_host_ids.len() as i64 { return Err(sqlx::Error::Protocol("unknown proxy host id".into())); }
         for host_id in &scope.proxy_host_ids {
+            let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM proxy_hosts WHERE id=?")
+                .bind(host_id).fetch_optional(&mut **tx).await?;
+            if exists.is_none() { return Err(sqlx::Error::Protocol("unknown proxy host id".into())); }
             sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'proxy_host',? FROM permissions WHERE key=?")
                 .bind(role_id).bind(host_id).bind(&scope.permission).execute(&mut **tx).await?;
         }

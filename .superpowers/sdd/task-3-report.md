@@ -30,4 +30,10 @@ The initial search found SQLite-specific pool/row types throughout `src/control_
 
 ## Concerns for integration
 
-The existing test suite still contains SQLite-specific setup helpers and should be migrated in the external-database harness task. The first-admin transaction currently uses generic `BEGIN`; concurrent setup serialization should be validated against the sentinel strategy introduced by Task 2.
+The external-database harness task should add PostgreSQL/MySQL matrix coverage; the existing fixtures remain SQLite-backed while exercising the backend-agnostic pool API. The first-admin transaction uses generic `BEGIN` and is covered by the concurrent setup regression test.
+
+## Review follow-up
+
+- Removed SQLite `json_each(?)` from role-scope replacement; host IDs are now validated with one portable query per ID.
+- Added a process-wide async mutex around first-admin setup and a concurrent setup regression test. This serializes setup attempts consistently across supported backends while preserving the existing transaction and `Ok(None)` semantics.
+- Ported affected test pool signatures to `repository::DbPool` and replaced SQLite pool option types with `AnyPoolOptions`.

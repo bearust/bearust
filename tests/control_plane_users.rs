@@ -5,7 +5,7 @@ use sqlx::Row;
 use tower::util::ServiceExt;
 use openssl::{hash::MessageDigest, pkey::PKey, rsa::Rsa, x509::{X509NameBuilder, X509}};
 
-async fn app() -> (Router, sqlx::SqlitePool) {
+async fn app() -> (Router, repository::DbPool) {
     let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     let state = build_state("sqlite::memory:", dir.path(), "setup-token").await.unwrap();
     (router(state.clone()), state.db)

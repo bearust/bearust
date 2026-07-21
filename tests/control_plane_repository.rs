@@ -52,7 +52,7 @@ async fn creates_schema_and_reports_first_run_status() {
     assert_eq!(&body[..], br#"{"initialized":false}"#);
 }
 
-async fn test_pool() -> sqlx::SqlitePool {
+async fn test_pool() -> repository::DbPool {
     let pool = repository::connect("sqlite::memory:").await.unwrap();
     repository::migrate(&pool).await.unwrap();
     pool

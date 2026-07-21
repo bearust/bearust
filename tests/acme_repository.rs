@@ -5,7 +5,7 @@ use bearust::control_plane::{
 use sqlx::Row;
 use uuid::Uuid;
 
-async fn db() -> sqlx::SqlitePool {
+async fn db() -> repository::DbPool {
     let database_url = format!(
         "sqlite:file:acme_repository_test_{}?mode=memory&cache=shared",
         Uuid::new_v4()
