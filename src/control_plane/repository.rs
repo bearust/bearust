@@ -1,6 +1,7 @@
 use crate::control_plane::models::{
     AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AuditLogItem, AuditLogPage,
     AuditLogQuery, CertificateMetadata, ProxyHost, RoleDetail, RolePermissionScope, User,
+    WafAction, WafConfig, WafMode, WafRule,
 };
 use crate::control_plane::rbac::Role;
 use sqlx::{any::AnyPoolOptions, Row};
@@ -53,6 +54,7 @@ fn is_in_memory_sqlite(url: &str) -> bool {
 }
 pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
     sqlx::migrate!("./migrations").run(pool).await?;
+    seed_builtin_waf_rules(pool).await?;
 
     // Keep this outside the migration SQL so legacy databases that already
     // have the index can be upgraded safely on every supported backend.
@@ -171,6 +173,78 @@ fn generated_id() -> i64 {
     let bytes = *Uuid::new_v4().as_bytes();
     let mut raw = [0u8; 8]; raw.copy_from_slice(&bytes[..8]);
     (i64::from_be_bytes(raw) & i64::MAX).max(1)
+}
+
+fn waf_mode_value(mode: WafMode) -> &'static str {
+    match mode { WafMode::MonitorOnly => "monitor-only", WafMode::Block => "block" }
+}
+fn parse_waf_mode(value: &str) -> WafMode {
+    if value == "block" { WafMode::Block } else { WafMode::MonitorOnly }
+}
+fn waf_action_value(action: WafAction) -> &'static str {
+    match action { WafAction::Inherit => "inherit", WafAction::Allow => "allow", WafAction::Log => "log", WafAction::Block => "block" }
+}
+fn parse_waf_action(value: &str) -> WafAction {
+    match value { "allow" => WafAction::Allow, "log" => WafAction::Log, "block" => WafAction::Block, _ => WafAction::Inherit }
+}
+
+fn waf_rule_from_row(row: &sqlx::any::AnyRow) -> WafRule {
+    WafRule {
+        id: row.get("id"), name: row.get("name"), source: row.get("source"),
+        category: row.get("category"), severity: row.get("severity"),
+        enabled: row.get::<i64, _>("enabled") != 0,
+        action: parse_waf_action(&row.get::<String, _>("action")),
+        matcher_json: row.get("matcher_json"), created_at: row.get("created_at"), updated_at: row.get("updated_at"),
+    }
+}
+
+pub async fn get_waf_config(pool: &DbPool) -> Result<WafConfig, sqlx::Error> {
+    let row = sqlx::query("SELECT mode,updated_at FROM waf_config WHERE id=1").fetch_one(pool).await?;
+    Ok(WafConfig { mode: parse_waf_mode(&row.get::<String, _>("mode")), updated_at: row.get("updated_at") })
+}
+
+pub async fn update_waf_mode(pool: &DbPool, mode: WafMode) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("UPDATE waf_config SET mode=?,updated_at=? WHERE id=1").bind(waf_mode_value(mode)).bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?.rows_affected())
+}
+
+pub async fn list_waf_rules(pool: &DbPool) -> Result<Vec<WafRule>, sqlx::Error> {
+    let rows = sqlx::query("SELECT id,name,source,category,severity,enabled,action,matcher_json,created_at,updated_at FROM waf_rules ORDER BY id").fetch_all(pool).await?;
+    Ok(rows.iter().map(waf_rule_from_row).collect())
+}
+
+pub async fn insert_waf_rule(pool: &DbPool, rule: &WafRule) -> Result<i64, sqlx::Error> {
+    let id = if rule.id > 0 { rule.id } else { generated_id() };
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO waf_rules(id,name,source,category,severity,enabled,action,matcher_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .bind(id).bind(&rule.name).bind(&rule.source).bind(&rule.category).bind(&rule.severity)
+        .bind(rule.enabled as i64).bind(waf_action_value(rule.action)).bind(&rule.matcher_json).bind(&now).bind(&now).execute(pool).await?;
+    Ok(id)
+}
+
+pub async fn update_waf_rule(pool: &DbPool, id: i64, rule: &WafRule) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("UPDATE waf_rules SET name=?,category=?,severity=?,enabled=?,action=?,matcher_json=?,updated_at=? WHERE id=? AND source='custom'")
+        .bind(&rule.name).bind(&rule.category).bind(&rule.severity).bind(rule.enabled as i64).bind(waf_action_value(rule.action)).bind(&rule.matcher_json).bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(pool).await?.rows_affected())
+}
+
+pub async fn delete_waf_rule(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("DELETE FROM waf_rules WHERE id=? AND source='custom'").bind(id).execute(pool).await?.rows_affected())
+}
+
+pub async fn seed_builtin_waf_rules(pool: &DbPool) -> Result<(), sqlx::Error> {
+    let rules = [
+        ("builtin-sqli", "SQL injection", "sqli", "high", r#"{"field":"any","builtin":"sqli"}"#),
+        ("builtin-xss", "Cross-site scripting", "xss", "high", r#"{"field":"any","builtin":"xss"}"#),
+        ("builtin-path-traversal", "Path traversal", "path_traversal", "high", r#"{"field":"path","builtin":"path_traversal"}"#),
+        ("builtin-command-injection", "Command injection", "command_injection", "critical", r#"{"field":"any","builtin":"command_injection"}"#),
+    ];
+    for (key, name, category, severity, matcher) in rules {
+        if sqlx::query("SELECT 1 FROM waf_rules WHERE builtin_key=?").bind(key).fetch_optional(pool).await?.is_some() { continue; }
+        let id = generated_id();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO waf_rules(id,name,source,builtin_key,category,severity,enabled,action,matcher_json,created_at,updated_at) VALUES(?,?,?,?,?,?,1,'inherit',?,?,?)")
+            .bind(id).bind(name).bind("builtin").bind(key).bind(category).bind(severity).bind(matcher).bind(&now).bind(&now).execute(pool).await?;
+    }
+    Ok(())
 }
 
 fn is_duplicate_column(error: &sqlx::Error) -> bool {

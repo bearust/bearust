@@ -209,6 +209,42 @@ pub struct RolePermissionScope {
     pub proxy_host_ids: Vec<i64>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WafMode {
+    MonitorOnly,
+    Block,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WafAction {
+    Inherit,
+    Allow,
+    Log,
+    Block,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WafConfig {
+    pub mode: WafMode,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WafRule {
+    pub id: i64,
+    pub name: String,
+    pub source: String,
+    pub category: String,
+    pub severity: String,
+    pub enabled: bool,
+    pub action: WafAction,
+    pub matcher_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoleCreate {
