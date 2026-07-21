@@ -4,8 +4,7 @@ use crate::control_plane::models::{
 };
 use crate::control_plane::rbac::Role;
 use sqlx::{any::AnyPoolOptions, Row};
-use std::sync::{Once, OnceLock};
-use tokio::sync::Mutex;
+use std::sync::Once;
 use std::hash::{Hash, Hasher};
 use uuid::Uuid;
 
@@ -14,11 +13,6 @@ use uuid::Uuid;
 pub type DbPool = sqlx::AnyPool;
 
 static ANY_DRIVERS: Once = Once::new();
-static FIRST_ADMIN_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn first_admin_mutex() -> &'static Mutex<()> {
-    FIRST_ADMIN_MUTEX.get_or_init(|| Mutex::new(()))
-}
 
 /// Validate a database URL without including credentials in the resulting
 /// error.  Only the backends supported by the application are accepted.
@@ -326,9 +320,12 @@ pub async fn insert_initial_admin(
     email: &str,
     hash: &str,
 ) -> Result<Option<User>, sqlx::Error> {
-    let _guard = first_admin_mutex().lock().await;
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN").execute(&mut *conn).await?;
+    // Lock the single sentinel row. UPDATE obtains a row/write lock on
+    // PostgreSQL, MySQL, and SQLite without backend-specific syntax.
+    sqlx::query("UPDATE setup_lock SET id=id WHERE id=1")
+        .execute(&mut *conn).await?;
     let count = sqlx::query("SELECT COUNT(*) c FROM users")
         .fetch_one(&mut *conn).await?.get::<i64, _>("c");
     if count != 0 {

@@ -37,3 +37,7 @@ The external-database harness task should add PostgreSQL/MySQL matrix coverage; 
 - Removed SQLite `json_each(?)` from role-scope replacement; host IDs are now validated with one portable query per ID.
 - Added a process-wide async mutex around first-admin setup and a concurrent setup regression test. This serializes setup attempts consistently across supported backends while preserving the existing transaction and `Ok(None)` semantics.
 - Ported affected test pool signatures to `repository::DbPool` and replaced SQLite pool option types with `AnyPoolOptions`.
+
+## Final concurrency hardening
+
+Added migration `0003_setup_lock.sql` with an idempotent singleton sentinel row. First-admin setup now updates that row inside its transaction before checking the user count; the row update acquires the selected backend's write/row lock, preventing concurrent processes from both creating an administrator without backend-specific SQL. The process-local mutex was removed.
