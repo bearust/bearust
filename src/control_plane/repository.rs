@@ -5,6 +5,7 @@ use crate::control_plane::models::{
 use crate::control_plane::rbac::Role;
 use sqlx::{any::AnyPoolOptions, Row, SqlitePool};
 use std::sync::Once;
+use std::hash::{Hash, Hasher};
 use uuid::Uuid;
 
 /// Database pool type used by the control plane once all repositories have
@@ -129,9 +130,9 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
 }
 
 fn deterministic_id(value: &str) -> i64 {
-    let bytes = *Uuid::new_v5(&Uuid::NAMESPACE_OID, value.as_bytes()).as_bytes();
-    let mut raw = [0u8; 8]; raw.copy_from_slice(&bytes[..8]);
-    (i64::from_be_bytes(raw) & i64::MAX).max(1)
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    ((hasher.finish() as i64) & i64::MAX).max(1)
 }
 
 fn generated_id() -> i64 {
