@@ -46,6 +46,52 @@ pub struct Evaluation {
     pub severity: Option<String>,
 }
 
+/// The only WAF fields safe to place in audit logs or realtime telemetry.
+/// Values are already bounded and contain identifiers rather than request
+/// material (the evaluator diagnostic is deliberately excluded).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RedactedTelemetry {
+    pub category: String,
+    pub score: u16,
+    pub severity: String,
+    pub reason_ids: String,
+}
+
+fn telemetry_identifier(value: &str) -> String {
+    let mut output = String::with_capacity(value.len().min(32));
+    for byte in value.bytes() {
+        if output.len() >= 32 {
+            break;
+        }
+        if byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' {
+            output.push(byte.to_ascii_lowercase() as char);
+        } else if !output.ends_with('_') {
+            output.push('_');
+        }
+    }
+    output.trim_matches('_').to_owned()
+}
+
+/// Convert an evaluation into bounded metadata suitable for audit/event
+/// serialization.  This intentionally omits `diagnostic`, matched rule ids,
+/// field values, headers, and bodies.
+pub fn redacted_telemetry(evaluation: &Evaluation) -> RedactedTelemetry {
+    let mut identifiers = Vec::new();
+    for category in evaluation.categories.iter().take(MAX_SEMANTIC_SIGNALS) {
+        let identifier = telemetry_identifier(category);
+        if !identifier.is_empty() && !identifiers.contains(&identifier) {
+            identifiers.push(identifier);
+        }
+    }
+    let categories = identifiers.join(",");
+    RedactedTelemetry {
+        category: categories.clone(),
+        score: evaluation.semantic_score,
+        severity: evaluation.severity.clone().unwrap_or_else(|| "none".into()),
+        reason_ids: categories,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SemanticSignal {
     pub category: String,

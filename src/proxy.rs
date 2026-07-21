@@ -4,7 +4,7 @@ use crate::{
     observability::{append_forwarded_for, classify_error, log_request, validated_request_id},
     router::{normalize_host, ResolvedRoute},
     runtime::{RuntimeSnapshot, RuntimeStore},
-    waf::{evaluate, InspectionContext, WafDecision},
+    waf::{evaluate, Evaluation, InspectionContext, WafDecision},
     waf_store::WafStore,
 };
 use async_trait::async_trait;
@@ -26,6 +26,11 @@ pub struct RequestContext {
     pub completion_logged: bool,
     pub waf_body: Vec<u8>,
     pub waf_blocked: bool,
+    /// The most recent bounded WAF result.  Keeping the result in the request
+    /// context lets the body callback enrich the initial header-only check
+    /// without re-reading or retaining the request payload.
+    pub waf_evaluation: Option<Evaluation>,
+    pub waf_telemetry_emitted: bool,
 }
 
 impl Default for RequestContext {
@@ -42,6 +47,8 @@ impl Default for RequestContext {
             completion_logged: false,
             waf_body: Vec::new(),
             waf_blocked: false,
+            waf_evaluation: None,
+            waf_telemetry_emitted: false,
         }
     }
 }
@@ -75,6 +82,27 @@ pub fn http_service(
     conf: &Arc<pingora_core::server::configuration::ServerConf>,
 ) -> pingora_core::services::listening::Service<pingora_proxy::HttpProxy<BeaRustProxy, ()>> {
     pingora_proxy::http_proxy_service(conf, proxy)
+}
+
+/// Emit only bounded, redacted WAF metadata.  In particular, do not use the
+/// evaluator diagnostic here: it is intentionally useful for local debugging
+/// but is not an audit payload contract.  Categories are normalized into
+/// identifiers and capped so custom rule names cannot become an unbounded log
+/// injection vector.
+fn emit_waf_telemetry(request_id: &str, evaluation: &Evaluation) {
+    if evaluation.semantic_score == 0 && evaluation.matched_rule_ids.is_empty() {
+        return;
+    }
+    let details = crate::waf::redacted_telemetry(evaluation);
+    tracing::info!(
+        event = "waf_detection",
+        request_id,
+        category = %details.category,
+        score = details.score,
+        severity = %details.severity,
+        reason_ids = %details.reason_ids,
+        decision = ?evaluation.decision,
+    );
 }
 
 #[async_trait]
@@ -112,6 +140,13 @@ impl ProxyHttp for BeaRustProxy {
                 body: Vec::new(),
             };
             let evaluation = evaluate(&waf.snapshot(), &context);
+            ctx.waf_blocked = evaluation.decision == WafDecision::Block;
+            ctx.waf_evaluation = Some(evaluation.clone());
+            if !ctx.waf_telemetry_emitted {
+                emit_waf_telemetry(&ctx.request_id, &evaluation);
+                ctx.waf_telemetry_emitted = evaluation.semantic_score > 0
+                    || !evaluation.matched_rule_ids.is_empty();
+            }
             if evaluation.decision == WafDecision::Block {
                 session.respond_error_with_body(403, Bytes::from_static(b"Request blocked")).await?;
                 ctx.completion_logged = true;
@@ -217,7 +252,14 @@ impl ProxyHttp for BeaRustProxy {
             if let Some(waf) = &self.waf {
                 let header_values = session.req_header().headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_owned(), value.to_owned()))).collect();
                 let context = InspectionContext { method: session.req_header().method.as_str().to_owned(), path: session.req_header().uri.path().to_owned(), query: session.req_header().uri.query().unwrap_or_default().to_owned(), headers: header_values, body: ctx.waf_body.clone() };
-                ctx.waf_blocked = evaluate(&waf.snapshot(), &context).decision == WafDecision::Block;
+                let evaluation = evaluate(&waf.snapshot(), &context);
+                ctx.waf_blocked = evaluation.decision == WafDecision::Block;
+                ctx.waf_evaluation = Some(evaluation.clone());
+                if !ctx.waf_telemetry_emitted {
+                    emit_waf_telemetry(&ctx.request_id, &evaluation);
+                    ctx.waf_telemetry_emitted = evaluation.semantic_score > 0
+                        || !evaluation.matched_rule_ids.is_empty();
+                }
             }
         }
         Ok(())

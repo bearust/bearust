@@ -1,4 +1,4 @@
-use bearust::{control_plane::{models::{WafAction, WafMode, WafRule}, repository}, waf::{evaluate, InspectionContext, WafDecision}, waf_store::WafStore};
+use bearust::{control_plane::{models::{WafAction, WafMode, WafRule}, repository}, waf::{evaluate, redacted_telemetry, InspectionContext, WafDecision}, waf_store::WafStore};
 
 #[tokio::test]
 async fn waf_store_loads_monitor_mode_and_reload_publishes_block_snapshot() {
@@ -24,3 +24,34 @@ async fn invalid_custom_rule_does_not_replace_last_valid_snapshot() {
     assert_eq!(store.snapshot().rules.len(), before.rules.len());
 }
 
+#[test]
+fn waf_telemetry_contains_only_bounded_redacted_identifiers() {
+    let snapshot = bearust::waf::compile_snapshot(
+        bearust::control_plane::models::WafConfig {
+            mode: WafMode::MonitorOnly,
+            updated_at: String::new(),
+        },
+        Vec::new(),
+    )
+    .unwrap();
+    let body = "union select password from users; credential=super-secret-body";
+    let evaluation = evaluate(
+        &snapshot,
+        &InspectionContext {
+            method: "POST".into(),
+            path: "/login".into(),
+            query: "".into(),
+            headers: vec![("authorization".into(), "Bearer top-secret-token".into())],
+            body: body.as_bytes().to_vec(),
+        },
+    );
+    let details = redacted_telemetry(&evaluation);
+    assert_eq!(details.category, "sqli");
+    assert_eq!(details.reason_ids, "sqli");
+    assert_eq!(details.score, 6);
+    assert_eq!(details.severity, "medium");
+    let serialized = format!("{}:{}:{}:{}", details.category, details.score, details.severity, details.reason_ids);
+    assert!(!serialized.contains("super-secret-body"));
+    assert!(!serialized.contains("top-secret-token"));
+    assert!(!serialized.contains("authorization"));
+}
