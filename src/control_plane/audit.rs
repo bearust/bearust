@@ -1,10 +1,13 @@
 use sqlx::SqlitePool;
+use uuid::Uuid;
 use super::AppState;
 
 /// Writes a deliberately small, redacted audit record. Callers must pass only
 /// identifiers and safe metadata; secrets and request bodies are never stored.
 pub async fn record(pool: &SqlitePool, user_id: Option<i64>, event: &str, details: &str) {
-    let _ = sqlx::query("INSERT INTO audit_logs(user_id,event,details,created_at) VALUES(?,?,?,?)")
+    let id = (Uuid::new_v4().as_u128() as i64).abs().max(1);
+    let _ = sqlx::query("INSERT INTO audit_logs(id,user_id,event,details,created_at) VALUES(?,?,?,?,?)")
+        .bind(id)
         .bind(user_id)
         .bind(event)
         .bind(details)

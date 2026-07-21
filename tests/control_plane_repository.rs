@@ -171,6 +171,12 @@ async fn migrations_record_order_and_seed_exact_permissions() {
         .await
         .unwrap();
     assert_eq!(role_count, 3);
+    let global_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM role_permissions WHERE scope_type='' AND scope_id=0")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(global_rows, 18, "built-in roles must retain every expected global grant");
+    let nullable_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM role_permissions WHERE scope_type IS NULL OR scope_id IS NULL")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(nullable_rows, 0, "global scopes use the portable non-null sentinel");
 }
 
 #[tokio::test]

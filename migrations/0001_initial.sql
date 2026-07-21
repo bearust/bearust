@@ -1,5 +1,6 @@
--- Portable control-plane schema.  Identity generation is intentionally left to
--- the application/database defaults so the same DDL can be used by SQLx Any.
+-- Portable control-plane schema. IDs are supplied by the application. This is
+-- required because INTEGER PRIMARY KEY has no implicit generator on PostgreSQL
+-- or MySQL (while remaining compatible with SQLite legacy inserts).
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     email VARCHAR(320) NOT NULL UNIQUE,
@@ -74,8 +75,8 @@ CREATE TABLE IF NOT EXISTS permissions (
 CREATE TABLE IF NOT EXISTS role_permissions (
     role_id INTEGER NOT NULL,
     permission_id INTEGER NOT NULL,
-    scope_type VARCHAR(64),
-    scope_id INTEGER,
+    scope_type VARCHAR(64) NOT NULL DEFAULT '',
+    scope_id INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (role_id, permission_id, scope_type, scope_id),
     FOREIGN KEY(role_id) REFERENCES roles(id) ON DELETE CASCADE,
     FOREIGN KEY(permission_id) REFERENCES permissions(id) ON DELETE CASCADE

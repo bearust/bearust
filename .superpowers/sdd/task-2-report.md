@@ -21,3 +21,26 @@ Implemented and committed as `0ee8f2b` (`feat: add portable control-plane migrat
 - Task 1/Task 3 must finish converting repository APIs and tests from `SqlitePool` to `DbPool`; this task only changes the migration entry point and seed logic.
 - The additive compatibility migration is a deliberate no-op because columns are present in the initial portable schema. This avoids non-portable conditional `ALTER TABLE` behavior while upgrading legacy databases through the initial migration.
 - `INTEGER PRIMARY KEY` is used as requested for portable DDL; verify identity/auto-generation semantics against PostgreSQL and MySQL integration containers in the external-database test task.
+
+## Review blocker fixes
+
+- IDs are now explicitly supplied by the application for repository-created users,
+  roles, sessions, proxy hosts, and certificates (UUID-derived positive `i64`);
+  deterministic IDs are used for built-in permissions and roles. This avoids
+  relying on SQLite's implicit `INTEGER PRIMARY KEY` allocator, which does not
+  exist for PostgreSQL/MySQL.
+- `role_permissions` now uses the portable non-null global sentinel
+  `scope_type=''` and `scope_id=0`; migration startup normalizes nullable rows
+  left by legacy SQLite schemas and seed checks use the sentinel.
+- `repository::migrate` performs backend-tolerant additive `ALTER TABLE` checks
+  for legacy `users.disabled` and `acme_certificates.secret_ref`, ignoring only
+  duplicate-column errors and preserving all existing data.
+- Added assertions that all 18 built-in global grants exist, are idempotent, and
+  contain no nullable scope values.
+
+## Review-fix verification
+
+- `git diff --check`: passed.
+- Cargo tests/checks: unavailable (`cargo: command not found`); run the focused
+  repository migration tests with the project's Rust 1.88 builder and external
+  PostgreSQL/MySQL containers before merging.
