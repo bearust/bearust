@@ -24,6 +24,8 @@ pub struct RequestContext {
     pub failover_attempted: bool,
     pub excluded_backend: Option<BackendId>,
     pub completion_logged: bool,
+    pub waf_body: Vec<u8>,
+    pub waf_blocked: bool,
 }
 
 impl Default for RequestContext {
@@ -38,6 +40,8 @@ impl Default for RequestContext {
             failover_attempted: false,
             excluded_backend: None,
             completion_logged: false,
+            waf_body: Vec::new(),
+            waf_blocked: false,
         }
     }
 }
@@ -177,6 +181,9 @@ impl ProxyHttp for BeaRustProxy {
         request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        if ctx.waf_blocked {
+            return Err(pingora_core::Error::explain(ErrorType::HTTPStatus(403), "request blocked by waf"));
+        }
         if let Some(host) = session
             .req_header()
             .headers
@@ -191,6 +198,28 @@ impl ProxyHttp for BeaRustProxy {
         );
         let _ = request.insert_header("X-Request-Id", ctx.request_id.clone());
         ctx.upstream_started = true;
+        Ok(())
+    }
+
+    async fn request_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        if self.waf.is_none() { return Ok(()); }
+        if let Some(chunk) = body.as_ref() {
+            let remaining = crate::waf::MAX_INSPECTION_BODY_BYTES.saturating_sub(ctx.waf_body.len());
+            ctx.waf_body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        }
+        if end_of_stream {
+            if let Some(waf) = &self.waf {
+                let header_values = session.req_header().headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_owned(), value.to_owned()))).collect();
+                let context = InspectionContext { method: session.req_header().method.as_str().to_owned(), path: session.req_header().uri.path().to_owned(), query: session.req_header().uri.query().unwrap_or_default().to_owned(), headers: header_values, body: ctx.waf_body.clone() };
+                ctx.waf_blocked = evaluate(&waf.snapshot(), &context).decision == WafDecision::Block;
+            }
+        }
         Ok(())
     }
 
