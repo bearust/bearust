@@ -929,7 +929,12 @@ pub async fn delete_host_and_scopes(pool: &SqlitePool, id: i64) -> Result<u64, s
     }.await;
     match result {
         Ok(changed) => { sqlx::query("COMMIT").execute(&mut *conn).await?; Ok(changed) }
-        Err(error) => { let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await; Err(error) }
+        Err(error) => {
+            if let Err(rollback_error) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+                eprintln!("proxy host deletion rollback failed: {rollback_error}");
+            }
+            Err(error)
+        }
     }
 }
 
