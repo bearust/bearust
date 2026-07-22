@@ -15,6 +15,55 @@ pub struct Config {
     pub health: HealthConfig,
     pub upstream_pools: Vec<PoolConfig>,
     pub routes: Vec<RouteConfig>,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub action: RateLimitAction,
+    #[serde(default = "default_rate_capacity")]
+    pub capacity: u64,
+    #[serde(default = "default_rate_refill")]
+    pub refill_per_second: f64,
+    #[serde(default)]
+    pub key_scope: RateLimitKeyScope,
+}
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            action: RateLimitAction::Monitor,
+            capacity: default_rate_capacity(),
+            refill_per_second: default_rate_refill(),
+            key_scope: RateLimitKeyScope::ProxyHostIp,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitAction {
+    Monitor,
+    Block,
+}
+impl Default for RateLimitAction {
+    fn default() -> Self {
+        Self::Monitor
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitKeyScope {
+    ProxyHostIp,
+}
+impl Default for RateLimitKeyScope {
+    fn default() -> Self {
+        Self::ProxyHostIp
+    }
 }
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -32,6 +81,9 @@ pub struct ServerConfig {
     pub pid_file: PathBuf,
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+    /// CIDRs whose forwarding headers may be used for client identity.
+    #[serde(default)]
+    pub trusted_proxy_cidrs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -136,6 +188,12 @@ fn default_connect_timeout() -> u64 {
 fn default_request_timeout() -> u64 {
     30
 }
+fn default_rate_capacity() -> u64 {
+    100
+}
+fn default_rate_refill() -> f64 {
+    10.0
+}
 
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
     let input = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
@@ -180,6 +238,17 @@ impl Config {
         }
         if self.routes.is_empty() {
             return err("routes", "must not be empty");
+        }
+        if !(1..=1_000_000).contains(&self.rate_limit.capacity) {
+            return err("rate_limit.capacity", "must be between 1 and 1000000");
+        }
+        if !self.rate_limit.refill_per_second.is_finite()
+            || !(0.001..=100_000.0).contains(&self.rate_limit.refill_per_second)
+        {
+            return err(
+                "rate_limit.refill_per_second",
+                "must be between 0.001 and 100000",
+            );
         }
         let mut pools = HashSet::new();
         for (i, p) in self.upstream_pools.iter().enumerate() {

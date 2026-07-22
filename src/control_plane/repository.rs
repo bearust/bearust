@@ -1,8 +1,9 @@
 use crate::control_plane::models::{
     AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AuditLogItem, AuditLogPage,
     AuditLogQuery, CertificateMetadata, ProxyHost, RoleDetail, RolePermissionScope, User,
-    WafAction, WafConfig, WafMode, WafRule,
+    RateLimitConfig, WafAction, WafConfig, WafMode, WafRule,
 };
+use crate::rate_limit::{RateLimitAction, RateLimitKeyScope, RateLimitPolicy};
 use crate::bot_protection::{BotConfig, BotMode, BotRule, MAX_FIELD_BYTES, MAX_RULES, MAX_TTL_SECONDS, MAX_TRUSTED_RULES};
 use crate::control_plane::rbac::Role;
 use sqlx::{any::AnyPoolOptions, Row};
@@ -189,6 +190,12 @@ fn waf_action_value(action: WafAction) -> &'static str {
 fn parse_waf_action(value: &str) -> WafAction {
     match value { "allow" => WafAction::Allow, "log" => WafAction::Log, "block" => WafAction::Block, _ => WafAction::Inherit }
 }
+fn rate_limit_action_value(a: RateLimitAction) -> &'static str { if matches!(a, RateLimitAction::Block) { "block" } else { "monitor" } }
+fn parse_rate_limit_action(v: &str) -> RateLimitAction { if v == "block" { RateLimitAction::Block } else { RateLimitAction::Monitor } }
+fn parse_rate_limit_scope(v: &str) -> Option<RateLimitKeyScope> { (v == "proxy_host_ip").then_some(RateLimitKeyScope::ProxyHostIp) }
+fn validate_rate_limit_config(c: &RateLimitConfig) -> Result<(), sqlx::Error> { RateLimitPolicy { enabled:c.enabled, action:c.action, capacity:c.capacity, refill_per_second:c.refill_per_second, key_scope:c.key_scope }.validate().map_err(|e| sqlx::Error::Protocol(e.to_string().into())) }
+pub async fn get_rate_limit_config(pool: &DbPool) -> Result<RateLimitConfig, sqlx::Error> { let row=sqlx::query("SELECT enabled,action,capacity,refill_per_second,key_scope,updated_at FROM rate_limit_config WHERE id=1").fetch_one(pool).await?; let scope=parse_rate_limit_scope(&row.get::<String,_>("key_scope")).ok_or_else(||sqlx::Error::Protocol("invalid rate limit key scope".into()))?; let c=RateLimitConfig{enabled:row.get::<i64,_>("enabled")!=0,action:parse_rate_limit_action(&row.get::<String,_>("action")),capacity:row.get::<i64,_>("capacity") as u32,refill_per_second:row.get::<f64,_>("refill_per_second"),key_scope:scope,updated_at:row.get("updated_at")}; validate_rate_limit_config(&c)?; Ok(c) }
+pub async fn update_rate_limit_config(pool: &DbPool, c: &RateLimitConfig) -> Result<u64, sqlx::Error> { validate_rate_limit_config(c)?; Ok(sqlx::query("UPDATE rate_limit_config SET enabled=?,action=?,capacity=?,refill_per_second=?,key_scope=?,updated_at=? WHERE id=1").bind(c.enabled as i64).bind(rate_limit_action_value(c.action)).bind(c.capacity as i64).bind(c.refill_per_second).bind("proxy_host_ip").bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?.rows_affected()) }
 
 fn bot_mode_value(mode: BotMode) -> &'static str { match mode { BotMode::Monitor => "monitor", BotMode::Challenge => "challenge", BotMode::Block => "block" } }
 fn parse_bot_mode(value: &str) -> Result<BotMode, sqlx::Error> { match value { "monitor" => Ok(BotMode::Monitor), "challenge" => Ok(BotMode::Challenge), "block" => Ok(BotMode::Block), _ => Err(sqlx::Error::Protocol("invalid bot mode".into())) } }

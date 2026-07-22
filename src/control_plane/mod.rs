@@ -14,6 +14,7 @@ use crate::waf_store::WafStore;
 use crate::bot_store::BotStore;
 use crate::bot_challenge::{ChallengeService, unix_now};
 use crate::bot_protection::{BotConfig, BotMode, BotRule, MAX_FIELD_BYTES, MAX_RULES, MAX_TRUSTED_RULES};
+use crate::rate_limit_store::RateLimiterStore;
 use async_trait::async_trait;
 use axum::{
     body::Bytes,
@@ -52,6 +53,9 @@ pub struct AppState {
     pub waf: Arc<WafStore>,
     pub bot: Arc<BotStore>,
     pub challenges: Arc<ChallengeService>,
+    /// Shared live limiter state used by both control-plane updates and the
+    /// Pingora proxy worker.
+    pub rate_limiter: Arc<RateLimiterStore>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +75,9 @@ struct BotTomlCrawler { user_agent: String, domain: String, #[serde(default = "d
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WafConfigPatch { mode: WafMode }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RateLimitConfigPatch { enabled: Option<bool>, action: Option<crate::rate_limit::RateLimitAction>, capacity: Option<u32>, refill_per_second: Option<f64>, key_scope: Option<crate::rate_limit::RateLimitKeyScope> }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -253,6 +260,7 @@ pub async fn build_state(
     let secrets = SecretStore::open(&certificate_root.join("secrets"))
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     let challenges = Arc::new(ChallengeService::new(&secrets).map_err(|e| sqlx::Error::Protocol(e.to_string()))?);
+    let rate_limiter = Arc::new(RateLimiterStore::new(100_000, std::time::Duration::from_secs(900)));
     let reloader: Arc<dyn ConfigReloader> = Arc::new(NoopReloader);
     // The production control-plane path uses the real ACME client.  The
     // client is lazy with respect to network calls, so startup remains
@@ -288,6 +296,7 @@ pub async fn build_state(
         waf,
         bot,
         challenges,
+        rate_limiter,
     })
 }
 
@@ -329,6 +338,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bot/challenge/verify", post(verify_bot_challenge).layer(DefaultBodyLimit::max(16 * 1024)))
         .route("/api/events", get(events))
         .route("/api/waf/config", get(get_waf_config).patch(update_waf_config))
+        .route("/api/rate-limit/config", get(get_rate_limit_config).patch(update_rate_limit_config))
         .route("/api/waf/rules", get(list_waf_rules).post(create_waf_rule))
         .route("/api/waf/rules/{id}", axum::routing::patch(update_waf_rule).delete(delete_waf_rule))
         .route("/api/waf/rules/import", post(import_waf_rules))
@@ -449,6 +459,9 @@ async fn get_waf_config(State(s): State<AppState>, h: HeaderMap) -> impl IntoRes
     if let Err(response) = require_role_admin(&s, &h).await { return response; }
     match repository::get_waf_config(&s.db).await { Ok(config) => Json(config).into_response(), Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") }
 }
+async fn require_rate_limit_admin(s: &AppState, h: &HeaderMap) -> Result<User, Response> { let user=current(s,h).await.map_err(|status|user_error(status,"unauthorized","Authentication required"))?; if !authorize(&s.db,&user,Permission::SystemSettingsManage,ResourceContext::GLOBAL).await.unwrap_or(false) { audit::record_state(s,Some(user.id),"rate_limit_mutation_denied","authorization").await; return Err(user_error(StatusCode::FORBIDDEN,"forbidden","Administrator access required")); } Ok(user) }
+async fn get_rate_limit_config(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse { if let Err(r)=require_rate_limit_admin(&s,&h).await{return r;} match repository::get_rate_limit_config(&s.db).await {Ok(c)=>Json(c).into_response(),Err(_)=>user_error(StatusCode::INTERNAL_SERVER_ERROR,"database_error","Database unavailable")} }
+async fn update_rate_limit_config(State(s): State<AppState>, h: HeaderMap, input: Result<Json<RateLimitConfigPatch>, JsonRejection>) -> impl IntoResponse { let actor=match require_rate_limit_admin(&s,&h).await{Ok(u)=>u,Err(r)=>return r}; let Json(i)=match input{Ok(v)=>v,Err(_)=>return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid rate-limit configuration")}; let mut c=match repository::get_rate_limit_config(&s.db).await{Ok(v)=>v,Err(_)=>return user_error(StatusCode::INTERNAL_SERVER_ERROR,"database_error","Database unavailable")}; if let Some(v)=i.enabled{c.enabled=v;} if let Some(v)=i.action{c.action=v;} if let Some(v)=i.capacity{c.capacity=v;} if let Some(v)=i.refill_per_second{c.refill_per_second=v;} if let Some(v)=i.key_scope{c.key_scope=v;} if repository::update_rate_limit_config(&s.db,&c).await.is_err(){return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid rate-limit configuration");} s.rate_limiter.set_policy(crate::rate_limit::RateLimitPolicy { enabled:c.enabled, action:c.action, capacity:c.capacity, refill_per_second:c.refill_per_second, key_scope:c.key_scope }); audit::record_state(&s,Some(actor.id),"rate_limit_config_updated","policy_changed").await; s.realtime.publish("rate_limit.changed"); match repository::get_rate_limit_config(&s.db).await{Ok(v)=>Json(v).into_response(),Err(_)=>user_error(StatusCode::INTERNAL_SERVER_ERROR,"database_error","Database unavailable")} }
 
 async fn update_waf_config(State(s): State<AppState>, h: HeaderMap, input: Result<Json<WafConfigPatch>, JsonRejection>) -> impl IntoResponse {
     let actor = match require_role_admin(&s, &h).await { Ok(user) => user, Err(response) => return response };

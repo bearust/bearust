@@ -9,6 +9,7 @@ export type RealtimeLoaders = Partial<{
   auditLogs: () => unknown | Promise<unknown>;
   sessions: () => unknown | Promise<unknown>;
   waf: () => unknown | Promise<unknown>;
+  rateLimit: () => unknown | Promise<unknown>;
 }>;
 
 const EVENT_LOADERS: Record<string, keyof RealtimeLoaders> = {
@@ -19,6 +20,7 @@ const EVENT_LOADERS: Record<string, keyof RealtimeLoaders> = {
   audit: "auditLogs",
   "sessions.changed": "sessions",
   "waf.changed": "waf",
+  "rate_limit.changed": "rateLimit",
 };
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;

@@ -231,6 +231,15 @@ pub struct WafConfig {
     pub mode: WafMode,
     pub updated_at: String,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RateLimitConfig {
+    pub enabled: bool,
+    pub action: crate::rate_limit::RateLimitAction,
+    pub capacity: u32,
+    pub refill_per_second: f64,
+    pub key_scope: crate::rate_limit::RateLimitKeyScope,
+    pub updated_at: String,
+}
 
 /// Persisted bot policy views used by control-plane handlers. Secret material
 /// is intentionally omitted from the serializable view.

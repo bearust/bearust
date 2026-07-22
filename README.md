@@ -135,3 +135,15 @@ action = "block"
 field = "query"
 pattern = "evil"
 ```
+
+Rate limiting is disabled and monitor-only by default. Administrators may
+configure the bounded token bucket in the main TOML file or dashboard:
+
+```toml
+[rate_limit]
+enabled = false
+action = "monitor"
+capacity = 100
+refill_per_second = 10.0
+key_scope = "proxy_host_ip"
+```

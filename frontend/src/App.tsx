@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useEffect, useRef, useState, type MutableRefObject, type FormEvent } from "react";
 import {
   api,
   AcmeRequest,
@@ -16,6 +16,8 @@ import {
   BotMode,
   TrustedCrawler,
   BotChallenge,
+  RateLimitConfig,
+  RateLimitAction,
 } from "./api";
 import { useRealtimeUpdates, RealtimeStatus } from "./realtime";
 import { Alert, Button, Card, Field, SelectField, TextareaField, ThemeSelect } from "./ui";
@@ -638,6 +640,17 @@ export function BotProtectionSection({ user, refreshToken = 0 }: { user: User; r
   return <Card data-testid="bot-protection-section"><h2 className="mb-2 text-xl font-semibold">Bot protection</h2><p className="mb-4 text-sm text-muted">Monitor-only is the safe default. No keys or challenge tokens are displayed here.</p>{error && <Alert variant="danger">{error}</Alert>}{saved && <Alert variant="success">Bot protection policy saved.</Alert>}<form className="grid gap-4 sm:grid-cols-3" onSubmit={(e) => { e.preventDefault(); if (!config || !threshold || !ttl) return; void run(() => api.updateBotConfig({ mode, threshold: Number(threshold), ttl_seconds: Number(ttl) })); }}><SelectField label="Mode" value={mode} onChange={(e) => setMode(e.target.value as BotMode)} disabled={busy}><option value="monitor">Monitor-only</option><option value="challenge">Challenge</option><option value="block">Block</option></SelectField><Field label="Risk threshold" type="number" min="0" max="100" value={threshold} onChange={(e) => setThreshold(e.target.value)} disabled={busy} required /><Field label="Challenge TTL (seconds)" type="number" min="30" max="86400" value={ttl} onChange={(e) => setTtl(e.target.value)} disabled={busy} required /><Button type="submit" disabled={busy || !threshold || !ttl}>Save policy</Button></form><div className="mt-6"><h3 className="mb-3 font-semibold">Trusted crawlers</h3><div className="overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>User agent</th><th>Domain</th><th>Status</th><th /></tr></thead><tbody>{crawlers.map((crawler) => <tr key={crawler.id}><td>{crawler.trusted_user_agent ?? "—"}</td><td>{crawler.trusted_domain ?? "—"}</td><td>{crawler.enabled ? "Enabled" : "Disabled"}</td><td><Button variant="secondary" disabled={busy} onClick={() => void run(() => api.updateTrustedCrawler(crawler.id, { user_agent: crawler.trusted_user_agent ?? "", domain: crawler.trusted_domain ?? "", enabled: !crawler.enabled }))}>{crawler.enabled ? "Disable" : "Enable"}</Button> <Button variant="danger" disabled={busy} onClick={() => void run(() => api.deleteTrustedCrawler(crawler.id))}>Delete</Button></td></tr>)}</tbody></table></div><form className="mt-4 grid gap-4 sm:grid-cols-2" onSubmit={(e) => { e.preventDefault(); if (!validCrawler) return; void run(async () => { await api.createTrustedCrawler({ user_agent: ua.trim(), domain: domain.trim(), enabled: true }); setUa(""); setDomain(""); }); }}><Field label="Crawler user agent" value={ua} onChange={(e) => setUa(e.target.value)} maxLength={256} required /><Field label="Crawler domain" value={domain} onChange={(e) => setDomain(e.target.value)} maxLength={253} placeholder="example.com" required /><Button type="submit" disabled={busy || !validCrawler}>Add trusted crawler</Button></form></div></Card>;
 }
 
+export function RateLimitSection({ user, refreshToken = 0 }: { user: User; refreshToken?: number }) {
+  const [config, setConfig] = useState<RateLimitConfig | null>(null);
+  const [error, setError] = useState(""), [busy, setBusy] = useState(false), [saved, setSaved] = useState(false);
+  const [enabled, setEnabled] = useState(false), [action, setAction] = useState<RateLimitAction>("monitor"), [capacity, setCapacity] = useState("100"), [refill, setRefill] = useState("10");
+  const admin = user.role === "admin";
+  const reload = async () => { try { const next = await api.rateLimitConfig(); setConfig(next); setEnabled(next.enabled); setAction(next.action); setCapacity(String(next.capacity)); setRefill(String(next.refill_per_second)); setError(""); } catch (e) { setError("Unable to load rate-limit policy."); } };
+  useEffect(() => { void reload(); }, [refreshToken]);
+  const save = async (event: FormEvent) => { event.preventDefault(); if (!admin) return; const c = Number(capacity), r = Number(refill); if (!Number.isInteger(c) || c < 1 || c > 1_000_000 || !Number.isFinite(r) || r < 0.001 || r > 100_000) { setError("Capacity must be 1–1,000,000 and refill 0.001–100,000 per second."); return; } setBusy(true); setError(""); setSaved(false); try { const next = await api.updateRateLimitConfig({ enabled, action, capacity: c, refill_per_second: r, key_scope: "proxy_host_ip" }); setConfig(next); setSaved(true); } catch { setError("Unable to save rate-limit policy."); } finally { setBusy(false); } };
+  return <Card data-testid="rate-limit-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">Rate limiting</h2><span className="rounded-full border border-border px-3 py-1 text-sm">{config?.action === "block" ? "Block" : "Monitor-only"}</span></div><p className="mt-2 text-sm text-muted">Limits each proxy host by client IP. Monitor-only is the safe default; no raw client identifiers are shown.</p>{error && <Alert variant="danger">{error}</Alert>}{saved && <Alert variant="success">Rate-limit policy saved.</Alert>}<form className="mt-4 grid gap-4 sm:grid-cols-2" onSubmit={(e) => void save(e)}><label className="flex min-h-11 items-center gap-3 text-sm font-medium"><input aria-label="Enable rate limiting" type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} disabled={!admin || busy} />Enable rate limiting</label><SelectField label="Action" value={action} onChange={(e) => setAction(e.target.value as RateLimitAction)} disabled={!admin || busy}><option value="monitor">Monitor-only</option><option value="block">Block limited requests</option></SelectField><Field label="Burst capacity" type="number" min="1" max="1000000" value={capacity} onChange={(e) => setCapacity(e.target.value)} disabled={!admin || busy} required /><Field label="Refill per second" type="number" min="0.001" max="100000" step="0.001" value={refill} onChange={(e) => setRefill(e.target.value)} disabled={!admin || busy} required /><SelectField label="Key scope" value="proxy_host_ip" disabled><option value="proxy_host_ip">Proxy host + client IP</option></SelectField>{admin && <Button type="submit" disabled={busy}>{busy ? "Saving…" : "Save policy"}</Button>}</form></Card>;
+}
+
 export function BotChallengePage({ fingerprint = serverChallengeFingerprint(), onComplete }: { fingerprint?: string; onComplete?: () => void }) {
   const [challenge, setChallenge] = useState<BotChallenge | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState(""), [complete, setComplete] = useState(false);
   const requestChallenge = async () => { if (!fingerprint) { setError("Challenge context unavailable. Please return to the protected page and try again."); return; } setBusy(true); setError(""); setComplete(false); try { setChallenge(await api.botChallenge(fingerprint)); } catch { setError("Challenge unavailable. Please try again."); } finally { setBusy(false); } };
@@ -713,6 +726,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
     auditLogs: () => auditReloadRef.current?.(),
     sessions: loadSession,
     waf: () => setWafRefresh(value => value + 1),
+    rateLimit: () => setWafRefresh(value => value + 1),
   });
   const refresh = async () => {
     try {
@@ -754,6 +768,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
       <CertificateTable user={user} onChanged={() => void refresh()} />
       <WafSection user={user} refreshToken={wafRefresh} />
       <BotProtectionSection user={user} refreshToken={wafRefresh} />
+      <RateLimitSection user={user} refreshToken={wafRefresh} />
       {canWrite && (
         <AcmeWizard canWrite={canWrite} onIssued={() => void refresh()} />
       )}

@@ -1,47 +1,27 @@
-# Phase 7B Task 1 report
+# Task 1 Report — Pure policy and token-bucket engine
 
 ## Status
 
-Complete. Added the bounded bot-protection domain model, immutable snapshot
-compiler, deterministic evaluator, keyed request fingerprint, and integration
-module export. Follow-up hardening addressed trusted-crawler bypasses,
-post-filter header bounds, score aggregation, empty keys, and UTF-8 path
-canonicalization.
+Complete. Commit: `7365f2f` (`feat: add bounded rate limit engine`).
 
-## Changes
+## Implementation
 
-- Canonicalized method/path and bounded all request fields and allowlisted
-  headers; invalid or oversized contexts cannot produce blocking signals.
-- Added stable signal categories, capped rule weights, deterministic category
-  ordering, and monitor/challenge/block action mapping.
-- Added trusted crawler matching with strict non-empty user-agent and Host
-  predicates (without X-Forwarded-For/IP bypass), bounded trusted-rule count,
-  and snapshot validation for threshold, TTL, fingerprint key, required
-  predicates, and rule field limits. Numeric IP hosts are rejected as crawler
-  identities.
-- Applied the header cap after allowlist filtering, capped aggregate score at
-  100, and made percent-decoded paths UTF-8 safe.
-- Added focused domain tests for canonicalization, fingerprinting, trusted
-  crawler rejection cases, header bounds, score caps, action mapping, and
-  snapshot limits.
-
-## Commit
-
-`97bd12b feat: add bounded bot evaluator`
-
-`b2b54e4 fix: harden bounded bot evaluator predicates`
-
-`533c70d fix: reject unsafe trusted crawler identities`
+- Added serde-compatible `RateLimitPolicy`, monitor/block actions, proxy-host/IP
+  key scope, strict bounds, and validation errors.
+- Added shared `RateLimitKey` and deterministic monotonic `TokenBucket` math.
+- Decisions expose bounded remaining-token metadata and a bounded `Retry-After`.
+- Added focused tests for defaults, bounds, burst consumption, refill, zero and
+  backwards clock deltas, and retry-after clamping.
 
 ## Verification
 
-- Docker Rust 1.88 (`cargo test --locked --test bot_protection`) passed (8/8
-  tests) after the final review fixes.
-- `git diff --check` passed.
-- The focused source and test changes are committed and the worktree is clean.
+- `rustfmt --check src/rate_limit.rs tests/rate_limit.rs` — passed.
+- `git diff --cached --check` — passed.
+- `cargo test --test rate_limit` — unable to run in this environment: the
+  installed Cargo 1.84.1 cannot parse cached `clap_lex 1.1.0`, which requires
+  the unstable `edition2024` feature. No source/test failure was observed.
 
-## Concerns
+## Concerns / follow-up
 
-No blocking concerns remain. Trusted-crawler domain matching is deliberately
-local and does not perform DNS lookups; runtime integration must supply a
-normalized Host hostname when evaluating an exception.
+The runtime store should use `RateLimitKey`, `TokenBucket::from_policy`, and the
+`Decision` variants exported by `rate_limit`.
