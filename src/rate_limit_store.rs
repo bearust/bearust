@@ -91,10 +91,14 @@ pub struct RateLimiterStore {
     state: Mutex<State>,
 }
 
+/// Hard upper bound for process-local entries, preventing accidental
+/// unbounded memory growth when configuration is supplied by an operator.
+pub const MAX_STORE_ENTRIES: usize = 100_000;
+
 impl RateLimiterStore {
     pub fn new(max_entries: usize, idle_ttl: Duration) -> Self {
         Self {
-            max_entries,
+            max_entries: max_entries.min(MAX_STORE_ENTRIES),
             idle_ttl,
             state: Mutex::new(State {
                 entries: HashMap::new(),
@@ -109,7 +113,21 @@ impl RateLimiterStore {
                 remaining_tokens: policy.capacity,
             };
         }
-        let mut state = self.state.lock().expect("rate limiter store lock poisoned");
+        // Validate and construct before mutating the store. This keeps the
+        // fail-open contract even if a future policy variant cannot construct
+        // a bucket after validation.
+        let bucket = match TokenBucket::from_policy(policy) {
+            Ok(bucket) => bucket,
+            Err(_) => {
+                return Decision::Allowed {
+                    remaining_tokens: policy.capacity,
+                }
+            }
+        };
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         state
             .entries
             .retain(|_, entry| now.saturating_duration_since(entry.last_seen) <= self.idle_ttl);
@@ -126,7 +144,7 @@ impl RateLimiterStore {
         state.sequence = state.sequence.wrapping_add(1);
         let sequence = state.sequence;
         let entry = state.entries.entry(key).or_insert_with(|| Entry {
-            bucket: TokenBucket::from_policy(policy).expect("validated rate-limit policy"),
+            bucket,
             last_seen: now,
             sequence,
         });
@@ -135,13 +153,13 @@ impl RateLimiterStore {
         entry.bucket.try_consume(now, 1)
     }
 
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.state
-            .lock()
-            .expect("rate limiter store lock poisoned")
-            .entries
-            .len()
+    /// Number of currently retained client buckets (primarily for telemetry
+    /// and boundedness checks).
+    pub fn len(&self) -> usize {
+        match self.state.lock() {
+            Ok(state) => state.entries.len(),
+            Err(poisoned) => poisoned.into_inner().entries.len(),
+        }
     }
 }
 

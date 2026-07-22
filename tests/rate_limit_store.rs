@@ -1,6 +1,6 @@
 use bearust::{
     rate_limit::{Decision, RateLimitKey, RateLimitPolicy},
-    rate_limit_store::{client_ip, IpNetSet, RateLimiterStore},
+    rate_limit_store::{client_ip, IpNetSet, RateLimiterStore, MAX_STORE_ENTRIES},
 };
 use http::{HeaderMap, HeaderValue};
 use std::{
@@ -48,7 +48,9 @@ fn ttl_and_capacity_evict_entries_deterministically() {
     let policy = RateLimitPolicy {
         enabled: true,
         capacity: 2,
-        refill_per_second: 0.0,
+        // The policy bounds require a strictly positive refill rate. A very
+        // small valid value still leaves eviction assertions deterministic.
+        refill_per_second: 0.001,
         ..RateLimitPolicy::default()
     };
     let start = Instant::now();
@@ -101,4 +103,17 @@ fn disabled_policy_is_monitor_only() {
         Instant::now(),
     );
     assert!(matches!(decision, Decision::Allowed { .. }));
+}
+
+#[test]
+fn configured_capacity_is_clamped_to_safe_bound() {
+    let store = RateLimiterStore::new(usize::MAX, Duration::from_secs(60));
+    let policy = RateLimitPolicy {
+        enabled: true,
+        capacity: 1,
+        ..RateLimitPolicy::default()
+    };
+    let _ = store.evaluate(key(1, "192.0.2.1"), &policy, Instant::now());
+    assert!(MAX_STORE_ENTRIES < usize::MAX);
+    assert_eq!(store.len(), 1);
 }
