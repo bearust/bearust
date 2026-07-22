@@ -267,6 +267,10 @@ pub async fn update_bot_rule(pool: &DbPool, id: i64, rule: &BotRule) -> Result<u
     tx.commit().await?; Ok(changed)
 }
 pub async fn delete_bot_rule(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> { Ok(sqlx::query("DELETE FROM bot_rules WHERE id=?").bind(id).execute(pool).await?.rows_affected()) }
+pub async fn restore_bot_rule(pool: &DbPool, id: i64, rule: &BotRule) -> Result<(), sqlx::Error> {
+    let rule = normalize_bot_rule(rule)?; let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO bot_rules(id,category,weight,trusted_user_agent,trusted_domain,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id).bind(rule.category).bind(rule.weight as i64).bind(rule.trusted_user_agent).bind(rule.trusted_domain).bind(rule.enabled as i64).bind(&now).bind(&now).execute(pool).await?; Ok(())
+}
 
 /// Replace the persisted bot policy in one transaction. All validation is
 /// performed before opening the transaction so malformed imports cannot leave
