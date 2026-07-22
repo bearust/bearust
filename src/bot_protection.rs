@@ -170,6 +170,12 @@ pub fn compile_snapshot(
         return Err("too many trusted rules");
     }
     for r in &rules {
+        if r.category == "trusted_crawler"
+            && (r.trusted_user_agent.as_deref().is_none()
+                || r.trusted_domain.as_deref().is_none())
+        {
+            return Err("trusted crawler requires user-agent and domain predicates");
+        }
         if r.category.len() > MAX_FIELD_BYTES
             || r.trusted_user_agent
                 .as_ref()
@@ -301,12 +307,9 @@ fn domain_matches(actual: &str, expected: &str) -> bool {
     if a.is_empty() || e.is_empty() {
         return false;
     }
-    // An address is not a DNS assertion; callers may populate X-Forwarded-For
-    // with an IP while a trusted-crawler verifier resolves it separately.
-    if a.bytes()
-        .all(|b| b.is_ascii_digit() || b == b'.' || b == b':')
-    {
-        return true;
+    // Numeric IP hosts are never accepted as DNS identity assertions.
+    if a.parse::<std::net::IpAddr>().is_ok() || e.parse::<std::net::IpAddr>().is_ok() {
+        return false;
     }
     a == e || a.ends_with(&format!(".{e}"))
 }

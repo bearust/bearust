@@ -72,6 +72,8 @@ fn trusted_crawler_requires_both_strict_ua_and_host_predicates() {
     assert!(!evaluate(&snapshot, &ip_bypass).trusted);
     let wrong_host = BotInspectionContext::new("GET", "/", vec![("User-Agent".into(), "Googlebot".into()), ("Host".into(), "evilgooglebot.com".into())]);
     assert!(!evaluate(&snapshot, &wrong_host).trusted);
+    let ip_host = BotInspectionContext::new("GET", "/", vec![("User-Agent".into(), "Googlebot".into()), ("Host".into(), "66.249.66.1".into())]);
+    assert!(!evaluate(&snapshot, &ip_host).trusted);
 }
 
 #[test]
@@ -92,6 +94,8 @@ fn rejects_empty_fingerprint_and_trusted_predicates_and_preserves_utf8() {
     invalid.fingerprint_key.clear();
     assert!(compile_snapshot(invalid, vec![]).is_err());
     assert!(compile_snapshot(config(BotMode::Block), vec![BotRule::trusted_crawler("", "example.com")]).is_err());
+    assert!(compile_snapshot(config(BotMode::Block), vec![BotRule { trusted_user_agent: Some("Googlebot".into()), trusted_domain: None, ..BotRule::trusted_crawler("Googlebot", "example.com") }]).is_err());
+    assert!(compile_snapshot(config(BotMode::Block), vec![BotRule { trusted_user_agent: None, trusted_domain: Some("example.com".into()), ..BotRule::trusted_crawler("Googlebot", "example.com") }]).is_err());
     let context = BotInspectionContext::new("GET", "/caf%C3%A9", vec![]);
     assert_eq!(context.path, "/café");
 }
