@@ -2,7 +2,7 @@
 
 ## Commit
 
-- `053630a4d171a663bd9de719a6f15a45645e08b3` — `feat: add bot protection dashboard`
+- `5d0055a1e6f9d53e8ce61ae51c6f7409acfe2b45` — `fix: align bot challenge context` (includes the original dashboard commit)
 
 ## Delivered
 
@@ -35,3 +35,16 @@
 - The challenge page uses the browser's Web Crypto API; unsupported browsers
   receive a generic unavailable/verification error and can request another
   challenge.
+
+## Review follow-up
+
+- Challenge UX no longer derives a fingerprint from `navigator.userAgent`.
+  It requires a bounded, server-issued value in `sessionStorage` (or an
+  explicit `fingerprint` prop), matching the keyed data-plane fingerprint
+  contract without exposing the signing key.
+- `AppContent` mounts `BotChallengePage` at `/bot-challenge` and a regression
+  test verifies the route and exact server-issued payload.
+- Follow-up targeted tests: `npm test -- --run src/bot.test.tsx` — **passed**
+  (4 tests); `npm run build` — **passed**.
+- Full suite remains **43 passed / 1 baseline users.test.tsx failure** as
+  described above.

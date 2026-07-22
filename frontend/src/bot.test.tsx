@@ -4,7 +4,7 @@ import React from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { api, User } from "./api";
-import { BotChallengePage, BotProtectionSection } from "./App";
+import App, { BotChallengePage, BotProtectionSection } from "./App";
 
 const admin: User = { id: 1, email: "admin@example.com", role: "admin", disabled: false };
 const config = { mode: "monitor" as const, threshold: 50, ttl_seconds: 300, updated_at: "now" };
@@ -35,14 +35,26 @@ describe("bot protection dashboard", () => {
     vi.spyOn(api, "botChallenge").mockResolvedValue({ token: "1.nonce.prefix.1.999.sig", difficulty: 1, expires_at: 999, fingerprint_prefix: "Mozilla" });
     vi.spyOn(api, "verifyBotChallenge").mockResolvedValue({ ok: true });
     vi.spyOn(crypto.subtle, "digest").mockResolvedValue(new Uint8Array(32).buffer);
-    const view = render(<BotChallengePage />); await act(async () => {});
+    const view = render(<BotChallengePage fingerprint="sha256:server-issued-context" />); await act(async () => {});
+    expect(api.botChallenge).toHaveBeenCalledWith("sha256:server-issued-context");
     const verify = Array.from(view.container.querySelectorAll("button")).find((button) => button.textContent?.includes("Verify browser")) as HTMLButtonElement;
     await act(async () => { verify.click(); });
     expect(view.container.textContent).toContain("Verification complete");
     view.root.unmount();
     vi.restoreAllMocks();
     vi.spyOn(api, "botChallenge").mockRejectedValue(new Error("down"));
-    const failed = render(<BotChallengePage />); await act(async () => {});
+    const failed = render(<BotChallengePage fingerprint="sha256:server-issued-context" />); await act(async () => {});
     expect(failed.container.textContent).toContain("Challenge unavailable"); failed.root.unmount();
+  });
+  it("mounts the challenge page on the dedicated route with server context", async () => {
+    vi.spyOn(api, "status").mockResolvedValue({ initialized: true });
+    vi.spyOn(api, "me").mockRejectedValue(new Error("unauthenticated"));
+    vi.spyOn(api, "botChallenge").mockResolvedValue({ token: "1.nonce.prefix.1.999.sig", difficulty: 1, expires_at: 999, fingerprint_prefix: "sha256" });
+    sessionStorage.setItem("bearust-bot-fingerprint", "sha256:server-issued-context");
+    window.history.pushState({}, "", "/bot-challenge");
+    const view = render(<App />); await act(async () => {});
+    expect(view.container.textContent).toContain("Quick browser check");
+    expect(api.botChallenge).toHaveBeenCalledWith("sha256:server-issued-context");
+    view.root.unmount(); sessionStorage.clear(); window.history.pushState({}, "", "/");
   });
 });
