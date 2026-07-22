@@ -140,9 +140,31 @@ exposes stable bounded labels (`proxy_host_id` and status class) and is capped
 at 256 KiB by default. Do not expose it publicly without an authenticated
 network boundary.
 
-Durable history, Redis/cross-node aggregation and fan-out, per-route
-dimensions, anomaly detection, adaptive tuning, custom retention, and alerting
-remain deferred to later phases.
+Analytics history remains process-local and resets on restart. Durable history,
+Redis/cross-node aggregation and fan-out, per-route dimensions, custom
+retention, and alerting remain deferred to later phases. Phase 9 now adds the
+bounded self-learning layer: per-host traffic baselines, deterministic anomaly
+detection, and opt-in adaptive tuning. These controls are monitor-only by
+default, preserve bounded storage and sensitive-data redaction, and expose
+authenticated baseline, anomaly, recommendation, and policy APIs plus redacted
+realtime invalidation events.
+
+### Self-learning (Phase 9)
+
+Phase 9 is complete across three increments:
+
+- **9A — Traffic baseline:** bounded per-host rolling metrics with warming-up
+  handling and `GET /api/analytics/baseline`.
+- **9B — Anomaly detection:** deterministic rate, error, latency, and security
+  deviation detection with severity, deduplication, acknowledgement, and
+  `GET /api/analytics/anomalies`.
+- **9C — Adaptive tuning:** opt-in per-host recommendations and guarded runtime
+  tuning. The default mode is `monitor`; automatic enforcement requires an
+  explicit host policy, confidence threshold, and a non-emergency-disabled
+  control-plane state.
+
+Cross-node self-learning aggregation and event replay remain deferred to
+Phase 10 and later.
 ### Basic WAF
 
 Phase 6 adds a bounded in-process WAF for SQL injection, XSS, path traversal,
