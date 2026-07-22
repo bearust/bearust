@@ -117,3 +117,24 @@ fn configured_capacity_is_clamped_to_safe_bound() {
     assert!(MAX_STORE_ENTRIES < usize::MAX);
     assert_eq!(store.len(), 1);
 }
+
+#[test]
+fn policy_updates_reset_existing_buckets() {
+    let store = RateLimiterStore::new(4, Duration::from_secs(60));
+    let policy = RateLimitPolicy {
+        enabled: true,
+        capacity: 1,
+        refill_per_second: 1.0,
+        ..RateLimitPolicy::default()
+    };
+    let start = Instant::now();
+    let _ = store.evaluate(key(1, "192.0.2.1"), &policy, start);
+    assert_eq!(store.len(), 1);
+    store.set_policy(RateLimitPolicy {
+        enabled: true,
+        capacity: 10,
+        refill_per_second: 10.0,
+        ..RateLimitPolicy::default()
+    });
+    assert_eq!(store.len(), 0);
+}

@@ -113,6 +113,12 @@ impl RateLimiterStore {
         if let Ok(mut current) = self.policy.write() {
             *current = policy;
         }
+        // Buckets encode capacity/refill parameters. Clear them atomically
+        // on policy changes so existing clients cannot retain stale limits.
+        if let Ok(mut state) = self.state.lock() {
+            state.entries.clear();
+            state.sequence = 0;
+        }
     }
 
     pub fn policy(&self) -> RateLimitPolicy {
