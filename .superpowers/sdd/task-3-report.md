@@ -2,7 +2,7 @@
 
 Status: complete
 
-Commits: `f67aa1185e1e227ed40755fb055d94a46b5a93e6` (`feat: add bot policy admin api`), `b59c729` (`fix: make bot policy imports atomic`), `bc0fd0e` (`fix: rollback bot rule reload failures`).
+Commits: `f67aa1185e1e227ed40755fb055d94a46b5a93e6`, `b59c729`, `bc0fd0e`, and `9d19366` (mutation rollback hardening).
 
 Implemented:
 
