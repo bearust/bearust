@@ -21,7 +21,7 @@ Scope: `6023c15..d9124a5` (Phase 7B bot protection implementation and task repor
 - Bot request fields/allowlisted headers, scores, categories, trusted rules, and persisted config/rule counts are bounded. Detection/audit records retain only bounded category names and fingerprint prefixes; raw request headers, bodies, tokens, and solutions are not recorded.
 - Monitor, challenge, and block actions are deterministic; trusted crawlers require both UA and DNS-like host predicates, and numeric IP hosts cannot satisfy the exception.
 - WAF evaluation precedes bot responses, preserving WAF block precedence. Reloads compile before atomic publication; failures keep the last valid snapshot. Mutations/imports use transactional rollback paths.
-- Trusted crawler bypass is disabled by default in the runtime. It can only be enabled through the explicit `server.trusted_proxy_mode` deployment setting, where the ingress contract requires stripping/overwriting `X-Bearust-Verified-Hostname`; the client `Host` header alone never verifies a source.
+- Trusted crawler bypass is disabled in the proxy runtime. Rules remain persisted for admin/UI compatibility, but no client header or Host value can mark a request trusted. Bypass is deferred until a cryptographically signed ingress marker is implemented.
 
 Follow-up hardening applied after broad review:
 

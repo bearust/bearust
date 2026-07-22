@@ -32,10 +32,6 @@ pub struct ServerConfig {
     pub pid_file: PathBuf,
     #[serde(default)]
     pub tls: Option<TlsConfig>,
-    /// Enable trusted-proxy crawler verification only when an ingress proxy
-    /// strips and overwrites `X-Bearust-Verified-Hostname`.
-    #[serde(default)]
-    pub trusted_proxy_mode: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

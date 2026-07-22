@@ -283,7 +283,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             Some(config.server.graceful_shutdown_seconds);
         let ready_path = std::env::var_os("BEARUST_UPGRADE_READY").map(PathBuf::from);
         let mut service = proxy::http_service(
-            crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store).with_bot_store(bot_store, challenge_service).with_trusted_proxy_mode(config.server.trusted_proxy_mode),
+            crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store).with_bot_store(bot_store, challenge_service),
             &server.configuration,
         );
         if let Some(tls_config) = &config.server.tls {

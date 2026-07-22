@@ -9,4 +9,4 @@ Phase 7B Task 6: complete (commits a6b5368..d9124a5, review approved; frontend b
 Phase 7B Task 7: complete (final verification documented; targeted 42/42, clippy and Compose pass; baseline failures remain)
 Phase 7B final review: complete (base 6023c15..d9124a5; no blocking Phase 7B defect)
 Phase 7B broad-review hardening: complete (trusted source gate, HMAC fingerprints, bounded telemetry, migration/users baselines fixed; targeted tests pass)
-Phase 7B trusted-proxy wiring: complete (runtime default disabled; explicit `server.trusted_proxy_mode` + ingress verification metadata required)
+Phase 7B trusted-crawler safety deferral: complete (proxy bypass disabled; deferred until signed ingress marker)

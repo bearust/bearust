@@ -59,3 +59,19 @@ fn proxy_bot_modes_keep_response_contract_actions() {
         assert_eq!(evaluate(&snapshot, &context).action, expected);
     }
 }
+
+#[test]
+fn proxy_path_never_trusts_spoofed_ingress_marker() {
+    let snapshot = compile_snapshot(
+        BotConfig { mode: BotMode::Block, threshold: 1, ttl_seconds: 300, fingerprint_key: b"proxy-test-key".to_vec() },
+        vec![BotRule::trusted_crawler("Googlebot", "googlebot.com")],
+    ).unwrap();
+    let spoofed = BotInspectionContext::new(
+        "GET", "/", vec![
+            ("User-Agent".into(), "Googlebot/2.1".into()),
+            ("Host".into(), "crawl.googlebot.com".into()),
+            ("X-Bearust-Verified-Hostname".into(), "crawl.googlebot.com".into()),
+        ],
+    );
+    assert!(!evaluate(&snapshot, &spoofed).trusted);
+}

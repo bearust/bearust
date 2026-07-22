@@ -80,7 +80,6 @@ pub struct BeaRustProxy {
     pub waf: Option<Arc<WafStore>>,
     pub bot: Option<Arc<BotStore>>,
     pub challenges: Option<Arc<ChallengeService>>,
-    pub trusted_proxy_mode: bool,
 }
 
 impl BeaRustProxy {
@@ -91,7 +90,6 @@ impl BeaRustProxy {
             waf: None,
             bot: None,
             challenges: None,
-            trusted_proxy_mode: false,
         }
     }
     pub fn with_challenge_store(mut self, challenges: Http01Store) -> Self {
@@ -105,12 +103,6 @@ impl BeaRustProxy {
     pub fn with_bot_store(mut self, bot: Arc<BotStore>, challenges: Arc<ChallengeService>) -> Self {
         self.bot = Some(bot);
         self.challenges = Some(challenges);
-        self
-    }
-    /// Enables crawler exceptions only for deployments with a trusted ingress
-    /// that overwrites the verification metadata header.
-    pub fn with_trusted_proxy_mode(mut self, enabled: bool) -> Self {
-        self.trusted_proxy_mode = enabled;
         self
     }
 }
@@ -176,19 +168,9 @@ impl ProxyHttp for BeaRustProxy {
                 if !matches!(name.as_str(), "user-agent" | "accept" | "accept-language" | "sec-ch-ua" | "x-forwarded-for" | "host") { return None; }
                 value.to_str().ok().map(|value| (name, value.to_owned()))
             }).collect::<Vec<_>>();
+            // Trusted crawler bypass is intentionally deferred until a signed
+            // ingress marker is implemented. Client headers never verify origin.
             let inspection = BotInspectionContext::new(method, &path, headers);
-            let inspection = if self.trusted_proxy_mode
-                && session
-                    .req_header()
-                    .headers
-                    .get("x-bearust-verified-hostname")
-                    .and_then(|value| value.to_str().ok())
-                    .is_some_and(|verified| verified.eq_ignore_ascii_case(host))
-            {
-                inspection.with_verified_trusted_source()
-            } else {
-                inspection
-            };
             let snapshot = bot.snapshot();
             let mut evaluation = evaluate_bot(&snapshot, &inspection);
             let valid_clearance = session.req_header().headers.get("cookie").and_then(|v| v.to_str().ok()).and_then(cookie_value).and_then(|token| self.challenges.as_ref().and_then(|service| service.verify_clearance(token, &evaluation.fingerprint, unix_now()).ok())).is_some();
