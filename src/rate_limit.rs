@@ -67,9 +67,9 @@ impl Default for RateLimitPolicy {
 
 #[derive(Debug, Error, PartialEq)]
 pub enum RateLimitConfigError {
-    #[error("capacity must be between {MIN_CAPACITY} and {MAX_CAPACITY}")]
+    #[error("capacity is outside the permitted bounds")]
     CapacityOutOfBounds,
-    #[error("refill_per_second must be finite and between {MIN_REFILL_PER_SECOND} and {MAX_REFILL_PER_SECOND}")]
+    #[error("refill_per_second is outside the permitted bounds")]
     RefillOutOfBounds,
 }
 
