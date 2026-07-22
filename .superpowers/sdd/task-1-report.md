@@ -16,8 +16,9 @@ canonicalization.
   ordering, and monitor/challenge/block action mapping.
 - Added trusted crawler matching with strict non-empty user-agent and Host
   predicates (without X-Forwarded-For/IP bypass), bounded trusted-rule count,
-  and snapshot validation for threshold, TTL, fingerprint key, and rule field
-  limits.
+  and snapshot validation for threshold, TTL, fingerprint key, required
+  predicates, and rule field limits. Numeric IP hosts are rejected as crawler
+  identities.
 - Applied the header cap after allowlist filtering, capped aggregate score at
   100, and made percent-decoded paths UTF-8 safe.
 - Added focused domain tests for canonicalization, fingerprinting, trusted
@@ -30,10 +31,12 @@ canonicalization.
 
 `b2b54e4 fix: harden bounded bot evaluator predicates`
 
+`533c70d fix: reject unsafe trusted crawler identities`
+
 ## Verification
 
 - Docker Rust 1.88 (`cargo test --locked --test bot_protection`) passed (8/8
-  tests).
+  tests) after the final review fixes.
 - `git diff --check` passed.
 - The focused source and test changes are committed and the worktree is clean.
 
