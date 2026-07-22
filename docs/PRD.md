@@ -733,6 +733,9 @@ sensitive header values.
 Phase 7B delivers deterministic bot-risk policy with monitor-only as the default,
 admin-selectable challenge/block modes, bounded score threshold and challenge
 TTL controls, and trusted-crawler CRUD with explicit user-agent/domain matching.
+Trusted-crawler configuration is persisted and manageable, but runtime bypass is
+deferred until a cryptographically signed ingress marker exists; no unsigned
+Host, User-Agent, or client header is trusted.
 Suspicious traffic can complete a short proof-of-work challenge backed by an
 expiring, replay-safe HMAC token; challenge responses are generic and secrets,
 raw fingerprints, and tokens are never rendered in the dashboard or audit data.
