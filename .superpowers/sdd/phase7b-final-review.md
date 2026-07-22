@@ -5,11 +5,11 @@ Scope: `6023c15..d9124a5` (Phase 7B bot protection implementation and task repor
 
 ## Verification evidence
 
-- `$HOME/.cargo/bin/cargo +stable test --all-targets`: **fails only at known baseline users/migration assertions**. 13/15 tests in `control_plane_repository` passed; failures: `migrations_record_order_and_seed_exact_permissions` (expected `[1,2,3,4]`, observed `[1,2,3,4,5]`) and `migration_seeds_builtin_roles_and_all_permissions_idempotently` (expected 10, observed 11).
-- Targeted bot/WAF/proxy command (`bot_challenge`, `bot_protection`, `bot_repository`, `proxy_bot`, `control_plane_bot`, `proxy_waf`, `waf_engine`, `waf_end_to_end`): **pass, 42 tests**.
+- `$HOME/.cargo/bin/cargo +stable test --all-targets`: **pass** after updating stale migration/permission expectations; all Rust targets passed.
+- Targeted bot/WAF/proxy command (`bot_challenge`, `bot_protection`, `bot_repository`, `proxy_bot`, `control_plane_bot`, `proxy_waf`, `waf_engine`, `waf_end_to_end`): **pass** (including new HMAC/source-gate/mode tests).
 - `$HOME/.cargo/bin/cargo +stable clippy --all-targets --all-features -- -D warnings`: **pass**.
 - `git diff --check`: **pass**.
-- `npm test --if-present` in `frontend/`: **fails one pre-existing users UI test** (`src/users.test.tsx`); 9 files/43 tests passed, 1 failed. Phase 7B bot dashboard tests pass.
+- `npm test -- --run` in `frontend/`: **pass, 10 files/44 tests**; the brittle users test now scopes inputs to its create form.
 - `npm run build` in `frontend/`: **pass**.
 - `docker compose -f docker-compose.yml config`: **pass**.
 - `docker compose -f docker-compose.dev.yml config`: **pass**.
@@ -22,7 +22,12 @@ Scope: `6023c15..d9124a5` (Phase 7B bot protection implementation and task repor
 - Monitor, challenge, and block actions are deterministic; trusted crawlers require both UA and DNS-like host predicates, and numeric IP hosts cannot satisfy the exception.
 - WAF evaluation precedes bot responses, preserving WAF block precedence. Reloads compile before atomic publication; failures keep the last valid snapshot. Mutations/imports use transactional rollback paths.
 
-No blocking Phase 7B defect was proven. The migration assertions and users UI test remain baseline follow-up items.
+Follow-up hardening applied after broad review:
+
+- Trusted crawler domain exceptions now require an explicit trusted-proxy verification marker; client-controlled `Host`/UA pairs cannot bypass block mode.
+- Fingerprints now use HMAC-SHA256 rather than a raw keyed digest.
+- Detection audit writes use a bounded semaphore (64 in-flight records) and drop on saturation instead of spawning unbounded work.
+- Migration/permission expectations and the brittle users UI selector were updated to cover the Phase 7B additions.
 
 ## Deferred scope
 

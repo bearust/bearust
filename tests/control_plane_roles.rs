@@ -89,7 +89,7 @@ async fn admin_role_lifecycle_and_audits_are_safe() {
     let (status, body, _) = request(app.clone(), "GET", "/api/roles", Some(&admin), "").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap().as_array().unwrap().len(), 3);
-    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM permissions").fetch_one(&db).await.unwrap(), 10);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM permissions").fetch_one(&db).await.unwrap(), 11);
     let (status, body, _) = request(app.clone(), "POST", "/api/roles", Some(&admin), r#"{"slug":" Security_Auditor ","name":"Security Auditor","permissions":["audit_logs.read"]}"#).await;
     assert_eq!(status, StatusCode::CREATED);
     let role = serde_json::from_str::<serde_json::Value>(&body).unwrap();

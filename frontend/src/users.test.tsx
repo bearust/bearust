@@ -81,9 +81,9 @@ describe('Dashboard Users UI',()=>{
     const remove=vi.spyOn(api,'deleteUser').mockResolvedValue(undefined);
     vi.spyOn(window,'confirm').mockReturnValue(true);
     const {element,root}=await renderDashboard(admin,[admin,operator]);
-    const inputs=element.querySelectorAll('input');
-    await act(async()=>{const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!;set.call(inputs[4],'new@example.com');inputs[4].dispatchEvent(new Event('input',{bubbles:true}));set.call(inputs[5],'long-password-123');inputs[5].dispatchEvent(new Event('input',{bubbles:true}));});
     const form=element.querySelector('[data-testid="user-create-form"]') as HTMLFormElement;
+    const inputs=form.querySelectorAll('input');
+    await act(async()=>{const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!;set.call(inputs[0],'new@example.com');inputs[0].dispatchEvent(new Event('input',{bubbles:true}));set.call(inputs[1],'long-password-123');inputs[1].dispatchEvent(new Event('input',{bubbles:true}));});
     await act(async()=>{form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));});
     expect(create).toHaveBeenCalledWith({email:'new@example.com',password:'long-password-123',role:'viewer'});
     const selects=element.querySelectorAll('select');

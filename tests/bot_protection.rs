@@ -38,6 +38,23 @@ fn fingerprint_is_bounded_and_deterministic() {
 }
 
 #[test]
+fn fingerprint_uses_hmac_keyed_hashing() {
+    let context = BotInspectionContext::new("GET", "/", vec![]);
+    let fingerprint = context.fingerprint(b"key");
+    let expected = hex::encode({
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"key").unwrap();
+        mac.update(b"GET");
+        mac.update(&[0]);
+        mac.update(b"/");
+        mac.update(&[0]);
+        mac.finalize().into_bytes()
+    });
+    assert_eq!(fingerprint, expected);
+}
+
+#[test]
 fn deterministic_score_and_trusted_crawler_match() {
     let snapshot = compile_snapshot(
         config(BotMode::Block),
@@ -51,7 +68,8 @@ fn deterministic_score_and_trusted_crawler_match() {
             ("User-Agent".into(), "Googlebot/2.1".into()),
             ("Host".into(), "crawl.googlebot.com".into()),
         ],
-    );
+    )
+    .with_verified_trusted_source();
     let first = evaluate(&snapshot, &context);
     let second = evaluate(&snapshot, &context);
     assert_eq!(first.score, second.score);
@@ -74,6 +92,24 @@ fn trusted_crawler_requires_both_strict_ua_and_host_predicates() {
     assert!(!evaluate(&snapshot, &wrong_host).trusted);
     let ip_host = BotInspectionContext::new("GET", "/", vec![("User-Agent".into(), "Googlebot".into()), ("Host".into(), "66.249.66.1".into())]);
     assert!(!evaluate(&snapshot, &ip_host).trusted);
+}
+
+#[test]
+fn trusted_crawler_requires_verified_proxy_source() {
+    let snapshot = compile_snapshot(
+        config(BotMode::Block),
+        vec![
+            BotRule::trusted_crawler("Googlebot", "googlebot.com"),
+            BotRule::signal("ua_missing", 100),
+        ],
+    )
+    .unwrap();
+    let spoofed = BotInspectionContext::new(
+        "GET", "/", vec![("User-Agent".into(), "Googlebot/2.1".into()), ("Host".into(), "crawl.googlebot.com".into())],
+    );
+    assert!(!evaluate(&snapshot, &spoofed).trusted);
+    let verified = spoofed.with_verified_trusted_source();
+    assert!(evaluate(&snapshot, &verified).trusted);
 }
 
 #[test]

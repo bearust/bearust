@@ -1,5 +1,6 @@
 //! Bounded bot-protection domain evaluator.
-use sha2::{Digest, Sha256};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
 pub const MAX_FIELD_BYTES: usize = 256;
 pub const MAX_HEADERS: usize = 8;
@@ -64,6 +65,7 @@ pub struct BotInspectionContext {
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
+    trusted_source_verified: bool,
     valid: bool,
 }
 impl BotInspectionContext {
@@ -99,23 +101,29 @@ impl BotInspectionContext {
             method,
             path,
             headers: selected,
+            trusted_source_verified: false,
             valid,
         }
     }
+    /// Marks the source hostname as verified by trusted proxy metadata.
+    /// This is intentionally not inferred from client-controlled headers.
+    pub fn with_verified_trusted_source(mut self) -> Self {
+        self.trusted_source_verified = true;
+        self
+    }
     pub fn fingerprint(&self, key: &[u8]) -> String {
-        let mut h = Sha256::new();
-        h.update(key);
+        let mut h = Hmac::<Sha256>::new_from_slice(key).expect("fingerprint key is bounded");
         h.update(self.method.as_bytes());
-        h.update([0]);
+        h.update(&[0]);
         h.update(self.path.as_bytes());
-        h.update([0]);
+        h.update(&[0]);
         for (k, v) in &self.headers {
             h.update(k.as_bytes());
-            h.update(*b"=");
+            h.update(b"=");
             h.update(v.as_bytes());
-            h.update([0]);
+            h.update(&[0]);
         }
-        hex::encode(h.finalize())
+        hex::encode(h.finalize().into_bytes())
     }
     fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -213,7 +221,7 @@ pub fn evaluate(snapshot: &BotSnapshot, context: &BotInspectionContext) -> BotEv
                     .trusted_domain
                     .as_ref()
                     .is_some_and(|v| domain_matches(domain, v));
-                if ua_ok && domain_ok {
+                if context.trusted_source_verified && ua_ok && domain_ok {
                     trusted = true;
                 }
                 continue;
