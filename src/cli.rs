@@ -10,6 +10,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use crate::rate_limit::{RateLimitPolicy, RateLimitKeyScope};
+use crate::rate_limit_store::IpNetSet;
 use thiserror::Error;
 
 /// Start certificate renewal outside the Pingora traffic path. The command
@@ -261,6 +263,16 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let waf_store = control_state.waf.clone();
         let bot_store = control_state.bot.clone();
         let challenge_service = control_state.challenges.clone();
+        let rate_limiter = control_state.rate_limiter.clone();
+        let rate_policy = RateLimitPolicy {
+            enabled: config.rate_limit.enabled,
+            action: match config.rate_limit.action { config::RateLimitAction::Block => crate::rate_limit::RateLimitAction::Block, config::RateLimitAction::Monitor => crate::rate_limit::RateLimitAction::Monitor },
+            capacity: config.rate_limit.capacity as u32,
+            refill_per_second: config.rate_limit.refill_per_second,
+            key_scope: match config.rate_limit.key_scope { config::RateLimitKeyScope::ProxyHostIp => RateLimitKeyScope::ProxyHostIp },
+        };
+        rate_limiter.set_policy(rate_policy.clone());
+        let trusted_proxies = IpNetSet::new(config.server.trusted_proxy_cidrs.iter().map(String::as_str));
         let control_listener = tokio::net::TcpListener::bind(config.server.control_bind).await
             .map_err(|e| AppError::Server(format!("control plane bind: {e}")))?;
         let control_task = tokio::spawn(async move {
@@ -283,7 +295,10 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             Some(config.server.graceful_shutdown_seconds);
         let ready_path = std::env::var_os("BEARUST_UPGRADE_READY").map(PathBuf::from);
         let mut service = proxy::http_service(
-            crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store).with_bot_store(bot_store, challenge_service),
+            crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store).with_bot_store(bot_store, challenge_service)
+                .with_rate_limiter(rate_limiter)
+                .with_rate_limit_policy(rate_policy)
+                .with_trusted_proxies(trusted_proxies),
             &server.configuration,
         );
         if let Some(tls_config) = &config.server.tls {

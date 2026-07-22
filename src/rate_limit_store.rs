@@ -4,7 +4,7 @@ use http::{header, HeaderMap};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    sync::Mutex,
+    sync::{Mutex, RwLock},
     time::{Duration, Instant},
 };
 
@@ -89,6 +89,7 @@ pub struct RateLimiterStore {
     max_entries: usize,
     idle_ttl: Duration,
     state: Mutex<State>,
+    policy: RwLock<RateLimitPolicy>,
 }
 
 /// Hard upper bound for process-local entries, preventing accidental
@@ -104,7 +105,18 @@ impl RateLimiterStore {
                 entries: HashMap::new(),
                 sequence: 0,
             }),
+            policy: RwLock::new(RateLimitPolicy::default()),
         }
+    }
+
+    pub fn set_policy(&self, policy: RateLimitPolicy) {
+        if let Ok(mut current) = self.policy.write() {
+            *current = policy;
+        }
+    }
+
+    pub fn policy(&self) -> RateLimitPolicy {
+        self.policy.read().map(|p| p.clone()).unwrap_or_default()
     }
 
     pub fn evaluate(&self, key: RateLimitKey, policy: &RateLimitPolicy, now: Instant) -> Decision {

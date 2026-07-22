@@ -47,10 +47,10 @@ pub struct RateLimitPolicy {
 }
 
 fn default_capacity() -> u32 {
-    60
+    100
 }
 fn default_refill() -> f64 {
-    1.0
+    10.0
 }
 
 impl Default for RateLimitPolicy {

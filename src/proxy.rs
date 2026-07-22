@@ -120,6 +120,9 @@ impl BeaRustProxy {
         self
     }
     pub fn with_rate_limit_policy(mut self, policy: RateLimitPolicy) -> Self {
+        if let Some(store) = &self.rate_limiter {
+            store.set_policy(policy.clone());
+        }
         self.rate_limit_policy = policy;
         self
     }
@@ -387,18 +390,22 @@ impl ProxyHttp for BeaRustProxy {
                     &session.req_header().headers,
                     &self.trusted_proxies,
                 );
+                // The store owns the live policy snapshot so control-plane
+                // mutations take effect for existing proxy workers without a
+                // listener restart.
+                let policy = store.policy();
                 let decision = store.evaluate(
                     RateLimitKey {
                         proxy_host_id: route_key(ctx.route.as_ref().expect("route must be set")),
                         client_ip: ip,
                     },
-                    &self.rate_limit_policy,
+                    &policy,
                     Instant::now(),
                 );
                 ctx.rate_limit_decision = Some(decision);
                 if let RateLimitDecision::Limited { .. } = decision {
-                    emit_rate_limit_telemetry(&ctx.request_id, &decision, self.rate_limit_policy.action);
-                    if self.rate_limit_policy.action == RateLimitAction::Block {
+                    emit_rate_limit_telemetry(&ctx.request_id, &decision, policy.action);
+                    if policy.action == RateLimitAction::Block {
                         let retry_after = match decision {
                             RateLimitDecision::Limited { retry_after, .. } => retry_after.as_secs().clamp(1, 3_600),
                             RateLimitDecision::Allowed { .. } => 1,

@@ -81,6 +81,9 @@ pub struct ServerConfig {
     pub pid_file: PathBuf,
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+    /// CIDRs whose forwarding headers may be used for client identity.
+    #[serde(default)]
+    pub trusted_proxy_cidrs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
