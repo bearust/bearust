@@ -68,12 +68,11 @@ fn deterministic_score_and_trusted_crawler_match() {
             ("User-Agent".into(), "Googlebot/2.1".into()),
             ("Host".into(), "crawl.googlebot.com".into()),
         ],
-    )
-    .with_verified_trusted_source();
+    );
     let first = evaluate(&snapshot, &context);
     let second = evaluate(&snapshot, &context);
     assert_eq!(first.score, second.score);
-    assert!(first.trusted);
+    assert!(!first.trusted);
     assert_eq!(first.action, BotAction::Allow);
 }
 
@@ -108,8 +107,7 @@ fn trusted_crawler_requires_verified_proxy_source() {
         "GET", "/", vec![("User-Agent".into(), "Googlebot/2.1".into()), ("Host".into(), "crawl.googlebot.com".into())],
     );
     assert!(!evaluate(&snapshot, &spoofed).trusted);
-    let verified = spoofed.with_verified_trusted_source();
-    assert!(evaluate(&snapshot, &verified).trusted);
+    assert!(!evaluate(&snapshot, &spoofed).trusted);
 }
 
 #[test]

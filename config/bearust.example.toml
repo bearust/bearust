@@ -5,6 +5,9 @@ control_bind = "0.0.0.0:8081"
 control_database = "/data/bearust.sqlite"
 pid_file = "/run/bearust/bearust.pid"
 certificate_store = "/data/certificates"
+# Leave disabled unless a trusted ingress strips and overwrites
+# X-Bearust-Verified-Hostname before forwarding requests.
+trusted_proxy_mode = false
 
 # Optional native TLS. Both paths are required when this block is enabled.
 # [server.tls]

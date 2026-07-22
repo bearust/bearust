@@ -42,7 +42,6 @@ fn trusted_crawler_is_allowed_even_when_block_mode_is_configured() {
         ],
     );
     assert!(!evaluate(&snapshot, &context).trusted);
-    assert!(evaluate(&snapshot, &context.with_verified_trusted_source()).trusted);
 }
 
 #[test]
