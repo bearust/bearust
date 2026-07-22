@@ -13,6 +13,9 @@ fn parses_valid_configuration_and_defaults() {
     assert_eq!(config.health.interval_seconds, 10);
     assert_eq!(config.health.timeout_seconds, 2);
     assert_eq!(config.health.unhealthy_threshold, 3);
+    assert!(!config.rate_limit.enabled);
+    assert_eq!(config.rate_limit.capacity, 100);
+    assert_eq!(config.rate_limit.refill_per_second, 10.0);
     assert_eq!(config.upstream_pools[0].connect_timeout_seconds, 3);
     assert_eq!(config.upstream_pools[0].request_timeout_seconds, 30);
     assert_eq!(
@@ -23,6 +26,29 @@ fn parses_valid_configuration_and_defaults() {
         config.upstream_pools[0].backends[0].health_check,
         HealthCheckKind::Http
     );
+}
+
+#[test]
+fn rate_limit_policy_is_strict_and_bounded() {
+    let configured = format!("{VALID}\n[rate_limit]\nenabled = true\naction = \"block\"\ncapacity = 500\nrefill_per_second = 25.5\nkey_scope = \"proxy_host_ip\"\n");
+    let config = Config::parse(&configured).expect("valid rate limit policy");
+    assert!(config.rate_limit.enabled);
+    assert_eq!(config.rate_limit.capacity, 500);
+
+    for replacement in [
+        "capacity = 0",
+        "capacity = 1000001",
+        "refill_per_second = 0",
+        "refill_per_second = 100001",
+    ] {
+        let input = format!("{VALID}\n[rate_limit]\n{replacement}\n");
+        assert!(
+            Config::parse(&input).is_err(),
+            "accepted invalid policy: {replacement}"
+        );
+    }
+    let unknown = format!("{VALID}\n[rate_limit]\nunknown = true\n");
+    assert!(Config::parse(&unknown).is_err());
 }
 
 #[test]
