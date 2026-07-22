@@ -101,6 +101,7 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
         "audit_logs.export",
         "system.settings.manage",
         "sessions.revoke",
+        "bot_protection.manage",
     ];
     for key in permissions {
             sqlx::query(
@@ -237,6 +238,12 @@ pub async fn list_bot_rules(pool: &DbPool) -> Result<Vec<BotRule>, sqlx::Error> 
         .bind(MAX_RULES as i64 + 1).fetch_all(pool).await?;
     if rows.len() > MAX_RULES { return Err(bot_validation("too many bot rules")); }
     Ok(rows.iter().map(bot_rule_from_row).collect())
+}
+pub async fn list_bot_rule_records(pool: &DbPool) -> Result<Vec<(i64, BotRule)>, sqlx::Error> {
+    let rows = sqlx::query("SELECT id,category,weight,trusted_user_agent,trusted_domain,enabled FROM bot_rules ORDER BY id LIMIT ?")
+        .bind(MAX_RULES as i64 + 1).fetch_all(pool).await?;
+    if rows.len() > MAX_RULES { return Err(bot_validation("too many bot rules")); }
+    Ok(rows.iter().map(|row| (row.get("id"), bot_rule_from_row(row))).collect())
 }
 pub async fn insert_bot_rule(pool: &DbPool, rule: &BotRule) -> Result<i64, sqlx::Error> {
     let rule = normalize_bot_rule(rule)?;

@@ -11,6 +11,8 @@ use crate::certificates::{
 };
 use crate::secrets::SecretStore;
 use crate::waf_store::WafStore;
+use crate::bot_store::BotStore;
+use crate::bot_protection::{BotConfig, BotMode, BotRule, MAX_FIELD_BYTES, MAX_RULES};
 use async_trait::async_trait;
 use axum::{
     body::Bytes,
@@ -47,7 +49,22 @@ pub struct AppState {
     pub acme: Arc<dyn AcmeService>,
     pub realtime: Arc<realtime::RealtimeHub>,
     pub waf: Arc<WafStore>,
+    pub bot: Arc<BotStore>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BotConfigPatch { mode: Option<String>, threshold: Option<u16>, ttl_seconds: Option<u64> }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BotCrawlerInput { user_agent: String, domain: String, #[serde(default = "default_true")] enabled: bool }
+fn default_true() -> bool { true }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BotToml { version: u32, mode: Option<String>, threshold: Option<u16>, ttl_seconds: Option<u64>, #[serde(default)] trusted_crawlers: Vec<BotTomlCrawler> }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BotTomlCrawler { user_agent: String, domain: String, #[serde(default = "default_true")] enabled: bool }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -227,6 +244,7 @@ pub async fn build_state(
     let db = repository::connect(database_url).await?;
     repository::migrate(&db).await?;
     let waf = Arc::new(WafStore::load(&db).await.map_err(sqlx::Error::Protocol)?);
+    let bot = Arc::new(BotStore::load(&db).await.map_err(sqlx::Error::Protocol)?);
     let certificates = CertificateStore::new(certificate_root)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     let certificates = Arc::new(certificates);
@@ -253,6 +271,7 @@ pub async fn build_state(
     ));
     let realtime = Arc::new(realtime::RealtimeHub::new(256));
     waf.configure_audit_sink(db.clone(), realtime.clone());
+    bot.configure_audit_sink(db.clone(), realtime.clone());
     certificate_acme.attach_realtime(realtime.clone());
     Ok(AppState {
         db,
@@ -264,6 +283,7 @@ pub async fn build_state(
         acme: Arc::new(CertificateAcmeAdapter::new(certificate_acme)),
         realtime,
         waf,
+        bot,
     })
 }
 
@@ -307,6 +327,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/waf/rules/{id}", axum::routing::patch(update_waf_rule).delete(delete_waf_rule))
         .route("/api/waf/rules/import", post(import_waf_rules))
         .route("/api/waf/rules/export", get(export_waf_rules))
+        .route("/api/bot/config", get(get_bot_config).patch(update_bot_config))
+        .route("/api/bot/trusted-crawlers", get(list_bot_crawlers).post(create_bot_crawler))
+        .route("/api/bot/trusted-crawlers/{id}", axum::routing::patch(update_bot_crawler).delete(delete_bot_crawler))
+        .route("/api/bot/config/import", post(import_bot_config))
+        .route("/api/bot/config/export", get(export_bot_config))
         .route("/api/audit-logs", get(list_audit_logs))
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{id}", axum::routing::patch(update_user).delete(delete_user))
@@ -332,6 +357,61 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
         .fallback_service(ServeDir::new("/usr/share/bearust/frontend"))
+}
+
+async fn require_bot_admin(s: &AppState, h: &HeaderMap) -> Result<User, Response> {
+    let user = current(s, h).await.map_err(|status| user_error(status, "unauthorized", "Authentication required"))?;
+    if !authorize(&s.db, &user, Permission::BotProtectionManage, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        audit::record_state(s, Some(user.id), "bot_mutation_denied", "authorization").await;
+        return Err(user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required"));
+    }
+    Ok(user)
+}
+
+fn bot_mode(value: &str) -> Option<BotMode> { match value { "monitor" | "monitor-only" => Some(BotMode::Monitor), "challenge" => Some(BotMode::Challenge), "block" => Some(BotMode::Block), _ => None } }
+fn bot_record(config: &BotConfig) -> BotConfigRecord { BotConfigRecord { mode: match config.mode { BotMode::Monitor => "monitor", BotMode::Challenge => "challenge", BotMode::Block => "block" }.into(), threshold: config.threshold, ttl_seconds: config.ttl_seconds, updated_at: Utc::now().to_rfc3339() } }
+fn bot_rule_record(id: i64, rule: BotRule) -> BotRuleRecord { BotRuleRecord { id, category: rule.category, weight: rule.weight, trusted_user_agent: rule.trusted_user_agent, trusted_domain: rule.trusted_domain, enabled: rule.enabled } }
+async fn get_bot_config(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse { if let Err(r) = require_bot_admin(&s, &h).await { return r; } match repository::get_bot_config(&s.db).await { Ok(c) => Json(bot_record(&c)).into_response(), Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR,"database_error","Database unavailable") } }
+async fn update_bot_config(State(s): State<AppState>, h: HeaderMap, input: Result<Json<BotConfigPatch>, JsonRejection>) -> impl IntoResponse {
+    let actor = match require_bot_admin(&s, &h).await { Ok(u) => u, Err(r) => return r };
+    let Json(input) = match input { Ok(v) => v, Err(_) => return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid bot configuration") };
+    let mut config = match repository::get_bot_config(&s.db).await { Ok(c) => c, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR,"database_error","Database unavailable") };
+    if let Some(mode) = input.mode { config.mode = match bot_mode(&mode) { Some(v) => v, None => return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid bot mode") }; }
+    if let Some(v) = input.threshold { config.threshold = v; }
+    if let Some(v) = input.ttl_seconds { config.ttl_seconds = v; }
+    if repository::update_bot_config(&s.db, &config).await.is_err() || s.bot.reload(&s.db).await.is_err() { return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid bot configuration"); }
+    audit::record_state(&s, Some(actor.id), "bot_config_updated", &format!("mode={};threshold={};ttl_seconds={}", bot_record(&config).mode, config.threshold, config.ttl_seconds)).await;
+    s.realtime.publish("bot.changed"); Json(bot_record(&config)).into_response()
+}
+async fn list_bot_crawlers(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse { if let Err(r)=require_bot_admin(&s,&h).await{return r;} match repository::list_bot_rule_records(&s.db).await { Ok(rules)=>Json(rules.into_iter().filter(|(_,r)|r.category=="trusted_crawler").map(|(id,r)|bot_rule_record(id,r)).collect::<Vec<_>>()).into_response(), Err(_)=>user_error(StatusCode::INTERNAL_SERVER_ERROR,"database_error","Database unavailable") } }
+async fn create_bot_crawler(State(s): State<AppState>, h: HeaderMap, input: Result<Json<BotCrawlerInput>, JsonRejection>) -> impl IntoResponse { let actor=match require_bot_admin(&s,&h).await{Ok(u)=>u,Err(r)=>return r}; let Json(i)=match input{Ok(v)=>v,Err(_)=>return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid trusted crawler")}; let rule=BotRule::trusted_crawler(i.user_agent,i.domain); let rule=BotRule{enabled:i.enabled,..rule}; let id=match repository::insert_bot_rule(&s.db,&rule).await{Ok(id)=>id,Err(_)=>return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid trusted crawler")}; if s.bot.reload(&s.db).await.is_err(){return user_error(StatusCode::INTERNAL_SERVER_ERROR,"database_error","Unable to reload bot policy")}; audit::record_state(&s,Some(actor.id),"bot_trusted_crawler_created",&format!("rule_id={id}")).await;s.realtime.publish("bot.changed");(StatusCode::CREATED,Json(bot_rule_record(id,rule))).into_response() }
+async fn update_bot_crawler(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>, input: Result<Json<BotCrawlerInput>, JsonRejection>) -> impl IntoResponse { let actor=match require_bot_admin(&s,&h).await{Ok(u)=>u,Err(r)=>return r}; let Json(i)=match input{Ok(v)=>v,Err(_)=>return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid trusted crawler")}; let rule=BotRule{enabled:i.enabled,..BotRule::trusted_crawler(i.user_agent,i.domain)}; if repository::update_bot_rule(&s.db,id,&rule).await.unwrap_or(0)!=1{return user_error(StatusCode::NOT_FOUND,"not_found","Trusted crawler not found")}; if s.bot.reload(&s.db).await.is_err(){return user_error(StatusCode::INTERNAL_SERVER_ERROR,"database_error","Unable to reload bot policy")};audit::record_state(&s,Some(actor.id),"bot_trusted_crawler_updated",&format!("rule_id={id}")).await;s.realtime.publish("bot.changed");Json(bot_rule_record(id,rule)).into_response() }
+async fn delete_bot_crawler(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse { let actor=match require_bot_admin(&s,&h).await{Ok(u)=>u,Err(r)=>return r};if repository::delete_bot_rule(&s.db,id).await.unwrap_or(0)!=1{return user_error(StatusCode::NOT_FOUND,"not_found","Trusted crawler not found")};let _=s.bot.reload(&s.db).await;audit::record_state(&s,Some(actor.id),"bot_trusted_crawler_deleted",&format!("rule_id={id}")).await;s.realtime.publish("bot.changed");StatusCode::NO_CONTENT.into_response() }
+async fn import_bot_config(State(s): State<AppState>, h: HeaderMap, body: Bytes) -> impl IntoResponse {
+    let actor = match require_bot_admin(&s, &h).await { Ok(u) => u, Err(r) => return r };
+    let doc = match String::from_utf8(body.to_vec()).ok().and_then(|t| toml::from_str::<BotToml>(&t).ok()) { Some(v) if v.version == 1 => v, _ => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid bot TOML") };
+    if doc.trusted_crawlers.len() > MAX_RULES { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Too many trusted crawlers"); }
+    let mut config = match repository::get_bot_config(&s.db).await { Ok(v) => v, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") };
+    if let Some(m) = doc.mode { config.mode = match bot_mode(&m) { Some(v) => v, None => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid bot mode") }; }
+    if let Some(v) = doc.threshold { config.threshold = v; }
+    if let Some(v) = doc.ttl_seconds { config.ttl_seconds = v; }
+    for c in &doc.trusted_crawlers { if c.user_agent.len() > MAX_FIELD_BYTES || c.domain.len() > MAX_FIELD_BYTES || c.user_agent.trim().is_empty() || c.domain.trim().is_empty() { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid trusted crawler"); } }
+    if repository::update_bot_config(&s.db, &config).await.is_err() { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid bot configuration"); }
+    for c in doc.trusted_crawlers { let _ = repository::insert_bot_rule(&s.db, &BotRule { enabled: c.enabled, ..BotRule::trusted_crawler(c.user_agent, c.domain) }).await; }
+    if s.bot.reload(&s.db).await.is_err() { return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Unable to reload bot policy"); }
+    audit::record_state(&s, Some(actor.id), "bot_config_imported", "redacted").await; s.realtime.publish("bot.changed"); StatusCode::OK.into_response()
+}
+async fn export_bot_config(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
+    if let Err(r) = require_bot_admin(&s, &h).await { return r; }
+    let c = match repository::get_bot_config(&s.db).await { Ok(v) => v, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") };
+    let rules = match repository::list_bot_rules(&s.db).await { Ok(v) => v, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") };
+    let mut out = format!("version = 1\nmode = '{}'\nthreshold = {}\nttl_seconds = {}\n", bot_record(&c).mode, c.threshold, c.ttl_seconds);
+    for r in rules.into_iter().filter(|r| r.category == "trusted_crawler") {
+        let ua = r.trusted_user_agent.unwrap_or_default().replace('\'', "''");
+        let domain = r.trusted_domain.unwrap_or_default().replace('\'', "''");
+        out.push_str(&format!("\n[[trusted_crawlers]]\nuser_agent = '{}'\ndomain = '{}'\nenabled = {}\n", ua, domain, r.enabled));
+    }
+    ([(axum::http::header::CONTENT_TYPE, "application/toml")], out).into_response()
 }
 
 async fn get_waf_config(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
@@ -497,7 +577,7 @@ fn normalize_role_slug(raw: &str) -> Option<String> {
 }
 
 fn validate_role_input(name: &str, permissions: &[String]) -> Result<(), ()> {
-    if name.trim().is_empty() || permissions.iter().any(|key| !matches!(key.as_str(), "proxy_hosts.read" | "proxy_hosts.write" | "certificates.read" | "certificates.write" | "users.manage" | "roles.manage" | "audit_logs.read" | "audit_logs.export" | "system.settings.manage" | "sessions.revoke")) { return Err(()); }
+    if name.trim().is_empty() || permissions.iter().any(|key| !matches!(key.as_str(), "proxy_hosts.read" | "proxy_hosts.write" | "certificates.read" | "certificates.write" | "users.manage" | "roles.manage" | "audit_logs.read" | "audit_logs.export" | "system.settings.manage" | "sessions.revoke" | "bot_protection.manage")) { return Err(()); }
     Ok(())
 }
 

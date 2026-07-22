@@ -10,8 +10,8 @@ impl Role {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Permission { ProxyHostsRead, ProxyHostsWrite, CertificatesRead, CertificatesWrite, UsersManage, RolesManage, AuditLogsRead, AuditLogsExport, SystemSettingsManage, SessionsRevoke }
-impl Permission { pub const fn key(self) -> &'static str { match self { Self::ProxyHostsRead => "proxy_hosts.read", Self::ProxyHostsWrite => "proxy_hosts.write", Self::CertificatesRead => "certificates.read", Self::CertificatesWrite => "certificates.write", Self::UsersManage => "users.manage", Self::RolesManage => "roles.manage", Self::AuditLogsRead => "audit_logs.read", Self::AuditLogsExport => "audit_logs.export", Self::SystemSettingsManage => "system.settings.manage", Self::SessionsRevoke => "sessions.revoke" } } }
+pub enum Permission { ProxyHostsRead, ProxyHostsWrite, CertificatesRead, CertificatesWrite, UsersManage, RolesManage, AuditLogsRead, AuditLogsExport, SystemSettingsManage, SessionsRevoke, BotProtectionManage }
+impl Permission { pub const fn key(self) -> &'static str { match self { Self::ProxyHostsRead => "proxy_hosts.read", Self::ProxyHostsWrite => "proxy_hosts.write", Self::CertificatesRead => "certificates.read", Self::CertificatesWrite => "certificates.write", Self::UsersManage => "users.manage", Self::RolesManage => "roles.manage", Self::AuditLogsRead => "audit_logs.read", Self::AuditLogsExport => "audit_logs.export", Self::SystemSettingsManage => "system.settings.manage", Self::SessionsRevoke => "sessions.revoke", Self::BotProtectionManage => "bot_protection.manage" } } }
 pub type PermissionKey = Permission;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResourceContext {
@@ -23,7 +23,7 @@ impl ResourceContext {
     pub const GLOBAL: Self = Self::Global;
 }
 
-pub fn allowed(role: Role, permission: Permission) -> bool { match permission { Permission::ProxyHostsRead | Permission::CertificatesRead | Permission::AuditLogsRead => true, Permission::ProxyHostsWrite | Permission::CertificatesWrite => matches!(role, Role::Admin | Role::Operator), Permission::UsersManage | Permission::RolesManage | Permission::AuditLogsExport | Permission::SystemSettingsManage | Permission::SessionsRevoke => matches!(role, Role::Admin) } }
+pub fn allowed(role: Role, permission: Permission) -> bool { match permission { Permission::ProxyHostsRead | Permission::CertificatesRead | Permission::AuditLogsRead => true, Permission::ProxyHostsWrite | Permission::CertificatesWrite => matches!(role, Role::Admin | Role::Operator), Permission::UsersManage | Permission::RolesManage | Permission::AuditLogsExport | Permission::SystemSettingsManage | Permission::SessionsRevoke | Permission::BotProtectionManage => matches!(role, Role::Admin) } }
 
 pub async fn authorize(pool: &DbPool, user: &crate::control_plane::models::User, permission: PermissionKey, context: ResourceContext) -> Result<bool, sqlx::Error> {
     let scope = match context {

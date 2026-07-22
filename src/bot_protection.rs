@@ -111,7 +111,7 @@ impl BotInspectionContext {
         h.update([0]);
         for (k, v) in &self.headers {
             h.update(k.as_bytes());
-            h.update([b'=']);
+            h.update(*b"=");
             h.update(v.as_bytes());
             h.update([0]);
         }
