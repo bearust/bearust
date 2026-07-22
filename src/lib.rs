@@ -10,6 +10,7 @@ pub mod control_plane;
 pub mod health;
 pub mod observability;
 pub mod proxy;
+pub mod rate_limit;
 pub mod reload;
 pub mod router;
 pub mod runtime;
