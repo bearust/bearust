@@ -27,3 +27,10 @@ CREATE TABLE IF NOT EXISTS adaptive_tuning_global (
 
 INSERT OR IGNORE INTO adaptive_tuning_global (id, emergency_disabled, updated_at)
 VALUES (1, 0, '2026-07-22T00:00:00Z');
+
+CREATE TABLE IF NOT EXISTS host_rate_limit_configs (
+    host_id INTEGER PRIMARY KEY,
+    capacity INTEGER NOT NULL,
+    refill_per_second REAL NOT NULL,
+    updated_at TEXT NOT NULL
+);

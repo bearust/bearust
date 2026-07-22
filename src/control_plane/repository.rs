@@ -1499,29 +1499,167 @@ pub async fn insert_tuning_recommendation(pool: &DbPool, rec: &crate::adaptive_t
     Ok(id)
 }
 
-pub async fn mark_recommendation_applied(pool: &DbPool, id: i64, previous_config_json: &str) -> Result<bool, sqlx::Error> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let res = sqlx::query("UPDATE adaptive_tuning_recommendations SET applied=1, applied_at=?, previous_config_json=? WHERE id=? AND applied=0")
-        .bind(&now)
-        .bind(previous_config_json)
-        .bind(id)
+pub async fn insert_tuning_recommendation_dedup(
+    pool: &DbPool,
+    rec: &crate::adaptive_tuning::PolicyRecommendation,
+    cooldown_seconds: i64,
+) -> Result<Option<i64>, sqlx::Error> {
+    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(cooldown_seconds)).to_rfc3339();
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM adaptive_tuning_recommendations WHERE host_id=? AND reason=? AND applied=0 AND created_at >= ?"
+    )
+    .bind(rec.host_id)
+    .bind(&rec.reason)
+    .bind(&cutoff)
+    .fetch_one(pool).await?;
+
+    if count > 0 {
+        return Ok(None);
+    }
+
+    let id = insert_tuning_recommendation(pool, rec).await?;
+
+    sqlx::query("DELETE FROM adaptive_tuning_recommendations WHERE id NOT IN (SELECT id FROM adaptive_tuning_recommendations ORDER BY id DESC LIMIT 1000)")
         .execute(pool).await?;
-    Ok(res.rows_affected() > 0)
+
+    Ok(Some(id))
 }
 
-pub async fn mark_recommendation_rolled_back(pool: &DbPool, id: i64) -> Result<Option<String>, sqlx::Error> {
-    let row = sqlx::query("SELECT previous_config_json FROM adaptive_tuning_recommendations WHERE id=? AND applied=1")
-        .bind(id)
-        .fetch_optional(pool).await?;
+pub async fn get_host_rate_limit_config(pool: &DbPool, host_id: i64) -> Result<super::models::RateLimitConfig, sqlx::Error> {
+    let global = get_rate_limit_config(pool).await?;
+    let row = sqlx::query("SELECT capacity, refill_per_second FROM host_rate_limit_configs WHERE host_id=?")
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await?;
 
     if let Some(row) = row {
-        let prev: Option<String> = row.get("previous_config_json");
-        sqlx::query("UPDATE adaptive_tuning_recommendations SET applied=0, applied_at=NULL WHERE id=?")
-            .bind(id)
-            .execute(pool).await?;
-        Ok(prev)
+        let capacity: i64 = row.get("capacity");
+        let refill_per_second: f64 = row.get("refill_per_second");
+        Ok(super::models::RateLimitConfig {
+            enabled: global.enabled,
+            action: global.action,
+            capacity: capacity as u32,
+            refill_per_second,
+            key_scope: global.key_scope,
+            updated_at: global.updated_at,
+        })
     } else {
-        Ok(None)
+        Ok(global)
     }
+}
+
+pub async fn apply_tuning_recommendation_tx(
+    pool: &DbPool,
+    rec_id: i64,
+) -> Result<Option<(i64, super::models::RateLimitConfig)>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let row = sqlx::query("SELECT id, host_id, patch_json, applied FROM adaptive_tuning_recommendations WHERE id=?")
+        .bind(rec_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let applied: i64 = row.get("applied");
+    if applied != 0 {
+        return Ok(None);
+    }
+
+    let host_id: i64 = row.get("host_id");
+    let patch_json: String = row.get("patch_json");
+    let patch: crate::adaptive_tuning::PolicyPatch = serde_json::from_str(&patch_json).unwrap_or_default();
+
+    let global_row = sqlx::query("SELECT enabled, action, capacity, refill_per_second, key_scope, updated_at FROM rate_limit_config WHERE id=1")
+        .fetch_one(&mut *tx)
+        .await?;
+
+    let host_override = sqlx::query("SELECT capacity, refill_per_second FROM host_rate_limit_configs WHERE host_id=?")
+        .bind(host_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    let current_cap = host_override.as_ref().map(|r| r.get::<i64, _>("capacity") as u32).unwrap_or_else(|| global_row.get::<i64, _>("capacity") as u32);
+    let current_refill = host_override.as_ref().map(|r| r.get::<f64, _>("refill_per_second")).unwrap_or_else(|| global_row.get::<f64, _>("refill_per_second"));
+
+    let mut current_rl = super::models::RateLimitConfig {
+        enabled: global_row.get::<i64, _>("enabled") != 0,
+        action: if global_row.get::<String, _>("action") == "block" { crate::rate_limit::RateLimitAction::Block } else { crate::rate_limit::RateLimitAction::Monitor },
+        capacity: current_cap,
+        refill_per_second: current_refill,
+        key_scope: crate::rate_limit::RateLimitKeyScope::ProxyHostIp,
+        updated_at: global_row.get("updated_at"),
+    };
+
+    let prev_json = serde_json::to_string(&current_rl).unwrap_or_default();
+
+    if let Some(cap) = patch.capacity {
+        current_rl.capacity = cap;
+    }
+    if let Some(refill) = patch.refill_per_second {
+        current_rl.refill_per_second = refill;
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO host_rate_limit_configs(host_id, capacity, refill_per_second, updated_at) VALUES(?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET capacity=?, refill_per_second=?, updated_at=?")
+        .bind(host_id).bind(current_rl.capacity as i64).bind(current_rl.refill_per_second).bind(&now)
+        .bind(current_rl.capacity as i64).bind(current_rl.refill_per_second).bind(&now)
+        .execute(&mut *tx).await?;
+
+    sqlx::query("UPDATE adaptive_tuning_recommendations SET applied=1, applied_at=?, previous_config_json=? WHERE id=?")
+        .bind(&now)
+        .bind(&prev_json)
+        .bind(rec_id)
+        .execute(&mut *tx).await?;
+
+    tx.commit().await?;
+
+    Ok(Some((host_id, current_rl)))
+}
+
+pub async fn rollback_tuning_recommendation_tx(
+    pool: &DbPool,
+    rec_id: i64,
+) -> Result<Option<(i64, super::models::RateLimitConfig)>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let row = sqlx::query("SELECT id, host_id, applied, previous_config_json FROM adaptive_tuning_recommendations WHERE id=?")
+        .bind(rec_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let applied: i64 = row.get("applied");
+    if applied == 0 {
+        return Ok(None);
+    }
+
+    let host_id: i64 = row.get("host_id");
+    let prev_json: Option<String> = row.get("previous_config_json");
+    let Some(prev_json) = prev_json else {
+        return Ok(None);
+    };
+
+    let restored_rl: super::models::RateLimitConfig = serde_json::from_str(&prev_json).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO host_rate_limit_configs(host_id, capacity, refill_per_second, updated_at) VALUES(?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET capacity=?, refill_per_second=?, updated_at=?")
+        .bind(host_id).bind(restored_rl.capacity as i64).bind(restored_rl.refill_per_second).bind(&now)
+        .bind(restored_rl.capacity as i64).bind(restored_rl.refill_per_second).bind(&now)
+        .execute(&mut *tx).await?;
+
+    sqlx::query("UPDATE adaptive_tuning_recommendations SET applied=0, applied_at=NULL WHERE id=?")
+        .bind(rec_id)
+        .execute(&mut *tx).await?;
+
+    tx.commit().await?;
+
+    Ok(Some((host_id, restored_rl)))
 }
 

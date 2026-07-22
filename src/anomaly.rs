@@ -296,6 +296,13 @@ impl AnomalyDetector {
             .collect()
     }
 
+    pub fn get_record(&self, id: u64) -> Option<AnomalyRecord> {
+        let Ok(state) = self.state.lock() else {
+            return None;
+        };
+        state.records.iter().find(|r| r.id == id).cloned()
+    }
+
     pub fn acknowledge(&self, id: u64) -> Option<AnomalyRecord> {
         let Ok(mut state) = self.state.lock() else {
             return None;

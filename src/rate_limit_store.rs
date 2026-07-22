@@ -90,6 +90,7 @@ pub struct RateLimiterStore {
     idle_ttl: Duration,
     state: Mutex<State>,
     policy: RwLock<RateLimitPolicy>,
+    host_policies: RwLock<HashMap<i64, RateLimitPolicy>>,
 }
 
 /// Hard upper bound for process-local entries, preventing accidental
@@ -106,6 +107,7 @@ impl RateLimiterStore {
                 sequence: 0,
             }),
             policy: RwLock::new(RateLimitPolicy::default()),
+            host_policies: RwLock::new(HashMap::new()),
         }
     }
 
@@ -121,8 +123,25 @@ impl RateLimiterStore {
         }
     }
 
+    pub fn set_host_policy(&self, host_id: i64, policy: RateLimitPolicy) {
+        if let Ok(mut current) = self.host_policies.write() {
+            current.insert(host_id, policy);
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.entries.retain(|k, _| k.proxy_host_id != host_id);
+        }
+    }
+
     pub fn policy(&self) -> RateLimitPolicy {
         self.policy.read().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    pub fn host_policy(&self, host_id: i64) -> RateLimitPolicy {
+        self.host_policies
+            .read()
+            .ok()
+            .and_then(|map| map.get(&host_id).cloned())
+            .unwrap_or_else(|| self.policy())
     }
 
     pub fn evaluate(&self, key: RateLimitKey, policy: &RateLimitPolicy, now: Instant) -> Decision {

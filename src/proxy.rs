@@ -93,6 +93,8 @@ pub struct BeaRustProxy {
     pub analytics: Option<Arc<AnalyticsCollector>>,
     pub analytics_changed: Option<Arc<dyn Fn() + Send + Sync>>,
     pub analytics_host_ids: HashMap<String, i64>,
+    pub baseline: Option<Arc<crate::baseline::BaselineCollector>>,
+    pub anomaly: Option<Arc<crate::anomaly::AnomalyDetector>>,
 }
 
 impl BeaRustProxy {
@@ -109,6 +111,8 @@ impl BeaRustProxy {
             analytics: None,
             analytics_changed: None,
             analytics_host_ids: HashMap::new(),
+            baseline: None,
+            anomaly: None,
         }
     }
     pub fn with_challenge_store(mut self, challenges: Http01Store) -> Self {
@@ -151,6 +155,14 @@ impl BeaRustProxy {
         self.analytics_host_ids = host_ids;
         self
     }
+    pub fn with_baseline(mut self, baseline: Arc<crate::baseline::BaselineCollector>) -> Self {
+        self.baseline = Some(baseline);
+        self
+    }
+    pub fn with_anomaly(mut self, anomaly: Arc<crate::anomaly::AnomalyDetector>) -> Self {
+        self.anomaly = Some(anomaly);
+        self
+    }
 
     fn record_completion(
         &self,
@@ -191,6 +203,19 @@ impl BeaRustProxy {
             ctx.start.elapsed().as_millis() as u64,
             security,
         ));
+        if let Some(baseline) = &self.baseline {
+            let snap = analytics.snapshot();
+            let now = chrono::Utc::now();
+            baseline.record(&snap, now);
+            if let Some(anomaly) = &self.anomaly {
+                let host_opt = if proxy_host_id > 0 { Some(proxy_host_id) } else { None };
+                let b_snap = baseline.snapshot(host_opt, crate::baseline::BaselineWindow::FiveMinutes, now - chrono::Duration::minutes(5), now);
+                let new_anomalies = anomaly.evaluate(&b_snap, &snap, now);
+                if !new_anomalies.is_empty() {
+                    invoke_analytics_changed(&self.analytics_changed);
+                }
+            }
+        }
         invoke_analytics_changed(&self.analytics_changed);
         ctx.analytics_logged = true;
     }

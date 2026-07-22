@@ -1336,16 +1336,24 @@ async fn acknowledge_anomaly(
         Err(c) => return user_error(c, "unauthorized", "Authentication required"),
     };
 
-    let allowed = authorize(&s.db, &user, Permission::ProxyHostsWrite, ResourceContext::GLOBAL).await.unwrap_or(false);
+    let record = match s.anomaly.get_record(id) {
+        Some(r) => r,
+        None => return user_error(StatusCode::NOT_FOUND, "not_found", "Anomaly record not found"),
+    };
+
+    let ctx = ResourceContext::ProxyHost(record.host_id);
+    let allowed = authorize(&s.db, &user, Permission::ProxyHostsWrite, ctx).await.unwrap_or(false)
+        || authorize(&s.db, &user, Permission::ProxyHostsWrite, ResourceContext::GLOBAL).await.unwrap_or(false);
+
     if !allowed {
-        return user_error(StatusCode::FORBIDDEN, "forbidden", "Mutation access denied");
+        return user_error(StatusCode::FORBIDDEN, "forbidden", "Mutation access denied for this host");
     }
 
     match s.anomaly.acknowledge(id) {
-        Some(record) => {
-            audit::record_state(&s, Some(user.id), "anomaly_acknowledged", &format!("anomaly_id={id}")).await;
+        Some(rec) => {
+            audit::record_state(&s, Some(user.id), "anomaly_acknowledged", &format!("anomaly_id={id};host_id={}", rec.host_id)).await;
             s.realtime.publish("anomaly.changed");
-            Json(record).into_response()
+            Json(rec).into_response()
         }
         None => user_error(StatusCode::NOT_FOUND, "not_found", "Anomaly record not found"),
     }
@@ -1399,27 +1407,31 @@ async fn list_recommendations(
     if let Err(r) = require_analytics_read(&s, &h, None).await {
         return r;
     }
-    s.baseline.record(&s.analytics.snapshot(), Utc::now());
-
-    let baseline = s.baseline.snapshot(None, crate::baseline::BaselineWindow::FiveMinutes, Utc::now() - chrono::Duration::minutes(5), Utc::now());
+    let now = Utc::now();
     let analytics = s.analytics.snapshot();
-    let anomalies = s.anomaly.evaluate(&baseline, &analytics, Utc::now());
+    s.baseline.record(&analytics, now);
 
-    let current_rl = match repository::get_rate_limit_config(&s.db).await {
-        Ok(c) => crate::rate_limit::RateLimitPolicy {
-            enabled: c.enabled,
-            action: c.action,
-            capacity: c.capacity,
-            refill_per_second: c.refill_per_second,
-            key_scope: c.key_scope,
-        },
-        Err(_) => crate::rate_limit::RateLimitPolicy::default(),
-    };
+    let hosts = repository::list_hosts(&s.db).await.unwrap_or_default();
+    for host in &hosts {
+        let baseline = s.baseline.snapshot(Some(host.id), crate::baseline::BaselineWindow::FiveMinutes, now - chrono::Duration::minutes(5), now);
+        let anomalies = s.anomaly.evaluate(&baseline, &analytics, now);
 
-    for anomaly in &anomalies {
-        let policy = repository::get_tuning_policy(&s.db, anomaly.host_id).await.unwrap_or_default();
-        if let Some(rec) = s.adaptive_tuning.recommend(anomaly, &current_rl, &policy) {
-            let _ = repository::insert_tuning_recommendation(&s.db, &rec).await;
+        let policy = repository::get_tuning_policy(&s.db, host.id).await.unwrap_or_default();
+        let current_rl = match repository::get_host_rate_limit_config(&s.db, host.id).await {
+            Ok(c) => crate::rate_limit::RateLimitPolicy {
+                enabled: c.enabled,
+                action: c.action,
+                capacity: c.capacity,
+                refill_per_second: c.refill_per_second,
+                key_scope: c.key_scope,
+            },
+            Err(_) => crate::rate_limit::RateLimitPolicy::default(),
+        };
+
+        for anomaly in &anomalies {
+            if let Some(rec) = s.adaptive_tuning.recommend(anomaly, &current_rl, &policy) {
+                let _ = repository::insert_tuning_recommendation_dedup(&s.db, &rec, policy.cooldown_seconds as i64).await;
+            }
         }
     }
 
@@ -1452,41 +1464,30 @@ async fn apply_recommendation(
         Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database error"),
     };
 
-    if rec.applied {
-        return user_error(StatusCode::BAD_REQUEST, "already_applied", "Recommendation has already been applied");
+    let policy = repository::get_tuning_policy(&s.db, rec.host_id).await.unwrap_or_default();
+    if policy.mode == crate::adaptive_tuning::TuningMode::Monitor {
+        return user_error(StatusCode::BAD_REQUEST, "monitor_mode_only", "Adaptive tuning for this host is set to monitor-only mode");
     }
 
-    let mut current_rl = match repository::get_rate_limit_config(&s.db).await {
-        Ok(c) => c,
-        Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Rate limit config unavailable"),
+    let res = match repository::apply_tuning_recommendation_tx(&s.db, id).await {
+        Ok(Some(res)) => res,
+        Ok(None) => return user_error(StatusCode::BAD_REQUEST, "already_applied_or_not_found", "Recommendation cannot be applied"),
+        Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Atomic apply transaction failed"),
     };
 
-    let prev_json = serde_json::to_string(&current_rl).unwrap_or_default();
+    let (host_id, new_rl) = res;
+    s.rate_limiter.set_host_policy(
+        host_id,
+        crate::rate_limit::RateLimitPolicy {
+            enabled: new_rl.enabled,
+            action: new_rl.action,
+            capacity: new_rl.capacity,
+            refill_per_second: new_rl.refill_per_second,
+            key_scope: new_rl.key_scope,
+        },
+    );
 
-    if let Some(cap) = rec.patch.capacity {
-        current_rl.capacity = cap;
-    }
-    if let Some(refill) = rec.patch.refill_per_second {
-        current_rl.refill_per_second = refill;
-    }
-
-    if repository::update_rate_limit_config(&s.db, &current_rl).await.is_err() {
-        return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Unable to update rate limit policy");
-    }
-
-    s.rate_limiter.set_policy(crate::rate_limit::RateLimitPolicy {
-        enabled: current_rl.enabled,
-        action: current_rl.action,
-        capacity: current_rl.capacity,
-        refill_per_second: current_rl.refill_per_second,
-        key_scope: current_rl.key_scope,
-    });
-
-    if repository::mark_recommendation_applied(&s.db, id, &prev_json).await.is_err() {
-        return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Unable to mark recommendation applied");
-    }
-
-    audit::record_state(&s, Some(user.id), "recommendation_applied", &format!("recommendation_id={id}")).await;
+    audit::record_state(&s, Some(user.id), "recommendation_applied", &format!("recommendation_id={id};host_id={host_id}")).await;
     s.realtime.publish("adaptive_tuning.changed");
     s.realtime.publish("rate_limit.changed");
     StatusCode::OK.into_response()
@@ -1505,35 +1506,25 @@ async fn rollback_recommendation(
         return user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required");
     }
 
-    let rec = match repository::get_tuning_recommendation(&s.db, id).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return user_error(StatusCode::NOT_FOUND, "recommendation_not_found", "Recommendation not found"),
-        Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database error"),
+    let res = match repository::rollback_tuning_recommendation_tx(&s.db, id).await {
+        Ok(Some(res)) => res,
+        Ok(None) => return user_error(StatusCode::BAD_REQUEST, "not_applied_or_not_found", "Recommendation cannot be rolled back"),
+        Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Atomic rollback transaction failed"),
     };
 
-    if !rec.applied {
-        return user_error(StatusCode::BAD_REQUEST, "not_applied", "Recommendation is not currently applied");
-    }
+    let (host_id, restored_rl) = res;
+    s.rate_limiter.set_host_policy(
+        host_id,
+        crate::rate_limit::RateLimitPolicy {
+            enabled: restored_rl.enabled,
+            action: restored_rl.action,
+            capacity: restored_rl.capacity,
+            refill_per_second: restored_rl.refill_per_second,
+            key_scope: restored_rl.key_scope,
+        },
+    );
 
-    let prev_json = match repository::mark_recommendation_rolled_back(&s.db, id).await {
-        Ok(Some(json)) => json,
-        Ok(None) => return user_error(StatusCode::BAD_REQUEST, "no_previous_config", "No previous configuration stored for rollback"),
-        Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Unable to rollback recommendation"),
-    };
-
-    if let Ok(restored_rl) = serde_json::from_str::<models::RateLimitConfig>(&prev_json) {
-        if repository::update_rate_limit_config(&s.db, &restored_rl).await.is_ok() {
-            s.rate_limiter.set_policy(crate::rate_limit::RateLimitPolicy {
-                enabled: restored_rl.enabled,
-                action: restored_rl.action,
-                capacity: restored_rl.capacity,
-                refill_per_second: restored_rl.refill_per_second,
-                key_scope: restored_rl.key_scope,
-            });
-        }
-    }
-
-    audit::record_state(&s, Some(user.id), "recommendation_rolled_back", &format!("recommendation_id={id}")).await;
+    audit::record_state(&s, Some(user.id), "recommendation_rolled_back", &format!("recommendation_id={id};host_id={host_id}")).await;
     s.realtime.publish("adaptive_tuning.changed");
     s.realtime.publish("rate_limit.changed");
     StatusCode::OK.into_response()
