@@ -724,6 +724,7 @@ export function BaselineSection({ hosts, refreshToken = 0 }: { hosts: Host[]; re
   const [window, setWindow] = useState<BaselineWindow>("5m");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const autoSelectedHost = useRef(false);
 
   const load = async () => {
     setLoading(true);
@@ -741,6 +742,16 @@ export function BaselineSection({ hosts, refreshToken = 0 }: { hosts: Host[]; re
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (hosts.length === 0) return;
+    if (!autoSelectedHost.current) {
+      autoSelectedHost.current = true;
+      setHost(String(hosts[0].id));
+      return;
+    }
+    if (host && !hosts.some((candidate) => String(candidate.id) === host)) setHost(String(hosts[0].id));
+  }, [hosts]);
 
   useEffect(() => {
     void load();
@@ -810,6 +821,7 @@ export function AnomalySection({ user, hosts, refreshToken = 0 }: { user: User; 
   const [severity, setSeverity] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const autoSelectedHost = useRef(false);
   const canAck = user.role === "admin" || user.role === "operator";
 
   const load = async () => {
@@ -828,6 +840,16 @@ export function AnomalySection({ user, hosts, refreshToken = 0 }: { user: User; 
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (hosts.length === 0) return;
+    if (!autoSelectedHost.current) {
+      autoSelectedHost.current = true;
+      setHost(String(hosts[0].id));
+      return;
+    }
+    if (host && !hosts.some((candidate) => String(candidate.id) === host)) setHost(String(hosts[0].id));
+  }, [hosts]);
 
   useEffect(() => {
     void load();

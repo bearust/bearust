@@ -60,6 +60,7 @@ fn is_loopback(ip: IpAddr) -> bool {
     ip.is_loopback()
 }
 
+#[allow(clippy::result_unit_err)]
 pub fn render(snapshot: &AnalyticsSnapshot, config: &PrometheusConfig) -> Result<String, ()> {
     config.validate().map_err(|_| ())?;
     let mut out = String::new();

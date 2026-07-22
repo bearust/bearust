@@ -43,7 +43,7 @@ fn test_default_mode_and_guardrails() {
 
     // Validate max delta limit (capacity 100 with max 50% delta -> patch capacity between 50 and 150)
     if let Some(cap) = rec.patch.capacity {
-        assert!(cap >= 50 && cap <= 150);
+        assert!((50..=150).contains(&cap));
     }
 }
 

@@ -26,7 +26,7 @@ pub fn external_database_url() -> Option<String> {
 pub fn redacted_database_target(url: &str) -> String {
     let (scheme, remainder) = url
         .split_once("://")
-        .map_or(("unknown", url), |parts| parts);
+        .unwrap_or(("unknown", url));
     let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
     let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
     let host = if host.starts_with('[') {

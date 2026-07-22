@@ -193,7 +193,7 @@ fn parse_waf_action(value: &str) -> WafAction {
 fn rate_limit_action_value(a: RateLimitAction) -> &'static str { if matches!(a, RateLimitAction::Block) { "block" } else { "monitor" } }
 fn parse_rate_limit_action(v: &str) -> RateLimitAction { if v == "block" { RateLimitAction::Block } else { RateLimitAction::Monitor } }
 fn parse_rate_limit_scope(v: &str) -> Option<RateLimitKeyScope> { (v == "proxy_host_ip").then_some(RateLimitKeyScope::ProxyHostIp) }
-fn validate_rate_limit_config(c: &RateLimitConfig) -> Result<(), sqlx::Error> { RateLimitPolicy { enabled:c.enabled, action:c.action, capacity:c.capacity, refill_per_second:c.refill_per_second, key_scope:c.key_scope }.validate().map_err(|e| sqlx::Error::Protocol(e.to_string().into())) }
+fn validate_rate_limit_config(c: &RateLimitConfig) -> Result<(), sqlx::Error> { RateLimitPolicy { enabled:c.enabled, action:c.action, capacity:c.capacity, refill_per_second:c.refill_per_second, key_scope:c.key_scope }.validate().map_err(|e| sqlx::Error::Protocol(e.to_string())) }
 pub async fn get_rate_limit_config(pool: &DbPool) -> Result<RateLimitConfig, sqlx::Error> { let row=sqlx::query("SELECT enabled,action,capacity,refill_per_second,key_scope,updated_at FROM rate_limit_config WHERE id=1").fetch_one(pool).await?; let scope=parse_rate_limit_scope(&row.get::<String,_>("key_scope")).ok_or_else(||sqlx::Error::Protocol("invalid rate limit key scope".into()))?; let c=RateLimitConfig{enabled:row.get::<i64,_>("enabled")!=0,action:parse_rate_limit_action(&row.get::<String,_>("action")),capacity:row.get::<i64,_>("capacity") as u32,refill_per_second:row.get::<f64,_>("refill_per_second"),key_scope:scope,updated_at:row.get("updated_at")}; validate_rate_limit_config(&c)?; Ok(c) }
 pub async fn update_rate_limit_config(pool: &DbPool, c: &RateLimitConfig) -> Result<u64, sqlx::Error> { validate_rate_limit_config(c)?; Ok(sqlx::query("UPDATE rate_limit_config SET enabled=?,action=?,capacity=?,refill_per_second=?,key_scope=?,updated_at=? WHERE id=1").bind(c.enabled as i64).bind(rate_limit_action_value(c.action)).bind(c.capacity as i64).bind(c.refill_per_second).bind("proxy_host_ip").bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?.rows_affected()) }
 
@@ -1417,5 +1417,111 @@ pub async fn set_emergency_disabled(pool: &DbPool, disabled: bool) -> Result<(),
         .bind(val).bind(&now).bind(val).bind(&now)
         .execute(pool).await?;
     Ok(())
+}
+
+pub async fn list_tuning_recommendations(pool: &DbPool) -> Result<Vec<crate::adaptive_tuning::PolicyRecommendation>, sqlx::Error> {
+    let rows = sqlx::query("SELECT id, host_id, patch_json, confidence, reason, created_at, applied, applied_at, previous_config_json FROM adaptive_tuning_recommendations ORDER BY id DESC LIMIT 100")
+        .fetch_all(pool).await?;
+
+    let mut list = Vec::new();
+    for row in rows {
+        let patch_json: String = row.get("patch_json");
+        let patch = serde_json::from_str(&patch_json).unwrap_or_default();
+        let created_at_str: String = row.get("created_at");
+        let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+
+        let applied_at = row.get::<Option<String>, _>("applied_at").and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&chrono::Utc)).ok()
+        });
+
+        list.push(crate::adaptive_tuning::PolicyRecommendation {
+            id: row.get("id"),
+            host_id: row.get("host_id"),
+            patch,
+            confidence: row.get("confidence"),
+            reason: row.get("reason"),
+            created_at,
+            applied: row.get::<i64, _>("applied") != 0,
+            applied_at,
+            previous_config_json: row.get("previous_config_json"),
+        });
+    }
+    Ok(list)
+}
+
+pub async fn get_tuning_recommendation(pool: &DbPool, id: i64) -> Result<Option<crate::adaptive_tuning::PolicyRecommendation>, sqlx::Error> {
+    let row = sqlx::query("SELECT id, host_id, patch_json, confidence, reason, created_at, applied, applied_at, previous_config_json FROM adaptive_tuning_recommendations WHERE id=?")
+        .bind(id)
+        .fetch_optional(pool).await?;
+
+    if let Some(row) = row {
+        let patch_json: String = row.get("patch_json");
+        let patch = serde_json::from_str(&patch_json).unwrap_or_default();
+        let created_at_str: String = row.get("created_at");
+        let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+
+        let applied_at = row.get::<Option<String>, _>("applied_at").and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&chrono::Utc)).ok()
+        });
+
+        Ok(Some(crate::adaptive_tuning::PolicyRecommendation {
+            id: row.get("id"),
+            host_id: row.get("host_id"),
+            patch,
+            confidence: row.get("confidence"),
+            reason: row.get("reason"),
+            created_at,
+            applied: row.get::<i64, _>("applied") != 0,
+            applied_at,
+            previous_config_json: row.get("previous_config_json"),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn insert_tuning_recommendation(pool: &DbPool, rec: &crate::adaptive_tuning::PolicyRecommendation) -> Result<i64, sqlx::Error> {
+    let id = if rec.id > 0 { rec.id } else { generated_id() };
+    let patch_json = serde_json::to_string(&rec.patch).unwrap_or_default();
+    sqlx::query("INSERT INTO adaptive_tuning_recommendations (id, host_id, patch_json, confidence, reason, created_at, applied) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .bind(id)
+        .bind(rec.host_id)
+        .bind(&patch_json)
+        .bind(rec.confidence)
+        .bind(&rec.reason)
+        .bind(rec.created_at.to_rfc3339())
+        .bind(if rec.applied { 1i64 } else { 0i64 })
+        .execute(pool).await?;
+    Ok(id)
+}
+
+pub async fn mark_recommendation_applied(pool: &DbPool, id: i64, previous_config_json: &str) -> Result<bool, sqlx::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let res = sqlx::query("UPDATE adaptive_tuning_recommendations SET applied=1, applied_at=?, previous_config_json=? WHERE id=? AND applied=0")
+        .bind(&now)
+        .bind(previous_config_json)
+        .bind(id)
+        .execute(pool).await?;
+    Ok(res.rows_affected() > 0)
+}
+
+pub async fn mark_recommendation_rolled_back(pool: &DbPool, id: i64) -> Result<Option<String>, sqlx::Error> {
+    let row = sqlx::query("SELECT previous_config_json FROM adaptive_tuning_recommendations WHERE id=? AND applied=1")
+        .bind(id)
+        .fetch_optional(pool).await?;
+
+    if let Some(row) = row {
+        let prev: Option<String> = row.get("previous_config_json");
+        sqlx::query("UPDATE adaptive_tuning_recommendations SET applied=0, applied_at=NULL WHERE id=?")
+            .bind(id)
+            .execute(pool).await?;
+        Ok(prev)
+    } else {
+        Ok(None)
+    }
 }
 

@@ -114,7 +114,10 @@ fn configured_capacity_is_clamped_to_safe_bound() {
         ..RateLimitPolicy::default()
     };
     let _ = store.evaluate(key(1, "192.0.2.1"), &policy, Instant::now());
-    assert!(MAX_STORE_ENTRIES < usize::MAX);
+    #[allow(clippy::assertions_on_constants)]
+    {
+        assert!(MAX_STORE_ENTRIES < usize::MAX);
+    }
     assert_eq!(store.len(), 1);
 }
 

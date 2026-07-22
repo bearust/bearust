@@ -5,18 +5,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TuningMode {
+    #[default]
     Monitor,
     Recommend,
     Enforce,
-}
-
-impl Default for TuningMode {
-    fn default() -> Self {
-        TuningMode::Monitor
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -25,6 +20,21 @@ pub struct TuningPolicy {
     pub max_delta_percent: u8,
     pub cooldown_seconds: u64,
     pub min_confidence: f64,
+}
+
+impl TuningPolicy {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.max_delta_percent == 0 || self.max_delta_percent > 100 {
+            return Err("max_delta_percent must be between 1 and 100");
+        }
+        if !(10..=86400).contains(&self.cooldown_seconds) {
+            return Err("cooldown_seconds must be between 10 and 86400");
+        }
+        if self.min_confidence.is_nan() || self.min_confidence.is_infinite() || !(0.1..=1.0).contains(&self.min_confidence) {
+            return Err("min_confidence must be a number between 0.1 and 1.0");
+        }
+        Ok(())
+    }
 }
 
 impl Default for TuningPolicy {

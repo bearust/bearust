@@ -154,7 +154,7 @@ impl RateLimiterStore {
                 .entries
                 .iter()
                 .min_by_key(|(_, entry)| entry.sequence)
-                .map(|(key, _)| key.clone())
+                .map(|(key, _)| *key)
             {
                 state.entries.remove(&oldest);
             }
@@ -178,6 +178,10 @@ impl RateLimiterStore {
             Ok(state) => state.entries.len(),
             Err(poisoned) => poisoned.into_inner().entries.len(),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

@@ -47,26 +47,18 @@ impl Default for RateLimitConfig {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitAction {
+    #[default]
     Monitor,
     Block,
 }
-impl Default for RateLimitAction {
-    fn default() -> Self {
-        Self::Monitor
-    }
-}
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitKeyScope {
+    #[default]
     ProxyHostIp,
-}
-impl Default for RateLimitKeyScope {
-    fn default() -> Self {
-        Self::ProxyHostIp
-    }
 }
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

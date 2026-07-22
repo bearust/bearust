@@ -66,7 +66,7 @@ async fn baseline_endpoint_scoped_viewer_and_admin() {
 
     // Admin can query any host baseline
     let req = Request::builder()
-        .uri(&format!("/api/analytics/baseline?proxy_host_id={}&window=5m", host1.id))
+        .uri(format!("/api/analytics/baseline?proxy_host_id={}&window=5m", host1.id))
         .method("GET")
         .header("Cookie", "bearust_session=admin-token")
         .body(Body::empty())
@@ -77,7 +77,7 @@ async fn baseline_endpoint_scoped_viewer_and_admin() {
 
     // Scoped user can query host 1
     let req = Request::builder()
-        .uri(&format!("/api/analytics/baseline?proxy_host_id={}&window=5m", host1.id))
+        .uri(format!("/api/analytics/baseline?proxy_host_id={}&window=5m", host1.id))
         .method("GET")
         .header("Cookie", "bearust_session=scoped-token")
         .body(Body::empty())
@@ -88,7 +88,7 @@ async fn baseline_endpoint_scoped_viewer_and_admin() {
 
     // Scoped user CANNOT query host 2
     let req = Request::builder()
-        .uri(&format!("/api/analytics/baseline?proxy_host_id={}&window=5m", host2.id))
+        .uri(format!("/api/analytics/baseline?proxy_host_id={}&window=5m", host2.id))
         .method("GET")
         .header("Cookie", "bearust_session=scoped-token")
         .body(Body::empty())
