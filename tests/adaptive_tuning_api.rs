@@ -277,8 +277,8 @@ async fn adaptive_tuning_auto_enforce_mode() {
         });
     }
 
-    // Run evaluation tick - ticker will detect anomaly, generate recommendation, and AUTO-APPLY it!
-    bearust::control_plane::run_adaptive_evaluation_tick(&state).await;
+    // 1. Scheduler tick (allow_auto_enforce = true) auto-applies recommendation for host 3
+    bearust::control_plane::run_adaptive_evaluation_tick(&state, true).await;
 
     // Verify rate limit for host 3 in DB was automatically updated to 75 (100 - 50% delta)
     let rl_after = repository::get_host_rate_limit_config(&state.db, host_id).await.unwrap();
@@ -299,4 +299,48 @@ async fn adaptive_tuning_auto_enforce_mode() {
     };
     let audit_logs = repository::list_audit_logs(&state.db, &query).await.unwrap();
     assert!(audit_logs.items.iter().any(|log| log.event == "adaptive_tuning_auto_enforced"));
+
+    // 2. Read-only tick (allow_auto_enforce = false) on host 4 does NOT mutate rate limit
+    let host_4_id = 4;
+    repository::insert_host(&state.db, &bearust::control_plane::models::ProxyHost {
+        id: host_4_id,
+        name: "test-host-4".into(),
+        domain: "h4.example.com".into(),
+        upstream_host: "127.0.0.1".into(),
+        upstream_port: 8080,
+        tls_mode: "off".into(),
+        certificate_id: None,
+        enabled: true,
+    }).await.unwrap();
+
+    repository::update_tuning_policy(&state.db, host_4_id, &TuningPolicy {
+        mode: TuningMode::Enforce,
+        max_delta_percent: 50,
+        cooldown_seconds: 300,
+        min_confidence: 0.8,
+    }).await.unwrap();
+
+    for i in (1..=6).rev() {
+        state.analytics.record(bearust::analytics::AnalyticsEvent {
+            proxy_host_id: host_4_id,
+            timestamp: now - chrono::Duration::seconds(i * 60 + 5),
+            status_code: 200,
+            latency_ms: 10,
+            security: bearust::analytics::SecurityCounters::default(),
+        });
+    }
+    state.baseline.record(&state.analytics.snapshot(), now - chrono::Duration::seconds(65));
+    for _ in 0..500 {
+        state.analytics.record(bearust::analytics::AnalyticsEvent {
+            proxy_host_id: host_4_id,
+            timestamp: now,
+            status_code: 200,
+            latency_ms: 10,
+            security: bearust::analytics::SecurityCounters::default(),
+        });
+    }
+
+    bearust::control_plane::run_adaptive_evaluation_tick(&state, false).await;
+    let rl_host_4 = repository::get_host_rate_limit_config(&state.db, host_4_id).await.unwrap();
+    assert_eq!(rl_host_4.capacity, 100);
 }

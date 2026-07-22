@@ -1307,7 +1307,7 @@ struct AnomalyQuery {
     rule: Option<String>,
 }
 
-pub async fn run_adaptive_evaluation_tick(s: &AppState) {
+pub async fn run_adaptive_evaluation_tick(s: &AppState, allow_auto_enforce: bool) {
     let now = Utc::now();
     let analytics = s.analytics.snapshot();
     let hosts = repository::list_hosts(&s.db).await.unwrap_or_default();
@@ -1329,8 +1329,9 @@ pub async fn run_adaptive_evaluation_tick(s: &AppState) {
 
         // 3. Record current snapshot into baseline AFTER anomaly evaluation
         s.baseline.record(&analytics, now);
+        s.realtime.publish("baseline.changed");
 
-        // 4. Generate recommendations & auto-enforce if mode is Enforce
+        // 4. Generate recommendations & auto-enforce if mode is Enforce and allow_auto_enforce is true
         let policy = repository::get_tuning_policy(&s.db, host.id).await.unwrap_or_default();
         let current_rl = match repository::get_host_rate_limit_config(&s.db, host.id).await {
             Ok(c) => crate::rate_limit::RateLimitPolicy {
@@ -1345,62 +1346,64 @@ pub async fn run_adaptive_evaluation_tick(s: &AppState) {
 
         for anomaly in &new_anomalies {
             if let Some(rec) = s.adaptive_tuning.recommend(anomaly, &current_rl, &policy) {
-                if let Ok(Some(rec_id)) = repository::insert_tuning_recommendation_dedup(&s.db, &rec, policy.cooldown_seconds as i64).await {
-                    s.realtime.publish("adaptive_tuning.changed");
+                if allow_auto_enforce {
+                    if let Ok(Some(rec_id)) = repository::insert_tuning_recommendation_dedup(&s.db, &rec, policy.cooldown_seconds as i64).await {
+                        s.realtime.publish("adaptive_tuning.changed");
 
-                    // Auto-enforce if policy mode is Enforce, not emergency disabled, and confidence >= min_confidence
-                    if policy.mode == crate::adaptive_tuning::TuningMode::Enforce
-                        && !s.adaptive_tuning.is_emergency_disabled()
-                        && rec.confidence >= policy.min_confidence
-                    {
-                        match repository::apply_tuning_recommendation_tx(&s.db, rec_id).await {
-                            Ok(Some((h_id, new_rl))) => {
-                                s.rate_limiter.set_host_policy(
-                                    h_id,
-                                    crate::rate_limit::RateLimitPolicy {
-                                        enabled: new_rl.enabled,
-                                        action: new_rl.action,
-                                        capacity: new_rl.capacity,
-                                        refill_per_second: new_rl.refill_per_second,
-                                        key_scope: new_rl.key_scope,
-                                    },
-                                );
-                                audit::record_state(
-                                    s,
-                                    None,
-                                    "adaptive_tuning_auto_enforced",
-                                    &format!("recommendation_id={rec_id};host_id={h_id};confidence={}", rec.confidence),
-                                ).await;
-                                s.realtime.publish("adaptive_tuning.changed");
-                                s.realtime.publish("rate_limit.changed");
-                            }
-                            Ok(None) => {
-                                audit::record_state(
-                                    s,
-                                    None,
-                                    "adaptive_tuning_auto_enforce_failed",
-                                    &format!("recommendation_id={rec_id};host_id={};reason=already_applied_or_not_found", rec.host_id),
-                                ).await;
-                                tracing::warn!(
-                                    event = "adaptive_tuning_auto_enforce_failed",
-                                    recommendation_id = rec_id,
-                                    host_id = rec.host_id,
-                                    reason = "already_applied_or_not_found"
-                                );
-                            }
-                            Err(e) => {
-                                audit::record_state(
-                                    s,
-                                    None,
-                                    "adaptive_tuning_auto_enforce_failed",
-                                    &format!("recommendation_id={rec_id};host_id={};error={e}", rec.host_id),
-                                ).await;
-                                tracing::error!(
-                                    event = "adaptive_tuning_auto_enforce_failed",
-                                    recommendation_id = rec_id,
-                                    host_id = rec.host_id,
-                                    error = %e
-                                );
+                        // Auto-enforce if policy mode is Enforce, not emergency disabled, and confidence >= min_confidence
+                        if policy.mode == crate::adaptive_tuning::TuningMode::Enforce
+                            && !s.adaptive_tuning.is_emergency_disabled()
+                            && rec.confidence >= policy.min_confidence
+                        {
+                            match repository::apply_tuning_recommendation_tx(&s.db, rec_id).await {
+                                Ok(Some((h_id, new_rl))) => {
+                                    s.rate_limiter.set_host_policy(
+                                        h_id,
+                                        crate::rate_limit::RateLimitPolicy {
+                                            enabled: new_rl.enabled,
+                                            action: new_rl.action,
+                                            capacity: new_rl.capacity,
+                                            refill_per_second: new_rl.refill_per_second,
+                                            key_scope: new_rl.key_scope,
+                                        },
+                                    );
+                                    audit::record_state(
+                                        s,
+                                        None,
+                                        "adaptive_tuning_auto_enforced",
+                                        &format!("recommendation_id={rec_id};host_id={h_id};confidence={}", rec.confidence),
+                                    ).await;
+                                    s.realtime.publish("adaptive_tuning.changed");
+                                    s.realtime.publish("rate_limit.changed");
+                                }
+                                Ok(None) => {
+                                    audit::record_state(
+                                        s,
+                                        None,
+                                        "adaptive_tuning_auto_enforce_failed",
+                                        &format!("recommendation_id={rec_id};host_id={};reason=already_applied_or_not_found", rec.host_id),
+                                    ).await;
+                                    tracing::warn!(
+                                        event = "adaptive_tuning_auto_enforce_failed",
+                                        recommendation_id = rec_id,
+                                        host_id = rec.host_id,
+                                        reason = "already_applied_or_not_found"
+                                    );
+                                }
+                                Err(e) => {
+                                    audit::record_state(
+                                        s,
+                                        None,
+                                        "adaptive_tuning_auto_enforce_failed",
+                                        &format!("recommendation_id={rec_id};host_id={};reason=database_error", rec.host_id),
+                                    ).await;
+                                    tracing::error!(
+                                        event = "adaptive_tuning_auto_enforce_failed",
+                                        recommendation_id = rec_id,
+                                        host_id = rec.host_id,
+                                        error = %e
+                                    );
+                                }
                             }
                         }
                     }
@@ -1418,7 +1421,7 @@ async fn list_anomalies(
     if let Err(r) = require_analytics_read(&s, &h, query.host_id).await {
         return r;
     }
-    run_adaptive_evaluation_tick(&s).await;
+    run_adaptive_evaluation_tick(&s, false).await;
 
     let severity = query.severity.as_deref().and_then(|s| match s {
         "info" => Some(crate::anomaly::AnomalySeverity::Info),
@@ -1520,7 +1523,7 @@ async fn list_recommendations(
     if let Err(r) = require_analytics_read(&s, &h, None).await {
         return r;
     }
-    run_adaptive_evaluation_tick(&s).await;
+    run_adaptive_evaluation_tick(&s, false).await;
 
     match repository::list_tuning_recommendations(&s.db).await {
         Ok(list) => Json(list).into_response(),

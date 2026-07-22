@@ -308,7 +308,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 interval.tick().await;
-                crate::control_plane::run_adaptive_evaluation_tick(&eval_state).await;
+                crate::control_plane::run_adaptive_evaluation_tick(&eval_state, true).await;
             }
         });
 
