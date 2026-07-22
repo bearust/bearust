@@ -343,6 +343,7 @@ dependencies = [
  "clap",
  "futures-util",
  "hex",
+ "hmac",
  "http",
  "http-body-util",
  "instant-acme",

@@ -12,6 +12,7 @@ use crate::certificates::{
 use crate::secrets::SecretStore;
 use crate::waf_store::WafStore;
 use crate::bot_store::BotStore;
+use crate::bot_challenge::{ChallengeService, unix_now};
 use crate::bot_protection::{BotConfig, BotMode, BotRule, MAX_FIELD_BYTES, MAX_RULES, MAX_TRUSTED_RULES};
 use async_trait::async_trait;
 use axum::{
@@ -50,6 +51,7 @@ pub struct AppState {
     pub realtime: Arc<realtime::RealtimeHub>,
     pub waf: Arc<WafStore>,
     pub bot: Arc<BotStore>,
+    pub challenges: Arc<ChallengeService>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -250,6 +252,7 @@ pub async fn build_state(
     let certificates = Arc::new(certificates);
     let secrets = SecretStore::open(&certificate_root.join("secrets"))
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let challenges = Arc::new(ChallengeService::new(&secrets).map_err(|e| sqlx::Error::Protocol(e.to_string()))?);
     let reloader: Arc<dyn ConfigReloader> = Arc::new(NoopReloader);
     // The production control-plane path uses the real ACME client.  The
     // client is lazy with respect to network calls, so startup remains
@@ -284,6 +287,7 @@ pub async fn build_state(
         realtime,
         waf,
         bot,
+        challenges,
     })
 }
 
@@ -321,6 +325,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(me))
+        .route("/api/bot/challenge", post(issue_bot_challenge))
+        .route("/api/bot/challenge/verify", post(verify_bot_challenge))
         .route("/api/events", get(events))
         .route("/api/waf/config", get(get_waf_config).patch(update_waf_config))
         .route("/api/waf/rules", get(list_waf_rules).post(create_waf_rule))
@@ -357,6 +363,24 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
         .fallback_service(ServeDir::new("/usr/share/bearust/frontend"))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChallengeInput { fingerprint: String }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChallengeVerifyInput { token: String, fingerprint: String, solution: String }
+async fn issue_bot_challenge(State(s): State<AppState>, Json(input): Json<ChallengeInput>) -> impl IntoResponse {
+    if input.fingerprint.is_empty() || input.fingerprint.len() > 128 { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid challenge"); }
+    let challenge = s.challenges.issue_challenge(&input.fingerprint, unix_now()).await;
+    ([(axum::http::header::CACHE_CONTROL, "no-store")], Json(challenge)).into_response()
+}
+async fn verify_bot_challenge(State(s): State<AppState>, Json(input): Json<ChallengeVerifyInput>) -> impl IntoResponse {
+    let result = s.challenges.verify_solution(&input.token, &input.fingerprint, &input.solution, unix_now()).await;
+    if result.is_err() { return user_error(StatusCode::BAD_REQUEST, "challenge_failed", "Challenge verification failed"); }
+    let cookie = format!("bearust_bot_clear={}; Max-Age=300; Path=/; Secure; HttpOnly; SameSite=Strict", input.token);
+    ([(axum::http::header::SET_COOKIE, cookie), (axum::http::header::CACHE_CONTROL, "no-store".to_string())], Json(serde_json::json!({"ok":true}))).into_response()
 }
 
 async fn require_bot_admin(s: &AppState, h: &HeaderMap) -> Result<User, Response> {

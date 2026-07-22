@@ -1,6 +1,7 @@
 pub mod acme;
 pub mod balancer;
 pub mod bot_protection;
+pub mod bot_challenge;
 pub mod bot_store;
 pub mod certificates;
 pub mod cli;
