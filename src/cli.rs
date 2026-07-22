@@ -1,3 +1,5 @@
+use crate::rate_limit::{RateLimitKeyScope, RateLimitPolicy};
+use crate::rate_limit_store::IpNetSet;
 use crate::{
     certificates::RenewalScheduler,
     config, proxy,
@@ -11,8 +13,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use crate::rate_limit::{RateLimitPolicy, RateLimitKeyScope};
-use crate::rate_limit_store::IpNetSet;
 use thiserror::Error;
 
 /// Start certificate renewal outside the Pingora traffic path. The command
@@ -259,8 +259,9 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             tracing::warn!(event = "generated_setup_token_file", path = %token_path.display());
         }
         tracing::info!(event = "control_plane_start", bind = %config.server.control_bind, setup_token_configured = setup_token_from_env.is_some(), generated_setup_token = setup_token_from_env.is_none());
-        let control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
+        let mut control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
+        control_state.prometheus = config.prometheus.clone();
         let waf_store = control_state.waf.clone();
         let bot_store = control_state.bot.clone();
         let challenge_service = control_state.challenges.clone();
@@ -283,9 +284,19 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let trusted_proxies = IpNetSet::new(config.server.trusted_proxy_cidrs.iter().map(String::as_str));
         let control_listener = tokio::net::TcpListener::bind(config.server.control_bind).await
             .map_err(|e| AppError::Server(format!("control plane bind: {e}")))?;
+        let control_router = crate::control_plane::router(control_state.clone());
         let control_task = tokio::spawn(async move {
-            let _ = axum::serve(control_listener, crate::control_plane::router(control_state)).await;
+            let _ = axum::serve(control_listener, control_router).await;
         });
+        if config.prometheus.enabled && config.prometheus.bind != config.server.control_bind {
+            let metrics_listener = tokio::net::TcpListener::bind(config.prometheus.bind).await
+                .map_err(|e| AppError::Server(format!("prometheus bind: {e}")))?;
+            let metrics_router = crate::control_plane::router(control_state);
+            tokio::spawn(async move {
+                let _ = axum::serve(metrics_listener, metrics_router).await;
+            });
+            tracing::info!(event = "prometheus_start", bind = %config.prometheus.bind, internal_only = config.prometheus.internal_only, require_auth = config.prometheus.require_auth);
+        }
         let pingora_options = std::env::var_os("BEARUST_PROXY_UPGRADE").map(|_| {
             pingora_core::server::configuration::Opt {
                 upgrade: true,

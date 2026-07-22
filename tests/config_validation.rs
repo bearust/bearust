@@ -18,6 +18,7 @@ fn parses_valid_configuration_and_defaults() {
     assert_eq!(config.rate_limit.refill_per_second, 10.0);
     assert_eq!(config.upstream_pools[0].connect_timeout_seconds, 3);
     assert_eq!(config.upstream_pools[0].request_timeout_seconds, 30);
+    assert!(!config.prometheus.enabled);
     assert_eq!(
         config.upstream_pools[0].algorithm,
         Algorithm::LeastConnections
@@ -26,6 +27,21 @@ fn parses_valid_configuration_and_defaults() {
         config.upstream_pools[0].backends[0].health_check,
         HealthCheckKind::Http
     );
+}
+
+#[test]
+fn parses_and_validates_prometheus_configuration() {
+    let input = format!(
+        "{VALID}\n[prometheus]\nenabled = true\nbind = \"127.0.0.1:9191\"\nmax_output_bytes = 4096\n"
+    );
+    let config = Config::parse(&input).expect("valid prometheus configuration");
+    assert!(config.prometheus.enabled);
+    assert_eq!(config.prometheus.bind.to_string(), "127.0.0.1:9191");
+    assert_eq!(config.prometheus.max_output_bytes, 4096);
+
+    let external_internal =
+        format!("{VALID}\n[prometheus]\nenabled = true\nbind = \"0.0.0.0:9191\"\n");
+    assert!(Config::parse(&external_internal).is_err());
 }
 
 #[test]

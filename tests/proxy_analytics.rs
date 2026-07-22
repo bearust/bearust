@@ -24,6 +24,7 @@ fn proxy_builder_accepts_analytics_collector() {
             upstream_pools: Vec::new(),
             routes: Vec::new(),
             rate_limit: Default::default(),
+            prometheus: Default::default(),
         },
         None,
     )
@@ -71,6 +72,7 @@ fn analytics_event_path_is_fail_open_without_collector() {
             upstream_pools: Vec::new(),
             routes: Vec::new(),
             rate_limit: Default::default(),
+            prometheus: Default::default(),
         },
         None,
     )

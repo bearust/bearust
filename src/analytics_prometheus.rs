@@ -1,5 +1,6 @@
 use crate::analytics::AnalyticsSnapshot;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 256 * 1024;
@@ -63,6 +64,8 @@ pub fn render(snapshot: &AnalyticsSnapshot, config: &PrometheusConfig) -> Result
     config.validate().map_err(|_| ())?;
     let mut out = String::new();
     out.push_str("# TYPE bearust_requests_total counter\n# TYPE bearust_request_duration_ms gauge\n# TYPE bearust_security_events_total counter\n# TYPE bearust_rate_limit_events_total counter\n");
+    let mut counters: BTreeMap<(String, String, String), u64> = BTreeMap::new();
+    let mut gauges: BTreeMap<(String, String), u64> = BTreeMap::new();
     for b in &snapshot.timeseries {
         let host = b.proxy_host_id.to_string();
         let class = [
@@ -72,37 +75,53 @@ pub fn render(snapshot: &AnalyticsSnapshot, config: &PrometheusConfig) -> Result
             ("5xx", b.status_5xx),
         ];
         for (status, count) in class {
+            *counters
+                .entry(("bearust_requests_total".into(), host.clone(), status.into()))
+                .or_default() += count;
+        }
+        let key = ("bearust_request_duration_ms".to_string(), host.clone());
+        gauges
+            .entry(key)
+            .and_modify(|v| *v = (*v).max(b.p95_ms.unwrap_or(0)))
+            .or_insert(b.p95_ms.unwrap_or(0));
+        let security = b.waf_blocks + b.bot_blocks + b.bot_challenges;
+        *counters
+            .entry((
+                "bearust_security_events_total".into(),
+                host.clone(),
+                "".into(),
+            ))
+            .or_default() += security;
+        *counters
+            .entry(("bearust_rate_limit_events_total".into(), host, "".into()))
+            .or_default() += b.rate_limited;
+    }
+    for ((name, host, status), value) in counters {
+        if status.is_empty() {
+            line(&mut out, &name, &[("proxy_host_id", host.as_str())], value);
+        } else {
             line(
                 &mut out,
-                "bearust_requests_total",
-                &[("proxy_host_id", host.as_str()), ("status_class", status)],
-                count,
+                &name,
+                &[
+                    ("proxy_host_id", host.as_str()),
+                    ("status_class", status.as_str()),
+                ],
+                value,
             );
         }
-        line(
-            &mut out,
-            "bearust_request_duration_ms",
-            &[("proxy_host_id", host.as_str())],
-            b.p95_ms.unwrap_or(0),
-        );
-        let security = b.waf_blocks + b.bot_blocks + b.bot_challenges;
-        line(
-            &mut out,
-            "bearust_security_events_total",
-            &[("proxy_host_id", host.as_str())],
-            security,
-        );
-        line(
-            &mut out,
-            "bearust_rate_limit_events_total",
-            &[("proxy_host_id", host.as_str())],
-            b.rate_limited,
-        );
-        if out.len() >= config.max_output_bytes {
-            break;
+    }
+    for ((name, host), value) in gauges {
+        line(&mut out, &name, &[("proxy_host_id", host.as_str())], value);
+    }
+    if out.len() > config.max_output_bytes {
+        out.truncate(config.max_output_bytes);
+        if let Some(end) = out.rfind('\n') {
+            out.truncate(end + 1);
+        } else {
+            out.clear();
         }
     }
-    out.truncate(config.max_output_bytes);
     Ok(out)
 }
 fn line(out: &mut String, name: &str, labels: &[(&str, &str)], value: u64) {

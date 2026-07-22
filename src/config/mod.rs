@@ -1,4 +1,5 @@
 mod error;
+use crate::analytics_prometheus::PrometheusConfig;
 pub use error::ConfigError;
 use serde::Deserialize;
 use std::{
@@ -17,6 +18,8 @@ pub struct Config {
     pub routes: Vec<RouteConfig>,
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    #[serde(default)]
+    pub prometheus: PrometheusConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -211,6 +214,18 @@ impl Config {
     fn validate(&self) -> Result<(), ConfigError> {
         if self.server.graceful_shutdown_seconds == 0 {
             return err("server.graceful_shutdown_seconds", "must be positive");
+        }
+        if let Err(message) = self.prometheus.validate() {
+            return Err(validation("prometheus", message));
+        }
+        if self.prometheus.enabled
+            && self.prometheus.internal_only
+            && !self.server.control_bind.ip().is_loopback()
+        {
+            return Err(validation(
+                "prometheus",
+                "internal endpoint requires loopback control_bind",
+            ));
         }
         if let Some(tls) = &self.server.tls {
             if tls.cert_path.as_os_str().is_empty() {

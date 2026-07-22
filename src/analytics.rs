@@ -303,8 +303,10 @@ fn timeseries_from_buckets(
     buckets: Vec<BucketView>,
     filter: &AnalyticsFilter,
 ) -> Vec<AnalyticsBucket> {
+    let start = buckets.len().saturating_sub(filter.limit());
     buckets
         .into_iter()
+        .skip(start)
         .take(filter.limit())
         .map(|b| to_bucket(b, filter.proxy_host_id.unwrap_or(0)))
         .collect()
