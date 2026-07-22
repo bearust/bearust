@@ -1,44 +1,36 @@
 # Task 3 review fixes
 
-Addressed the Task 3 review findings for the shared Tailwind v4 UI primitives.
+## Changes
 
-- Added all semantic aliases used by `frontend/src/ui.tsx` to the light and dark token maps: action, action-hover, action-foreground, surface, surface-muted, foreground, muted, focus offset, and info/success/warning/danger border, surface, foreground, and hover tokens.
-- Kept the existing canonical token names (`page`, `panel`, `text`, `brand`, etc.) for compatibility.
-- Set the global brand/action primary to `#D99906` in both themes, with a dark accessible foreground and hover value.
-- Updated `ThemeSelect` to invoke a caller-provided `onChange` handler after synchronizing theme state.
-- Added a regression test for the caller `onChange` behavior.
+- Extract the peer IP directly from Pingora's `SocketAddr::Inet` via
+  `as_inet().ip()`, preserving both IPv4 and IPv6 addresses and avoiding the
+  lossy string round-trip that previously skipped real requests.
+- Derive the temporary proxy-host identity from `ResolvedRoute.host` only;
+  `path_prefix` is excluded so all paths on one host share one client quota.
+- Added regressions for direct IPv4/IPv6 extraction, trusted bracketed IPv6
+  forwarding, and shared host quota across paths.
 
 ## Verification
 
 Command:
 
 ```text
-npm test -- --run src/ui.test.tsx src/theme.test.tsx
+cargo +nightly test --test proxy_rate_limit
 ```
 
-Output summary:
+Output:
 
 ```text
-Test Files  2 passed (2)
-Tests       11 passed (11)
+running 6 tests
+test block_mode_exposes_retry_after_for_429_response ... ok
+test buckets_are_isolated_by_proxy_host_and_client_ip ... ok
+test client_ip_preserves_ipv4_and_ipv6_peer_addresses ... ok
+test monitor_mode_records_limit_without_changing_decision_math ... ok
+test one_host_quota_is_shared_across_paths ... ok
+test trusted_forwarded_client_ip_supports_bracketed_ipv6 ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
-Command:
-
-```text
-npm run build
-```
-
-Output summary:
-
-```text
-✓ built in 85ms
-```
-
-Command:
-
-```text
-git diff --check
-```
-
-Output: passed (no output).
+The repository's default Cargo 1.84.1 cannot parse the cached `clap_lex`
+2024-edition manifest, so verification used the installed nightly toolchain.

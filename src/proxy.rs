@@ -171,10 +171,12 @@ fn emit_rate_limit_telemetry(request_id: &str, decision: &RateLimitDecision, act
 }
 
 fn route_key(route: &ResolvedRoute) -> i64 {
-    // Stable, non-sensitive identity for config-defined routes. Control-plane
-    // integrations may replace this with the persisted proxy-host id later.
+    // Stable, non-sensitive identity for the configured proxy host.  The
+    // control-plane proxy-host id can replace this hash once it is wired into
+    // the runtime snapshot; paths deliberately do not participate so all
+    // routes on one host share the same client quota.
     let mut hash = 0xcbf29ce484222325u64;
-    for byte in route.host.bytes().chain([0].into_iter()).chain(route.path_prefix.bytes()) {
+    for byte in route.host.bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }
@@ -378,7 +380,7 @@ impl ProxyHttp for BeaRustProxy {
         if let Some(store) = &self.rate_limiter {
             let peer = session
                 .client_addr()
-                .and_then(|addr| addr.to_string().parse().ok());
+                .and_then(|addr| addr.as_inet().map(|inet| inet.ip()));
             if let Some(peer) = peer {
                 let ip = client_ip(
                     peer,
