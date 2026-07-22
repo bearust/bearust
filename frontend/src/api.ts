@@ -25,6 +25,20 @@ export type RateLimitConfig={enabled:boolean;action:RateLimitAction;capacity:num
 export type AnalyticsSummary={requests:number;status_2xx:number;status_3xx:number;status_4xx:number;status_5xx:number;waf_blocks:number;bot_blocks:number;bot_challenges:number;rate_limited:number;p50_ms:number|null;p95_ms:number|null;p99_ms:number|null};
 export type AnalyticsBucket={timestamp:string;proxy_host_id:number;requests:number;status_2xx:number;status_3xx:number;status_4xx:number;status_5xx:number;waf_blocks:number;bot_blocks:number;bot_challenges:number;rate_limited:number;p50_ms:number|null;p95_ms:number|null;p99_ms:number|null};
 export type AnalyticsQuery={proxy_host_id?:number;from?:string;to?:string;limit?:number};
+
+export type BaselineWindow = '5m' | '1h' | '24h';
+export type BaselineStatus = 'warming_up' | 'ready';
+export type BaselineMetrics = { req_per_sec: number; total_requests: number; status_2xx: number; status_3xx: number; status_4xx: number; status_5xx: number; error_rate_percent: number; p50_ms: number | null; p95_ms: number | null; p99_ms: number | null; waf_blocks: number; bot_blocks: number; bot_challenges: number; rate_limited: number; };
+export type BaselineSnapshot = { host_id: number | null; status: BaselineStatus; window: BaselineWindow; sample_count: number; metrics: BaselineMetrics; calculated_at: string; };
+
+export type AnomalyRule = 'request_rate' | 'error_rate' | 'latency' | 'security_events';
+export type AnomalySeverity = 'info' | 'warning' | 'critical';
+export type AnomalyRecord = { id: number; host_id: number; rule: AnomalyRule; severity: AnomalySeverity; score: number; summary: string; observed_at: string; acknowledged: boolean };
+
+export type TuningMode = 'monitor' | 'recommend' | 'enforce';
+export type TuningPolicy = { mode: TuningMode; max_delta_percent: number; cooldown_seconds: number; min_confidence: number };
+export type PolicyRecommendation = { id: number; host_id: number; patch: { capacity?: number; refill_per_second?: number; waf_mode?: WafMode }; confidence: number; reason: string; created_at: string; applied: boolean };
+
 async function request<T>(path:string,init:RequestInit={}):Promise<T>{const r=await fetch(path,{...init,credentials:'include',headers:{'Content-Type':'application/json',...(init.headers||{})}});if(!r.ok){const e=await r.json().catch(()=>({message:r.statusText}));const error=new Error(typeof e.message==='string'?e.message:'Request failed') as Error & {status?:number};error.status=r.status;throw error}return r.status===204?undefined as T:r.json()}
 async function requestText(path:string):Promise<string>{const r=await fetch(path,{credentials:'include'});if(!r.ok)throw Object.assign(new Error('Request failed'),{status:r.status});return r.text()}
 export const api={
@@ -38,5 +52,15 @@ export const api={
  botConfig:()=>request<BotConfig>('/api/bot/config'),updateBotConfig:(x:Partial<{mode:BotMode;threshold:number;ttl_seconds:number}>)=>request<BotConfig>('/api/bot/config',{method:'PATCH',body:JSON.stringify(x)}),trustedCrawlers:()=>request<TrustedCrawler[]>('/api/bot/trusted-crawlers'),createTrustedCrawler:(x:{user_agent:string;domain:string;enabled?:boolean})=>request<TrustedCrawler>('/api/bot/trusted-crawlers',{method:'POST',body:JSON.stringify(x)}),updateTrustedCrawler:(id:number,x:{user_agent:string;domain:string;enabled?:boolean})=>request<TrustedCrawler>(`/api/bot/trusted-crawlers/${id}`,{method:'PATCH',body:JSON.stringify(x)}),deleteTrustedCrawler:(id:number)=>request<void>(`/api/bot/trusted-crawlers/${id}`,{method:'DELETE'}),botChallenge:(fingerprint:string)=>request<BotChallenge>('/api/bot/challenge',{method:'POST',body:JSON.stringify({fingerprint})}),verifyBotChallenge:(x:{token:string;fingerprint:string;solution:string})=>request<{ok:boolean}>('/api/bot/challenge/verify',{method:'POST',body:JSON.stringify(x)}),importBotConfig:(toml:string)=>request<void>('/api/bot/config/import',{method:'POST',headers:{'Content-Type':'application/toml'},body:toml}),exportBotConfig:()=>requestText('/api/bot/config/export')
  ,rateLimitConfig:()=>request<RateLimitConfig>('/api/rate-limit/config'),updateRateLimitConfig:(x:Pick<RateLimitConfig,'enabled'|'action'|'capacity'|'refill_per_second'|'key_scope'>)=>request<RateLimitConfig>('/api/rate-limit/config',{method:'PATCH',body:JSON.stringify(x)}),
  getAnalyticsSummary:(query:AnalyticsQuery={})=>{const p=new URLSearchParams();for(const [k,v] of Object.entries(query)){if(v!==undefined&&v!=='')p.set(k,String(v))}const s=p.toString();return request<AnalyticsSummary>(`/api/analytics/summary${s?`?${s}`:''}`)},
- getAnalyticsTimeseries:(query:AnalyticsQuery={})=>{const p=new URLSearchParams();for(const [k,v] of Object.entries(query)){if(v!==undefined&&v!=='')p.set(k,String(v))}const s=p.toString();return request<AnalyticsBucket[]>(`/api/analytics/timeseries${s?`?${s}`:''}`)}
+ getAnalyticsTimeseries:(query:AnalyticsQuery={})=>{const p=new URLSearchParams();for(const [k,v] of Object.entries(query)){if(v!==undefined&&v!=='')p.set(k,String(v))}const s=p.toString();return request<AnalyticsBucket[]>(`/api/analytics/timeseries${s?`?${s}`:''}`)},
+ getBaseline:(query:{proxy_host_id?:number;window?:string}={})=>{const p=new URLSearchParams();for(const [k,v] of Object.entries(query)){if(v!==undefined&&v!=='')p.set(k,String(v))}const s=p.toString();return request<BaselineSnapshot>(`/api/analytics/baseline${s?`?${s}`:''}`)},
+ getAnomalies:(query:{host_id?:number;severity?:string;rule?:string}={})=>{const p=new URLSearchParams();for(const [k,v] of Object.entries(query)){if(v!==undefined&&v!=='')p.set(k,String(v))}const s=p.toString();return request<AnomalyRecord[]>(`/api/analytics/anomalies${s?`?${s}`:''}`)},
+ ackAnomaly:(id:number)=>request<AnomalyRecord>(`/api/analytics/anomalies/${id}/ack`,{method:'POST'}),
+ getTuningPolicy:(host_id:number)=>request<TuningPolicy>(`/api/adaptive-tuning/policy/${host_id}`),
+ updateTuningPolicy:(host_id:number,x:Partial<TuningPolicy>)=>request<TuningPolicy>(`/api/adaptive-tuning/policy/${host_id}`,{method:'PUT',body:JSON.stringify(x)}),
+ getRecommendations:()=>request<PolicyRecommendation[]>('/api/adaptive-tuning/recommendations'),
+ applyRecommendation:(id:number)=>request<void>(`/api/adaptive-tuning/recommendations/${id}/apply`,{method:'POST'}),
+ rollbackRecommendation:(id:number)=>request<void>(`/api/adaptive-tuning/recommendations/${id}/rollback`,{method:'POST'}),
+ emergencyDisableTuning:()=>request<{emergency_disabled:boolean}>('/api/adaptive-tuning/emergency-disable',{method:'POST'})
 };
+

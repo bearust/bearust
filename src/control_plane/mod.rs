@@ -59,6 +59,7 @@ pub struct AppState {
     /// Pingora proxy worker.
     pub rate_limiter: Arc<RateLimiterStore>,
     pub analytics: Arc<AnalyticsCollector>,
+    pub baseline: Arc<crate::baseline::BaselineCollector>,
     pub prometheus: PrometheusConfig,
 }
 
@@ -302,6 +303,7 @@ pub async fn build_state(
         challenges,
         rate_limiter,
         analytics: Arc::new(AnalyticsCollector::default()),
+        baseline: Arc::new(crate::baseline::BaselineCollector::default()),
         prometheus: PrometheusConfig::default(),
     })
 }
@@ -352,6 +354,7 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route("/api/events", get(events))
         .route("/api/analytics/summary", get(analytics_summary))
         .route("/api/analytics/timeseries", get(analytics_timeseries))
+        .route("/api/analytics/baseline", get(analytics_baseline))
         .route("/api/waf/config", get(get_waf_config).patch(update_waf_config))
         .route("/api/rate-limit/config", get(get_rate_limit_config).patch(update_rate_limit_config))
         .route("/api/waf/rules", get(list_waf_rules).post(create_waf_rule))
@@ -1229,6 +1232,40 @@ async fn analytics_timeseries(State(s): State<AppState>, h: HeaderMap, RawQuery(
     let q = match parse_analytics_query(raw).and_then(analytics_filter) { Ok(v) => v, Err(_) => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid analytics query") };
     if let Err(r) = require_analytics_read(&s, &h, q.proxy_host_id).await { return r; }
     Json(s.analytics.timeseries(q)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BaselineQuery {
+    proxy_host_id: Option<i64>,
+    window: Option<String>,
+}
+
+async fn analytics_baseline(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Query(query): Query<BaselineQuery>,
+) -> Response {
+    if let Some(host_id) = query.proxy_host_id {
+        if host_id <= 0 {
+            return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid host id");
+        }
+    }
+    if let Err(r) = require_analytics_read(&s, &h, query.proxy_host_id).await {
+        return r;
+    }
+    let window = match query.window.as_deref() {
+        None | Some("5m") | Some("5minutes") => crate::baseline::BaselineWindow::FiveMinutes,
+        Some("1h") | Some("1hour") => crate::baseline::BaselineWindow::OneHour,
+        Some("24h") | Some("24hours") => crate::baseline::BaselineWindow::TwentyFourHours,
+        _ => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid window parameter"),
+    };
+
+    s.baseline.record(&s.analytics.snapshot(), Utc::now());
+    let now = Utc::now();
+    let from = now - chrono::Duration::seconds(window.duration_seconds());
+    let snap = s.baseline.snapshot(query.proxy_host_id, window, from, now);
+    Json(snap).into_response()
 }
 
 /// Normalize RFC3339 query bounds to the UTC representation persisted in

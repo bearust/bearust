@@ -20,6 +20,9 @@ import {
   RateLimitAction,
   AnalyticsSummary,
   AnalyticsBucket,
+  BaselineSnapshot,
+  BaselineWindow,
+  BaselineStatus,
 } from "./api";
 import { useRealtimeUpdates, RealtimeStatus } from "./realtime";
 import { Alert, Button, Card, Field, SelectField, TextareaField, ThemeSelect } from "./ui";
@@ -709,6 +712,92 @@ export function AnalyticsSection({ hosts, refreshToken = 0 }: { hosts: Host[]; r
   </Card>;
 }
 
+export function BaselineSection({ hosts, refreshToken = 0 }: { hosts: Host[]; refreshToken?: number }) {
+  const [snapshot, setSnapshot] = useState<BaselineSnapshot | null>(null);
+  const [host, setHost] = useState("");
+  const [window, setWindow] = useState<BaselineWindow>("5m");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const load = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const snap = await api.getBaseline({
+        ...(host ? { proxy_host_id: Number(host) } : {}),
+        window,
+      });
+      setSnapshot(snap);
+    } catch (e) {
+      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setSnapshot(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, [refreshToken, host, window]);
+
+  return (
+    <Card data-testid="baseline-section">
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="mr-auto text-xl font-semibold">Traffic Baseline</h2>
+        {snapshot?.status === "warming_up" ? (
+          <span className="rounded-full bg-amber-500/20 px-3 py-1 text-xs text-amber-500 font-medium">Warming up</span>
+        ) : (
+          <span className="rounded-full bg-emerald-500/20 px-3 py-1 text-xs text-emerald-500 font-medium">Baseline ready</span>
+        )}
+      </div>
+      <p className="mt-2 text-sm text-muted">Bounded process-local traffic baselines for anomaly detection reference.</p>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <SelectField id="baseline-proxy-host" label="Proxy host" value={host} onChange={(e) => setHost(e.target.value)}>
+          <option value="">All hosts</option>
+          {hosts.slice(0, 100).map((h) => (
+            <option key={h.id} value={h.id}>
+              {h.name} ({h.domain})
+            </option>
+          ))}
+        </SelectField>
+        <SelectField id="baseline-window" label="Window" value={window} onChange={(e) => setWindow(e.target.value as BaselineWindow)}>
+          <option value="5m">5 Minutes</option>
+          <option value="1h">1 Hour</option>
+          <option value="24h">24 Hours</option>
+        </SelectField>
+      </div>
+      {loading && <p role="status" className="mt-4 text-muted">Loading baseline…</p>}
+      {!loading && error && <Alert variant="danger">{error}</Alert>}
+      {!loading && !error && snapshot && (
+        <div className="mt-5 grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
+          <div className="rounded border border-border p-3">
+            <div className="text-xs text-muted">Req / sec</div>
+            <div className="text-xl font-semibold">{snapshot.metrics.req_per_sec.toFixed(2)}</div>
+          </div>
+          <div className="rounded border border-border p-3">
+            <div className="text-xs text-muted">Error rate</div>
+            <div className="text-xl font-semibold">{snapshot.metrics.error_rate_percent.toFixed(1)}%</div>
+          </div>
+          <div className="rounded border border-border p-3">
+            <div className="text-xs text-muted">p50 latency</div>
+            <div className="text-xl font-semibold">{snapshot.metrics.p50_ms == null ? "—" : `${snapshot.metrics.p50_ms} ms`}</div>
+          </div>
+          <div className="rounded border border-border p-3">
+            <div className="text-xs text-muted">p95 latency</div>
+            <div className="text-xl font-semibold">{snapshot.metrics.p95_ms == null ? "—" : `${snapshot.metrics.p95_ms} ms`}</div>
+          </div>
+          <div className="rounded border border-border p-3">
+            <div className="text-xs text-muted">Security blocks</div>
+            <div className="text-xl font-semibold">
+              {snapshot.metrics.waf_blocks + snapshot.metrics.bot_blocks + snapshot.metrics.bot_challenges + snapshot.metrics.rate_limited}
+            </div>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function BotChallengePage({ fingerprint = serverChallengeFingerprint(), onComplete }: { fingerprint?: string; onComplete?: () => void }) {
   const [challenge, setChallenge] = useState<BotChallenge | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState(""), [complete, setComplete] = useState(false);
   const requestChallenge = async () => { if (!fingerprint) { setError("Challenge context unavailable. Please return to the protected page and try again."); return; } setBusy(true); setError(""); setComplete(false); try { setChallenge(await api.botChallenge(fingerprint)); } catch { setError("Challenge unavailable. Please try again."); } finally { setBusy(false); } };
@@ -726,6 +815,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
     [usersError, setUsersError] = useState("");
   const [wafRefresh, setWafRefresh] = useState(0);
   const [analyticsRefresh, setAnalyticsRefresh] = useState(0);
+  const [baselineRefresh, setBaselineRefresh] = useState(0);
   const [form, setForm] = useState({
     name: "",
     domain: "",
@@ -787,6 +877,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
     waf: () => setWafRefresh(value => value + 1),
     rateLimit: () => setWafRefresh(value => value + 1),
     analytics: () => setAnalyticsRefresh(value => value + 1),
+    baseline: () => setBaselineRefresh(value => value + 1),
   });
   const refresh = async () => {
     try {
@@ -830,6 +921,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
       <BotProtectionSection user={user} refreshToken={wafRefresh} />
       <RateLimitSection user={user} refreshToken={wafRefresh} />
       <AnalyticsSection hosts={hosts} refreshToken={analyticsRefresh} />
+      <BaselineSection hosts={hosts} refreshToken={baselineRefresh} />
       {canWrite && (
         <AcmeWizard canWrite={canWrite} onIssued={() => void refresh()} />
       )}

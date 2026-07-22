@@ -14,5 +14,5 @@ function render(user: User) { const element = document.createElement("div"); doc
 describe("rate-limit dashboard", () => {
   afterEach(() => { vi.restoreAllMocks(); document.body.innerHTML = ""; });
   it("shows safe defaults and admin controls", async () => { vi.spyOn(api, "rateLimitConfig").mockResolvedValue(config); const view = render(admin); await act(async () => {}); expect(view.element.textContent).toContain("Monitor-only"); expect(view.element.querySelector('button')?.textContent).toContain("Save policy"); view.root.unmount(); });
-  it("keeps viewer controls read-only", async () => { vi.spyOn(api, "rateLimitConfig").mockResolvedValue(config); const view = render(viewer); await act(async () => {}); expect(view.element.querySelector('button')).toBeNull(); expect(view.element.querySelector('input[type="checkbox"]')).toBeDisabled(); view.root.unmount(); });
+  it("keeps viewer controls read-only", async () => { vi.spyOn(api, "rateLimitConfig").mockResolvedValue(config); const view = render(viewer); await act(async () => {}); expect(view.element.querySelector('button')).toBeNull(); expect((view.element.querySelector('input[type="checkbox"]') as HTMLInputElement).disabled).toBe(true); view.root.unmount(); });
 });
