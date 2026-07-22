@@ -6,6 +6,7 @@ pub const MAX_HEADERS: usize = 8;
 pub const MAX_RULES: usize = 128;
 pub const MAX_TRUSTED_RULES: usize = 32;
 pub const MAX_TTL_SECONDS: u64 = 86_400;
+pub const MAX_SCORE: u16 = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BotMode {
@@ -71,7 +72,7 @@ impl BotInspectionContext {
         let method = truncate(method.trim(), MAX_FIELD_BYTES).to_ascii_uppercase();
         let path = canonical_path(path);
         let mut selected = Vec::new();
-        for (name, value) in headers.into_iter().take(MAX_HEADERS) {
+        for (name, value) in headers {
             let name = name.trim().to_ascii_lowercase();
             if !matches!(
                 name.as_str(),
@@ -89,6 +90,9 @@ impl BotInspectionContext {
                 continue;
             }
             selected.push((name, truncate(value.trim(), MAX_FIELD_BYTES)));
+            if selected.len() == MAX_HEADERS {
+                break;
+            }
         }
         selected.sort();
         Self {
@@ -148,6 +152,9 @@ pub fn compile_snapshot(
     if config.ttl_seconds == 0 || config.ttl_seconds > MAX_TTL_SECONDS {
         return Err("invalid ttl");
     }
+    if config.fingerprint_key.is_empty() {
+        return Err("fingerprint key is empty");
+    }
     if config.fingerprint_key.len() > MAX_FIELD_BYTES {
         return Err("fingerprint key too large");
     }
@@ -166,10 +173,10 @@ pub fn compile_snapshot(
         if r.category.len() > MAX_FIELD_BYTES
             || r.trusted_user_agent
                 .as_ref()
-                .is_some_and(|s| s.len() > MAX_FIELD_BYTES)
+                .is_some_and(|s| s.trim().is_empty() || s.len() > MAX_FIELD_BYTES)
             || r.trusted_domain
                 .as_ref()
-                .is_some_and(|s| s.len() > MAX_FIELD_BYTES)
+                .is_some_and(|s| s.trim().is_empty() || s.len() > MAX_FIELD_BYTES)
         {
             return Err("rule field too large");
         }
@@ -185,10 +192,7 @@ pub fn compile_snapshot(
 
 pub fn evaluate(snapshot: &BotSnapshot, context: &BotInspectionContext) -> BotEvaluation {
     let ua = context.header("user-agent").unwrap_or("");
-    let domain = context
-        .header("host")
-        .or_else(|| context.header("x-forwarded-for"))
-        .unwrap_or("");
+    let domain = context.header("host").unwrap_or("");
     let mut trusted = false;
     let mut score = 0u16;
     let mut categories = Vec::new();
@@ -198,11 +202,11 @@ pub fn evaluate(snapshot: &BotSnapshot, context: &BotInspectionContext) -> BotEv
                 let ua_ok = rule
                     .trusted_user_agent
                     .as_ref()
-                    .is_none_or(|v| contains_ci(ua, v));
+                    .is_some_and(|v| contains_ci(ua, v));
                 let domain_ok = rule
                     .trusted_domain
                     .as_ref()
-                    .is_none_or(|v| domain_matches(domain, v));
+                    .is_some_and(|v| domain_matches(domain, v));
                 if ua_ok && domain_ok {
                     trusted = true;
                 }
@@ -218,7 +222,7 @@ pub fn evaluate(snapshot: &BotSnapshot, context: &BotInspectionContext) -> BotEv
                 _ => false,
             };
             if matches {
-                score = score.saturating_add(rule.weight.min(100));
+                score = score.saturating_add(rule.weight.min(MAX_SCORE)).min(MAX_SCORE);
                 if !categories.contains(&category) {
                     categories.push(category);
                 }
@@ -255,18 +259,20 @@ fn canonical_path(path: &str) -> String {
     let value = value.split('?').next().unwrap_or("");
     let mut out = String::new();
     let b = value.as_bytes();
+    let mut decoded = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
             if let (Some(a), Some(c)) = (hex_digit(b[i + 1]), hex_digit(b[i + 2])) {
-                out.push((a * 16 + c) as char);
+                decoded.push(a * 16 + c);
                 i += 3;
                 continue;
             }
         }
-        out.push(b[i] as char);
+        decoded.push(b[i]);
         i += 1;
     }
+    out.push_str(&String::from_utf8_lossy(&decoded));
     truncate(&out, MAX_FIELD_BYTES)
 }
 fn hex_digit(v: u8) -> Option<u8> {
@@ -302,7 +308,5 @@ fn domain_matches(actual: &str, expected: &str) -> bool {
     {
         return true;
     }
-    a == e
-        || a.ends_with(&format!(".{e}"))
-        || (!a.bytes().all(|b| b.is_ascii_digit() || b == b'.') && contains_ci(&a, &e))
+    a == e || a.ends_with(&format!(".{e}"))
 }
