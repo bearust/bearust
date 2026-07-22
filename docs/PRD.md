@@ -728,5 +728,19 @@ immutable and reload atomically, while audit and realtime telemetry contain only
 category/score/severity identifiers and never request bodies, credentials, or
 sensitive header values.
 
-Bot challenges/management (Phase 7B) and adaptive rate limiting with tuning
-feedback (Phase 7C) are intentionally deferred to subsequent increments.
+### Phase 7B status: bounded bot protection and signed challenges
+
+Phase 7B delivers deterministic bot-risk policy with monitor-only as the default,
+admin-selectable challenge/block modes, bounded score threshold and challenge
+TTL controls, and trusted-crawler CRUD with explicit user-agent/domain matching.
+Trusted-crawler configuration is persisted and manageable, but runtime bypass is
+deferred until a cryptographically signed ingress marker exists; no unsigned
+Host, User-Agent, or client header is trusted.
+Suspicious traffic can complete a short proof-of-work challenge backed by an
+expiring, replay-safe HMAC token; challenge responses are generic and secrets,
+raw fingerprints, and tokens are never rendered in the dashboard or audit data.
+The responsive admin dashboard exposes policy and crawler controls with
+validation and accessible loading/error states.
+
+Adaptive rate limiting, CAPTCHA provider integrations, and tuning feedback
+remain deferred to Phase 7C and later increments.

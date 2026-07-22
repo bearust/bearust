@@ -232,6 +232,26 @@ pub struct WafConfig {
     pub updated_at: String,
 }
 
+/// Persisted bot policy views used by control-plane handlers. Secret material
+/// is intentionally omitted from the serializable view.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotConfigRecord {
+    pub mode: String,
+    pub threshold: u16,
+    pub ttl_seconds: u64,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotRuleRecord {
+    pub id: i64,
+    pub category: String,
+    pub weight: u16,
+    pub trusted_user_agent: Option<String>,
+    pub trusted_domain: Option<String>,
+    pub enabled: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WafRule {
     pub id: i64,

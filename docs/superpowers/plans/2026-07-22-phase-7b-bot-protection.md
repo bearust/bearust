@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add bounded deterministic bot detection, signed challenges, trusted-crawler policy, and admin controls while preserving monitor-only as the default.
+**Goal:** Add bounded deterministic bot detection, signed challenges, trusted-crawler CRUD/admin controls, while preserving monitor-only as the default. Runtime crawler bypass is deferred until cryptographically signed ingress metadata is implemented.
 
 **Architecture:** A new `bot_protection` domain module evaluates a bounded request context against an immutable `BotSnapshot`. A `BotStore` publishes snapshots and redacted telemetry, while control-plane handlers persist policy/rules and expose challenge verification. The proxy combines bot action with the existing WAF decision, with explicit WAF blocks remaining dominant.
 
@@ -108,7 +108,7 @@
 - Consumes: Task 1 `evaluate`, Task 2 `BotStore`, and Task 4 token verification.
 - Produces: request-path enforcement where monitor forwards, challenge returns a non-cacheable challenge, valid tokens bypass challenge, and block returns `403`.
 
-- [ ] **Step 1: Write failing proxy tests** for each mode, trusted crawler bypass, valid/invalid challenge cookie, WAF block dominance, and redacted telemetry.
+- [ ] **Step 1: Write failing proxy tests** for each mode, rejection of spoofed trusted-crawler markers, valid/invalid challenge cookie, WAF block dominance, and redacted telemetry.
 - [ ] **Step 2: Run `cargo test --test proxy_bot`** and verify failures.
 - [ ] **Step 3: Add bot context/evaluation fields to `RequestContext`** without retaining raw sensitive headers after evaluation.
 - [ ] **Step 4: Evaluate bot policy before upstream selection**, skip challenge for valid tokens, and combine action with WAF so WAF block wins and bot challenge never forwards upstream.

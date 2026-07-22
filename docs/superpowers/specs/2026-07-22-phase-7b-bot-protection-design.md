@@ -14,7 +14,7 @@ Phase 7B includes:
 - deterministic bot-risk signals and a conservative score threshold;
 - monitor, challenge, and block policy modes;
 - a stateless, HMAC-signed challenge token with expiry and replay-safe nonce;
-- admin configuration for policy and trusted crawler exceptions;
+- admin configuration for policy and trusted-crawler rules (runtime bypass deferred pending signed ingress metadata);
 - redacted audit and realtime telemetry;
 - proxy, control-plane, and unit/integration regression tests.
 
@@ -43,8 +43,10 @@ challenge failures. Each signal has a bounded weight, category, and source
 label. The final score and action are deterministic for a snapshot and request.
 
 Trusted-crawler rules are explicit administrator configuration containing a
-normalized hostname pattern and User-Agent pattern. They are evaluated without
-network access and only bypass bot scoring when both configured predicates match.
+normalized hostname pattern and User-Agent pattern. They are stored and exposed
+through the admin API/UI, but do not bypass bot scoring in Phase 7B. Runtime
+bypass is deferred until a cryptographically signed ingress marker is available;
+unsigned Host, User-Agent, and client headers are never trusted.
 Every mutation is authorized through the existing RBAC policy and produces a
 redacted audit record plus `bot.changed` realtime invalidation.
 

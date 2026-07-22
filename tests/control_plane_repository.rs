@@ -147,7 +147,7 @@ async fn migration_seeds_builtin_roles_and_all_permissions_idempotently() {
         .unwrap();
 
     assert_eq!(roles, 3);
-    assert_eq!(permissions, 10);
+    assert_eq!(permissions, 11);
     assert_eq!(repository::role_by_slug(&pool, "admin").await.unwrap().unwrap().slug, "admin");
 }
 
@@ -159,7 +159,7 @@ async fn migrations_record_order_and_seed_exact_permissions() {
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert_eq!(versions, vec![1, 2, 3, 4]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5]);
     let lock_row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM setup_lock WHERE id=1")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(lock_row, 1);
@@ -167,7 +167,7 @@ async fn migrations_record_order_and_seed_exact_permissions() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(permission_count, 10);
+    assert_eq!(permission_count, 11);
     repository::migrate(&pool).await.unwrap();
     let role_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM roles WHERE system_managed=1")
         .fetch_one(&pool)
@@ -176,7 +176,7 @@ async fn migrations_record_order_and_seed_exact_permissions() {
     assert_eq!(role_count, 3);
     let global_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM role_permissions WHERE scope_type='' AND scope_id=0")
         .fetch_one(&pool).await.unwrap();
-    assert_eq!(global_rows, 18, "built-in roles must retain every expected global grant");
+    assert_eq!(global_rows, 19, "built-in roles must retain every expected global grant");
     let nullable_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM role_permissions WHERE scope_type IS NULL OR scope_id IS NULL")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(nullable_rows, 0, "global scopes use the portable non-null sentinel");

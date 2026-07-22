@@ -6,11 +6,14 @@ use crate::{
     runtime::{RuntimeSnapshot, RuntimeStore},
     waf::{evaluate, Evaluation, InspectionContext, WafDecision, WafSnapshot},
     waf_store::WafStore,
+    bot_protection::{evaluate as evaluate_bot, BotAction, BotEvaluation, BotInspectionContext},
+    bot_store::BotStore,
+    bot_challenge::{ChallengeService, unix_now},
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use pingora_core::{upstreams::peer::HttpPeer, ErrorType, Result};
-use pingora_http::RequestHeader;
+use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{FailToProxy, ProxyHttp, Session};
 use std::{sync::Arc, time::Instant};
 
@@ -37,6 +40,9 @@ pub struct RequestContext {
     pub waf_telemetry_emitted: bool,
     pub waf_snapshot: Option<Arc<WafSnapshot>>,
     pub waf_body_expected: bool,
+    pub bot_evaluation: Option<BotEvaluation>,
+    pub bot_blocked: bool,
+    pub bot_challenge: bool,
 }
 
 impl Default for RequestContext {
@@ -61,30 +67,42 @@ impl Default for RequestContext {
             waf_telemetry_emitted: false,
             waf_snapshot: None,
             waf_body_expected: false,
+            bot_evaluation: None,
+            bot_blocked: false,
+            bot_challenge: false,
         }
     }
 }
 
 pub struct BeaRustProxy {
     pub runtime: Arc<RuntimeStore>,
-    pub challenges: Http01Store,
+    pub http01: Http01Store,
     pub waf: Option<Arc<WafStore>>,
+    pub bot: Option<Arc<BotStore>>,
+    pub challenges: Option<Arc<ChallengeService>>,
 }
 
 impl BeaRustProxy {
     pub fn new(runtime: Arc<RuntimeStore>) -> Self {
         Self {
             runtime,
-            challenges: Http01Store::default(),
+            http01: Http01Store::default(),
             waf: None,
+            bot: None,
+            challenges: None,
         }
     }
     pub fn with_challenge_store(mut self, challenges: Http01Store) -> Self {
-        self.challenges = challenges;
+        self.http01 = challenges;
         self
     }
     pub fn with_waf_store(mut self, waf: Arc<WafStore>) -> Self {
         self.waf = Some(waf);
+        self
+    }
+    pub fn with_bot_store(mut self, bot: Arc<BotStore>, challenges: Arc<ChallengeService>) -> Self {
+        self.bot = Some(bot);
+        self.challenges = Some(challenges);
         self
     }
 }
@@ -144,6 +162,24 @@ impl ProxyHttp for BeaRustProxy {
         );
         let challenge_host = normalize_host(host).unwrap_or_default();
         let method = session.req_header().method.as_str();
+        if let Some(bot) = &self.bot {
+            let headers = session.req_header().headers.iter().filter_map(|(name, value)| {
+                let name = name.as_str().to_ascii_lowercase();
+                if !matches!(name.as_str(), "user-agent" | "accept" | "accept-language" | "sec-ch-ua" | "x-forwarded-for" | "host") { return None; }
+                value.to_str().ok().map(|value| (name, value.to_owned()))
+            }).collect::<Vec<_>>();
+            // Trusted crawler bypass is intentionally deferred until a signed
+            // ingress marker is implemented. Client headers never verify origin.
+            let inspection = BotInspectionContext::new(method, &path, headers);
+            let snapshot = bot.snapshot();
+            let mut evaluation = evaluate_bot(&snapshot, &inspection);
+            let valid_clearance = session.req_header().headers.get("cookie").and_then(|v| v.to_str().ok()).and_then(cookie_value).and_then(|token| self.challenges.as_ref().and_then(|service| service.verify_clearance(token, &evaluation.fingerprint, unix_now()).ok())).is_some();
+            if valid_clearance && evaluation.action == BotAction::Challenge { evaluation.action = BotAction::Allow; }
+            ctx.bot_evaluation = Some(evaluation.clone());
+            if evaluation.action != BotAction::Allow { bot.record_detection(&evaluation); tracing::info!(event="bot_detection", request_id=%ctx.request_id, action=?evaluation.action, score=evaluation.score, trusted=evaluation.trusted, categories=?evaluation.categories, fingerprint_prefix=%evaluation.fingerprint.chars().take(16).collect::<String>()); }
+            ctx.bot_blocked = evaluation.action == BotAction::Block;
+            ctx.bot_challenge = evaluation.action == BotAction::Challenge;
+        }
         if let Some(waf) = &self.waf {
             let waf_snapshot = waf.snapshot();
             ctx.waf_snapshot = Some(waf_snapshot.clone());
@@ -176,8 +212,28 @@ impl ProxyHttp for BeaRustProxy {
                 return Ok(true);
             }
         }
+        if ctx.bot_blocked {
+            session.respond_error_with_body(403, Bytes::from_static(b"Request blocked")).await?;
+            ctx.completion_logged = true;
+            return Ok(true);
+        }
+        if ctx.bot_challenge {
+            let body = if let Some(evaluation) = &ctx.bot_evaluation {
+                let prefix: String = evaluation.fingerprint.chars().take(16).collect();
+                serde_json::to_vec(&serde_json::json!({
+                    "challenge_url": format!("/bot-challenge?fingerprint_prefix={prefix}"),
+                    "fingerprint_prefix": prefix,
+                })).unwrap_or_else(|_| b"Challenge required".to_vec())
+            } else { b"Challenge required".to_vec() };
+            let mut response = ResponseHeader::build(403, Some(3)).map_err(|e| pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string()))?;
+            response.insert_header("Cache-Control", "no-store").map_err(|e| pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string()))?;
+            response.insert_header("Content-Type", "application/json").map_err(|e| pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string()))?;
+            session.as_downstream_mut().write_error_response(response, Bytes::from(body)).await?;
+            ctx.completion_logged = true;
+            return Ok(true);
+        }
         if matches!(method, "GET" | "HEAD") {
-            if let Some(value) = lookup_http01_for_host(&path, &challenge_host, &self.challenges) {
+            if let Some(value) = lookup_http01_for_host(&path, &challenge_host, &self.http01) {
                 session
                     .respond_error_with_body(200, Bytes::from(value))
                     .await?;
@@ -434,6 +490,8 @@ impl ProxyHttp for BeaRustProxy {
         e.more_context(format!("Peer: {peer}"))
     }
 }
+
+fn cookie_value(header: &str) -> Option<&str> { header.split(';').map(str::trim).find_map(|part| part.strip_prefix("bearust_bot_clear=")) }
 
 fn error_status(error: &pingora_core::Error) -> u16 {
     match error.etype() {
