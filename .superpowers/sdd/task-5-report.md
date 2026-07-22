@@ -8,11 +8,13 @@
 
 - Added bounded bot evaluation to `BeaRustProxy::request_filter` before route/upstream selection.
 - Monitor mode forwards; challenge and block terminate downstream requests with `403`.
+- Clearance cookies bypass only `challenge`; an explicit `block` action remains enforced.
 - WAF block remains dominant because bot enforcement runs only after WAF evaluation.
 - Added signed, short-lived clearance tokens bound to the fingerprint prefix; valid clearance bypasses challenge.
 - Wired the production proxy to the control-plane `BotStore` and `ChallengeService`.
 - Added regression coverage for clearance binding/expiry and trusted crawler bypass.
 - Bot telemetry contains only action, score, trusted flag, bounded categories, and a short fingerprint prefix.
+- Challenge responses include `Cache-Control: no-store` and JSON content type; only the selected bot headers are copied into the bounded inspection context.
 
 ## Verification
 

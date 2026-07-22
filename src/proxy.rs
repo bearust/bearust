@@ -13,7 +13,7 @@ use crate::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use pingora_core::{upstreams::peer::HttpPeer, ErrorType, Result};
-use pingora_http::RequestHeader;
+use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{FailToProxy, ProxyHttp, Session};
 use std::{sync::Arc, time::Instant};
 
@@ -163,12 +163,16 @@ impl ProxyHttp for BeaRustProxy {
         let challenge_host = normalize_host(host).unwrap_or_default();
         let method = session.req_header().method.as_str();
         if let Some(bot) = &self.bot {
-            let headers = session.req_header().headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_owned(), value.to_owned()))).collect::<Vec<_>>();
+            let headers = session.req_header().headers.iter().filter_map(|(name, value)| {
+                let name = name.as_str().to_ascii_lowercase();
+                if !matches!(name.as_str(), "user-agent" | "accept" | "accept-language" | "sec-ch-ua" | "x-forwarded-for" | "host") { return None; }
+                value.to_str().ok().map(|value| (name, value.to_owned()))
+            }).collect::<Vec<_>>();
             let inspection = BotInspectionContext::new(method, &path, headers);
             let snapshot = bot.snapshot();
             let mut evaluation = evaluate_bot(&snapshot, &inspection);
             let valid_clearance = session.req_header().headers.get("cookie").and_then(|v| v.to_str().ok()).and_then(cookie_value).and_then(|token| self.challenges.as_ref().and_then(|service| service.verify_clearance(token, &evaluation.fingerprint, unix_now()).ok())).is_some();
-            if valid_clearance { evaluation.action = BotAction::Allow; }
+            if valid_clearance && evaluation.action == BotAction::Challenge { evaluation.action = BotAction::Allow; }
             ctx.bot_evaluation = Some(evaluation.clone());
             if evaluation.action != BotAction::Allow { bot.record_detection(&evaluation); tracing::info!(event="bot_detection", request_id=%ctx.request_id, action=?evaluation.action, score=evaluation.score, trusted=evaluation.trusted, categories=?evaluation.categories, fingerprint_prefix=%evaluation.fingerprint.chars().take(16).collect::<String>()); }
             ctx.bot_blocked = evaluation.action == BotAction::Block;
@@ -213,7 +217,10 @@ impl ProxyHttp for BeaRustProxy {
         }
         if ctx.bot_challenge {
             let body = if let (Some(service), Some(evaluation)) = (&self.challenges, &ctx.bot_evaluation) { service.issue_challenge(&evaluation.fingerprint, unix_now()).await.ok().and_then(|value| serde_json::to_vec(&value).ok()) } else { None }.unwrap_or_else(|| b"Challenge required".to_vec());
-            session.respond_error_with_body(403, Bytes::from(body)).await?;
+            let mut response = ResponseHeader::build(403, Some(3)).map_err(|e| pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string()))?;
+            response.insert_header("Cache-Control", "no-store").map_err(|e| pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string()))?;
+            response.insert_header("Content-Type", "application/json").map_err(|e| pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string()))?;
+            session.as_downstream_mut().write_error_response(response, Bytes::from(body)).await?;
             ctx.completion_logged = true;
             return Ok(true);
         }
