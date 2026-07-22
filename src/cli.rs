@@ -263,7 +263,12 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
         control_state.prometheus = config.prometheus.clone();
         let cluster_service = Arc::new(crate::cluster::ClusterService::new(&config.cluster));
-        control_state = control_state.with_cluster(cluster_service);
+        control_state = control_state.with_cluster(cluster_service.clone());
+        let (cluster_shutdown_tx, cluster_shutdown_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(crate::cluster::run_cluster_listener(
+            cluster_service,
+            cluster_shutdown_rx,
+        ));
         let waf_store = control_state.waf.clone();
         let bot_store = control_state.bot.clone();
         let challenge_service = control_state.challenges.clone();
@@ -444,6 +449,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             .map_err(|error| AppError::Server(error.to_string()))?;
         reload_task.abort();
         control_task.abort();
+        let _ = cluster_shutdown_tx.send(true);
         tokio::time::timeout(
             Duration::from_secs(config.server.graceful_shutdown_seconds),
             store.shutdown(),

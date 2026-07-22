@@ -237,7 +237,10 @@ impl ClusterPeer {
         for item in trimmed.split(',') {
             let item = item.trim();
             if item.is_empty() {
-                continue;
+                return Err(ConfigError::Validation {
+                    field: "cluster.peers".into(),
+                    message: "empty peer entry in peer list".into(),
+                });
             }
             let parts: Vec<&str> = item.split('=').collect();
             if parts.len() != 2 {
@@ -248,7 +251,9 @@ impl ClusterPeer {
             }
             let node_id = parts[0].trim().to_string();
             if node_id.is_empty()
-                || node_id.chars().any(|ch| ch.is_ascii_control() || ch.is_whitespace())
+                || node_id
+                    .chars()
+                    .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
             {
                 return Err(ConfigError::Validation {
                     field: "cluster.peers".into(),
@@ -319,6 +324,12 @@ impl Config {
         }
         if self.cluster.timeout_seconds == 0 || self.cluster.timeout_seconds > 60 {
             return err("cluster.timeout_seconds", "must be between 1 and 60");
+        }
+        if self.cluster.peers.len() > 64 {
+            return err(
+                "cluster.peers",
+                "peer count exceeds maximum limit of 64 peers",
+            );
         }
         let mut peer_ids = HashSet::new();
         let mut peer_addrs = HashSet::new();

@@ -355,3 +355,38 @@ fn rejects_duplicate_cluster_peer_ids_or_addresses() {
     let err_addr = Config::parse(&dup_addr).unwrap_err().to_string();
     assert!(err_addr.contains("duplicate peer address"), "{err_addr}");
 }
+
+#[test]
+fn rejects_empty_peer_entries_in_env_var() {
+    // Doubled commas (empty entries) must be rejected, not silently skipped.
+    let err =
+        bearust::config::ClusterPeer::parse_peers("node2=127.0.0.1:9000,,node3=127.0.0.1:9001")
+            .unwrap_err()
+            .to_string();
+    assert!(err.contains("empty peer entry"), "{err}");
+
+    // Trailing comma is also an empty entry.
+    let err2 = bearust::config::ClusterPeer::parse_peers("node2=127.0.0.1:9000,")
+        .unwrap_err()
+        .to_string();
+    assert!(err2.contains("empty peer entry"), "{err2}");
+}
+
+#[test]
+fn rejects_peer_list_exceeding_64_peers() {
+    // Build TOML with 65 [[cluster.peers]] entries.
+    let mut toml = format!("{VALID}\n[cluster]\nnode_id = \"node1\"\n");
+    for i in 2..=66 {
+        toml.push_str(&format!(
+            "[[cluster.peers]]\nnode_id = \"node{i}\"\naddress = \"127.0.0.{}.{}:{}\"\n",
+            (i / 256) + 1,
+            i % 256,
+            9000 + i
+        ));
+    }
+    let err = Config::parse(&toml).unwrap_err().to_string();
+    assert!(
+        err.contains("peer count exceeds maximum"),
+        "expected peer count error, got: {err}"
+    );
+}
