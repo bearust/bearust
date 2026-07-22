@@ -82,9 +82,9 @@ fn zero_and_backward_clock_deltas_do_not_create_tokens() {
 #[test]
 fn retry_after_is_bounded() {
     let start = Instant::now();
-    let mut bucket = TokenBucket::new(1, 0.001).unwrap();
-    let _ = bucket.try_consume(start, 1);
-    let decision = bucket.try_consume(start, 1);
+    let mut bucket = TokenBucket::new(4, 0.001).unwrap();
+    let _ = bucket.try_consume(start, 4);
+    let decision = bucket.try_consume(start, 4);
     let Decision::Limited { retry_after, .. } = decision else {
         panic!("expected limited")
     };
