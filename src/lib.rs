@@ -24,6 +24,7 @@ pub mod rate_limit_store;
 pub mod baseline;
 pub mod anomaly;
 pub mod adaptive_tuning;
+pub mod cluster;
 
 
 
