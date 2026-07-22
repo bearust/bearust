@@ -48,14 +48,26 @@ fn trusted_crawler_is_allowed_even_when_block_mode_is_configured() {
 fn proxy_bot_modes_keep_response_contract_actions() {
     let context = BotInspectionContext::new("GET", "/", vec![]);
     for (mode, expected) in [
-        (BotMode::Monitor, bearust::bot_protection::BotAction::Monitor),
-        (BotMode::Challenge, bearust::bot_protection::BotAction::Challenge),
+        (
+            BotMode::Monitor,
+            bearust::bot_protection::BotAction::Monitor,
+        ),
+        (
+            BotMode::Challenge,
+            bearust::bot_protection::BotAction::Challenge,
+        ),
         (BotMode::Block, bearust::bot_protection::BotAction::Block),
     ] {
         let snapshot = compile_snapshot(
-            BotConfig { mode, threshold: 1, ttl_seconds: 300, fingerprint_key: b"proxy-test-key".to_vec() },
+            BotConfig {
+                mode,
+                threshold: 1,
+                ttl_seconds: 300,
+                fingerprint_key: b"proxy-test-key".to_vec(),
+            },
             vec![BotRule::signal("ua_missing", 100)],
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(evaluate(&snapshot, &context).action, expected);
     }
 }
@@ -63,14 +75,25 @@ fn proxy_bot_modes_keep_response_contract_actions() {
 #[test]
 fn proxy_path_never_trusts_spoofed_ingress_marker() {
     let snapshot = compile_snapshot(
-        BotConfig { mode: BotMode::Block, threshold: 1, ttl_seconds: 300, fingerprint_key: b"proxy-test-key".to_vec() },
+        BotConfig {
+            mode: BotMode::Block,
+            threshold: 1,
+            ttl_seconds: 300,
+            fingerprint_key: b"proxy-test-key".to_vec(),
+        },
         vec![BotRule::trusted_crawler("Googlebot", "googlebot.com")],
-    ).unwrap();
+    )
+    .unwrap();
     let spoofed = BotInspectionContext::new(
-        "GET", "/", vec![
+        "GET",
+        "/",
+        vec![
             ("User-Agent".into(), "Googlebot/2.1".into()),
             ("Host".into(), "crawl.googlebot.com".into()),
-            ("X-Bearust-Verified-Hostname".into(), "crawl.googlebot.com".into()),
+            (
+                "X-Bearust-Verified-Hostname".into(),
+                "crawl.googlebot.com".into(),
+            ),
         ],
     );
     assert!(!evaluate(&snapshot, &spoofed).trusted);

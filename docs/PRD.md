@@ -776,3 +776,11 @@ Phase 9 delivers a complete three-stage self-learning framework:
 - **Phase 9B — Anomaly Detection**: Deterministic monitor-only traffic deviation evaluator detecting request-rate spikes, error-rate spikes, latency regressions, and security-event surges with EWMA and standard deviation scoring. Evaluates `info`, `warning`, and `critical` severities, prevents critical anomalies during `warming_up`, enforces 5-minute deduplication cooldowns, and exposes `GET /api/analytics/anomalies` and `POST /api/analytics/anomalies/{id}/ack` with `anomaly.changed` SSE event.
 - **Phase 9C — Adaptive Tuning**: Opt-in per-host policy recommendation and tuning engine with guardrails (mode defaults to `monitor`, max delta limits, min confidence floor, emergency global disable). Persisted via SQLite migration `0007_adaptive_tuning.sql` with atomic apply/rollback, audit logging, and `adaptive_tuning.changed` SSE event.
 
+### Phase 10A status: cluster foundation (node identity, peer configuration, bounded health)
+
+Phase 10A delivers the cluster foundation for multi-node BeaRust deployments:
+- **Node Identity & Peer Configuration**: Explicit `NODE_ID` and `CLUSTER_PEERS` configuration parsed via environment variables or TOML (`[cluster]` section). Validates non-empty node IDs, rejects malformed, duplicate, or self-referential peer definitions, and defaults to single-node operation (`peers = []`) when omitted.
+- **Bounded Peer Health Service**: `ClusterService` executes out-of-band, non-blocking TCP peer connectivity checks with bounded timeouts. Peer failures (connection refused, timeout, unreachable) produce per-peer unhealthy snapshots without causing process errors or affecting proxy request paths.
+- **Authenticated Status API**: `GET /api/cluster/status` exposes authenticated local node identity, cluster status, and redacted peer health snapshots. Responses omit raw connection strings, secrets, and credentials.
+- **Deferred Scope**: Raft consensus/state replication, leader election, write forwarding, cross-node event fan-out/replay, and keepalived automation are deferred to Phases 10B and 10C.
+

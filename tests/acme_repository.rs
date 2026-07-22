@@ -50,7 +50,10 @@ async fn stores_redacted_lifecycle_metadata_and_due_rows() {
     )
     .await
     .unwrap();
-    let status = repository::get_acme_status(&p, certificate_id).await.unwrap().unwrap();
+    let status = repository::get_acme_status(&p, certificate_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(status.last_error_code.as_deref(), Some("timeout"));
     let due = repository::list_due_acme_certificates(&p, "2026-02-01T00:00:00Z")
         .await

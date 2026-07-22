@@ -33,12 +33,10 @@ async fn external_database_migrates_seeds_rbac_and_round_trips_user() {
         .await
         .unwrap_or_else(|_| panic!("external migration is not idempotent for {target}"));
 
-    let permissions: Vec<String> = sqlx::query_scalar(
-        "SELECT key FROM permissions ORDER BY key",
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_else(|_| panic!("could not read permissions from {target}"));
+    let permissions: Vec<String> = sqlx::query_scalar("SELECT key FROM permissions ORDER BY key")
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_else(|_| panic!("could not read permissions from {target}"));
     let mut expected_permissions: Vec<String> = PERMISSIONS
         .iter()
         .map(|permission| (*permission).to_owned())

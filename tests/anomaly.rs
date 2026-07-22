@@ -1,9 +1,15 @@
 use bearust::analytics::{AnalyticsBucket, AnalyticsSnapshot, AnalyticsSummary};
-use bearust::baseline::{BaselineCollector, BaselineStatus, BaselineWindow};
 use bearust::anomaly::{AnomalyDetector, AnomalyRule, AnomalySeverity};
+use bearust::baseline::{BaselineCollector, BaselineStatus, BaselineWindow};
 use chrono::{Duration, Utc};
 
-fn create_sample_bucket(proxy_host_id: i64, timestamp: chrono::DateTime<Utc>, reqs: u64, errors: u64, sec: u64) -> AnalyticsBucket {
+fn create_sample_bucket(
+    proxy_host_id: i64,
+    timestamp: chrono::DateTime<Utc>,
+    reqs: u64,
+    errors: u64,
+    sec: u64,
+) -> AnalyticsBucket {
     AnalyticsBucket {
         timestamp,
         proxy_host_id,
@@ -32,8 +38,19 @@ fn test_request_rate_spike_detection() {
     let baseline_timeseries: Vec<_> = (0..5)
         .map(|i| create_sample_bucket(1, now - Duration::minutes(5 - i), 60, 0, 0))
         .collect();
-    baseline_collector.record(&AnalyticsSnapshot { summary: AnalyticsSummary::default(), timeseries: baseline_timeseries }, now);
-    let baseline = baseline_collector.snapshot(Some(1), BaselineWindow::FiveMinutes, now - Duration::minutes(5), now);
+    baseline_collector.record(
+        &AnalyticsSnapshot {
+            summary: AnalyticsSummary::default(),
+            timeseries: baseline_timeseries,
+        },
+        now,
+    );
+    let baseline = baseline_collector.snapshot(
+        Some(1),
+        BaselineWindow::FiveMinutes,
+        now - Duration::minutes(5),
+        now,
+    );
     assert_eq!(baseline.status, BaselineStatus::Ready);
 
     // Observed snapshot with huge spike: 600 req in 1 min (10 req/s, 10x baseline)
@@ -59,8 +76,19 @@ fn test_warming_up_never_produces_critical_anomaly() {
     let baseline_timeseries: Vec<_> = (0..2)
         .map(|i| create_sample_bucket(1, now - Duration::minutes(2 - i), 60, 0, 0))
         .collect();
-    baseline_collector.record(&AnalyticsSnapshot { summary: AnalyticsSummary::default(), timeseries: baseline_timeseries }, now);
-    let baseline = baseline_collector.snapshot(Some(1), BaselineWindow::FiveMinutes, now - Duration::minutes(5), now);
+    baseline_collector.record(
+        &AnalyticsSnapshot {
+            summary: AnalyticsSummary::default(),
+            timeseries: baseline_timeseries,
+        },
+        now,
+    );
+    let baseline = baseline_collector.snapshot(
+        Some(1),
+        BaselineWindow::FiveMinutes,
+        now - Duration::minutes(5),
+        now,
+    );
     assert_eq!(baseline.status, BaselineStatus::WarmingUp);
 
     // Observed spike
@@ -71,7 +99,11 @@ fn test_warming_up_never_produces_critical_anomaly() {
 
     let anomalies = detector.evaluate(&baseline, &observed, now);
     for a in anomalies {
-        assert_ne!(a.severity, AnomalySeverity::Critical, "WarmingUp status must not produce critical anomalies");
+        assert_ne!(
+            a.severity,
+            AnomalySeverity::Critical,
+            "WarmingUp status must not produce critical anomalies"
+        );
     }
 }
 
@@ -84,8 +116,19 @@ fn test_cooldown_and_acknowledgement() {
     let baseline_timeseries: Vec<_> = (0..5)
         .map(|i| create_sample_bucket(1, now - Duration::minutes(5 - i), 60, 0, 0))
         .collect();
-    baseline_collector.record(&AnalyticsSnapshot { summary: AnalyticsSummary::default(), timeseries: baseline_timeseries }, now);
-    let baseline = baseline_collector.snapshot(Some(1), BaselineWindow::FiveMinutes, now - Duration::minutes(5), now);
+    baseline_collector.record(
+        &AnalyticsSnapshot {
+            summary: AnalyticsSummary::default(),
+            timeseries: baseline_timeseries,
+        },
+        now,
+    );
+    let baseline = baseline_collector.snapshot(
+        Some(1),
+        BaselineWindow::FiveMinutes,
+        now - Duration::minutes(5),
+        now,
+    );
 
     let observed = AnalyticsSnapshot {
         summary: AnalyticsSummary::default(),

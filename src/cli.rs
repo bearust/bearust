@@ -262,6 +262,8 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let mut control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
         control_state.prometheus = config.prometheus.clone();
+        let cluster_service = Arc::new(crate::cluster::ClusterService::new(&config.cluster));
+        control_state = control_state.with_cluster(cluster_service);
         let waf_store = control_state.waf.clone();
         let bot_store = control_state.bot.clone();
         let challenge_service = control_state.challenges.clone();

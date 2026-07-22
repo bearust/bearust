@@ -109,6 +109,16 @@ The endpoint accepts these optional query parameters:
 
 Each row contains only `id`, `actor`, `event`, redacted `details`, and `created_at`. Actor labels are the current user email, `system` for system-generated events, or `deleted-user` when the original account no longer exists. Passwords, session/token hashes, setup tokens, private keys, provider credentials, request bodies, and raw SQL/database errors are sanitized at the read boundary and never serialized, rendered, or otherwise exposed. Audit history is strictly read-only: there are no delete, mutation, or export endpoints.
 
+### Multi-Node Cluster Foundation (Phase 10A)
+
+BeaRust includes an explicit node identity and cluster peer foundation for multi-node deployments. Setting `CLUSTER_PEERS` (or configuring `[cluster]` in TOML) enables out-of-band peer connectivity checks without affecting proxy request handling or single-node operations.
+
+- `NODE_ID`: Unique node identifier (defaults to `node1`).
+- `CLUSTER_PEERS`: Comma-separated `node_id=host:port` peer list (defaults to empty, preserving single-node behavior).
+- `GET /api/cluster/status`: Authenticated control-plane status endpoint returning local node identity and redacted peer connectivity health snapshots.
+
+> **Note**: Phase 10A establishes explicit node identity, validation, and peer health visibility. Raft state replication, leader election, write forwarding, cross-node event replay, and keepalived automation are deferred to Phases 10B and 10C.
+
 ### Phase 4D.2 realtime updates
 
 The dashboard subscribes to `GET /api/events` using an authenticated session cookie. The endpoint uses Server-Sent Events (SSE) to deliver safe invalidation notifications for proxy hosts, certificates, users, roles, sessions, and audit activity; the dashboard reloads the corresponding proxy-host, certificate, user, role, and audit data, while session events are notified through the stream for future session-view consumers. Payloads never contain credentials, tokens, hashes, private keys, or request bodies. Delivery is process-local and bounded, so clients automatically reconnect after transient disconnects and receive a heartbeat roughly every 15 seconds. Cross-node fan-out and replay of events missed while disconnected are intentionally deferred until the multi-node phase.

@@ -1,17 +1,36 @@
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use bearust::adaptive_tuning::{PolicyPatch, PolicyRecommendation, TuningMode, TuningPolicy};
 use bearust::control_plane::auth::{hash_password, token_hash};
 use bearust::control_plane::{build_state, repository, router};
-use axum::{body::Body, http::{Request, StatusCode}};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
 #[tokio::test]
 async fn adaptive_tuning_policy_endpoint_and_validation() {
     let dir = tempdir().unwrap();
-    let state = build_state("sqlite::memory:", dir.path(), "setup-token-123").await.unwrap();
+    let state = build_state("sqlite::memory:", dir.path(), "setup-token-123")
+        .await
+        .unwrap();
 
-    let admin = repository::insert_initial_admin(&state.db, "admin@example.com", &hash_password("admin12345678").unwrap()).await.unwrap().unwrap();
-    repository::create_session(&state.db, admin.id, &token_hash("admin-token"), "2099-01-01T00:00:00Z").await.unwrap();
+    let admin = repository::insert_initial_admin(
+        &state.db,
+        "admin@example.com",
+        &hash_password("admin12345678").unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    repository::create_session(
+        &state.db,
+        admin.id,
+        &token_hash("admin-token"),
+        "2099-01-01T00:00:00Z",
+    )
+    .await
+    .unwrap();
 
     let app = router(state.clone());
 
@@ -32,7 +51,8 @@ async fn adaptive_tuning_policy_endpoint_and_validation() {
         max_delta_percent: 0,
         cooldown_seconds: 300,
         min_confidence: 0.8,
-    }).unwrap();
+    })
+    .unwrap();
 
     let req = Request::builder()
         .uri("/api/adaptive-tuning/policy/1")
@@ -51,7 +71,8 @@ async fn adaptive_tuning_policy_endpoint_and_validation() {
         max_delta_percent: 30,
         cooldown_seconds: 600,
         min_confidence: 0.85,
-    }).unwrap();
+    })
+    .unwrap();
 
     let req = Request::builder()
         .uri("/api/adaptive-tuning/policy/1")
@@ -72,9 +93,25 @@ async fn adaptive_tuning_apply_rollback_and_persistence() {
     std::fs::File::create(&db_path).unwrap();
     let db_url = format!("sqlite://{}", db_path.display());
 
-    let state = build_state(&db_url, dir.path(), "setup-token-123").await.unwrap();
-    let admin = repository::insert_initial_admin(&state.db, "admin@example.com", &hash_password("admin12345678").unwrap()).await.unwrap().unwrap();
-    repository::create_session(&state.db, admin.id, &token_hash("admin-token"), "2099-01-01T00:00:00Z").await.unwrap();
+    let state = build_state(&db_url, dir.path(), "setup-token-123")
+        .await
+        .unwrap();
+    let admin = repository::insert_initial_admin(
+        &state.db,
+        "admin@example.com",
+        &hash_password("admin12345678").unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    repository::create_session(
+        &state.db,
+        admin.id,
+        &token_hash("admin-token"),
+        "2099-01-01T00:00:00Z",
+    )
+    .await
+    .unwrap();
 
     let app = router(state.clone());
 
@@ -90,12 +127,18 @@ async fn adaptive_tuning_apply_rollback_and_persistence() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
     // Set host 1 policy mode to Recommend
-    repository::update_tuning_policy(&state.db, 1, &TuningPolicy {
-        mode: TuningMode::Recommend,
-        max_delta_percent: 50,
-        cooldown_seconds: 300,
-        min_confidence: 0.8,
-    }).await.unwrap();
+    repository::update_tuning_policy(
+        &state.db,
+        1,
+        &TuningPolicy {
+            mode: TuningMode::Recommend,
+            max_delta_percent: 50,
+            cooldown_seconds: 300,
+            min_confidence: 0.8,
+        },
+    )
+    .await
+    .unwrap();
 
     // Insert dummy recommendation into DB
     let rec = PolicyRecommendation {
@@ -113,15 +156,21 @@ async fn adaptive_tuning_apply_rollback_and_persistence() {
         applied_at: None,
         previous_config_json: None,
     };
-    let rec_id = repository::insert_tuning_recommendation(&state.db, &rec).await.unwrap();
+    let rec_id = repository::insert_tuning_recommendation(&state.db, &rec)
+        .await
+        .unwrap();
 
     // Initial rate limit capacity in DB for host 1 is 100
-    let rl_before = repository::get_host_rate_limit_config(&state.db, 1).await.unwrap();
+    let rl_before = repository::get_host_rate_limit_config(&state.db, 1)
+        .await
+        .unwrap();
     assert_eq!(rl_before.capacity, 100);
 
     // Apply recommendation
     let req = Request::builder()
-        .uri(format!("/api/adaptive-tuning/recommendations/{rec_id}/apply"))
+        .uri(format!(
+            "/api/adaptive-tuning/recommendations/{rec_id}/apply"
+        ))
         .method("POST")
         .header("Cookie", "bearust_session=admin-token")
         .body(Body::empty())
@@ -131,12 +180,16 @@ async fn adaptive_tuning_apply_rollback_and_persistence() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Verify rate limit capacity for host 1 updated to 50
-    let rl_after = repository::get_host_rate_limit_config(&state.db, 1).await.unwrap();
+    let rl_after = repository::get_host_rate_limit_config(&state.db, 1)
+        .await
+        .unwrap();
     assert_eq!(rl_after.capacity, 50);
 
     // Re-applying already applied recommendation returns 400
     let req = Request::builder()
-        .uri(format!("/api/adaptive-tuning/recommendations/{rec_id}/apply"))
+        .uri(format!(
+            "/api/adaptive-tuning/recommendations/{rec_id}/apply"
+        ))
         .method("POST")
         .header("Cookie", "bearust_session=admin-token")
         .body(Body::empty())
@@ -147,7 +200,9 @@ async fn adaptive_tuning_apply_rollback_and_persistence() {
 
     // Rollback recommendation
     let req = Request::builder()
-        .uri(format!("/api/adaptive-tuning/recommendations/{rec_id}/rollback"))
+        .uri(format!(
+            "/api/adaptive-tuning/recommendations/{rec_id}/rollback"
+        ))
         .method("POST")
         .header("Cookie", "bearust_session=admin-token")
         .body(Body::empty())
@@ -157,7 +212,9 @@ async fn adaptive_tuning_apply_rollback_and_persistence() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Verify rate limit capacity for host 1 restored to 100
-    let rl_restored = repository::get_host_rate_limit_config(&state.db, 1).await.unwrap();
+    let rl_restored = repository::get_host_rate_limit_config(&state.db, 1)
+        .await
+        .unwrap();
     assert_eq!(rl_restored.capacity, 100);
 
     // Toggle emergency disable
@@ -172,17 +229,35 @@ async fn adaptive_tuning_apply_rollback_and_persistence() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Re-build state from persistent SQLite database and verify emergency_disabled persists
-    let state_restarted = build_state(&db_url, dir.path(), "setup-token-123").await.unwrap();
+    let state_restarted = build_state(&db_url, dir.path(), "setup-token-123")
+        .await
+        .unwrap();
     assert!(state_restarted.adaptive_tuning.is_emergency_disabled());
 }
 
 #[tokio::test]
 async fn adaptive_tuning_monitor_mode_rejection_and_deduplication() {
     let dir = tempdir().unwrap();
-    let state = build_state("sqlite::memory:", dir.path(), "setup-token-123").await.unwrap();
+    let state = build_state("sqlite::memory:", dir.path(), "setup-token-123")
+        .await
+        .unwrap();
 
-    let admin = repository::insert_initial_admin(&state.db, "admin@example.com", &hash_password("admin12345678").unwrap()).await.unwrap().unwrap();
-    repository::create_session(&state.db, admin.id, &token_hash("admin-token"), "2099-01-01T00:00:00Z").await.unwrap();
+    let admin = repository::insert_initial_admin(
+        &state.db,
+        "admin@example.com",
+        &hash_password("admin12345678").unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    repository::create_session(
+        &state.db,
+        admin.id,
+        &token_hash("admin-token"),
+        "2099-01-01T00:00:00Z",
+    )
+    .await
+    .unwrap();
 
     let app = router(state.clone());
 
@@ -204,16 +279,22 @@ async fn adaptive_tuning_monitor_mode_rejection_and_deduplication() {
     };
 
     // Deduplication test: inserting same recommendation twice returns None on second call
-    let id1 = repository::insert_tuning_recommendation_dedup(&state.db, &rec, 300).await.unwrap();
+    let id1 = repository::insert_tuning_recommendation_dedup(&state.db, &rec, 300)
+        .await
+        .unwrap();
     assert!(id1.is_some());
-    let id2 = repository::insert_tuning_recommendation_dedup(&state.db, &rec, 300).await.unwrap();
+    let id2 = repository::insert_tuning_recommendation_dedup(&state.db, &rec, 300)
+        .await
+        .unwrap();
     assert!(id2.is_none());
 
     let rec_id = id1.unwrap();
 
     // Applying recommendation on Monitor mode host returns BAD_REQUEST (400)
     let req = Request::builder()
-        .uri(format!("/api/adaptive-tuning/recommendations/{rec_id}/apply"))
+        .uri(format!(
+            "/api/adaptive-tuning/recommendations/{rec_id}/apply"
+        ))
         .method("POST")
         .header("Cookie", "bearust_session=admin-token")
         .body(Body::empty())
@@ -226,30 +307,45 @@ async fn adaptive_tuning_monitor_mode_rejection_and_deduplication() {
 #[tokio::test]
 async fn adaptive_tuning_auto_enforce_mode() {
     let dir = tempdir().unwrap();
-    let state = build_state("sqlite::memory:", dir.path(), "setup-token-123").await.unwrap();
+    let state = build_state("sqlite::memory:", dir.path(), "setup-token-123")
+        .await
+        .unwrap();
 
     let host_id = 3;
-    repository::insert_host(&state.db, &bearust::control_plane::models::ProxyHost {
-        id: host_id,
-        name: "test-host-3".into(),
-        domain: "h3.example.com".into(),
-        upstream_host: "127.0.0.1".into(),
-        upstream_port: 8080,
-        tls_mode: "off".into(),
-        certificate_id: None,
-        enabled: true,
-    }).await.unwrap();
+    repository::insert_host(
+        &state.db,
+        &bearust::control_plane::models::ProxyHost {
+            id: host_id,
+            name: "test-host-3".into(),
+            domain: "h3.example.com".into(),
+            upstream_host: "127.0.0.1".into(),
+            upstream_port: 8080,
+            tls_mode: "off".into(),
+            certificate_id: None,
+            enabled: true,
+        },
+    )
+    .await
+    .unwrap();
 
     // Set host 3 to Enforce mode
-    repository::update_tuning_policy(&state.db, host_id, &TuningPolicy {
-        mode: TuningMode::Enforce,
-        max_delta_percent: 50,
-        cooldown_seconds: 300,
-        min_confidence: 0.8,
-    }).await.unwrap();
+    repository::update_tuning_policy(
+        &state.db,
+        host_id,
+        &TuningPolicy {
+            mode: TuningMode::Enforce,
+            max_delta_percent: 50,
+            cooldown_seconds: 300,
+            min_confidence: 0.8,
+        },
+    )
+    .await
+    .unwrap();
 
     // Initial rate limit for host 3 is default (capacity 100)
-    let rl_before = repository::get_host_rate_limit_config(&state.db, host_id).await.unwrap();
+    let rl_before = repository::get_host_rate_limit_config(&state.db, host_id)
+        .await
+        .unwrap();
     assert_eq!(rl_before.capacity, 100);
 
     // Populate baseline with steady low traffic for 5 past minutes
@@ -264,7 +360,10 @@ async fn adaptive_tuning_auto_enforce_mode() {
             security: bearust::analytics::SecurityCounters::default(),
         });
     }
-    state.baseline.record(&state.analytics.snapshot(), now - chrono::Duration::seconds(65));
+    state.baseline.record(
+        &state.analytics.snapshot(),
+        now - chrono::Duration::seconds(65),
+    );
 
     // Record high traffic spike in current minute
     for _ in 0..500 {
@@ -281,7 +380,9 @@ async fn adaptive_tuning_auto_enforce_mode() {
     bearust::control_plane::run_adaptive_evaluation_tick(&state, true).await;
 
     // Verify rate limit for host 3 in DB was automatically updated to 75 (100 - 50% delta)
-    let rl_after = repository::get_host_rate_limit_config(&state.db, host_id).await.unwrap();
+    let rl_after = repository::get_host_rate_limit_config(&state.db, host_id)
+        .await
+        .unwrap();
     assert_eq!(rl_after.capacity, 75);
 
     // Verify rate limit in runtime store was automatically updated to 75
@@ -297,28 +398,44 @@ async fn adaptive_tuning_auto_enforce_mode() {
         page: 1,
         page_size: 100,
     };
-    let audit_logs = repository::list_audit_logs(&state.db, &query).await.unwrap();
-    assert!(audit_logs.items.iter().any(|log| log.event == "adaptive_tuning_auto_enforced"));
+    let audit_logs = repository::list_audit_logs(&state.db, &query)
+        .await
+        .unwrap();
+    assert!(audit_logs
+        .items
+        .iter()
+        .any(|log| log.event == "adaptive_tuning_auto_enforced"));
 
     // 2. Read-only tick (allow_auto_enforce = false) on host 4 does NOT mutate rate limit
     let host_4_id = 4;
-    repository::insert_host(&state.db, &bearust::control_plane::models::ProxyHost {
-        id: host_4_id,
-        name: "test-host-4".into(),
-        domain: "h4.example.com".into(),
-        upstream_host: "127.0.0.1".into(),
-        upstream_port: 8080,
-        tls_mode: "off".into(),
-        certificate_id: None,
-        enabled: true,
-    }).await.unwrap();
+    repository::insert_host(
+        &state.db,
+        &bearust::control_plane::models::ProxyHost {
+            id: host_4_id,
+            name: "test-host-4".into(),
+            domain: "h4.example.com".into(),
+            upstream_host: "127.0.0.1".into(),
+            upstream_port: 8080,
+            tls_mode: "off".into(),
+            certificate_id: None,
+            enabled: true,
+        },
+    )
+    .await
+    .unwrap();
 
-    repository::update_tuning_policy(&state.db, host_4_id, &TuningPolicy {
-        mode: TuningMode::Enforce,
-        max_delta_percent: 50,
-        cooldown_seconds: 300,
-        min_confidence: 0.8,
-    }).await.unwrap();
+    repository::update_tuning_policy(
+        &state.db,
+        host_4_id,
+        &TuningPolicy {
+            mode: TuningMode::Enforce,
+            max_delta_percent: 50,
+            cooldown_seconds: 300,
+            min_confidence: 0.8,
+        },
+    )
+    .await
+    .unwrap();
 
     for i in (1..=6).rev() {
         state.analytics.record(bearust::analytics::AnalyticsEvent {
@@ -329,7 +446,10 @@ async fn adaptive_tuning_auto_enforce_mode() {
             security: bearust::analytics::SecurityCounters::default(),
         });
     }
-    state.baseline.record(&state.analytics.snapshot(), now - chrono::Duration::seconds(65));
+    state.baseline.record(
+        &state.analytics.snapshot(),
+        now - chrono::Duration::seconds(65),
+    );
     for _ in 0..500 {
         state.analytics.record(bearust::analytics::AnalyticsEvent {
             proxy_host_id: host_4_id,
@@ -341,6 +461,8 @@ async fn adaptive_tuning_auto_enforce_mode() {
     }
 
     bearust::control_plane::run_adaptive_evaluation_tick(&state, false).await;
-    let rl_host_4 = repository::get_host_rate_limit_config(&state.db, host_4_id).await.unwrap();
+    let rl_host_4 = repository::get_host_rate_limit_config(&state.db, host_4_id)
+        .await
+        .unwrap();
     assert_eq!(rl_host_4.capacity, 100);
 }

@@ -15,7 +15,10 @@ fn default_policy_is_disabled_monitor_only() {
 
 #[test]
 fn policy_rejects_out_of_bounds_values() {
-    let mut policy = RateLimitPolicy { capacity: 0, ..Default::default() };
+    let mut policy = RateLimitPolicy {
+        capacity: 0,
+        ..Default::default()
+    };
     assert!(policy.validate().is_err());
     policy.capacity = MAX_CAPACITY + 1;
     assert!(policy.validate().is_err());

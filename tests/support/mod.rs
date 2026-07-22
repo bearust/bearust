@@ -24,11 +24,11 @@ pub fn external_database_url() -> Option<String> {
 /// Render a database URL without credentials or path/query components.
 /// This is suitable for diagnostics when an external test cannot connect.
 pub fn redacted_database_target(url: &str) -> String {
-    let (scheme, remainder) = url
-        .split_once("://")
-        .unwrap_or(("unknown", url));
+    let (scheme, remainder) = url.split_once("://").unwrap_or(("unknown", url));
     let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
     let host = if host.starts_with('[') {
         host.find(']').map_or(host, |end| &host[..=end])
     } else {

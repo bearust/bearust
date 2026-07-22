@@ -1,6 +1,4 @@
-use bearust::adaptive_tuning::{
-    AdaptiveTuningEngine, TuningMode, TuningPolicy,
-};
+use bearust::adaptive_tuning::{AdaptiveTuningEngine, TuningMode, TuningPolicy};
 use bearust::anomaly::{AnomalyRecord, AnomalyRule, AnomalySeverity};
 use bearust::rate_limit::RateLimitPolicy;
 

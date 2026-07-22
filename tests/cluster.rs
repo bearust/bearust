@@ -68,15 +68,27 @@ async fn multi_node_cluster_detects_healthy_unhealthy_and_timeout_peers() {
     assert_eq!(snapshot.total_peers, 3);
     assert_eq!(snapshot.healthy_peers, 1);
 
-    let node2_health = snapshot.peers.iter().find(|p| p.node_id == "node2").unwrap();
+    let node2_health = snapshot
+        .peers
+        .iter()
+        .find(|p| p.node_id == "node2")
+        .unwrap();
     assert_eq!(node2_health.status, PeerStatus::Healthy);
     assert!(node2_health.error.is_none());
 
-    let node3_health = snapshot.peers.iter().find(|p| p.node_id == "node3").unwrap();
+    let node3_health = snapshot
+        .peers
+        .iter()
+        .find(|p| p.node_id == "node3")
+        .unwrap();
     assert_eq!(node3_health.status, PeerStatus::Unhealthy);
     assert!(node3_health.error.is_some());
 
-    let node4_health = snapshot.peers.iter().find(|p| p.node_id == "node4").unwrap();
+    let node4_health = snapshot
+        .peers
+        .iter()
+        .find(|p| p.node_id == "node4")
+        .unwrap();
     assert!(matches!(
         node4_health.status,
         PeerStatus::Timeout | PeerStatus::Unhealthy

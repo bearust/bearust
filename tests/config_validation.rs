@@ -299,14 +299,22 @@ fn parses_valid_multi_node_cluster_config() {
     assert_eq!(config.cluster.node_id, "node1");
     assert_eq!(config.cluster.peers.len(), 2);
     assert_eq!(config.cluster.peers[0].node_id, "node2");
-    assert_eq!(config.cluster.peers[0].address, "127.0.0.1:9093".parse().unwrap());
+    assert_eq!(
+        config.cluster.peers[0].address,
+        "127.0.0.1:9093".parse().unwrap()
+    );
     assert_eq!(config.cluster.peers[1].node_id, "node3");
-    assert_eq!(config.cluster.peers[1].address, "127.0.0.1:9094".parse().unwrap());
+    assert_eq!(
+        config.cluster.peers[1].address,
+        "127.0.0.1:9094".parse().unwrap()
+    );
 }
 
 #[test]
 fn parses_cluster_peers_env_var_format() {
-    let peers = bearust::config::ClusterPeer::parse_peers("node2=127.0.0.1:9092,node3=127.0.0.1:9093").expect("valid peers str");
+    let peers =
+        bearust::config::ClusterPeer::parse_peers("node2=127.0.0.1:9092,node3=127.0.0.1:9093")
+            .expect("valid peers str");
     assert_eq!(peers.len(), 2);
     assert_eq!(peers[0].node_id, "node2");
     assert_eq!(peers[0].address, "127.0.0.1:9092".parse().unwrap());
