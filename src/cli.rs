@@ -284,7 +284,10 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let trusted_proxies = IpNetSet::new(config.server.trusted_proxy_cidrs.iter().map(String::as_str));
         let control_listener = tokio::net::TcpListener::bind(config.server.control_bind).await
             .map_err(|e| AppError::Server(format!("control plane bind: {e}")))?;
-        let control_router = crate::control_plane::router(control_state.clone());
+        let control_router = crate::control_plane::router_with_metrics(
+            control_state.clone(),
+            config.prometheus.bind == config.server.control_bind,
+        );
         let control_task = tokio::spawn(async move {
             let _ = axum::serve(control_listener, control_router).await;
         });

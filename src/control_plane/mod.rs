@@ -333,7 +333,14 @@ pub async fn allow_auth_attempt(state: &AppState, key: &str) -> bool {
     entry.1 <= 10
 }
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    router_with_metrics(state, true)
+}
+
+/// Construct the control-plane router, optionally mounting the Prometheus
+/// endpoint. When Prometheus uses a dedicated listener this must be `false`
+/// so the control listener does not expose a second metrics surface.
+pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
+    let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/setup/status", get(setup_status))
         .route("/api/setup/initialize", post(setup_initialize))
@@ -345,7 +352,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events", get(events))
         .route("/api/analytics/summary", get(analytics_summary))
         .route("/api/analytics/timeseries", get(analytics_timeseries))
-        .route("/metrics", get(prometheus_metrics))
         .route("/api/waf/config", get(get_waf_config).patch(update_waf_config))
         .route("/api/rate-limit/config", get(get_rate_limit_config).patch(update_rate_limit_config))
         .route("/api/waf/rules", get(list_waf_rules).post(create_waf_rule))
@@ -378,8 +384,13 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/certificates/acme", post(issue_acme))
         .route("/api/certificates/{id}/renew", post(renew_acme))
-        .route("/api/certificates/{id}/status", get(acme_status))
-        .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
+        .route("/api/certificates/{id}/status", get(acme_status));
+    let app = if include_metrics {
+        app.route("/metrics", get(prometheus_metrics))
+    } else {
+        app
+    };
+    app.layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
         .fallback_service(ServeDir::new("/usr/share/bearust/frontend"))
 }
