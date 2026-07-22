@@ -268,6 +268,22 @@ pub async fn update_bot_rule(pool: &DbPool, id: i64, rule: &BotRule) -> Result<u
 }
 pub async fn delete_bot_rule(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> { Ok(sqlx::query("DELETE FROM bot_rules WHERE id=?").bind(id).execute(pool).await?.rows_affected()) }
 
+/// Replace the persisted bot policy in one transaction. All validation is
+/// performed before opening the transaction so malformed imports cannot leave
+/// a partially applied policy behind.
+pub async fn replace_bot_policy(pool: &DbPool, config: &BotConfig, rules: &[BotRule]) -> Result<(), sqlx::Error> {
+    validate_bot_config(config)?;
+    if rules.len() > MAX_RULES || rules.iter().filter(|r| r.enabled && (r.trusted_user_agent.is_some() || r.trusted_domain.is_some())).count() > MAX_TRUSTED_RULES { return Err(bot_validation("too many bot rules")); }
+    let normalized = rules.iter().map(normalize_bot_rule).collect::<Result<Vec<_>, _>>()?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE bot_config SET mode=?,threshold=?,ttl_seconds=?,fingerprint_key=?,updated_at=? WHERE id=1")
+        .bind(bot_mode_value(config.mode)).bind(config.threshold as i64).bind(config.ttl_seconds as i64).bind(hex::encode(&config.fingerprint_key)).bind(chrono::Utc::now().to_rfc3339()).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM bot_rules").execute(&mut *tx).await?;
+    for rule in normalized { let id = generated_id(); let now = chrono::Utc::now().to_rfc3339(); sqlx::query("INSERT INTO bot_rules(id,category,weight,trusted_user_agent,trusted_domain,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id).bind(rule.category).bind(rule.weight as i64).bind(rule.trusted_user_agent).bind(rule.trusted_domain).bind(rule.enabled as i64).bind(&now).bind(&now).execute(&mut *tx).await?; }
+    tx.commit().await?;
+    Ok(())
+}
+
 fn waf_rule_from_row(row: &sqlx::any::AnyRow) -> WafRule {
     WafRule {
         id: row.get("id"), name: row.get("name"), source: row.get("source"),

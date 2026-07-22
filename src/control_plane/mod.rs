@@ -12,7 +12,7 @@ use crate::certificates::{
 use crate::secrets::SecretStore;
 use crate::waf_store::WafStore;
 use crate::bot_store::BotStore;
-use crate::bot_protection::{BotConfig, BotMode, BotRule, MAX_FIELD_BYTES, MAX_RULES};
+use crate::bot_protection::{BotConfig, BotMode, BotRule, MAX_FIELD_BYTES, MAX_RULES, MAX_TRUSTED_RULES};
 use async_trait::async_trait;
 use axum::{
     body::Bytes,
@@ -376,10 +376,12 @@ async fn update_bot_config(State(s): State<AppState>, h: HeaderMap, input: Resul
     let actor = match require_bot_admin(&s, &h).await { Ok(u) => u, Err(r) => return r };
     let Json(input) = match input { Ok(v) => v, Err(_) => return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid bot configuration") };
     let mut config = match repository::get_bot_config(&s.db).await { Ok(c) => c, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR,"database_error","Database unavailable") };
+    let previous = config.clone();
     if let Some(mode) = input.mode { config.mode = match bot_mode(&mode) { Some(v) => v, None => return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid bot mode") }; }
     if let Some(v) = input.threshold { config.threshold = v; }
     if let Some(v) = input.ttl_seconds { config.ttl_seconds = v; }
-    if repository::update_bot_config(&s.db, &config).await.is_err() || s.bot.reload(&s.db).await.is_err() { return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid bot configuration"); }
+    if repository::update_bot_config(&s.db, &config).await.is_err() { return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid bot configuration"); }
+    if s.bot.reload(&s.db).await.is_err() { let _ = repository::update_bot_config(&s.db, &previous).await; let _ = s.bot.reload(&s.db).await; return user_error(StatusCode::BAD_REQUEST,"invalid_input","Invalid bot configuration"); }
     audit::record_state(&s, Some(actor.id), "bot_config_updated", &format!("mode={};threshold={};ttl_seconds={}", bot_record(&config).mode, config.threshold, config.ttl_seconds)).await;
     s.realtime.publish("bot.changed"); Json(bot_record(&config)).into_response()
 }
@@ -389,15 +391,17 @@ async fn update_bot_crawler(State(s): State<AppState>, h: HeaderMap, Path(id): P
 async fn delete_bot_crawler(State(s): State<AppState>, h: HeaderMap, Path(id): Path<i64>) -> impl IntoResponse { let actor=match require_bot_admin(&s,&h).await{Ok(u)=>u,Err(r)=>return r};if repository::delete_bot_rule(&s.db,id).await.unwrap_or(0)!=1{return user_error(StatusCode::NOT_FOUND,"not_found","Trusted crawler not found")};let _=s.bot.reload(&s.db).await;audit::record_state(&s,Some(actor.id),"bot_trusted_crawler_deleted",&format!("rule_id={id}")).await;s.realtime.publish("bot.changed");StatusCode::NO_CONTENT.into_response() }
 async fn import_bot_config(State(s): State<AppState>, h: HeaderMap, body: Bytes) -> impl IntoResponse {
     let actor = match require_bot_admin(&s, &h).await { Ok(u) => u, Err(r) => return r };
+    const MAX_BOT_TOML_BYTES: usize = 64 * 1024;
+    if body.len() > MAX_BOT_TOML_BYTES { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Bot TOML is too large"); }
     let doc = match String::from_utf8(body.to_vec()).ok().and_then(|t| toml::from_str::<BotToml>(&t).ok()) { Some(v) if v.version == 1 => v, _ => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid bot TOML") };
-    if doc.trusted_crawlers.len() > MAX_RULES { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Too many trusted crawlers"); }
+    if doc.trusted_crawlers.len() > MAX_TRUSTED_RULES || doc.trusted_crawlers.len() > MAX_RULES { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Too many trusted crawlers"); }
     let mut config = match repository::get_bot_config(&s.db).await { Ok(v) => v, Err(_) => return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable") };
     if let Some(m) = doc.mode { config.mode = match bot_mode(&m) { Some(v) => v, None => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid bot mode") }; }
     if let Some(v) = doc.threshold { config.threshold = v; }
     if let Some(v) = doc.ttl_seconds { config.ttl_seconds = v; }
     for c in &doc.trusted_crawlers { if c.user_agent.len() > MAX_FIELD_BYTES || c.domain.len() > MAX_FIELD_BYTES || c.user_agent.trim().is_empty() || c.domain.trim().is_empty() { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid trusted crawler"); } }
-    if repository::update_bot_config(&s.db, &config).await.is_err() { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid bot configuration"); }
-    for c in doc.trusted_crawlers { let _ = repository::insert_bot_rule(&s.db, &BotRule { enabled: c.enabled, ..BotRule::trusted_crawler(c.user_agent, c.domain) }).await; }
+    let rules = doc.trusted_crawlers.into_iter().map(|c| BotRule { enabled: c.enabled, ..BotRule::trusted_crawler(c.user_agent, c.domain) }).collect::<Vec<_>>();
+    if repository::replace_bot_policy(&s.db, &config, &rules).await.is_err() { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Unable to import bot policy"); }
     if s.bot.reload(&s.db).await.is_err() { return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Unable to reload bot policy"); }
     audit::record_state(&s, Some(actor.id), "bot_config_imported", "redacted").await; s.realtime.publish("bot.changed"); StatusCode::OK.into_response()
 }
