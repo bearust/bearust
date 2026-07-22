@@ -25,3 +25,28 @@ Verification:
 Concern:
 
 - Frontend Vitest could not run in this worktree because the `frontend` dependencies are not installed (`vitest: not found`).
+## Task 3 Report: Proxy enforcement and telemetry
+
+### Status
+
+Implemented and committed as `a5102fe` (`feat: enforce adaptive rate limiting in proxy`).
+
+### Delivered
+
+- Added `BeaRustProxy::with_rate_limiter`, policy/trusted-proxy wiring helpers, and `RequestContext.rate_limit_decision`.
+- Evaluates after WAF/bot handling and route resolution, before upstream lease creation.
+- Monitor mode records bounded `rate_limit_detection` telemetry and forwards requests.
+- Block mode returns generic `429` with bounded `Retry-After` (1–3600 seconds) and `Cache-Control: no-store`.
+- Client identity uses peer address by default and honors `Forwarded`/`X-Forwarded-For` only for configured trusted proxy networks.
+- Added focused policy/Retry-After/isolation tests in `tests/proxy_rate_limit.rs`.
+
+### Verification
+
+- `cargo +stable check --all-targets` — passed.
+- `cargo +stable test --test proxy_rate_limit --test proxy_waf --test proxy_bot` — passed (3 + 5 + 4 tests).
+- Initial command before adding the target reported `proxy_rate_limit` missing; target was then added and rerun successfully.
+
+### Concerns / follow-up
+
+- The current task uses a stable hash of normalized route host/path as the rate-limit host key; control-plane persistence can replace it with a database proxy-host id when wiring is added.
+- Existing unrelated worktree modifications were left untouched.
