@@ -17,3 +17,4 @@ pub mod secrets;
 pub mod tls;
 pub mod waf;
 pub mod waf_store;
+pub mod rate_limit;
