@@ -2,7 +2,7 @@
 
 ## Commit
 
-- `5d0055a1e6f9d53e8ce61ae51c6f7409acfe2b45` — `fix: align bot challenge context` (includes the original dashboard commit)
+- `a2c09fdc3d241edb9b35facab0ada7d3af6fca53` — `fix: hand off bot challenge context` (includes the prior Task 6 commits)
 
 ## Delivered
 
@@ -44,7 +44,12 @@
   contract without exposing the signing key.
 - `AppContent` mounts `BotChallengePage` at `/bot-challenge` and a regression
   test verifies the route and exact server-issued payload.
+- Proxy challenge responses now include only a bounded 16-character fingerprint
+  prefix and a `/bot-challenge?fingerprint_prefix=…` handoff URL. The frontend
+  validates and stores that prefix before requesting a challenge token; no key,
+  raw headers, or full fingerprint is serialized.
 - Follow-up targeted tests: `npm test -- --run src/bot.test.tsx` — **passed**
   (4 tests); `npm run build` — **passed**.
+- `cargo +stable test --test proxy_bot` — **passed** (2 tests).
 - Full suite remains **43 passed / 1 baseline users.test.tsx failure** as
   described above.

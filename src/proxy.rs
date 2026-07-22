@@ -216,7 +216,13 @@ impl ProxyHttp for BeaRustProxy {
             return Ok(true);
         }
         if ctx.bot_challenge {
-            let body = if let (Some(service), Some(evaluation)) = (&self.challenges, &ctx.bot_evaluation) { service.issue_challenge(&evaluation.fingerprint, unix_now()).await.ok().and_then(|value| serde_json::to_vec(&value).ok()) } else { None }.unwrap_or_else(|| b"Challenge required".to_vec());
+            let body = if let Some(evaluation) = &ctx.bot_evaluation {
+                let prefix: String = evaluation.fingerprint.chars().take(16).collect();
+                serde_json::to_vec(&serde_json::json!({
+                    "challenge_url": format!("/bot-challenge?fingerprint_prefix={prefix}"),
+                    "fingerprint_prefix": prefix,
+                })).unwrap_or_else(|_| b"Challenge required".to_vec())
+            } else { b"Challenge required".to_vec() };
             let mut response = ResponseHeader::build(403, Some(3)).map_err(|e| pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string()))?;
             response.insert_header("Cache-Control", "no-store").map_err(|e| pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string()))?;
             response.insert_header("Content-Type", "application/json").map_err(|e| pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string()))?;

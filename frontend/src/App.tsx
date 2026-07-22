@@ -611,7 +611,7 @@ export function WafSection({ user, refreshToken = 0 }: { user: User; refreshToke
 const serverChallengeFingerprint = () => {
   if (typeof sessionStorage === "undefined") return "";
   const value = sessionStorage.getItem("bearust-bot-fingerprint") ?? "";
-  return value.length > 0 && value.length <= 128 ? value : "";
+  return /^[a-f0-9]{16}$/.test(value) ? value : "";
 };
 
 export async function solveBotChallenge(challenge: BotChallenge, fingerprint: string): Promise<string> {
@@ -925,7 +925,11 @@ function AppContent() {
         }}
       />
     );
-  if (typeof window !== "undefined" && window.location.pathname === "/bot-challenge") return <BotChallengePage />;
+  if (typeof window !== "undefined" && window.location.pathname === "/bot-challenge") {
+    const prefix = new URLSearchParams(window.location.search).get("fingerprint_prefix") ?? "";
+    if (/^[a-f0-9]{16}$/.test(prefix)) sessionStorage.setItem("bearust-bot-fingerprint", prefix);
+    return <BotChallengePage />;
+  }
   return user ? (
     <Dashboard
       user={user}

@@ -49,12 +49,11 @@ describe("bot protection dashboard", () => {
   it("mounts the challenge page on the dedicated route with server context", async () => {
     vi.spyOn(api, "status").mockResolvedValue({ initialized: true });
     vi.spyOn(api, "me").mockRejectedValue(new Error("unauthenticated"));
-    vi.spyOn(api, "botChallenge").mockResolvedValue({ token: "1.nonce.prefix.1.999.sig", difficulty: 1, expires_at: 999, fingerprint_prefix: "sha256" });
-    sessionStorage.setItem("bearust-bot-fingerprint", "sha256:server-issued-context");
-    window.history.pushState({}, "", "/bot-challenge");
+    vi.spyOn(api, "botChallenge").mockResolvedValue({ token: "1.nonce.prefix.1.999.sig", difficulty: 1, expires_at: 999, fingerprint_prefix: "abcdef0123456789" });
+    window.history.pushState({}, "", "/bot-challenge?fingerprint_prefix=abcdef0123456789");
     const view = render(<App />); await act(async () => {});
     expect(view.container.textContent).toContain("Quick browser check");
-    expect(api.botChallenge).toHaveBeenCalledWith("sha256:server-issued-context");
+    expect(api.botChallenge).toHaveBeenCalledWith("abcdef0123456789");
     view.root.unmount(); sessionStorage.clear(); window.history.pushState({}, "", "/");
   });
 });
