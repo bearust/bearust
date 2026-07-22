@@ -379,7 +379,8 @@ async fn issue_bot_challenge(State(s): State<AppState>, Json(input): Json<Challe
 async fn verify_bot_challenge(State(s): State<AppState>, Json(input): Json<ChallengeVerifyInput>) -> impl IntoResponse {
     let result = s.challenges.verify_solution(&input.token, &input.fingerprint, &input.solution, unix_now()).await;
     if result.is_err() { return user_error(StatusCode::BAD_REQUEST, "challenge_failed", "Challenge verification failed"); }
-    let cookie = format!("bearust_bot_clear={}; Max-Age=300; Path=/; Secure; HttpOnly; SameSite=Strict", input.token);
+    let clearance = match s.challenges.issue_clearance(&input.fingerprint, unix_now()) { Ok(token) => token, Err(_) => return user_error(StatusCode::BAD_REQUEST, "challenge_failed", "Challenge verification failed") };
+    let cookie = format!("bearust_bot_clear={}; Max-Age=300; Path=/; Secure; HttpOnly; SameSite=Strict", clearance);
     ([(axum::http::header::SET_COOKIE, cookie), (axum::http::header::CACHE_CONTROL, "no-store".to_string())], Json(serde_json::json!({"ok":true}))).into_response()
 }
 

@@ -69,6 +69,27 @@ impl ChallengeService {
         states.remove(&digest);
         Ok(())
     }
+
+    pub fn issue_clearance(&self, fingerprint: &str, now: u64) -> Result<String, VerifyError> {
+        if fingerprint.is_empty() || fingerprint.len() > MAX_FINGERPRINT_BYTES { return Err(VerifyError::Invalid); }
+        let expiry = now.saturating_add(CHALLENGE_TTL_SECONDS);
+        let prefix = fingerprint.chars().take(16).collect::<String>();
+        Ok(signed_token(&self.key, format!("c.{}.{}.{}", prefix, now, expiry).as_bytes()))
+    }
+
+    pub fn verify_clearance(&self, token: &str, fingerprint: &str, now: u64) -> Result<(), VerifyError> {
+        if token.len() > MAX_TOKEN_BYTES || fingerprint.is_empty() || fingerprint.len() > MAX_FINGERPRINT_BYTES { return Err(VerifyError::Invalid); }
+        let (payload, sig) = token.rsplit_once('.').ok_or(VerifyError::Invalid)?;
+        let expected_sig = signed_token(&self.key, payload.as_bytes()).rsplit_once('.').ok_or(VerifyError::Invalid)?.1.to_owned();
+        if !constant_time_eq(sig.as_bytes(), expected_sig.as_bytes()) { return Err(VerifyError::Invalid); }
+        let mut fields = payload.split('.');
+        if fields.next() != Some("c") { return Err(VerifyError::Invalid); }
+        let prefix = fields.next().ok_or(VerifyError::Invalid)?;
+        let issued: u64 = fields.next().and_then(|v| v.parse().ok()).ok_or(VerifyError::Invalid)?;
+        let expiry: u64 = fields.next().and_then(|v| v.parse().ok()).ok_or(VerifyError::Invalid)?;
+        if fields.next().is_some() || issued > now || expiry <= now || expiry.saturating_sub(issued) > CHALLENGE_TTL_SECONDS { return Err(VerifyError::Invalid); }
+        if fingerprint.starts_with(prefix) { Ok(()) } else { Err(VerifyError::FingerprintMismatch) }
+    }
 }
 
 pub async fn issue_challenge(service: &ChallengeService, fingerprint: &str, now: u64) -> Result<Challenge, VerifyError> {
