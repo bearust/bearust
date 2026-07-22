@@ -18,6 +18,8 @@ import {
   BotChallenge,
   RateLimitConfig,
   RateLimitAction,
+  AnalyticsSummary,
+  AnalyticsBucket,
 } from "./api";
 import { useRealtimeUpdates, RealtimeStatus } from "./realtime";
 import { Alert, Button, Card, Field, SelectField, TextareaField, ThemeSelect } from "./ui";
@@ -651,6 +653,32 @@ export function RateLimitSection({ user, refreshToken = 0 }: { user: User; refre
   return <Card data-testid="rate-limit-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">Rate limiting</h2><span className="rounded-full border border-border px-3 py-1 text-sm">{config?.action === "block" ? "Block" : "Monitor-only"}</span></div><p className="mt-2 text-sm text-muted">Limits each proxy host by client IP. Monitor-only is the safe default; no raw client identifiers are shown.</p>{error && <Alert variant="danger">{error}</Alert>}{saved && <Alert variant="success">Rate-limit policy saved.</Alert>}<form className="mt-4 grid gap-4 sm:grid-cols-2" onSubmit={(e) => void save(e)}><label className="flex min-h-11 items-center gap-3 text-sm font-medium"><input aria-label="Enable rate limiting" type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} disabled={!admin || busy} />Enable rate limiting</label><SelectField label="Action" value={action} onChange={(e) => setAction(e.target.value as RateLimitAction)} disabled={!admin || busy}><option value="monitor">Monitor-only</option><option value="block">Block limited requests</option></SelectField><Field label="Burst capacity" type="number" min="1" max="1000000" value={capacity} onChange={(e) => setCapacity(e.target.value)} disabled={!admin || busy} required /><Field label="Refill per second" type="number" min="0.001" max="100000" step="0.001" value={refill} onChange={(e) => setRefill(e.target.value)} disabled={!admin || busy} required /><SelectField label="Key scope" value="proxy_host_ip" disabled><option value="proxy_host_ip">Proxy host + client IP</option></SelectField>{admin && <Button type="submit" disabled={busy}>{busy ? "Saving…" : "Save policy"}</Button>}</form></Card>;
 }
 
+export function AnalyticsSection({ hosts, refreshToken = 0 }: { hosts: Host[]; refreshToken?: number }) {
+  const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
+  const [rows, setRows] = useState<AnalyticsBucket[]>([]);
+  const [host, setHost] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const query = () => ({ ...(host ? { proxy_host_id: Number(host) } : {}), ...(from ? { from: new Date(from).toISOString() } : {}), ...(to ? { to: new Date(to).toISOString() } : {}), limit: 1440 });
+  const load = async () => {
+    setLoading(true); setError("");
+    try { const q = query(); const [s, t] = await Promise.all([api.getAnalyticsSummary(q), api.getAnalyticsTimeseries(q)]); setSummary(s); setRows(t); }
+    catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); setSummary(null); setRows([]); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { const timer = setTimeout(() => void load(), 150); return () => clearTimeout(timer); }, [refreshToken, host, from, to]);
+  const cards = summary ? [["Requests", summary.requests], ["2xx", summary.status_2xx], ["4xx", summary.status_4xx], ["5xx", summary.status_5xx], ["p95 latency", summary.p95_ms == null ? "—" : `${summary.p95_ms} ms`], ["Security events", summary.waf_blocks + summary.bot_blocks + summary.bot_challenges + summary.rate_limited]] : [];
+  return <Card data-testid="analytics-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">Analytics</h2><span className="text-sm text-muted">Process-local · last 24 hours</span></div>
+    <div className="mt-4 grid gap-4 sm:grid-cols-3" role="group" aria-label="Analytics filters"><SelectField label="Proxy host" value={host} onChange={e => setHost(e.target.value)}><option value="">All hosts</option>{hosts.slice(0, 100).map(h => <option key={h.id} value={h.id}>{h.name} ({h.domain})</option>)}</SelectField><Field label="From" type="datetime-local" value={from} onChange={e => setFrom(e.target.value)} /><Field label="To" type="datetime-local" value={to} onChange={e => setTo(e.target.value)} /></div>
+    {loading && <p role="status" className="mt-4 text-muted">Loading analytics…</p>}
+    {!loading && error && <Alert variant="danger">{error}</Alert>}
+    {!loading && !error && summary && summary.requests === 0 && <p className="mt-4 text-muted">No analytics data for the selected range.</p>}
+    {!loading && !error && summary && summary.requests > 0 && <><div className="mt-5 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">{cards.map(([label, value]) => <div key={label} className="rounded border border-border p-3"><div className="text-xs text-muted">{label}</div><div className="text-xl font-semibold">{value}</div></div>)}</div><div className="mt-6 overflow-x-auto"><table className="min-w-full text-left text-sm"><caption className="sr-only">Analytics by minute</caption><thead><tr><th>Time</th><th>Host</th><th>Requests</th><th>p50</th><th>p95</th><th>Errors</th></tr></thead><tbody>{rows.map(row => <tr key={`${row.timestamp}-${row.proxy_host_id}`}><td>{new Date(row.timestamp).toLocaleString()}</td><td>{hosts.find(h => h.id === row.proxy_host_id)?.name ?? row.proxy_host_id}</td><td>{row.requests}</td><td>{row.p50_ms == null ? "—" : `${row.p50_ms} ms`}</td><td>{row.p95_ms == null ? "—" : `${row.p95_ms} ms`}</td><td>{row.status_4xx + row.status_5xx}</td></tr>)}</tbody></table></div></>}
+  </Card>;
+}
+
 export function BotChallengePage({ fingerprint = serverChallengeFingerprint(), onComplete }: { fingerprint?: string; onComplete?: () => void }) {
   const [challenge, setChallenge] = useState<BotChallenge | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState(""), [complete, setComplete] = useState(false);
   const requestChallenge = async () => { if (!fingerprint) { setError("Challenge context unavailable. Please return to the protected page and try again."); return; } setBusy(true); setError(""); setComplete(false); try { setChallenge(await api.botChallenge(fingerprint)); } catch { setError("Challenge unavailable. Please try again."); } finally { setBusy(false); } };
@@ -667,6 +695,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
     [error, setError] = useState(""),
     [usersError, setUsersError] = useState("");
   const [wafRefresh, setWafRefresh] = useState(0);
+  const [analyticsRefresh, setAnalyticsRefresh] = useState(0);
   const [form, setForm] = useState({
     name: "",
     domain: "",
@@ -727,6 +756,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
     sessions: loadSession,
     waf: () => setWafRefresh(value => value + 1),
     rateLimit: () => setWafRefresh(value => value + 1),
+    analytics: () => setAnalyticsRefresh(value => value + 1),
   });
   const refresh = async () => {
     try {
@@ -769,6 +799,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
       <WafSection user={user} refreshToken={wafRefresh} />
       <BotProtectionSection user={user} refreshToken={wafRefresh} />
       <RateLimitSection user={user} refreshToken={wafRefresh} />
+      <AnalyticsSection hosts={hosts} refreshToken={analyticsRefresh} />
       {canWrite && (
         <AcmeWizard canWrite={canWrite} onIssued={() => void refresh()} />
       )}
