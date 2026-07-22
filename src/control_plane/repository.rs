@@ -3,6 +3,7 @@ use crate::control_plane::models::{
     AuditLogQuery, CertificateMetadata, ProxyHost, RoleDetail, RolePermissionScope, User,
     WafAction, WafConfig, WafMode, WafRule,
 };
+use crate::bot_protection::{BotConfig, BotMode, BotRule, MAX_FIELD_BYTES, MAX_RULES, MAX_TTL_SECONDS, MAX_TRUSTED_RULES};
 use crate::control_plane::rbac::Role;
 use sqlx::{any::AnyPoolOptions, Row};
 use std::sync::Once;
@@ -187,6 +188,78 @@ fn waf_action_value(action: WafAction) -> &'static str {
 fn parse_waf_action(value: &str) -> WafAction {
     match value { "allow" => WafAction::Allow, "log" => WafAction::Log, "block" => WafAction::Block, _ => WafAction::Inherit }
 }
+
+fn bot_mode_value(mode: BotMode) -> &'static str { match mode { BotMode::Monitor => "monitor", BotMode::Challenge => "challenge", BotMode::Block => "block" } }
+fn parse_bot_mode(value: &str) -> Result<BotMode, sqlx::Error> { match value { "monitor" => Ok(BotMode::Monitor), "challenge" => Ok(BotMode::Challenge), "block" => Ok(BotMode::Block), _ => Err(sqlx::Error::Protocol("invalid bot mode".into())) } }
+fn bot_validation(message: &str) -> sqlx::Error { sqlx::Error::Protocol(message.into()) }
+fn validate_bot_config(config: &BotConfig) -> Result<(), sqlx::Error> {
+    if config.threshold == 0 || config.threshold > 100 { return Err(bot_validation("invalid bot threshold")); }
+    if config.ttl_seconds == 0 || config.ttl_seconds > MAX_TTL_SECONDS { return Err(bot_validation("invalid bot ttl")); }
+    if config.fingerprint_key.is_empty() || config.fingerprint_key.len() > MAX_FIELD_BYTES { return Err(bot_validation("invalid bot fingerprint key")); }
+    Ok(())
+}
+fn normalize_bot_rule(rule: &BotRule) -> Result<BotRule, sqlx::Error> {
+    let category = rule.category.trim().to_ascii_lowercase();
+    if category.is_empty() || category.len() > MAX_FIELD_BYTES || rule.weight > 100 { return Err(bot_validation("invalid bot rule")); }
+    let ua = rule.trusted_user_agent.as_ref().map(|v| v.trim().to_string());
+    let domain = rule.trusted_domain.as_ref().map(|v| v.trim().to_ascii_lowercase());
+    if ua.as_ref().is_some_and(|v| v.is_empty() || v.len() > MAX_FIELD_BYTES) || domain.as_ref().is_some_and(|v| v.is_empty() || v.len() > MAX_FIELD_BYTES) { return Err(bot_validation("invalid bot rule predicate")); }
+    if category == "trusted_crawler" && (ua.is_none() || domain.is_none()) { return Err(bot_validation("trusted crawler requires predicates")); }
+    Ok(BotRule { category, weight: rule.weight, trusted_user_agent: ua, trusted_domain: domain, enabled: rule.enabled })
+}
+
+pub async fn get_bot_config(pool: &DbPool) -> Result<BotConfig, sqlx::Error> {
+    let row = sqlx::query("SELECT mode,threshold,ttl_seconds,fingerprint_key FROM bot_config WHERE id=1").fetch_one(pool).await?;
+    let key: String = row.get("fingerprint_key");
+    let key = if key.is_empty() {
+        let mut generated = Vec::with_capacity(32);
+        generated.extend_from_slice(Uuid::new_v4().as_bytes());
+        generated.extend_from_slice(Uuid::new_v4().as_bytes());
+        let encoded = hex::encode(&generated);
+        sqlx::query("UPDATE bot_config SET fingerprint_key=?,updated_at=? WHERE id=1 AND fingerprint_key=''")
+            .bind(encoded).bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?;
+        let stored: String = sqlx::query_scalar("SELECT fingerprint_key FROM bot_config WHERE id=1").fetch_one(pool).await?;
+        hex::decode(stored).map_err(|_| bot_validation("invalid stored fingerprint key"))?
+    } else {
+        hex::decode(key).map_err(|_| bot_validation("invalid stored fingerprint key"))?
+    };
+    let config = BotConfig { mode: parse_bot_mode(&row.get::<String, _>("mode"))?, threshold: row.get::<i64, _>("threshold") as u16, ttl_seconds: row.get::<i64, _>("ttl_seconds") as u64, fingerprint_key: key };
+    validate_bot_config(&config)?;
+    Ok(config)
+}
+pub async fn update_bot_config(pool: &DbPool, config: &BotConfig) -> Result<u64, sqlx::Error> {
+    validate_bot_config(config)?;
+    Ok(sqlx::query("UPDATE bot_config SET mode=?,threshold=?,ttl_seconds=?,fingerprint_key=?,updated_at=? WHERE id=1").bind(bot_mode_value(config.mode)).bind(config.threshold as i64).bind(config.ttl_seconds as i64).bind(hex::encode(&config.fingerprint_key)).bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?.rows_affected())
+}
+fn bot_rule_from_row(row: &sqlx::any::AnyRow) -> BotRule { BotRule { category: row.get("category"), weight: row.get::<i64,_>("weight") as u16, trusted_user_agent: row.get("trusted_user_agent"), trusted_domain: row.get("trusted_domain"), enabled: row.get::<i64,_>("enabled") != 0 } }
+pub async fn list_bot_rules(pool: &DbPool) -> Result<Vec<BotRule>, sqlx::Error> {
+    let rows = sqlx::query("SELECT category,weight,trusted_user_agent,trusted_domain,enabled FROM bot_rules ORDER BY id LIMIT ?")
+        .bind(MAX_RULES as i64 + 1).fetch_all(pool).await?;
+    if rows.len() > MAX_RULES { return Err(bot_validation("too many bot rules")); }
+    Ok(rows.iter().map(bot_rule_from_row).collect())
+}
+pub async fn insert_bot_rule(pool: &DbPool, rule: &BotRule) -> Result<i64, sqlx::Error> {
+    let rule = normalize_bot_rule(rule)?;
+    let mut tx = pool.begin().await?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_rules").fetch_one(&mut *tx).await?;
+    if count as usize >= MAX_RULES { return Err(bot_validation("too many bot rules")); }
+    let trusted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_rules WHERE enabled=1 AND (trusted_user_agent IS NOT NULL OR trusted_domain IS NOT NULL)").fetch_one(&mut *tx).await?;
+    if rule.enabled && (rule.trusted_user_agent.is_some() || rule.trusted_domain.is_some()) && trusted as usize >= MAX_TRUSTED_RULES { return Err(bot_validation("too many trusted bot rules")); }
+    let id = generated_id(); let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO bot_rules(id,category,weight,trusted_user_agent,trusted_domain,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id).bind(&rule.category).bind(rule.weight as i64).bind(&rule.trusted_user_agent).bind(&rule.trusted_domain).bind(rule.enabled as i64).bind(&now).bind(&now).execute(&mut *tx).await?;
+    tx.commit().await?; Ok(id)
+}
+pub async fn update_bot_rule(pool: &DbPool, id: i64, rule: &BotRule) -> Result<u64, sqlx::Error> {
+    let rule = normalize_bot_rule(rule)?;
+    let mut tx = pool.begin().await?;
+    if rule.enabled && (rule.trusted_user_agent.is_some() || rule.trusted_domain.is_some()) {
+        let trusted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_rules WHERE id<>? AND enabled=1 AND (trusted_user_agent IS NOT NULL OR trusted_domain IS NOT NULL)").bind(id).fetch_one(&mut *tx).await?;
+        if trusted as usize >= MAX_TRUSTED_RULES { return Err(bot_validation("too many trusted bot rules")); }
+    }
+    let changed = sqlx::query("UPDATE bot_rules SET category=?,weight=?,trusted_user_agent=?,trusted_domain=?,enabled=?,updated_at=? WHERE id=?").bind(&rule.category).bind(rule.weight as i64).bind(&rule.trusted_user_agent).bind(&rule.trusted_domain).bind(rule.enabled as i64).bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(&mut *tx).await?.rows_affected();
+    tx.commit().await?; Ok(changed)
+}
+pub async fn delete_bot_rule(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> { Ok(sqlx::query("DELETE FROM bot_rules WHERE id=?").bind(id).execute(pool).await?.rows_affected()) }
 
 fn waf_rule_from_row(row: &sqlx::any::AnyRow) -> WafRule {
     WafRule {
