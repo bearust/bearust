@@ -1311,6 +1311,7 @@ pub async fn run_adaptive_evaluation_tick(s: &AppState, allow_auto_enforce: bool
     let now = Utc::now();
     let analytics = s.analytics.snapshot();
     let hosts = repository::list_hosts(&s.db).await.unwrap_or_default();
+    let mut baseline_updated = false;
 
     for host in &hosts {
         // 1. Take baseline snapshot BEFORE recording current traffic into baseline (prevents spike normalization)
@@ -1327,9 +1328,11 @@ pub async fn run_adaptive_evaluation_tick(s: &AppState, allow_auto_enforce: bool
             s.realtime.publish("anomaly.changed");
         }
 
-        // 3. Record current snapshot into baseline AFTER anomaly evaluation
-        s.baseline.record(&analytics, now);
-        s.realtime.publish("baseline.changed");
+        // 3. Record current snapshot into baseline ONLY on background scheduler tick
+        if allow_auto_enforce {
+            s.baseline.record(&analytics, now);
+            baseline_updated = true;
+        }
 
         // 4. Generate recommendations & auto-enforce if mode is Enforce and allow_auto_enforce is true
         let policy = repository::get_tuning_policy(&s.db, host.id).await.unwrap_or_default();
@@ -1411,6 +1414,10 @@ pub async fn run_adaptive_evaluation_tick(s: &AppState, allow_auto_enforce: bool
             }
         }
     }
+
+    if baseline_updated {
+        s.realtime.publish("baseline.changed");
+    }
 }
 
 async fn list_anomalies(
@@ -1421,7 +1428,6 @@ async fn list_anomalies(
     if let Err(r) = require_analytics_read(&s, &h, query.host_id).await {
         return r;
     }
-    run_adaptive_evaluation_tick(&s, false).await;
 
     let severity = query.severity.as_deref().and_then(|s| match s {
         "info" => Some(crate::anomaly::AnomalySeverity::Info),
@@ -1523,7 +1529,6 @@ async fn list_recommendations(
     if let Err(r) = require_analytics_read(&s, &h, None).await {
         return r;
     }
-    run_adaptive_evaluation_tick(&s, false).await;
 
     match repository::list_tuning_recommendations(&s.db).await {
         Ok(list) => Json(list).into_response(),
