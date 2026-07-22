@@ -24,6 +24,14 @@ describe("analytics dashboard", () => {
     expect(document.body.textContent).toContain("Loading analytics");
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 200)); });
     expect(document.body.textContent).toContain("Requests");
+    expect(document.body.textContent).toContain("Latency percentiles");
+    expect(document.body.textContent).toContain("p50");
+    expect(document.body.textContent).toContain("p99");
+    expect(document.body.textContent).toContain("WAF blocks");
+    expect(document.body.textContent).toContain("Bot challenges");
+    expect(document.body.textContent).toContain("Rate limited");
+    expect(document.querySelectorAll('[role="progressbar"]')).toHaveLength(3);
+    expect(document.querySelector('[aria-label="p95 latency"]')?.getAttribute("aria-valuenow")).toBe("40");
     expect(document.body.textContent).toContain("Analytics by minute");
     root.unmount();
   });

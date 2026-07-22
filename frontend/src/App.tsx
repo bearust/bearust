@@ -670,12 +670,32 @@ export function AnalyticsSection({ hosts, refreshToken = 0 }: { hosts: Host[]; r
   };
   useEffect(() => { const timer = setTimeout(() => void load(), 150); return () => clearTimeout(timer); }, [refreshToken, host, from, to]);
   const cards = summary ? [["Requests", summary.requests], ["2xx", summary.status_2xx], ["4xx", summary.status_4xx], ["5xx", summary.status_5xx], ["p95 latency", summary.p95_ms == null ? "—" : `${summary.p95_ms} ms`], ["Security events", summary.waf_blocks + summary.bot_blocks + summary.bot_challenges + summary.rate_limited]] : [];
+  const latency = summary ? [["p50", summary.p50_ms], ["p95", summary.p95_ms], ["p99", summary.p99_ms]] as const : [];
+  const latencyMax = Math.max(...latency.map(([, value]) => value ?? 0), 1);
   return <Card data-testid="analytics-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">Analytics</h2><span className="text-sm text-muted">Process-local · last 24 hours</span></div>
     <div className="mt-4 grid gap-4 sm:grid-cols-3" role="group" aria-label="Analytics filters"><SelectField label="Proxy host" value={host} onChange={e => setHost(e.target.value)}><option value="">All hosts</option>{hosts.slice(0, 100).map(h => <option key={h.id} value={h.id}>{h.name} ({h.domain})</option>)}</SelectField><Field label="From" type="datetime-local" value={from} onChange={e => setFrom(e.target.value)} /><Field label="To" type="datetime-local" value={to} onChange={e => setTo(e.target.value)} /></div>
     {loading && <p role="status" className="mt-4 text-muted">Loading analytics…</p>}
     {!loading && error && <Alert variant="danger">{error}</Alert>}
     {!loading && !error && summary && summary.requests === 0 && <p className="mt-4 text-muted">No analytics data for the selected range.</p>}
-    {!loading && !error && summary && summary.requests > 0 && <><div className="mt-5 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">{cards.map(([label, value]) => <div key={label} className="rounded border border-border p-3"><div className="text-xs text-muted">{label}</div><div className="text-xl font-semibold">{value}</div></div>)}</div><div className="mt-6 overflow-x-auto"><table className="min-w-full text-left text-sm"><caption className="sr-only">Analytics by minute</caption><thead><tr><th>Time</th><th>Host</th><th>Requests</th><th>p50</th><th>p95</th><th>Errors</th></tr></thead><tbody>{rows.map(row => <tr key={`${row.timestamp}-${row.proxy_host_id}`}><td>{new Date(row.timestamp).toLocaleString()}</td><td>{hosts.find(h => h.id === row.proxy_host_id)?.name ?? row.proxy_host_id}</td><td>{row.requests}</td><td>{row.p50_ms == null ? "—" : `${row.p50_ms} ms`}</td><td>{row.p95_ms == null ? "—" : `${row.p95_ms} ms`}</td><td>{row.status_4xx + row.status_5xx}</td></tr>)}</tbody></table></div></>}
+    {!loading && !error && summary && summary.requests > 0 && <><div className="mt-5 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">{cards.map(([label, value]) => <div key={label} className="rounded border border-border p-3"><div className="text-xs text-muted">{label}</div><div className="text-xl font-semibold">{value}</div></div>)}</div>
+      <div className="mt-6 grid gap-4 lg:grid-cols-2">
+        <section className="rounded border border-border p-4" aria-labelledby="analytics-latency-heading">
+          <h3 id="analytics-latency-heading" className="mb-3 font-semibold">Latency percentiles</h3>
+          <div className="space-y-3" role="group" aria-label="Request latency percentiles">
+            {latency.map(([label, value]) => {
+              const width = value == null ? 0 : Math.max(4, Math.round((value / latencyMax) * 100));
+              return <div key={label}><div className="mb-1 flex items-center justify-between text-sm"><span>{label}</span><span>{value == null ? "—" : `${value} ms`}</span></div><div className="h-2 rounded bg-muted/20" role="progressbar" aria-label={`${label} latency`} aria-valuemin={0} aria-valuemax={latencyMax} aria-valuenow={value ?? 0}><div className="h-2 rounded bg-accent" style={{ width: `${width}%` }} /></div></div>;
+            })}
+          </div>
+        </section>
+        <section className="rounded border border-border p-4" aria-labelledby="analytics-security-heading">
+          <h3 id="analytics-security-heading" className="mb-3 font-semibold">Security events</h3>
+          <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+            {[["WAF blocks", summary.waf_blocks], ["Bot blocks", summary.bot_blocks], ["Bot challenges", summary.bot_challenges], ["Rate limited", summary.rate_limited]].map(([label, value]) => <div key={label} className="rounded border border-border p-3"><dt className="text-xs text-muted">{label}</dt><dd className="text-xl font-semibold">{value}</dd></div>)}
+          </dl>
+        </section>
+      </div>
+      <div className="mt-6 overflow-x-auto"><table className="min-w-full text-left text-sm"><caption className="sr-only">Analytics by minute</caption><thead><tr><th>Time</th><th>Host</th><th>Requests</th><th>p50</th><th>p95</th><th>Errors</th></tr></thead><tbody>{rows.map(row => <tr key={`${row.timestamp}-${row.proxy_host_id}`}><td>{new Date(row.timestamp).toLocaleString()}</td><td>{hosts.find(h => h.id === row.proxy_host_id)?.name ?? row.proxy_host_id}</td><td>{row.requests}</td><td>{row.p50_ms == null ? "—" : `${row.p50_ms} ms`}</td><td>{row.p95_ms == null ? "—" : `${row.p95_ms} ms`}</td><td>{row.status_4xx + row.status_5xx}</td></tr>)}</tbody></table></div></>}
   </Card>;
 }
 
