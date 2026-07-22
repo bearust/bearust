@@ -6,6 +6,7 @@ use crate::{
 };
 use clap::{Parser, Subcommand};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -264,6 +265,13 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let bot_store = control_state.bot.clone();
         let challenge_service = control_state.challenges.clone();
         let rate_limiter = control_state.rate_limiter.clone();
+        let analytics = control_state.analytics.clone();
+        let analytics_host_ids = crate::control_plane::repository::list_hosts(&control_state.db)
+            .await
+            .map_err(|e| AppError::Server(format!("load proxy hosts for analytics: {e}")))?
+            .into_iter()
+            .filter_map(|host| crate::router::normalize_host(&host.domain).map(|domain| (domain, host.id)))
+            .collect::<HashMap<_, _>>();
         let rate_policy = RateLimitPolicy {
             enabled: config.rate_limit.enabled,
             action: match config.rate_limit.action { config::RateLimitAction::Block => crate::rate_limit::RateLimitAction::Block, config::RateLimitAction::Monitor => crate::rate_limit::RateLimitAction::Monitor },
@@ -296,6 +304,8 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let ready_path = std::env::var_os("BEARUST_UPGRADE_READY").map(PathBuf::from);
         let mut service = proxy::http_service(
             crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store).with_bot_store(bot_store, challenge_service)
+                .with_analytics(analytics)
+                .with_analytics_host_ids(analytics_host_ids)
                 .with_rate_limiter(rate_limiter)
                 .with_rate_limit_policy(rate_policy)
                 .with_trusted_proxies(trusted_proxies),

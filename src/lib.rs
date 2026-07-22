@@ -1,4 +1,6 @@
 pub mod acme;
+pub mod analytics;
+pub mod analytics_prometheus;
 pub mod balancer;
 pub mod bot_protection;
 pub mod bot_challenge;

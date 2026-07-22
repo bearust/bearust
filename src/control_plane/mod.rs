@@ -5,6 +5,8 @@ pub mod rbac;
 pub mod repository;
 pub mod realtime;
 use crate::acme::{AcmeEnvironment, AcmeManager, LetsEncryptClient};
+use crate::analytics::{AnalyticsCollector, AnalyticsFilter};
+use crate::analytics_prometheus::PrometheusConfig;
 use crate::certificates::{
     AcmeService as CertificateAcmeService, AcmeServiceError as CertificateAcmeError,
     CertificateStore,
@@ -19,7 +21,7 @@ use async_trait::async_trait;
 use axum::{
     body::Bytes,
     extract::DefaultBodyLimit,
-    extract::{rejection::{JsonRejection, PathRejection}, Multipart, Path, Query, State},
+    extract::{rejection::{JsonRejection, PathRejection}, Multipart, Path, Query, RawQuery, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response, sse::{Event, KeepAlive, Sse}},
     routing::{get, post},
@@ -56,6 +58,8 @@ pub struct AppState {
     /// Shared live limiter state used by both control-plane updates and the
     /// Pingora proxy worker.
     pub rate_limiter: Arc<RateLimiterStore>,
+    pub analytics: Arc<AnalyticsCollector>,
+    pub prometheus: PrometheusConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,6 +301,8 @@ pub async fn build_state(
         bot,
         challenges,
         rate_limiter,
+        analytics: Arc::new(AnalyticsCollector::default()),
+        prometheus: PrometheusConfig::default(),
     })
 }
 
@@ -337,6 +343,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/bot/challenge", post(issue_bot_challenge).layer(DefaultBodyLimit::max(16 * 1024)))
         .route("/api/bot/challenge/verify", post(verify_bot_challenge).layer(DefaultBodyLimit::max(16 * 1024)))
         .route("/api/events", get(events))
+        .route("/api/analytics/summary", get(analytics_summary))
+        .route("/api/analytics/timeseries", get(analytics_timeseries))
+        .route("/metrics", get(prometheus_metrics))
         .route("/api/waf/config", get(get_waf_config).patch(update_waf_config))
         .route("/api/rate-limit/config", get(get_rate_limit_config).patch(update_rate_limit_config))
         .route("/api/waf/rules", get(list_waf_rules).post(create_waf_rule))
@@ -373,6 +382,17 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
         .fallback_service(ServeDir::new("/usr/share/bearust/frontend"))
+}
+
+async fn prometheus_metrics(State(s): State<AppState>, h: HeaderMap) -> Response {
+    if !s.prometheus.enabled { return StatusCode::NOT_FOUND.into_response(); }
+    if s.prometheus.require_auth {
+        if current(&s, &h).await.is_err() { return StatusCode::UNAUTHORIZED.into_response(); }
+    }
+    match crate::analytics_prometheus::render(&s.analytics.snapshot(), &s.prometheus) {
+        Ok(body) => ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1159,6 +1179,36 @@ async fn list_audit_logs(
         Ok(page) => Json(page).into_response(),
         Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnalyticsQuery { proxy_host_id: Option<i64>, from: Option<String>, to: Option<String>, limit: Option<usize> }
+fn parse_analytics_query(raw: Option<String>) -> Result<AnalyticsQuery, ()> {
+    raw.as_deref().map(serde_urlencoded::from_str).transpose().map_err(|_| ()).map(|v| v.unwrap_or(AnalyticsQuery { proxy_host_id: None, from: None, to: None, limit: None }))
+}
+fn analytics_filter(q: AnalyticsQuery) -> Result<AnalyticsFilter, ()> {
+    let from = q.from.as_deref().map(DateTime::parse_from_rfc3339).transpose().map_err(|_| ())?.map(|v| v.with_timezone(&Utc));
+    let to = q.to.as_deref().map(DateTime::parse_from_rfc3339).transpose().map_err(|_| ())?.map(|v| v.with_timezone(&Utc));
+    if q.proxy_host_id.is_some_and(|id| id <= 0) || q.limit.unwrap_or(0) > crate::analytics::DEFAULT_MAX_BUCKETS { return Err(()); }
+    if let (Some(a), Some(b)) = (from, to) { if a > b || b.signed_duration_since(a) > chrono::Duration::hours(24) { return Err(()); } }
+    Ok(AnalyticsFilter { proxy_host_id: q.proxy_host_id, from, to, limit: q.limit.unwrap_or(0) })
+}
+async fn require_analytics_read(s: &AppState, h: &HeaderMap, host: Option<i64>) -> Result<User, Response> {
+    let user = current(s, h).await.map_err(|c| user_error(c, "unauthorized", "Authentication required"))?;
+    let allowed = match host { Some(id) => authorize(&s.db, &user, Permission::ProxyHostsRead, ResourceContext::ProxyHost(id)).await.unwrap_or(false), None => authorize(&s.db, &user, Permission::ProxyHostsRead, ResourceContext::GLOBAL).await.unwrap_or(false) };
+    if !allowed { return Err(user_error(StatusCode::FORBIDDEN, "forbidden", "Analytics access denied")); }
+    Ok(user)
+}
+async fn analytics_summary(State(s): State<AppState>, h: HeaderMap, RawQuery(raw): RawQuery) -> Response {
+    let q = match parse_analytics_query(raw).and_then(analytics_filter) { Ok(v) => v, Err(_) => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid analytics query") };
+    if let Err(r) = require_analytics_read(&s, &h, q.proxy_host_id).await { return r; }
+    Json(s.analytics.summary(q)).into_response()
+}
+async fn analytics_timeseries(State(s): State<AppState>, h: HeaderMap, RawQuery(raw): RawQuery) -> Response {
+    let q = match parse_analytics_query(raw).and_then(analytics_filter) { Ok(v) => v, Err(_) => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid analytics query") };
+    if let Err(r) = require_analytics_read(&s, &h, q.proxy_host_id).await { return r; }
+    Json(s.analytics.timeseries(q)).into_response()
 }
 
 /// Normalize RFC3339 query bounds to the UTC representation persisted in

@@ -1,12 +1,13 @@
 use crate::{
     acme::{lookup_http01_for_host, Http01Store},
+    analytics::{AnalyticsCollector, AnalyticsEvent, SecurityCounters},
     balancer::{BackendId, BackendLease},
     bot_challenge::{unix_now, ChallengeService},
     bot_protection::{evaluate as evaluate_bot, BotAction, BotEvaluation, BotInspectionContext},
     bot_store::BotStore,
+    observability::{append_forwarded_for, classify_error, log_request, validated_request_id},
     rate_limit::{Decision as RateLimitDecision, RateLimitAction, RateLimitKey, RateLimitPolicy},
     rate_limit_store::{client_ip, IpNetSet, RateLimiterStore},
-    observability::{append_forwarded_for, classify_error, log_request, validated_request_id},
     router::{normalize_host, ResolvedRoute},
     runtime::{RuntimeSnapshot, RuntimeStore},
     waf::{evaluate, Evaluation, InspectionContext, WafDecision, WafSnapshot},
@@ -17,7 +18,7 @@ use bytes::Bytes;
 use pingora_core::{upstreams::peer::HttpPeer, ErrorType, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{FailToProxy, ProxyHttp, Session};
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 pub struct RequestContext {
     pub snapshot: Option<Arc<RuntimeSnapshot>>,
@@ -29,6 +30,7 @@ pub struct RequestContext {
     pub failover_attempted: bool,
     pub excluded_backend: Option<BackendId>,
     pub completion_logged: bool,
+    pub analytics_logged: bool,
     pub waf_body: Vec<u8>,
     pub waf_buffering: bool,
     pub waf_pending_suffix: Vec<u8>,
@@ -60,6 +62,7 @@ impl Default for RequestContext {
             failover_attempted: false,
             excluded_backend: None,
             completion_logged: false,
+            analytics_logged: false,
             waf_body: Vec::new(),
             waf_buffering: true,
             waf_pending_suffix: Vec::new(),
@@ -87,6 +90,8 @@ pub struct BeaRustProxy {
     pub rate_limiter: Option<Arc<RateLimiterStore>>,
     pub rate_limit_policy: RateLimitPolicy,
     pub trusted_proxies: IpNetSet,
+    pub analytics: Option<Arc<AnalyticsCollector>>,
+    pub analytics_host_ids: HashMap<String, i64>,
 }
 
 impl BeaRustProxy {
@@ -100,6 +105,8 @@ impl BeaRustProxy {
             rate_limiter: None,
             rate_limit_policy: RateLimitPolicy::default(),
             trusted_proxies: IpNetSet::default(),
+            analytics: None,
+            analytics_host_ids: HashMap::new(),
         }
     }
     pub fn with_challenge_store(mut self, challenges: Http01Store) -> Self {
@@ -129,6 +136,88 @@ impl BeaRustProxy {
     pub fn with_trusted_proxies(mut self, trusted: IpNetSet) -> Self {
         self.trusted_proxies = trusted;
         self
+    }
+    pub fn with_analytics(mut self, analytics: Arc<AnalyticsCollector>) -> Self {
+        self.analytics = Some(analytics);
+        self
+    }
+    pub fn with_analytics_host_ids(mut self, host_ids: HashMap<String, i64>) -> Self {
+        self.analytics_host_ids = host_ids;
+        self
+    }
+
+    fn record_completion(
+        &self,
+        session: &Session,
+        ctx: &mut RequestContext,
+        status_hint: Option<u16>,
+    ) {
+        if ctx.analytics_logged {
+            return;
+        }
+        let Some(analytics) = &self.analytics else {
+            return;
+        };
+        let status_code = status_hint
+            .or_else(|| {
+                session
+                    .response_written()
+                    .map(|response| response.status.as_u16())
+            })
+            .unwrap_or(0);
+        let security = analytics_security_counters(
+            ctx.waf_blocked,
+            ctx.bot_blocked,
+            ctx.bot_challenge,
+            matches!(
+                ctx.rate_limit_decision,
+                Some(RateLimitDecision::Limited { .. })
+            ),
+        );
+        let proxy_host_id = ctx
+            .route
+            .as_ref()
+            .and_then(|route| self.analytics_host_ids.get(&route.host).copied())
+            .unwrap_or(0);
+        analytics.record(completion_event(
+            proxy_host_id,
+            status_code,
+            ctx.start.elapsed().as_millis() as u64,
+            security,
+        ));
+        ctx.analytics_logged = true;
+    }
+}
+
+/// Build the bounded security dimensions attached to one completion event.
+/// Bot blocks are counted as security events independently of challenges.
+pub fn analytics_security_counters(
+    waf_blocked: bool,
+    bot_blocked: bool,
+    bot_challenge: bool,
+    rate_limited: bool,
+) -> SecurityCounters {
+    SecurityCounters {
+        waf_blocks: u64::from(waf_blocked),
+        bot_blocks: u64::from(bot_blocked),
+        bot_challenges: u64::from(bot_challenge),
+        rate_limited: u64::from(rate_limited),
+    }
+}
+
+/// Construct a completion event without retaining request data or headers.
+pub fn completion_event(
+    proxy_host_id: i64,
+    status_code: u16,
+    latency_ms: u64,
+    security: SecurityCounters,
+) -> AnalyticsEvent {
+    AnalyticsEvent {
+        proxy_host_id,
+        timestamp: chrono::Utc::now(),
+        status_code,
+        latency_ms,
+        security,
     }
 }
 
@@ -161,8 +250,16 @@ fn emit_waf_telemetry(request_id: &str, waf: &WafStore, evaluation: &Evaluation)
     waf.record_detection(evaluation);
 }
 
-fn emit_rate_limit_telemetry(request_id: &str, decision: &RateLimitDecision, action: RateLimitAction) {
-    if let RateLimitDecision::Limited { remaining_tokens, retry_after } = decision {
+fn emit_rate_limit_telemetry(
+    request_id: &str,
+    decision: &RateLimitDecision,
+    action: RateLimitAction,
+) {
+    if let RateLimitDecision::Limited {
+        remaining_tokens,
+        retry_after,
+    } = decision
+    {
         tracing::info!(
             event = "rate_limit_detection",
             request_id,
@@ -312,6 +409,7 @@ impl ProxyHttp for BeaRustProxy {
                 session
                     .respond_error_with_body(403, Bytes::from_static(b"Request blocked"))
                     .await?;
+                self.record_completion(session, ctx, None);
                 ctx.completion_logged = true;
                 return Ok(true);
             }
@@ -320,6 +418,7 @@ impl ProxyHttp for BeaRustProxy {
             session
                 .respond_error_with_body(403, Bytes::from_static(b"Request blocked"))
                 .await?;
+            self.record_completion(session, ctx, None);
             ctx.completion_logged = true;
             return Ok(true);
         }
@@ -351,6 +450,7 @@ impl ProxyHttp for BeaRustProxy {
                 .as_downstream_mut()
                 .write_error_response(response, Bytes::from(body))
                 .await?;
+            self.record_completion(session, ctx, None);
             ctx.completion_logged = true;
             return Ok(true);
         }
@@ -359,6 +459,7 @@ impl ProxyHttp for BeaRustProxy {
                 session
                     .respond_error_with_body(200, Bytes::from(value))
                     .await?;
+                self.record_completion(session, ctx, None);
                 ctx.completion_logged = true;
                 return Ok(true);
             }
@@ -375,6 +476,7 @@ impl ProxyHttp for BeaRustProxy {
                 ctx.start.elapsed().as_millis() as u64,
                 "routing",
             );
+            self.record_completion(session, ctx, Some(404));
             ctx.completion_logged = true;
             return Ok(true);
         };
@@ -385,11 +487,7 @@ impl ProxyHttp for BeaRustProxy {
                 .client_addr()
                 .and_then(|addr| addr.as_inet().map(|inet| inet.ip()));
             if let Some(peer) = peer {
-                let ip = client_ip(
-                    peer,
-                    &session.req_header().headers,
-                    &self.trusted_proxies,
-                );
+                let ip = client_ip(peer, &session.req_header().headers, &self.trusted_proxies);
                 // The store owns the live policy snapshot so control-plane
                 // mutations take effect for existing proxy workers without a
                 // listener restart.
@@ -407,22 +505,38 @@ impl ProxyHttp for BeaRustProxy {
                     emit_rate_limit_telemetry(&ctx.request_id, &decision, policy.action);
                     if policy.action == RateLimitAction::Block {
                         let retry_after = match decision {
-                            RateLimitDecision::Limited { retry_after, .. } => retry_after.as_secs().clamp(1, 3_600),
+                            RateLimitDecision::Limited { retry_after, .. } => {
+                                retry_after.as_secs().clamp(1, 3_600)
+                            }
                             RateLimitDecision::Allowed { .. } => 1,
                         };
                         let mut response = ResponseHeader::build(429, Some(2)).map_err(|e| {
                             pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string())
                         })?;
-                        response.insert_header("Retry-After", retry_after.to_string()).map_err(|e| {
-                            pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string())
-                        })?;
-                        response.insert_header("Cache-Control", "no-store").map_err(|e| {
-                            pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string())
-                        })?;
-                        session.as_downstream_mut().write_error_response(
-                            response,
-                            Bytes::from_static(b"Rate limit exceeded"),
-                        ).await?;
+                        response
+                            .insert_header("Retry-After", retry_after.to_string())
+                            .map_err(|e| {
+                                pingora_core::Error::explain(
+                                    ErrorType::HTTPStatus(500),
+                                    e.to_string(),
+                                )
+                            })?;
+                        response
+                            .insert_header("Cache-Control", "no-store")
+                            .map_err(|e| {
+                                pingora_core::Error::explain(
+                                    ErrorType::HTTPStatus(500),
+                                    e.to_string(),
+                                )
+                            })?;
+                        session
+                            .as_downstream_mut()
+                            .write_error_response(
+                                response,
+                                Bytes::from_static(b"Rate limit exceeded"),
+                            )
+                            .await?;
+                        self.record_completion(session, ctx, Some(429));
                         ctx.completion_logged = true;
                         return Ok(true);
                     }
@@ -553,10 +667,11 @@ impl ProxyHttp for BeaRustProxy {
             if ctx.waf_blocked {
                 emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
                 *body = None;
-                ctx.completion_logged = true;
                 session
                     .respond_error_with_body(403, Bytes::from_static(b"Request blocked"))
                     .await?;
+                self.record_completion(session, ctx, None);
+                ctx.completion_logged = true;
                 // Returning an error is required here: `Ok(())` would let
                 // Pingora continue its upstream body pipeline after the
                 // downstream response was written.
@@ -634,6 +749,7 @@ impl ProxyHttp for BeaRustProxy {
             error.map(classify_error).unwrap_or(""),
         );
         ctx.completion_logged = true;
+        self.record_completion(session, ctx, Some(status));
         ctx.lease.take();
     }
 
@@ -641,12 +757,16 @@ impl ProxyHttp for BeaRustProxy {
         &self,
         session: &mut Session,
         error: &pingora_core::Error,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> FailToProxy {
         let code = error_status(error);
         if code > 0 && session.response_written().is_none() {
             let _ = session.respond_error(code).await;
         }
+        // Record before returning even when writing the downstream error
+        // failed; logging still owns the request log and this call is
+        // idempotent through analytics_logged.
+        self.record_completion(session, ctx, Some(code));
         FailToProxy {
             error_code: code,
             can_reuse_downstream: false,

@@ -1,0 +1,94 @@
+use bearust::analytics::{AnalyticsCollector, AnalyticsEvent, AnalyticsFilter, SecurityCounters};
+use chrono::{TimeZone, Utc};
+
+fn event(host: i64, minute: i64, status: u16, latency: u64) -> AnalyticsEvent {
+    AnalyticsEvent {
+        proxy_host_id: host,
+        timestamp: Utc.timestamp_opt(minute * 60, 0).unwrap(),
+        status_code: status,
+        latency_ms: latency,
+        security: SecurityCounters::default(),
+    }
+}
+
+#[test]
+fn empty_snapshot_has_zeroes() {
+    let c = AnalyticsCollector::new(4);
+    let s = c.summary(AnalyticsFilter::default());
+    assert_eq!(s.requests, 0);
+    assert_eq!(s.p50_ms, None);
+}
+
+#[test]
+fn records_minute_buckets_and_percentiles() {
+    let c = AnalyticsCollector::new(4);
+    c.record(event(1, 10, 200, 10));
+    c.record(event(1, 10, 500, 100));
+    c.record(event(1, 11, 200, 50));
+    let ts = c.timeseries(AnalyticsFilter {
+        proxy_host_id: Some(1),
+        ..Default::default()
+    });
+    assert_eq!(ts.len(), 2);
+    assert_eq!(ts[0].requests, 2);
+    let s = c.summary(AnalyticsFilter {
+        proxy_host_id: Some(1),
+        ..Default::default()
+    });
+    assert_eq!(s.requests, 3);
+    assert_eq!(s.status_2xx, 2);
+    assert_eq!(s.status_5xx, 1);
+    assert!(s.p50_ms.unwrap() >= 10);
+}
+
+#[test]
+fn evicts_old_buckets_and_limits_hosts() {
+    let c = AnalyticsCollector::with_limits(2, 2);
+    c.record(event(1, 0, 200, 1));
+    c.record(event(1, 1440, 200, 1));
+    assert_eq!(
+        c.timeseries(AnalyticsFilter {
+            proxy_host_id: Some(1),
+            ..Default::default()
+        })
+        .len(),
+        1
+    );
+    c.record(event(2, 1440, 200, 1));
+    c.record(event(3, 1440, 200, 1));
+    assert!(c.host_count() <= 2);
+}
+
+#[test]
+fn out_of_order_stale_events_do_not_displace_recent_buckets() {
+    let c = AnalyticsCollector::with_limits(1, 2);
+    c.record(event(1, 100, 200, 1));
+    c.record(event(1, 101, 200, 1));
+    c.record(event(1, 90, 200, 1));
+
+    let ts = c.timeseries(AnalyticsFilter {
+        proxy_host_id: Some(1),
+        ..Default::default()
+    });
+    assert_eq!(ts.len(), 2);
+    assert_eq!(ts[0].timestamp, Utc.timestamp_opt(100 * 60, 0).unwrap());
+    assert_eq!(ts[1].timestamp, Utc.timestamp_opt(101 * 60, 0).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_recording_is_safe() {
+    let c = std::sync::Arc::new(AnalyticsCollector::new(8));
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let c = c.clone();
+        tasks.push(tokio::spawn(async move {
+            for i in 0..100 {
+                c.record(event(1, i, 200, i as u64));
+            }
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap();
+    }
+    assert_eq!(c.summary(AnalyticsFilter::default()).requests, 800);
+}
