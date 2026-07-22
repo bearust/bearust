@@ -107,7 +107,7 @@ impl BotInspectionContext {
     }
     /// Marks the source hostname as verified by trusted proxy metadata.
     /// This is intentionally not inferred from client-controlled headers.
-    pub fn with_verified_trusted_source(mut self) -> Self {
+    pub(crate) fn with_verified_trusted_source(mut self) -> Self {
         self.trusted_source_verified = true;
         self
     }
@@ -320,4 +320,20 @@ fn domain_matches(actual: &str, expected: &str) -> bool {
         return false;
     }
     a == e || a.ends_with(&format!(".{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verified_source_marker_is_required_for_trusted_rule() {
+        let snapshot = compile_snapshot(
+            BotConfig { mode: BotMode::Block, threshold: 1, ttl_seconds: 300, fingerprint_key: vec![1] },
+            vec![BotRule::trusted_crawler("Googlebot", "googlebot.com")],
+        ).unwrap();
+        let context = BotInspectionContext::new("GET", "/", vec![("user-agent".into(), "Googlebot".into()), ("host".into(), "crawl.googlebot.com".into())]);
+        assert!(!evaluate(&snapshot, &context).trusted);
+        assert!(evaluate(&snapshot, &context.with_verified_trusted_source()).trusted);
+    }
 }
