@@ -60,6 +60,7 @@ pub struct AppState {
     pub rate_limiter: Arc<RateLimiterStore>,
     pub analytics: Arc<AnalyticsCollector>,
     pub baseline: Arc<crate::baseline::BaselineCollector>,
+    pub anomaly: Arc<crate::anomaly::AnomalyDetector>,
     pub prometheus: PrometheusConfig,
 }
 
@@ -304,6 +305,7 @@ pub async fn build_state(
         rate_limiter,
         analytics: Arc::new(AnalyticsCollector::default()),
         baseline: Arc::new(crate::baseline::BaselineCollector::default()),
+        anomaly: Arc::new(crate::anomaly::AnomalyDetector::default()),
         prometheus: PrometheusConfig::default(),
     })
 }
@@ -355,6 +357,8 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route("/api/analytics/summary", get(analytics_summary))
         .route("/api/analytics/timeseries", get(analytics_timeseries))
         .route("/api/analytics/baseline", get(analytics_baseline))
+        .route("/api/analytics/anomalies", get(list_anomalies))
+        .route("/api/analytics/anomalies/{id}/ack", post(acknowledge_anomaly))
         .route("/api/waf/config", get(get_waf_config).patch(update_waf_config))
         .route("/api/rate-limit/config", get(get_rate_limit_config).patch(update_rate_limit_config))
         .route("/api/waf/rules", get(list_waf_rules).post(create_waf_rule))
@@ -1266,6 +1270,71 @@ async fn analytics_baseline(
     let from = now - chrono::Duration::seconds(window.duration_seconds());
     let snap = s.baseline.snapshot(query.proxy_host_id, window, from, now);
     Json(snap).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnomalyQuery {
+    host_id: Option<i64>,
+    severity: Option<String>,
+    rule: Option<String>,
+}
+
+async fn list_anomalies(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Query(query): Query<AnomalyQuery>,
+) -> Response {
+    if let Err(r) = require_analytics_read(&s, &h, query.host_id).await {
+        return r;
+    }
+
+    let severity = query.severity.as_deref().and_then(|s| match s {
+        "info" => Some(crate::anomaly::AnomalySeverity::Info),
+        "warning" => Some(crate::anomaly::AnomalySeverity::Warning),
+        "critical" => Some(crate::anomaly::AnomalySeverity::Critical),
+        _ => None,
+    });
+
+    let rule = query.rule.as_deref().and_then(|r| match r {
+        "request_rate" => Some(crate::anomaly::AnomalyRule::RequestRate),
+        "error_rate" => Some(crate::anomaly::AnomalyRule::ErrorRate),
+        "latency" => Some(crate::anomaly::AnomalyRule::Latency),
+        "security_events" => Some(crate::anomaly::AnomalyRule::SecurityEvents),
+        _ => None,
+    });
+
+    let baseline = s.baseline.snapshot(query.host_id, crate::baseline::BaselineWindow::FiveMinutes, Utc::now() - chrono::Duration::minutes(5), Utc::now());
+    let analytics = s.analytics.snapshot();
+    s.anomaly.evaluate(&baseline, &analytics, Utc::now());
+
+    let records = s.anomaly.get_anomalies(query.host_id, severity, rule);
+    Json(records).into_response()
+}
+
+async fn acknowledge_anomaly(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<u64>,
+) -> Response {
+    let user = match current(&s, &h).await {
+        Ok(u) => u,
+        Err(c) => return user_error(c, "unauthorized", "Authentication required"),
+    };
+
+    let allowed = authorize(&s.db, &user, Permission::ProxyHostsWrite, ResourceContext::GLOBAL).await.unwrap_or(false);
+    if !allowed {
+        return user_error(StatusCode::FORBIDDEN, "forbidden", "Mutation access denied");
+    }
+
+    match s.anomaly.acknowledge(id) {
+        Some(record) => {
+            audit::record_state(&s, Some(user.id), "anomaly_acknowledged", &format!("anomaly_id={id}")).await;
+            s.realtime.publish("anomaly.changed");
+            Json(record).into_response()
+        }
+        None => user_error(StatusCode::NOT_FOUND, "not_found", "Anomaly record not found"),
+    }
 }
 
 /// Normalize RFC3339 query bounds to the UTC representation persisted in

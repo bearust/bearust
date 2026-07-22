@@ -23,6 +23,9 @@ import {
   BaselineSnapshot,
   BaselineWindow,
   BaselineStatus,
+  AnomalyRecord,
+  AnomalyRule,
+  AnomalySeverity,
 } from "./api";
 import { useRealtimeUpdates, RealtimeStatus } from "./realtime";
 import { Alert, Button, Card, Field, SelectField, TextareaField, ThemeSelect } from "./ui";
@@ -798,6 +801,126 @@ export function BaselineSection({ hosts, refreshToken = 0 }: { hosts: Host[]; re
   );
 }
 
+export function AnomalySection({ user, hosts, refreshToken = 0 }: { user: User; hosts: Host[]; refreshToken?: number }) {
+  const [anomalies, setAnomalies] = useState<AnomalyRecord[]>([]);
+  const [host, setHost] = useState("");
+  const [severity, setSeverity] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const canAck = user.role === "admin" || user.role === "operator";
+
+  const load = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const records = await api.getAnomalies({
+        ...(host ? { host_id: Number(host) } : {}),
+        ...(severity ? { severity } : {}),
+      });
+      setAnomalies(records);
+    } catch (e) {
+      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setAnomalies([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, [refreshToken, host, severity]);
+
+  const ack = async (id: number) => {
+    try {
+      await api.ackAnomaly(id);
+      void load();
+    } catch {
+      setError("Unable to acknowledge anomaly.");
+    }
+  };
+
+  return (
+    <Card data-testid="anomaly-section">
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="mr-auto text-xl font-semibold">Anomaly Detection</h2>
+        <span className="rounded-full border border-border px-3 py-1 text-xs text-muted">Monitor-only</span>
+      </div>
+      <p className="mt-2 text-sm text-muted">Deterministic traffic deviation detector with severity scoring and deduplication.</p>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <SelectField id="anomaly-proxy-host" label="Proxy host" value={host} onChange={(e) => setHost(e.target.value)}>
+          <option value="">All hosts</option>
+          {hosts.slice(0, 100).map((h) => (
+            <option key={h.id} value={h.id}>
+              {h.name} ({h.domain})
+            </option>
+          ))}
+        </SelectField>
+        <SelectField id="anomaly-severity" label="Severity" value={severity} onChange={(e) => setSeverity(e.target.value)}>
+          <option value="">All severities</option>
+          <option value="info">Info</option>
+          <option value="warning">Warning</option>
+          <option value="critical">Critical</option>
+        </SelectField>
+      </div>
+      {loading && <p role="status" className="mt-4 text-muted">Loading anomalies…</p>}
+      {!loading && error && <Alert variant="danger">{error}</Alert>}
+      {!loading && !error && anomalies.length === 0 && (
+        <p className="mt-4 text-muted">No traffic anomalies detected for the selected filters.</p>
+      )}
+      {!loading && !error && anomalies.length > 0 && (
+        <div className="mt-4 overflow-x-auto">
+          <table className="min-w-full text-left text-sm">
+            <caption>Traffic anomalies</caption>
+            <thead>
+              <tr>
+                <th>Observed</th>
+                <th>Host</th>
+                <th>Rule</th>
+                <th>Severity</th>
+                <th>Score</th>
+                <th>Summary</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {anomalies.map((item) => (
+                <tr key={item.id}>
+                  <td>{new Date(item.observed_at).toLocaleString()}</td>
+                  <td>{hosts.find((h) => h.id === item.host_id)?.name ?? item.host_id}</td>
+                  <td className="capitalize">{item.rule.replace("_", " ")}</td>
+                  <td>
+                    <span
+                      className={`inline-block rounded px-2 py-0.5 text-xs font-semibold ${
+                        item.severity === "critical"
+                          ? "bg-rose-500/20 text-rose-500"
+                          : item.severity === "warning"
+                          ? "bg-amber-500/20 text-amber-500"
+                          : "bg-blue-500/20 text-blue-500"
+                      }`}
+                    >
+                      {item.severity}
+                    </span>
+                  </td>
+                  <td>{item.score.toFixed(2)}</td>
+                  <td>{item.summary}</td>
+                  <td>
+                    {canAck && !item.acknowledged && (
+                      <Button variant="secondary" onClick={() => void ack(item.id)}>
+                        Acknowledge
+                      </Button>
+                    )}
+                    {item.acknowledged && <span className="text-xs text-muted">Acknowledged</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function BotChallengePage({ fingerprint = serverChallengeFingerprint(), onComplete }: { fingerprint?: string; onComplete?: () => void }) {
   const [challenge, setChallenge] = useState<BotChallenge | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState(""), [complete, setComplete] = useState(false);
   const requestChallenge = async () => { if (!fingerprint) { setError("Challenge context unavailable. Please return to the protected page and try again."); return; } setBusy(true); setError(""); setComplete(false); try { setChallenge(await api.botChallenge(fingerprint)); } catch { setError("Challenge unavailable. Please try again."); } finally { setBusy(false); } };
@@ -816,6 +939,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
   const [wafRefresh, setWafRefresh] = useState(0);
   const [analyticsRefresh, setAnalyticsRefresh] = useState(0);
   const [baselineRefresh, setBaselineRefresh] = useState(0);
+  const [anomalyRefresh, setAnomalyRefresh] = useState(0);
   const [form, setForm] = useState({
     name: "",
     domain: "",
@@ -878,6 +1002,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
     rateLimit: () => setWafRefresh(value => value + 1),
     analytics: () => setAnalyticsRefresh(value => value + 1),
     baseline: () => setBaselineRefresh(value => value + 1),
+    anomaly: () => setAnomalyRefresh(value => value + 1),
   });
   const refresh = async () => {
     try {
@@ -922,6 +1047,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
       <RateLimitSection user={user} refreshToken={wafRefresh} />
       <AnalyticsSection hosts={hosts} refreshToken={analyticsRefresh} />
       <BaselineSection hosts={hosts} refreshToken={baselineRefresh} />
+      <AnomalySection user={user} hosts={hosts} refreshToken={anomalyRefresh} />
       {canWrite && (
         <AcmeWizard canWrite={canWrite} onIssued={() => void refresh()} />
       )}
