@@ -11,3 +11,5 @@ Verification:
 - `git diff --check` — passed.
 
 Concerns/deferred integration: proxy enforcement and clearance-cookie consumption are Task 5 scope. The challenge endpoint intentionally returns only bounded token metadata and generic verification errors; signing material and raw request fields are not exposed.
+
+Review follow-up: nonce state is capped at 1024 with expiry purge and capacity failure; fingerprints and JSON bodies are bounded; expiry at the current timestamp fails closed. Focused tests, Clippy, and diff-check rerun successfully.

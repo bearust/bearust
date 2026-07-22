@@ -11,11 +11,13 @@ pub const CHALLENGE_TTL_SECONDS: u64 = 300;
 pub const MAX_ATTEMPTS: u8 = 5;
 pub const DIFFICULTY: u8 = 2;
 pub const MAX_TOKEN_BYTES: usize = 512;
+pub const MAX_NONCES: usize = 1024;
+pub const MAX_FINGERPRINT_BYTES: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Challenge { pub token: String, pub difficulty: u8, pub expires_at: u64, pub fingerprint_prefix: String }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum VerifyError { Invalid, Expired, Replay, AttemptsExceeded, FingerprintMismatch }
+pub enum VerifyError { Invalid, Expired, Replay, AttemptsExceeded, FingerprintMismatch, Capacity }
 #[derive(Clone, Debug)] struct NonceState { expires_at: u64, attempts: u8 }
 
 #[derive(Clone)]
@@ -25,18 +27,22 @@ impl ChallengeService {
         Ok(Self { key: Arc::new(secrets.get_or_create("bot-challenge-signing-key", 32)?), nonces: Arc::new(Mutex::new(HashMap::new())) })
     }
     pub fn from_key(key: Vec<u8>) -> Result<Self, VerifyError> { if key.is_empty() || key.len() > 256 { return Err(VerifyError::Invalid); } Ok(Self { key: Arc::new(key), nonces: Arc::new(Mutex::new(HashMap::new())) }) }
-    pub async fn issue_challenge(&self, fingerprint: &str, now: u64) -> Challenge {
+    pub async fn issue_challenge(&self, fingerprint: &str, now: u64) -> Result<Challenge, VerifyError> {
+        if fingerprint.is_empty() || fingerprint.len() > MAX_FINGERPRINT_BYTES { return Err(VerifyError::Invalid); }
         let nonce = uuid::Uuid::new_v4().as_bytes().to_vec();
         let expires_at = now.saturating_add(CHALLENGE_TTL_SECONDS);
         let digest: [u8; 32] = Sha256::digest(&nonce).into();
-        self.nonces.lock().await.insert(digest, NonceState { expires_at, attempts: 0 });
+        let mut nonces = self.nonces.lock().await;
+        nonces.retain(|_, state| state.expires_at > now);
+        if nonces.len() >= MAX_NONCES { return Err(VerifyError::Capacity); }
+        nonces.insert(digest, NonceState { expires_at, attempts: 0 });
         let prefix = fingerprint.chars().take(16).collect::<String>();
         let payload = format!("1.{}.{}.{}.{}", URL_SAFE_NO_PAD.encode(nonce), prefix, now, expires_at);
         let token = signed_token(&self.key, payload.as_bytes());
-        Challenge { token, difficulty: DIFFICULTY, expires_at, fingerprint_prefix: prefix }
+        Ok(Challenge { token, difficulty: DIFFICULTY, expires_at, fingerprint_prefix: prefix })
     }
     pub async fn verify_solution(&self, token: &str, fingerprint: &str, solution: &str, now: u64) -> Result<(), VerifyError> {
-        if token.len() > MAX_TOKEN_BYTES || solution.len() > 64 { return Err(VerifyError::Invalid); }
+        if token.len() > MAX_TOKEN_BYTES || solution.len() > 64 || fingerprint.is_empty() || fingerprint.len() > MAX_FINGERPRINT_BYTES { return Err(VerifyError::Invalid); }
         let (payload, sig) = token.rsplit_once('.').ok_or(VerifyError::Invalid)?;
         let expected = signed_token(&self.key, payload.as_bytes());
         let expected_sig = expected.rsplit_once('.').ok_or(VerifyError::Invalid)?.1;
@@ -47,13 +53,15 @@ impl ChallengeService {
         let prefix = fields.next().ok_or(VerifyError::Invalid)?;
         let issued: u64 = fields.next().and_then(|v| v.parse().ok()).ok_or(VerifyError::Invalid)?;
         let expiry: u64 = fields.next().and_then(|v| v.parse().ok()).ok_or(VerifyError::Invalid)?;
-        if fields.next().is_some() || expiry < now || issued > now || expiry.saturating_sub(issued) > CHALLENGE_TTL_SECONDS || !fingerprint.starts_with(prefix) { return Err(if expiry < now { VerifyError::Expired } else { VerifyError::FingerprintMismatch }); }
+        if fields.next().is_some() || issued > now || expiry.saturating_sub(issued) > CHALLENGE_TTL_SECONDS { return Err(VerifyError::Invalid); }
+        if expiry <= now { return Err(VerifyError::Expired); }
+        if !fingerprint.starts_with(prefix) { return Err(VerifyError::FingerprintMismatch); }
         let nonce = URL_SAFE_NO_PAD.decode(nonce_b64).map_err(|_| VerifyError::Invalid)?;
         if nonce.len() != 16 { return Err(VerifyError::Invalid); }
         let digest: [u8; 32] = Sha256::digest(&nonce).into();
         let mut states = self.nonces.lock().await;
         let state = states.get_mut(&digest).ok_or(VerifyError::Replay)?;
-        if state.expires_at < now { states.remove(&digest); return Err(VerifyError::Expired); }
+        if state.expires_at <= now { states.remove(&digest); return Err(VerifyError::Expired); }
         if state.attempts >= MAX_ATTEMPTS { return Err(VerifyError::AttemptsExceeded); }
         state.attempts += 1;
         let mut pow = Sha256::new(); pow.update(nonce_b64.as_bytes()); pow.update(solution.as_bytes());
@@ -63,7 +71,7 @@ impl ChallengeService {
     }
 }
 
-pub async fn issue_challenge(service: &ChallengeService, fingerprint: &str, now: u64) -> Challenge {
+pub async fn issue_challenge(service: &ChallengeService, fingerprint: &str, now: u64) -> Result<Challenge, VerifyError> {
     service.issue_challenge(fingerprint, now).await
 }
 pub async fn verify_solution(service: &ChallengeService, token: &str, fingerprint: &str, solution: &str, now: u64) -> Result<(), VerifyError> {

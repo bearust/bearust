@@ -325,8 +325,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(me))
-        .route("/api/bot/challenge", post(issue_bot_challenge))
-        .route("/api/bot/challenge/verify", post(verify_bot_challenge))
+        .route("/api/bot/challenge", post(issue_bot_challenge).layer(DefaultBodyLimit::max(16 * 1024)))
+        .route("/api/bot/challenge/verify", post(verify_bot_challenge).layer(DefaultBodyLimit::max(16 * 1024)))
         .route("/api/events", get(events))
         .route("/api/waf/config", get(get_waf_config).patch(update_waf_config))
         .route("/api/waf/rules", get(list_waf_rules).post(create_waf_rule))
@@ -372,8 +372,8 @@ struct ChallengeInput { fingerprint: String }
 #[serde(deny_unknown_fields)]
 struct ChallengeVerifyInput { token: String, fingerprint: String, solution: String }
 async fn issue_bot_challenge(State(s): State<AppState>, Json(input): Json<ChallengeInput>) -> impl IntoResponse {
-    if input.fingerprint.is_empty() || input.fingerprint.len() > 128 { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid challenge"); }
-    let challenge = s.challenges.issue_challenge(&input.fingerprint, unix_now()).await;
+    if input.fingerprint.is_empty() || input.fingerprint.len() > crate::bot_challenge::MAX_FINGERPRINT_BYTES { return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid challenge"); }
+    let challenge = match s.challenges.issue_challenge(&input.fingerprint, unix_now()).await { Ok(value) => value, Err(_) => return user_error(StatusCode::SERVICE_UNAVAILABLE, "challenge_failed", "Challenge unavailable") };
     ([(axum::http::header::CACHE_CONTROL, "no-store")], Json(challenge)).into_response()
 }
 async fn verify_bot_challenge(State(s): State<AppState>, Json(input): Json<ChallengeVerifyInput>) -> impl IntoResponse {
