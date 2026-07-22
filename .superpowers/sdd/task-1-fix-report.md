@@ -1,22 +1,21 @@
-# Task 1 Fix Report
+# Task 1 Fix Report — Oversized request cost
 
-## Commit
+## Status
 
-- `89710fc8a5939aef4add9dfc71266212ac0be201 fix: harden ACME request validation and persistence`
+Complete. Commit: `918ac97` (`fix: bound oversized rate limit costs`).
 
-## Changes
+## Finding and fix
 
-- Enforced DNS hostname label syntax, length, hyphen placement, and empty-label checks.
-- Rejected malformed wildcards and single-label/TLD wildcards; HTTP-01 wildcard rejection remains enforced.
-- Made ACME certificate insertion transactional, including certificate existence verification and hostname update.
-- Invalid persisted enum values and hostname JSON now return repository errors instead of silently defaulting.
-- Added deterministic malformed-hostname and missing-certificate atomicity tests.
+`TokenBucket::try_consume` now explicitly rejects a cost greater than bucket
+capacity with a bounded `Decision::Limited` and `MAX_RETRY_AFTER`. Such a cost
+can never become admissible through refill, so this avoids futile retry loops
+and preserves bucket state.
 
 ## Verification
 
+- Added `cost_above_capacity_is_bounded_and_never_admitted`.
+- `rustfmt --check src/rate_limit.rs tests/rate_limit.rs` — passed.
 - `git diff --check` — passed.
-- Focused Docker test attempt was blocked by the image's Rust 1.84 toolchain resolving a dependency requiring Cargo edition2024; host has no Cargo.
-
-## Concerns
-
-Run the focused test with the project's normal Rust 1.88 builder before integration. The existing task report was included in the same commit because it was already staged in the shared worktree.
+- `cargo test --test rate_limit` remains unavailable in this environment:
+  Cargo 1.84.1 cannot parse cached `clap_lex 1.1.0`, which requires unstable
+  `edition2024` support.
