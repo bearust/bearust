@@ -1549,6 +1549,32 @@ pub async fn get_host_rate_limit_config(pool: &DbPool, host_id: i64) -> Result<s
     }
 }
 
+pub async fn list_host_rate_limit_configs(pool: &DbPool) -> Result<Vec<(i64, super::models::RateLimitConfig)>, sqlx::Error> {
+    let global = get_rate_limit_config(pool).await?;
+    let rows = sqlx::query("SELECT host_id, capacity, refill_per_second FROM host_rate_limit_configs")
+        .fetch_all(pool)
+        .await?;
+
+    let mut list = Vec::new();
+    for row in rows {
+        let host_id: i64 = row.get("host_id");
+        let capacity: i64 = row.get("capacity");
+        let refill_per_second: f64 = row.get("refill_per_second");
+        list.push((
+            host_id,
+            super::models::RateLimitConfig {
+                enabled: global.enabled,
+                action: global.action,
+                capacity: capacity as u32,
+                refill_per_second,
+                key_scope: global.key_scope,
+                updated_at: global.updated_at.clone(),
+            },
+        ));
+    }
+    Ok(list)
+}
+
 pub async fn apply_tuning_recommendation_tx(
     pool: &DbPool,
     rec_id: i64,

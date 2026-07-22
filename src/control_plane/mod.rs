@@ -296,6 +296,21 @@ pub async fn build_state(
     let adaptive_tuning = Arc::new(crate::adaptive_tuning::AdaptiveTuningEngine::default());
     adaptive_tuning.set_emergency_disabled(emergency_disabled);
 
+    if let Ok(host_configs) = repository::list_host_rate_limit_configs(&db).await {
+        for (host_id, cfg) in host_configs {
+            rate_limiter.set_host_policy(
+                host_id,
+                crate::rate_limit::RateLimitPolicy {
+                    enabled: cfg.enabled,
+                    action: cfg.action,
+                    capacity: cfg.capacity,
+                    refill_per_second: cfg.refill_per_second,
+                    key_scope: cfg.key_scope,
+                },
+            );
+        }
+    }
+
     Ok(AppState {
         db,
         certificates,
@@ -1292,6 +1307,73 @@ struct AnomalyQuery {
     rule: Option<String>,
 }
 
+pub async fn run_adaptive_evaluation_tick(s: &AppState) {
+    let now = Utc::now();
+    let analytics = s.analytics.snapshot();
+    let hosts = repository::list_hosts(&s.db).await.unwrap_or_default();
+
+    for host in &hosts {
+        // 1. Take baseline snapshot BEFORE recording current traffic into baseline (prevents spike normalization)
+        let baseline = s.baseline.snapshot(
+            Some(host.id),
+            crate::baseline::BaselineWindow::FiveMinutes,
+            now - chrono::Duration::minutes(5),
+            now,
+        );
+
+        // 2. Evaluate anomalies
+        let new_anomalies = s.anomaly.evaluate(&baseline, &analytics, now);
+        if !new_anomalies.is_empty() {
+            s.realtime.publish("anomaly.changed");
+        }
+
+        // 3. Record current snapshot into baseline AFTER anomaly evaluation
+        s.baseline.record(&analytics, now);
+
+        // 4. Generate recommendations & auto-enforce if mode is Enforce
+        let policy = repository::get_tuning_policy(&s.db, host.id).await.unwrap_or_default();
+        let current_rl = match repository::get_host_rate_limit_config(&s.db, host.id).await {
+            Ok(c) => crate::rate_limit::RateLimitPolicy {
+                enabled: c.enabled,
+                action: c.action,
+                capacity: c.capacity,
+                refill_per_second: c.refill_per_second,
+                key_scope: c.key_scope,
+            },
+            Err(_) => crate::rate_limit::RateLimitPolicy::default(),
+        };
+
+        for anomaly in &new_anomalies {
+            if let Some(rec) = s.adaptive_tuning.recommend(anomaly, &current_rl, &policy) {
+                if let Ok(Some(rec_id)) = repository::insert_tuning_recommendation_dedup(&s.db, &rec, policy.cooldown_seconds as i64).await {
+                    s.realtime.publish("adaptive_tuning.changed");
+
+                    // Auto-enforce if policy mode is Enforce, not emergency disabled, and confidence >= min_confidence
+                    if policy.mode == crate::adaptive_tuning::TuningMode::Enforce
+                        && !s.adaptive_tuning.is_emergency_disabled()
+                        && rec.confidence >= policy.min_confidence
+                    {
+                        if let Ok(Some((h_id, new_rl))) = repository::apply_tuning_recommendation_tx(&s.db, rec_id).await {
+                            s.rate_limiter.set_host_policy(
+                                h_id,
+                                crate::rate_limit::RateLimitPolicy {
+                                    enabled: new_rl.enabled,
+                                    action: new_rl.action,
+                                    capacity: new_rl.capacity,
+                                    refill_per_second: new_rl.refill_per_second,
+                                    key_scope: new_rl.key_scope,
+                                },
+                            );
+                            s.realtime.publish("adaptive_tuning.changed");
+                            s.realtime.publish("rate_limit.changed");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn list_anomalies(
     State(s): State<AppState>,
     h: HeaderMap,
@@ -1300,6 +1382,7 @@ async fn list_anomalies(
     if let Err(r) = require_analytics_read(&s, &h, query.host_id).await {
         return r;
     }
+    run_adaptive_evaluation_tick(&s).await;
 
     let severity = query.severity.as_deref().and_then(|s| match s {
         "info" => Some(crate::anomaly::AnomalySeverity::Info),
@@ -1315,12 +1398,6 @@ async fn list_anomalies(
         "security_events" => Some(crate::anomaly::AnomalyRule::SecurityEvents),
         _ => None,
     });
-
-    s.baseline.record(&s.analytics.snapshot(), Utc::now());
-
-    let baseline = s.baseline.snapshot(query.host_id, crate::baseline::BaselineWindow::FiveMinutes, Utc::now() - chrono::Duration::minutes(5), Utc::now());
-    let analytics = s.analytics.snapshot();
-    s.anomaly.evaluate(&baseline, &analytics, Utc::now());
 
     let records = s.anomaly.get_anomalies(query.host_id, severity, rule);
     Json(records).into_response()
@@ -1407,33 +1484,7 @@ async fn list_recommendations(
     if let Err(r) = require_analytics_read(&s, &h, None).await {
         return r;
     }
-    let now = Utc::now();
-    let analytics = s.analytics.snapshot();
-    s.baseline.record(&analytics, now);
-
-    let hosts = repository::list_hosts(&s.db).await.unwrap_or_default();
-    for host in &hosts {
-        let baseline = s.baseline.snapshot(Some(host.id), crate::baseline::BaselineWindow::FiveMinutes, now - chrono::Duration::minutes(5), now);
-        let anomalies = s.anomaly.evaluate(&baseline, &analytics, now);
-
-        let policy = repository::get_tuning_policy(&s.db, host.id).await.unwrap_or_default();
-        let current_rl = match repository::get_host_rate_limit_config(&s.db, host.id).await {
-            Ok(c) => crate::rate_limit::RateLimitPolicy {
-                enabled: c.enabled,
-                action: c.action,
-                capacity: c.capacity,
-                refill_per_second: c.refill_per_second,
-                key_scope: c.key_scope,
-            },
-            Err(_) => crate::rate_limit::RateLimitPolicy::default(),
-        };
-
-        for anomaly in &anomalies {
-            if let Some(rec) = s.adaptive_tuning.recommend(anomaly, &current_rl, &policy) {
-                let _ = repository::insert_tuning_recommendation_dedup(&s.db, &rec, policy.cooldown_seconds as i64).await;
-            }
-        }
-    }
+    run_adaptive_evaluation_tick(&s).await;
 
     match repository::list_tuning_recommendations(&s.db).await {
         Ok(list) => Json(list).into_response(),

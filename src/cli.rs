@@ -282,6 +282,20 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             key_scope: match config.rate_limit.key_scope { config::RateLimitKeyScope::ProxyHostIp => RateLimitKeyScope::ProxyHostIp },
         };
         rate_limiter.set_policy(rate_policy.clone());
+        if let Ok(host_configs) = crate::control_plane::repository::list_host_rate_limit_configs(&control_state.db).await {
+            for (host_id, cfg) in host_configs {
+                rate_limiter.set_host_policy(
+                    host_id,
+                    RateLimitPolicy {
+                        enabled: cfg.enabled,
+                        action: cfg.action,
+                        capacity: cfg.capacity,
+                        refill_per_second: cfg.refill_per_second,
+                        key_scope: cfg.key_scope,
+                    },
+                );
+            }
+        }
         let trusted_proxies = IpNetSet::new(config.server.trusted_proxy_cidrs.iter().map(String::as_str));
         let control_listener = tokio::net::TcpListener::bind(config.server.control_bind).await
             .map_err(|e| AppError::Server(format!("control plane bind: {e}")))?;
@@ -289,6 +303,15 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             control_state.clone(),
             config.prometheus.bind == config.server.control_bind,
         );
+        let eval_state = control_state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                crate::control_plane::run_adaptive_evaluation_tick(&eval_state).await;
+            }
+        });
+
         let control_task = tokio::spawn(async move {
             let _ = axum::serve(control_listener, control_router).await;
         });

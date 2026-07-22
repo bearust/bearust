@@ -203,19 +203,6 @@ impl BeaRustProxy {
             ctx.start.elapsed().as_millis() as u64,
             security,
         ));
-        if let Some(baseline) = &self.baseline {
-            let snap = analytics.snapshot();
-            let now = chrono::Utc::now();
-            baseline.record(&snap, now);
-            if let Some(anomaly) = &self.anomaly {
-                let host_opt = if proxy_host_id > 0 { Some(proxy_host_id) } else { None };
-                let b_snap = baseline.snapshot(host_opt, crate::baseline::BaselineWindow::FiveMinutes, now - chrono::Duration::minutes(5), now);
-                let new_anomalies = anomaly.evaluate(&b_snap, &snap, now);
-                if !new_anomalies.is_empty() {
-                    invoke_analytics_changed(&self.analytics_changed);
-                }
-            }
-        }
         invoke_analytics_changed(&self.analytics_changed);
         ctx.analytics_logged = true;
     }
@@ -529,10 +516,11 @@ impl ProxyHttp for BeaRustProxy {
                 // The store owns the live policy snapshot so control-plane
                 // mutations take effect for existing proxy workers without a
                 // listener restart.
-                let policy = store.policy();
+                let host_id = route_key(ctx.route.as_ref().expect("route must be set"));
+                let policy = store.host_policy(host_id);
                 let decision = store.evaluate(
                     RateLimitKey {
-                        proxy_host_id: route_key(ctx.route.as_ref().expect("route must be set")),
+                        proxy_host_id: host_id,
                         client_ip: ip,
                     },
                     &policy,
