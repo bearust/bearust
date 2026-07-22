@@ -45,6 +45,17 @@ fn parses_and_validates_prometheus_configuration() {
 }
 
 #[test]
+fn prometheus_internal_bind_is_valid_when_control_bind_is_external() {
+    let input = VALID.replace(
+        "[server]\nbind = \"127.0.0.1:18080\"",
+        "[server]\nbind = \"127.0.0.1:18080\"\ncontrol_bind = \"0.0.0.0:8080\"",
+    ) + "\n[prometheus]\nenabled = true\nbind = \"127.0.0.1:9191\"\n";
+    let config = Config::parse(&input).expect("loopback prometheus bind should be valid");
+    assert_eq!(config.server.control_bind.to_string(), "0.0.0.0:8080");
+    assert!(config.prometheus.bind.ip().is_loopback());
+}
+
+#[test]
 fn rate_limit_policy_is_strict_and_bounded() {
     let configured = format!("{VALID}\n[rate_limit]\nenabled = true\naction = \"block\"\ncapacity = 500\nrefill_per_second = 25.5\nkey_scope = \"proxy_host_ip\"\n");
     let config = Config::parse(&configured).expect("valid rate limit policy");

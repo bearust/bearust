@@ -291,7 +291,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         if config.prometheus.enabled && config.prometheus.bind != config.server.control_bind {
             let metrics_listener = tokio::net::TcpListener::bind(config.prometheus.bind).await
                 .map_err(|e| AppError::Server(format!("prometheus bind: {e}")))?;
-            let metrics_router = crate::control_plane::router(control_state);
+            let metrics_router = crate::control_plane::prometheus_router(control_state);
             tokio::spawn(async move {
                 let _ = axum::serve(metrics_listener, metrics_router).await;
             });

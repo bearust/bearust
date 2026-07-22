@@ -47,7 +47,7 @@ impl PrometheusConfig {
         if self.max_output_bytes == 0 || self.max_output_bytes > 4 * 1024 * 1024 {
             return Err("max_output_bytes out of bounds");
         }
-        if self.internal_only && !is_loopback(self.bind.ip()) {
+        if self.enabled && self.internal_only && !is_loopback(self.bind.ip()) {
             return Err("internal prometheus endpoint must bind loopback");
         }
         if self.enabled && !self.internal_only && !self.require_auth {
@@ -115,12 +115,14 @@ pub fn render(snapshot: &AnalyticsSnapshot, config: &PrometheusConfig) -> Result
         line(&mut out, &name, &[("proxy_host_id", host.as_str())], value);
     }
     if out.len() > config.max_output_bytes {
-        out.truncate(config.max_output_bytes);
-        if let Some(end) = out.rfind('\n') {
-            out.truncate(end + 1);
-        } else {
-            out.clear();
-        }
+        // Keep only complete exposition lines; never return a partial sample.
+        let end = out
+            .get(..config.max_output_bytes)
+            .unwrap_or("")
+            .rfind('\n')
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        out.truncate(end);
     }
     Ok(out)
 }

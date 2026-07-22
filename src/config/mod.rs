@@ -218,15 +218,6 @@ impl Config {
         if let Err(message) = self.prometheus.validate() {
             return Err(validation("prometheus", message));
         }
-        if self.prometheus.enabled
-            && self.prometheus.internal_only
-            && !self.server.control_bind.ip().is_loopback()
-        {
-            return Err(validation(
-                "prometheus",
-                "internal endpoint requires loopback control_bind",
-            ));
-        }
         if let Some(tls) = &self.server.tls {
             if tls.cert_path.as_os_str().is_empty() {
                 return err("server.tls.cert_path", "must not be empty");

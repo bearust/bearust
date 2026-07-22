@@ -384,6 +384,15 @@ pub fn router(state: AppState) -> Router {
         .fallback_service(ServeDir::new("/usr/share/bearust/frontend"))
 }
 
+/// Router for a dedicated Prometheus listener. Keep this surface limited to
+/// the metrics endpoint so a separate bind never exposes the control plane or
+/// frontend assets.
+pub fn prometheus_router(state: AppState) -> Router {
+    Router::new()
+        .route("/metrics", get(prometheus_metrics))
+        .with_state(state)
+}
+
 async fn prometheus_metrics(State(s): State<AppState>, h: HeaderMap) -> Response {
     if !s.prometheus.enabled { return StatusCode::NOT_FOUND.into_response(); }
     if s.prometheus.require_auth {
