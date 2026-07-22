@@ -112,6 +112,37 @@ Each row contains only `id`, `actor`, `event`, redacted `details`, and `created_
 ### Phase 4D.2 realtime updates
 
 The dashboard subscribes to `GET /api/events` using an authenticated session cookie. The endpoint uses Server-Sent Events (SSE) to deliver safe invalidation notifications for proxy hosts, certificates, users, roles, sessions, and audit activity; the dashboard reloads the corresponding proxy-host, certificate, user, role, and audit data, while session events are notified through the stream for future session-view consumers. Payloads never contain credentials, tokens, hashes, private keys, or request bodies. Delivery is process-local and bounded, so clients automatically reconnect after transient disconnects and receive a heartbeat roughly every 15 seconds. Cross-node fan-out and replay of events missed while disconnected are intentionally deferred until the multi-node phase.
+
+### Analytics dashboard
+
+The authenticated dashboard includes a read-only Analytics panel for proxy
+traffic and security aggregates. `admin`, `operator`, and `viewer` sessions
+may query `GET /api/analytics/summary` and
+`GET /api/analytics/timeseries`; unauthenticated requests are rejected and
+malformed or oversized filters return `400`. The panel provides proxy-host and
+time-range filters, request/status cards, p50/p95/p99 latency and error-rate
+views, security-event panels, loading/error/empty states, and refreshes after
+the redacted `analytics.changed` SSE invalidation event.
+
+Analytics is process-local and resets on restart. It retains one-minute
+buckets for 24 hours (up to 1,440 buckets per host), returns at most 100 hosts
+and 1,440 timeseries buckets, and records bounded histograms rather than raw
+samples. Events contain aggregate status, latency, WAF, bot, and rate-limit
+counters only: raw IP addresses, complete URLs, headers, bodies, credentials,
+tokens, and secrets are never stored or returned. Collection is fail-open and
+cannot reject proxy traffic.
+
+Prometheus is disabled by default. To enable it, add a `[prometheus]` table to
+the TOML configuration. The default safe bind is `127.0.0.1:9090`, with
+`internal_only = true` and `require_auth = true`; internal-only mode must bind
+loopback, while any external bind must retain authentication. `/metrics`
+exposes stable bounded labels (`proxy_host_id` and status class) and is capped
+at 256 KiB by default. Do not expose it publicly without an authenticated
+network boundary.
+
+Durable history, Redis/cross-node aggregation and fan-out, per-route
+dimensions, anomaly detection, adaptive tuning, custom retention, and alerting
+remain deferred to later phases.
 ### Basic WAF
 
 Phase 6 adds a bounded in-process WAF for SQL injection, XSS, path traversal,

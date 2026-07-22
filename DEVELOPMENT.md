@@ -22,6 +22,40 @@ Phase 5 does not automate data export/import between backends, so verify a
 backup and restore plan before changing a production database URL.
 
 Focused TDD: add a minimal regression test, run it to observe failure, implement the smallest change, then rerun the focused test and the full suite.
+
+## Phase 8 analytics checks
+
+Analytics is deliberately process-local: the one-minute ring buffer is bounded
+to 24 hours (1,440 buckets per host) and resets whenever the process restarts.
+Queries clamp host and timeseries limits to 100 and 1,440 respectively. The
+collector stores only aggregate status, latency histograms, and redacted WAF,
+bot, and rate-limit counters; raw IPs, URLs, headers, bodies, credentials,
+tokens, and secrets are excluded. Recording is fail-open so an analytics error
+does not reject or materially delay a proxy request.
+
+The summary and timeseries endpoints require an authenticated admin, operator,
+or viewer session and are read-only. Prometheus is disabled by default; when
+enabled, its default internal bind is `127.0.0.1:9090`, and internal-only mode
+requires loopback. An externally bound endpoint must require authentication.
+Output uses bounded proxy-host/status-class labels and a 256 KiB default cap.
+The frontend Analytics panel renders filters, summary cards, latency/error
+views, security panels, and loading/error/empty states, then refetches on the
+redacted `analytics.changed` SSE invalidation event.
+
+Focused verification commands:
+
+```bash
+cargo +nightly fmt --all -- --check
+cargo +nightly check --all-targets
+cargo +nightly test --test analytics --test prometheus --test control_plane_analytics --test proxy_analytics
+npm test --prefix frontend -- --run src/analytics.test.tsx src/realtime.test.tsx
+npm run build --prefix frontend
+git diff --check
+```
+
+Durable historical storage, Redis/cross-node aggregation and replay,
+per-route analytics, anomaly detection, adaptive tuning, custom retention, and
+alerting are intentionally deferred.
 ## Basic WAF
 
 Migration `0004_basic_waf.sql` seeds four built-in rules and defaults to

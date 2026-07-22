@@ -744,3 +744,28 @@ validation and accessible loading/error states.
 
 Adaptive rate limiting, CAPTCHA provider integrations, and tuning feedback
 remain deferred to Phase 7C and later increments.
+
+### Phase 8 status: bounded analytics dashboard
+
+Phase 8 delivers process-local operational analytics for proxy traffic and
+security decisions. A bounded one-minute ring buffer retains 24 hours (up to
+1,440 buckets per host) and resets on process restart. Summary and timeseries
+queries are authenticated, read-only endpoints for `admin`, `operator`, and
+`viewer` roles; host and bucket limits are bounded at 100 and 1,440, and
+invalid or oversized ranges return `400`. Collection is fail-open and stores
+only aggregate status, latency histograms, and redacted WAF, bot, and
+rate-limit counters—never raw IP addresses, complete URLs, headers, bodies,
+credentials, tokens, or secrets.
+
+The dashboard provides host/time filters, request and status cards, latency
+percentiles, error views, security-event panels, and loading/error/empty
+states. It refetches bounded data after the authenticated SSE
+`analytics.changed` invalidation event; the event carries no metric payload.
+Prometheus `/metrics` is disabled by default. When enabled, the default
+internal bind is `127.0.0.1:9090`, internal-only mode requires loopback, and
+external exposure requires authentication. Output uses bounded configured
+proxy-host and status-class labels with a 256 KiB default cap.
+
+Durable history, Redis/cross-node aggregation and fan-out, per-route
+dimensions, anomaly detection, adaptive tuning, custom retention, and alerting
+remain deferred to later phases.
