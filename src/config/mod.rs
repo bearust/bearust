@@ -20,6 +20,8 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     #[serde(default)]
     pub prometheus: PrometheusConfig,
+    #[serde(default)]
+    pub cluster: ClusterConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -183,6 +185,96 @@ fn default_connect_timeout() -> u64 {
 fn default_request_timeout() -> u64 {
     30
 }
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterConfig {
+    #[serde(default = "default_node_id")]
+    pub node_id: String,
+    #[serde(default)]
+    pub peers: Vec<ClusterPeer>,
+    #[serde(default = "default_cluster_bind")]
+    pub bind: SocketAddr,
+    #[serde(default = "default_cluster_timeout")]
+    pub timeout_seconds: u64,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        let node_id = std::env::var("NODE_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(default_node_id);
+
+        let peers = std::env::var("CLUSTER_PEERS")
+            .ok()
+            .and_then(|s| ClusterPeer::parse_peers(&s).ok())
+            .unwrap_or_default();
+
+        Self {
+            node_id,
+            peers,
+            bind: default_cluster_bind(),
+            timeout_seconds: default_cluster_timeout(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterPeer {
+    pub node_id: String,
+    pub address: SocketAddr,
+}
+
+impl ClusterPeer {
+    pub fn parse_peers(input: &str) -> Result<Vec<Self>, ConfigError> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut peers = Vec::new();
+        for item in trimmed.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = item.split('=').collect();
+            if parts.len() != 2 {
+                return Err(ConfigError::Validation {
+                    field: "cluster.peers".into(),
+                    message: format!("invalid peer format '{item}', expected node_id=host:port"),
+                });
+            }
+            let node_id = parts[0].trim().to_string();
+            if node_id.is_empty()
+                || node_id.chars().any(|ch| ch.is_ascii_control() || ch.is_whitespace())
+            {
+                return Err(ConfigError::Validation {
+                    field: "cluster.peers".into(),
+                    message: format!("invalid peer node_id '{node_id}'"),
+                });
+            }
+            let addr_str = parts[1].trim();
+            let address: SocketAddr = addr_str.parse().map_err(|_| ConfigError::Validation {
+                field: "cluster.peers".into(),
+                message: format!("invalid peer address '{addr_str}' for node '{node_id}'"),
+            })?;
+            peers.push(ClusterPeer { node_id, address });
+        }
+        Ok(peers)
+    }
+}
+
+fn default_node_id() -> String {
+    "node1".into()
+}
+fn default_cluster_bind() -> SocketAddr {
+    "127.0.0.1:0".parse().expect("valid default")
+}
+fn default_cluster_timeout() -> u64 {
+    2
+}
 fn default_rate_capacity() -> u64 {
     100
 }
@@ -199,11 +291,67 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
 }
 impl Config {
     pub fn parse(input: &str) -> Result<Self, ConfigError> {
-        let config: Self = toml::from_str(input)?;
+        let mut config: Self = toml::from_str(input)?;
+        if let Ok(env_node_id) = std::env::var("NODE_ID") {
+            let trimmed = env_node_id.trim();
+            if !trimmed.is_empty() {
+                config.cluster.node_id = trimmed.to_string();
+            }
+        }
+        if let Ok(env_peers) = std::env::var("CLUSTER_PEERS") {
+            config.cluster.peers = ClusterPeer::parse_peers(&env_peers)?;
+        }
         config.validate()?;
         Ok(config)
     }
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.cluster.node_id.trim().is_empty()
+            || self
+                .cluster
+                .node_id
+                .chars()
+                .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
+        {
+            return err(
+                "cluster.node_id",
+                "must be a non-empty string without whitespace or control characters",
+            );
+        }
+        if self.cluster.timeout_seconds == 0 || self.cluster.timeout_seconds > 60 {
+            return err("cluster.timeout_seconds", "must be between 1 and 60");
+        }
+        let mut peer_ids = HashSet::new();
+        let mut peer_addrs = HashSet::new();
+        for (i, p) in self.cluster.peers.iter().enumerate() {
+            if p.node_id.trim().is_empty()
+                || p.node_id
+                    .chars()
+                    .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
+            {
+                return err(
+                    &format!("cluster.peers[{i}].node_id"),
+                    "must be non-empty without whitespace or control characters",
+                );
+            }
+            if p.node_id == self.cluster.node_id {
+                return err(
+                    &format!("cluster.peers[{i}].node_id"),
+                    format!("peer node_id '{}' matches local node_id", p.node_id),
+                );
+            }
+            if !peer_ids.insert(&p.node_id) {
+                return err(
+                    &format!("cluster.peers[{i}].node_id"),
+                    format!("duplicate peer node_id '{}'", p.node_id),
+                );
+            }
+            if !peer_addrs.insert(&p.address) {
+                return err(
+                    &format!("cluster.peers[{i}].address"),
+                    format!("duplicate peer address '{}'", p.address),
+                );
+            }
+        }
         if self.server.graceful_shutdown_seconds == 0 {
             return err("server.graceful_shutdown_seconds", "must be positive");
         }

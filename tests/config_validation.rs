@@ -281,3 +281,69 @@ fn rejects_empty_or_malformed_route_hosts() {
         assert!(error.contains("routes[0].host"), "{host:?}: {error}");
     }
 }
+
+#[test]
+fn omitted_cluster_config_uses_safe_single_node_defaults() {
+    let config = Config::parse(VALID).expect("valid fixture");
+    assert_eq!(config.cluster.node_id, "node1");
+    assert!(config.cluster.peers.is_empty());
+    assert_eq!(config.cluster.timeout_seconds, 2);
+}
+
+#[test]
+fn parses_valid_multi_node_cluster_config() {
+    let toml = format!(
+        "{VALID}\n[cluster]\nnode_id = \"node1\"\nbind = \"127.0.0.1:9092\"\ntimeout_seconds = 5\n\n[[cluster.peers]]\nnode_id = \"node2\"\naddress = \"127.0.0.1:9093\"\n\n[[cluster.peers]]\nnode_id = \"node3\"\naddress = \"127.0.0.1:9094\""
+    );
+    let config = Config::parse(&toml).expect("valid multi-node cluster config");
+    assert_eq!(config.cluster.node_id, "node1");
+    assert_eq!(config.cluster.peers.len(), 2);
+    assert_eq!(config.cluster.peers[0].node_id, "node2");
+    assert_eq!(config.cluster.peers[0].address, "127.0.0.1:9093".parse().unwrap());
+    assert_eq!(config.cluster.peers[1].node_id, "node3");
+    assert_eq!(config.cluster.peers[1].address, "127.0.0.1:9094".parse().unwrap());
+}
+
+#[test]
+fn parses_cluster_peers_env_var_format() {
+    let peers = bearust::config::ClusterPeer::parse_peers("node2=127.0.0.1:9092,node3=127.0.0.1:9093").expect("valid peers str");
+    assert_eq!(peers.len(), 2);
+    assert_eq!(peers[0].node_id, "node2");
+    assert_eq!(peers[0].address, "127.0.0.1:9092".parse().unwrap());
+    assert_eq!(peers[1].node_id, "node3");
+    assert_eq!(peers[1].address, "127.0.0.1:9093".parse().unwrap());
+
+    let empty = bearust::config::ClusterPeer::parse_peers("   ").expect("empty peers");
+    assert!(empty.is_empty());
+}
+
+#[test]
+fn rejects_invalid_cluster_peer_format() {
+    assert!(bearust::config::ClusterPeer::parse_peers("node2").is_err());
+    assert!(bearust::config::ClusterPeer::parse_peers("node2=invalid_host").is_err());
+    assert!(bearust::config::ClusterPeer::parse_peers("=127.0.0.1:9092").is_err());
+}
+
+#[test]
+fn rejects_self_referential_cluster_peer() {
+    let toml = format!(
+        "{VALID}\n[cluster]\nnode_id = \"node1\"\n[[cluster.peers]]\nnode_id = \"node1\"\naddress = \"127.0.0.1:9093\""
+    );
+    let err = Config::parse(&toml).unwrap_err().to_string();
+    assert!(err.contains("matches local node_id"), "{err}");
+}
+
+#[test]
+fn rejects_duplicate_cluster_peer_ids_or_addresses() {
+    let dup_id = format!(
+        "{VALID}\n[cluster]\nnode_id = \"node1\"\n[[cluster.peers]]\nnode_id = \"node2\"\naddress = \"127.0.0.1:9093\"\n[[cluster.peers]]\nnode_id = \"node2\"\naddress = \"127.0.0.1:9094\""
+    );
+    let err_id = Config::parse(&dup_id).unwrap_err().to_string();
+    assert!(err_id.contains("duplicate peer node_id"), "{err_id}");
+
+    let dup_addr = format!(
+        "{VALID}\n[cluster]\nnode_id = \"node1\"\n[[cluster.peers]]\nnode_id = \"node2\"\naddress = \"127.0.0.1:9093\"\n[[cluster.peers]]\nnode_id = \"node3\"\naddress = \"127.0.0.1:9093\""
+    );
+    let err_addr = Config::parse(&dup_addr).unwrap_err().to_string();
+    assert!(err_addr.contains("duplicate peer address"), "{err_addr}");
+}
