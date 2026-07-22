@@ -91,6 +91,7 @@ pub struct BeaRustProxy {
     pub rate_limit_policy: RateLimitPolicy,
     pub trusted_proxies: IpNetSet,
     pub analytics: Option<Arc<AnalyticsCollector>>,
+    pub analytics_changed: Option<Arc<dyn Fn() + Send + Sync>>,
     pub analytics_host_ids: HashMap<String, i64>,
 }
 
@@ -106,6 +107,7 @@ impl BeaRustProxy {
             rate_limit_policy: RateLimitPolicy::default(),
             trusted_proxies: IpNetSet::default(),
             analytics: None,
+            analytics_changed: None,
             analytics_host_ids: HashMap::new(),
         }
     }
@@ -139,6 +141,10 @@ impl BeaRustProxy {
     }
     pub fn with_analytics(mut self, analytics: Arc<AnalyticsCollector>) -> Self {
         self.analytics = Some(analytics);
+        self
+    }
+    pub fn with_analytics_changed_notifier(mut self, notifier: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.analytics_changed = Some(notifier);
         self
     }
     pub fn with_analytics_host_ids(mut self, host_ids: HashMap<String, i64>) -> Self {
@@ -185,7 +191,14 @@ impl BeaRustProxy {
             ctx.start.elapsed().as_millis() as u64,
             security,
         ));
+        invoke_analytics_changed(&self.analytics_changed);
         ctx.analytics_logged = true;
+    }
+}
+
+fn invoke_analytics_changed(notifier: &Option<Arc<dyn Fn() + Send + Sync>>) {
+    if let Some(notifier) = notifier {
+        notifier();
     }
 }
 
@@ -829,12 +842,24 @@ fn error_status(error: &pingora_core::Error) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::error_status;
+    use super::{error_status, invoke_analytics_changed};
+    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
     use pingora_core::{Error, ErrorType};
 
     #[test]
     fn preserves_explicit_http_error_status() {
         let error = Error::explain(ErrorType::HTTPStatus(503), "no healthy upstream");
         assert_eq!(error_status(&error), 503);
+    }
+
+    #[test]
+    fn analytics_change_notifier_is_invoked() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let notifier: Option<Arc<dyn Fn() + Send + Sync>> = Some(Arc::new(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+        }));
+        invoke_analytics_changed(&notifier);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 }

@@ -267,6 +267,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let challenge_service = control_state.challenges.clone();
         let rate_limiter = control_state.rate_limiter.clone();
         let analytics = control_state.analytics.clone();
+        let realtime = control_state.realtime.clone();
         let analytics_host_ids = crate::control_plane::repository::list_hosts(&control_state.db)
             .await
             .map_err(|e| AppError::Server(format!("load proxy hosts for analytics: {e}")))?
@@ -319,6 +320,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let mut service = proxy::http_service(
             crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store).with_bot_store(bot_store, challenge_service)
                 .with_analytics(analytics)
+                .with_analytics_changed_notifier(Arc::new(move || { realtime.publish("analytics.changed"); }))
                 .with_analytics_host_ids(analytics_host_ids)
                 .with_rate_limiter(rate_limiter)
                 .with_rate_limit_policy(rate_policy)
