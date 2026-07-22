@@ -4,7 +4,9 @@
 
 Complete. Added the bounded bot-protection domain model, immutable snapshot
 compiler, deterministic evaluator, keyed request fingerprint, and integration
-module export.
+module export. Follow-up hardening addressed trusted-crawler bypasses,
+post-filter header bounds, score aggregation, empty keys, and UTF-8 path
+canonicalization.
 
 ## Changes
 
@@ -12,24 +14,31 @@ module export.
   headers; invalid or oversized contexts cannot produce blocking signals.
 - Added stable signal categories, capped rule weights, deterministic category
   ordering, and monitor/challenge/block action mapping.
-- Added trusted crawler matching with user-agent and domain predicates,
-  bounded trusted-rule count, and snapshot validation for threshold, TTL,
-  fingerprint key, and rule field limits.
+- Added trusted crawler matching with strict non-empty user-agent and Host
+  predicates (without X-Forwarded-For/IP bypass), bounded trusted-rule count,
+  and snapshot validation for threshold, TTL, fingerprint key, and rule field
+  limits.
+- Applied the header cap after allowlist filtering, capped aggregate score at
+  100, and made percent-decoded paths UTF-8 safe.
 - Added focused domain tests for canonicalization, fingerprinting, trusted
-  crawlers, action mapping, and snapshot limits.
+  crawler rejection cases, header bounds, score caps, action mapping, and
+  snapshot limits.
 
 ## Commit
 
 `97bd12b feat: add bounded bot evaluator`
 
+`b2b54e4 fix: harden bounded bot evaluator predicates`
+
 ## Verification
 
-- `$HOME/.cargo/bin/cargo +stable test --test bot_protection` passed (5 tests).
+- Docker Rust 1.88 (`cargo test --locked --test bot_protection`) passed (8/8
+  tests).
 - `git diff --check` passed.
-- `rustfmt src/bot_protection.rs` passed.
+- The focused source and test changes are committed and the worktree is clean.
 
 ## Concerns
 
-Trusted-crawler domain matching is deliberately local and does not perform
-DNS lookups; runtime integration must supply a normalized hostname when
-evaluating an exception.
+No blocking concerns remain. Trusted-crawler domain matching is deliberately
+local and does not perform DNS lookups; runtime integration must supply a
+normalized Host hostname when evaluating an exception.
