@@ -63,7 +63,15 @@ pub struct AppState {
     pub baseline: Arc<crate::baseline::BaselineCollector>,
     pub anomaly: Arc<crate::anomaly::AnomalyDetector>,
     pub adaptive_tuning: Arc<crate::adaptive_tuning::AdaptiveTuningEngine>,
+    pub cluster: Arc<crate::cluster::ClusterService>,
     pub prometheus: PrometheusConfig,
+}
+
+impl AppState {
+    pub fn with_cluster(mut self, cluster: Arc<crate::cluster::ClusterService>) -> Self {
+        self.cluster = cluster;
+        self
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,6 +336,9 @@ pub async fn build_state(
         baseline: Arc::new(crate::baseline::BaselineCollector::default()),
         anomaly: Arc::new(crate::anomaly::AnomalyDetector::default()),
         adaptive_tuning,
+        cluster: Arc::new(crate::cluster::ClusterService::new(
+            &crate::config::ClusterConfig::default(),
+        )),
         prometheus: PrometheusConfig::default(),
     })
 }
@@ -417,6 +428,7 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
             post(activate_certificate),
         )
         .route("/api/certificates/acme", post(issue_acme))
+        .route("/api/cluster/status", get(get_cluster_status))
         .route("/api/certificates/{id}/renew", post(renew_acme))
         .route("/api/certificates/{id}/status", get(acme_status));
     let app = if include_metrics {
@@ -2043,4 +2055,15 @@ async fn restore_certificate_activation(
             .map_err(|_| ()),
         None => state.certificates.clear_active().map_err(|_| ()),
     }
+}
+
+async fn get_cluster_status(
+    State(s): State<AppState>,
+    h: HeaderMap,
+) -> Response {
+    if let Err(r) = require_analytics_read(&s, &h, None).await {
+        return r;
+    }
+    let snapshot = s.cluster.snapshot().await;
+    Json(snapshot).into_response()
 }
