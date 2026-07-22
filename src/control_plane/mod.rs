@@ -1353,19 +1353,55 @@ pub async fn run_adaptive_evaluation_tick(s: &AppState) {
                         && !s.adaptive_tuning.is_emergency_disabled()
                         && rec.confidence >= policy.min_confidence
                     {
-                        if let Ok(Some((h_id, new_rl))) = repository::apply_tuning_recommendation_tx(&s.db, rec_id).await {
-                            s.rate_limiter.set_host_policy(
-                                h_id,
-                                crate::rate_limit::RateLimitPolicy {
-                                    enabled: new_rl.enabled,
-                                    action: new_rl.action,
-                                    capacity: new_rl.capacity,
-                                    refill_per_second: new_rl.refill_per_second,
-                                    key_scope: new_rl.key_scope,
-                                },
-                            );
-                            s.realtime.publish("adaptive_tuning.changed");
-                            s.realtime.publish("rate_limit.changed");
+                        match repository::apply_tuning_recommendation_tx(&s.db, rec_id).await {
+                            Ok(Some((h_id, new_rl))) => {
+                                s.rate_limiter.set_host_policy(
+                                    h_id,
+                                    crate::rate_limit::RateLimitPolicy {
+                                        enabled: new_rl.enabled,
+                                        action: new_rl.action,
+                                        capacity: new_rl.capacity,
+                                        refill_per_second: new_rl.refill_per_second,
+                                        key_scope: new_rl.key_scope,
+                                    },
+                                );
+                                audit::record_state(
+                                    s,
+                                    None,
+                                    "adaptive_tuning_auto_enforced",
+                                    &format!("recommendation_id={rec_id};host_id={h_id};confidence={}", rec.confidence),
+                                ).await;
+                                s.realtime.publish("adaptive_tuning.changed");
+                                s.realtime.publish("rate_limit.changed");
+                            }
+                            Ok(None) => {
+                                audit::record_state(
+                                    s,
+                                    None,
+                                    "adaptive_tuning_auto_enforce_failed",
+                                    &format!("recommendation_id={rec_id};host_id={};reason=already_applied_or_not_found", rec.host_id),
+                                ).await;
+                                tracing::warn!(
+                                    event = "adaptive_tuning_auto_enforce_failed",
+                                    recommendation_id = rec_id,
+                                    host_id = rec.host_id,
+                                    reason = "already_applied_or_not_found"
+                                );
+                            }
+                            Err(e) => {
+                                audit::record_state(
+                                    s,
+                                    None,
+                                    "adaptive_tuning_auto_enforce_failed",
+                                    &format!("recommendation_id={rec_id};host_id={};error={e}", rec.host_id),
+                                ).await;
+                                tracing::error!(
+                                    event = "adaptive_tuning_auto_enforce_failed",
+                                    recommendation_id = rec_id,
+                                    host_id = rec.host_id,
+                                    error = %e
+                                );
+                            }
                         }
                     }
                 }

@@ -228,52 +228,75 @@ async fn adaptive_tuning_auto_enforce_mode() {
     let dir = tempdir().unwrap();
     let state = build_state("sqlite::memory:", dir.path(), "setup-token-123").await.unwrap();
 
+    let host_id = 3;
+    repository::insert_host(&state.db, &bearust::control_plane::models::ProxyHost {
+        id: host_id,
+        name: "test-host-3".into(),
+        domain: "h3.example.com".into(),
+        upstream_host: "127.0.0.1".into(),
+        upstream_port: 8080,
+        tls_mode: "off".into(),
+        certificate_id: None,
+        enabled: true,
+    }).await.unwrap();
+
     // Set host 3 to Enforce mode
-    repository::update_tuning_policy(&state.db, 3, &TuningPolicy {
+    repository::update_tuning_policy(&state.db, host_id, &TuningPolicy {
         mode: TuningMode::Enforce,
         max_delta_percent: 50,
         cooldown_seconds: 300,
         min_confidence: 0.8,
     }).await.unwrap();
 
-    // Host 3 initial capacity is 100
-    let rl_before = repository::get_host_rate_limit_config(&state.db, 3).await.unwrap();
+    // Initial rate limit for host 3 is default (capacity 100)
+    let rl_before = repository::get_host_rate_limit_config(&state.db, host_id).await.unwrap();
     assert_eq!(rl_before.capacity, 100);
 
-    // Record an anomaly for host 3 directly
-    let record = bearust::anomaly::AnomalyRecord {
-        id: 1,
-        host_id: 3,
-        rule: bearust::anomaly::AnomalyRule::RequestRate,
-        severity: bearust::anomaly::AnomalySeverity::Warning,
-        score: 2.5,
-        summary: "Spike detected on host 3".into(),
-        observed_at: chrono::Utc::now(),
-        acknowledged: false,
-    };
+    // Populate baseline with steady low traffic for 5 past minutes
+    let now = chrono::Utc::now();
+    for i in (1..=6).rev() {
+        let t = now - chrono::Duration::seconds(i * 60 + 5);
+        state.analytics.record(bearust::analytics::AnalyticsEvent {
+            proxy_host_id: host_id,
+            timestamp: t,
+            status_code: 200,
+            latency_ms: 10,
+            security: bearust::analytics::SecurityCounters::default(),
+        });
+    }
+    state.baseline.record(&state.analytics.snapshot(), now - chrono::Duration::seconds(65));
 
-    // Run evaluation tick
-    bearust::control_plane::run_adaptive_evaluation_tick(&state).await;
-
-    // Manually push anomaly and run tick
-    let current_rl = bearust::rate_limit::RateLimitPolicy::default();
-    let policy = repository::get_tuning_policy(&state.db, 3).await.unwrap();
-    if let Some(rec) = state.adaptive_tuning.recommend(&record, &current_rl, &policy) {
-        if let Ok(Some(rec_id)) = repository::insert_tuning_recommendation_dedup(&state.db, &rec, 300).await {
-            let res = repository::apply_tuning_recommendation_tx(&state.db, rec_id).await.unwrap();
-            assert!(res.is_some());
-            state.rate_limiter.set_host_policy(3, bearust::rate_limit::RateLimitPolicy {
-                enabled: res.as_ref().unwrap().1.enabled,
-                action: res.as_ref().unwrap().1.action,
-                capacity: res.as_ref().unwrap().1.capacity,
-                refill_per_second: res.as_ref().unwrap().1.refill_per_second,
-                key_scope: res.as_ref().unwrap().1.key_scope,
-            });
-        }
+    // Record high traffic spike in current minute
+    for _ in 0..500 {
+        state.analytics.record(bearust::analytics::AnalyticsEvent {
+            proxy_host_id: host_id,
+            timestamp: now,
+            status_code: 200,
+            latency_ms: 10,
+            security: bearust::analytics::SecurityCounters::default(),
+        });
     }
 
-    // Verify rate limit for host 3 was updated
-    let rl_after = repository::get_host_rate_limit_config(&state.db, 3).await.unwrap();
-    assert_ne!(rl_after.capacity, 100);
-    assert_eq!(state.rate_limiter.host_policy(3).capacity, rl_after.capacity);
+    // Run evaluation tick - ticker will detect anomaly, generate recommendation, and AUTO-APPLY it!
+    bearust::control_plane::run_adaptive_evaluation_tick(&state).await;
+
+    // Verify rate limit for host 3 in DB was automatically updated to 75 (100 - 50% delta)
+    let rl_after = repository::get_host_rate_limit_config(&state.db, host_id).await.unwrap();
+    assert_eq!(rl_after.capacity, 75);
+
+    // Verify rate limit in runtime store was automatically updated to 75
+    assert_eq!(state.rate_limiter.host_policy(host_id).capacity, 75);
+
+    // Verify audit log recorded adaptive_tuning_auto_enforced
+    let query = bearust::control_plane::models::AuditLogQuery {
+        event: None,
+        actor_id: None,
+        from: None,
+        to: None,
+        q: None,
+        page: 1,
+        page_size: 100,
+    };
+    let audit_logs = repository::list_audit_logs(&state.db, &query).await.unwrap();
+    assert!(audit_logs.items.iter().any(|log| log.event == "adaptive_tuning_auto_enforced"));
 }

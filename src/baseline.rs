@@ -134,12 +134,13 @@ impl BaselineCollector {
         self.state.lock().map(|s| s.hosts.len()).unwrap_or(0)
     }
 
-    pub fn record(&self, snapshot: &AnalyticsSnapshot, _now: DateTime<Utc>) {
+    pub fn record(&self, snapshot: &AnalyticsSnapshot, now: DateTime<Utc>) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
 
-        for b in &snapshot.timeseries {
+        let completed_cutoff = now - chrono::Duration::seconds(60);
+        for b in snapshot.timeseries.iter().filter(|b| b.timestamp <= completed_cutoff) {
             let host_id = b.proxy_host_id;
             if !state.hosts.contains_key(&host_id) {
                 if state.hosts.len() >= self.max_hosts {
