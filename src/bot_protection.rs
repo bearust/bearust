@@ -65,7 +65,6 @@ pub struct BotInspectionContext {
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
-    trusted_source_verified: bool,
     valid: bool,
 }
 impl BotInspectionContext {
@@ -101,15 +100,8 @@ impl BotInspectionContext {
             method,
             path,
             headers: selected,
-            trusted_source_verified: false,
             valid,
         }
-    }
-    /// Marks the source hostname as verified by trusted proxy metadata.
-    /// This is intentionally not inferred from client-controlled headers.
-    pub(crate) fn with_verified_trusted_source(mut self) -> Self {
-        self.trusted_source_verified = true;
-        self
     }
     pub fn fingerprint(&self, key: &[u8]) -> String {
         let mut h = Hmac::<Sha256>::new_from_slice(key).expect("fingerprint key is bounded");
@@ -207,7 +199,7 @@ pub fn compile_snapshot(
 pub fn evaluate(snapshot: &BotSnapshot, context: &BotInspectionContext) -> BotEvaluation {
     let ua = context.header("user-agent").unwrap_or("");
     let domain = context.header("host").unwrap_or("");
-    let mut trusted = false;
+    let trusted = false;
     let mut score = 0u16;
     let mut categories = Vec::new();
     if context.valid {
@@ -221,9 +213,9 @@ pub fn evaluate(snapshot: &BotSnapshot, context: &BotInspectionContext) -> BotEv
                     .trusted_domain
                     .as_ref()
                     .is_some_and(|v| domain_matches(domain, v));
-                if context.trusted_source_verified && ua_ok && domain_ok {
-                    trusted = true;
-                }
+                // Trusted-crawler bypass is deferred until signed ingress
+                // metadata is available; client request fields never suffice.
+                let _ = (ua_ok, domain_ok);
                 continue;
             }
             let category = stable_category(&rule.category);
@@ -320,20 +312,4 @@ fn domain_matches(actual: &str, expected: &str) -> bool {
         return false;
     }
     a == e || a.ends_with(&format!(".{e}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn verified_source_marker_is_required_for_trusted_rule() {
-        let snapshot = compile_snapshot(
-            BotConfig { mode: BotMode::Block, threshold: 1, ttl_seconds: 300, fingerprint_key: vec![1] },
-            vec![BotRule::trusted_crawler("Googlebot", "googlebot.com")],
-        ).unwrap();
-        let context = BotInspectionContext::new("GET", "/", vec![("user-agent".into(), "Googlebot".into()), ("host".into(), "crawl.googlebot.com".into())]);
-        assert!(!evaluate(&snapshot, &context).trusted);
-        assert!(evaluate(&snapshot, &context.with_verified_trusted_source()).trusted);
-    }
 }
