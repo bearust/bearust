@@ -35,6 +35,22 @@ describe("analytics dashboard", () => {
     expect(document.body.textContent).toContain("Analytics by minute");
     root.unmount();
   });
+  it("defaults analytics to the first visible host", async () => {
+    vi.mocked(api.getAnalyticsSummary).mockResolvedValue({ ...summary, requests: 0 });
+    vi.mocked(api.getAnalyticsTimeseries).mockResolvedValue([]);
+    const root = createRoot(document.body);
+    await act(async () => root.render(<AnalyticsSection hosts={[
+      { id: 7, name: "Scoped", domain: "scoped.example.com", upstream_host: "127.0.0.1", upstream_port: 80, tls_mode: "disabled", certificate_id: null, enabled: true },
+      { id: 8, name: "Other", domain: "other.example.com", upstream_host: "127.0.0.1", upstream_port: 80, tls_mode: "disabled", certificate_id: null, enabled: true },
+    ]} />));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 200)); });
+    expect(vi.mocked(api.getAnalyticsSummary)).toHaveBeenCalledWith({ proxy_host_id: 7, limit: 1440 });
+    expect(vi.mocked(api.getAnalyticsTimeseries)).toHaveBeenCalledWith({ proxy_host_id: 7, limit: 1440 });
+    const select = document.querySelector('#analytics-proxy-host') as HTMLSelectElement;
+    expect(select.value).toBe("7");
+    expect(Array.from(select.options).some(option => option.textContent === "All hosts")).toBe(true);
+    root.unmount();
+  });
   it("renders empty and error states", async () => {
     vi.mocked(api.getAnalyticsSummary).mockResolvedValue({ ...summary, requests: 0 });
     vi.mocked(api.getAnalyticsTimeseries).mockResolvedValue([]);

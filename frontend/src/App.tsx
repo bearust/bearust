@@ -661,6 +661,7 @@ export function AnalyticsSection({ hosts, refreshToken = 0 }: { hosts: Host[]; r
   const [to, setTo] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const autoSelectedHost = useRef(false);
   const query = () => ({ ...(host ? { proxy_host_id: Number(host) } : {}), ...(from ? { from: new Date(from).toISOString() } : {}), ...(to ? { to: new Date(to).toISOString() } : {}), limit: 1440 });
   const load = async () => {
     setLoading(true); setError("");
@@ -668,12 +669,21 @@ export function AnalyticsSection({ hosts, refreshToken = 0 }: { hosts: Host[]; r
     catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); setSummary(null); setRows([]); }
     finally { setLoading(false); }
   };
+  useEffect(() => {
+    if (hosts.length === 0) return;
+    if (!autoSelectedHost.current) {
+      autoSelectedHost.current = true;
+      setHost(String(hosts[0].id));
+      return;
+    }
+    if (host && !hosts.some((candidate) => String(candidate.id) === host)) setHost(String(hosts[0].id));
+  }, [hosts]);
   useEffect(() => { const timer = setTimeout(() => void load(), 150); return () => clearTimeout(timer); }, [refreshToken, host, from, to]);
   const cards = summary ? [["Requests", summary.requests], ["2xx", summary.status_2xx], ["4xx", summary.status_4xx], ["5xx", summary.status_5xx], ["p95 latency", summary.p95_ms == null ? "—" : `${summary.p95_ms} ms`], ["Security events", summary.waf_blocks + summary.bot_blocks + summary.bot_challenges + summary.rate_limited]] : [];
   const latency = summary ? [["p50", summary.p50_ms], ["p95", summary.p95_ms], ["p99", summary.p99_ms]] as const : [];
   const latencyMax = Math.max(...latency.map(([, value]) => value ?? 0), 1);
   return <Card data-testid="analytics-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">Analytics</h2><span className="text-sm text-muted">Process-local · last 24 hours</span></div>
-    <div className="mt-4 grid gap-4 sm:grid-cols-3" role="group" aria-label="Analytics filters"><SelectField label="Proxy host" value={host} onChange={e => setHost(e.target.value)}><option value="">All hosts</option>{hosts.slice(0, 100).map(h => <option key={h.id} value={h.id}>{h.name} ({h.domain})</option>)}</SelectField><Field label="From" type="datetime-local" value={from} onChange={e => setFrom(e.target.value)} /><Field label="To" type="datetime-local" value={to} onChange={e => setTo(e.target.value)} /></div>
+    <div className="mt-4 grid gap-4 sm:grid-cols-3" role="group" aria-label="Analytics filters"><SelectField id="analytics-proxy-host" label="Proxy host" value={host} onChange={e => setHost(e.target.value)}><option value="">All hosts</option>{hosts.slice(0, 100).map(h => <option key={h.id} value={h.id}>{h.name} ({h.domain})</option>)}</SelectField><Field label="From" type="datetime-local" value={from} onChange={e => setFrom(e.target.value)} /><Field label="To" type="datetime-local" value={to} onChange={e => setTo(e.target.value)} /></div>
     {loading && <p role="status" className="mt-4 text-muted">Loading analytics…</p>}
     {!loading && error && <Alert variant="danger">{error}</Alert>}
     {!loading && !error && summary && summary.requests === 0 && <p className="mt-4 text-muted">No analytics data for the selected range.</p>}
