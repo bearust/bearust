@@ -5,6 +5,7 @@
 //! repository state is updated only after certificate material has been
 //! validated and activated.
 
+use crate::control_plane::repository::DbPool;
 use crate::{
     acme::{AcmeError, AcmeManager, CertificateRequest, CloudflareProvider},
     certificates::{CertificateError, CertificateStore},
@@ -12,15 +13,17 @@ use crate::{
     control_plane::{
         audit,
         models::{AcmeChallenge, AcmeRequest, AcmeStatus},
-        repository,
         realtime::RealtimeHub,
+        repository,
     },
     secrets::SecretStore,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use sha2::{Digest, Sha256};
-use crate::control_plane::repository::DbPool;
-use std::{collections::HashSet, sync::{Arc, RwLock}};
+use std::{
+    collections::HashSet,
+    sync::{Arc, RwLock},
+};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -110,9 +113,13 @@ impl AcmeService {
         )
         .await?;
         let status = repository::insert_acme_certificate(&self.db, id, &request).await?;
-        if let (AcmeChallenge::CloudflareDns01, Some(token)) = (&request.challenge, cloudflare_token) {
+        if let (AcmeChallenge::CloudflareDns01, Some(token)) =
+            (&request.challenge, cloudflare_token)
+        {
             let secret_ref = format!("cloudflare-{id}");
-            self.secrets.put(&secret_ref, &token).map_err(|e| AcmeServiceError::Invalid(e.to_string()))?;
+            self.secrets
+                .put(&secret_ref, &token)
+                .map_err(|e| AcmeServiceError::Invalid(e.to_string()))?;
             repository::set_acme_secret_ref(&self.db, id, &secret_ref).await?;
         }
         let next = renewal_at(&issued.expiry);
@@ -158,9 +165,22 @@ impl AcmeService {
         .normalized()
         .map_err(AcmeServiceError::Invalid)?;
         let token = if matches!(request.challenge, AcmeChallenge::CloudflareDns01) {
-            let secret_ref = repository::acme_secret_ref(&self.db, certificate_id).await?.ok_or_else(|| AcmeServiceError::Invalid("Cloudflare credentials are unavailable".into()))?;
-            Some(self.secrets.get(&secret_ref).map_err(|e| AcmeServiceError::Invalid(e.to_string()))?.ok_or_else(|| AcmeServiceError::Invalid("Cloudflare credentials are unavailable".into()))?)
-        } else { None };
+            let secret_ref = repository::acme_secret_ref(&self.db, certificate_id)
+                .await?
+                .ok_or_else(|| {
+                    AcmeServiceError::Invalid("Cloudflare credentials are unavailable".into())
+                })?;
+            Some(
+                self.secrets
+                    .get(&secret_ref)
+                    .map_err(|e| AcmeServiceError::Invalid(e.to_string()))?
+                    .ok_or_else(|| {
+                        AcmeServiceError::Invalid("Cloudflare credentials are unavailable".into())
+                    })?,
+            )
+        } else {
+            None
+        };
         let issued = self.issue_material(&request, &name, token).await?;
         // import_letsencrypt validates before replacing the existing material;
         // activation is the final state transition and can therefore be

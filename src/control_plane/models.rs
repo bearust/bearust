@@ -225,7 +225,6 @@ pub enum WafAction {
     Block,
 }
 
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WafConfig {
     pub mode: WafMode,

@@ -86,7 +86,9 @@ impl AnomalyDetector {
         let mut host_stats: HashMap<i64, (u64, u64, u64, Vec<u64>, usize)> = HashMap::new(); // (total_reqs, errors, security_blocks, p95_list, bucket_count)
         for b in &observed.timeseries {
             if b.timestamp >= window_cutoff {
-                let entry = host_stats.entry(b.proxy_host_id).or_insert((0, 0, 0, Vec::new(), 0));
+                let entry = host_stats
+                    .entry(b.proxy_host_id)
+                    .or_insert((0, 0, 0, Vec::new(), 0));
                 entry.0 += b.requests;
                 entry.1 += b.status_4xx + b.status_5xx;
                 entry.2 += b.waf_blocks + b.bot_blocks + b.bot_challenges + b.rate_limited;
@@ -99,7 +101,9 @@ impl AnomalyDetector {
 
         let target_host = baseline.host_id;
 
-        for (&host_id, &(obs_reqs, obs_errors, obs_sec, ref obs_p95_samples, bucket_count)) in &host_stats {
+        for (&host_id, &(obs_reqs, obs_errors, obs_sec, ref obs_p95_samples, bucket_count)) in
+            &host_stats
+        {
             if target_host.is_some_and(|target| target != host_id) {
                 continue;
             }

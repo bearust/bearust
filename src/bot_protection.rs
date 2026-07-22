@@ -171,8 +171,7 @@ pub fn compile_snapshot(
     }
     for r in &rules {
         if r.category == "trusted_crawler"
-            && (r.trusted_user_agent.as_deref().is_none()
-                || r.trusted_domain.as_deref().is_none())
+            && (r.trusted_user_agent.as_deref().is_none() || r.trusted_domain.as_deref().is_none())
         {
             return Err("trusted crawler requires user-agent and domain predicates");
         }
@@ -228,7 +227,9 @@ pub fn evaluate(snapshot: &BotSnapshot, context: &BotInspectionContext) -> BotEv
                 _ => false,
             };
             if matches {
-                score = score.saturating_add(rule.weight.min(MAX_SCORE)).min(MAX_SCORE);
+                score = score
+                    .saturating_add(rule.weight.min(MAX_SCORE))
+                    .min(MAX_SCORE);
                 if !categories.contains(&category) {
                     categories.push(category);
                 }

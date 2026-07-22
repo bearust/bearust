@@ -1,14 +1,16 @@
+use crate::bot_protection::{
+    BotConfig, BotMode, BotRule, MAX_FIELD_BYTES, MAX_RULES, MAX_TRUSTED_RULES, MAX_TTL_SECONDS,
+};
 use crate::control_plane::models::{
     AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AuditLogItem, AuditLogPage,
-    AuditLogQuery, CertificateMetadata, ProxyHost, RoleDetail, RolePermissionScope, User,
-    RateLimitConfig, WafAction, WafConfig, WafMode, WafRule,
+    AuditLogQuery, CertificateMetadata, ProxyHost, RateLimitConfig, RoleDetail,
+    RolePermissionScope, User, WafAction, WafConfig, WafMode, WafRule,
 };
-use crate::rate_limit::{RateLimitAction, RateLimitKeyScope, RateLimitPolicy};
-use crate::bot_protection::{BotConfig, BotMode, BotRule, MAX_FIELD_BYTES, MAX_RULES, MAX_TTL_SECONDS, MAX_TRUSTED_RULES};
 use crate::control_plane::rbac::Role;
+use crate::rate_limit::{RateLimitAction, RateLimitKeyScope, RateLimitPolicy};
 use sqlx::{any::AnyPoolOptions, Row};
-use std::sync::Once;
 use std::hash::{Hash, Hasher};
+use std::sync::Once;
 use uuid::Uuid;
 
 /// Database pool type used by the control plane once all repositories have
@@ -105,7 +107,7 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
         "bot_protection.manage",
     ];
     for key in permissions {
-            sqlx::query(
+        sqlx::query(
                 "INSERT INTO permissions(id,key) SELECT ?,? WHERE NOT EXISTS (SELECT 1 FROM permissions WHERE key=?)",
             )
         .bind(seed_id(pool, "permissions", "key", key, deterministic_id(key)).await?)
@@ -116,7 +118,11 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
     }
 
     let now = chrono::Utc::now().to_rfc3339();
-    for (slug, name) in [("admin", "Administrator"), ("operator", "Operator"), ("viewer", "Viewer")] {
+    for (slug, name) in [
+        ("admin", "Administrator"),
+        ("operator", "Operator"),
+        ("viewer", "Viewer"),
+    ] {
         sqlx::query(
             "INSERT INTO roles(id,slug,name,system_managed,created_at,updated_at) SELECT ?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM roles WHERE slug=?)",
         )
@@ -135,9 +141,18 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
         ("admin", &permissions),
         (
             "operator",
-            &["proxy_hosts.read", "proxy_hosts.write", "certificates.read", "certificates.write", "audit_logs.read"],
+            &[
+                "proxy_hosts.read",
+                "proxy_hosts.write",
+                "certificates.read",
+                "certificates.write",
+                "audit_logs.read",
+            ],
         ),
-        ("viewer", &["proxy_hosts.read", "certificates.read", "audit_logs.read"]),
+        (
+            "viewer",
+            &["proxy_hosts.read", "certificates.read", "audit_logs.read"],
+        ),
     ];
     for (slug, keys) in assignments {
         for key in keys {
@@ -159,13 +174,40 @@ fn deterministic_id(value: &str) -> i64 {
     ((hasher.finish() as i64) & i64::MAX).max(1)
 }
 
-async fn seed_id(pool: &DbPool, table: &str, key_column: &str, key: &str, preferred: i64) -> Result<i64, sqlx::Error> {
-    if sqlx::query("SELECT 1").fetch_optional(pool).await.is_err() { return Ok(preferred); }
-    if sqlx::query(&format!("SELECT id FROM {table} WHERE {key_column}=?")).bind(key).fetch_optional(pool).await?.is_some() { return Ok(preferred); }
-    if sqlx::query(&format!("SELECT 1 FROM {table} WHERE id=?")).bind(preferred).fetch_optional(pool).await?.is_some() {
+async fn seed_id(
+    pool: &DbPool,
+    table: &str,
+    key_column: &str,
+    key: &str,
+    preferred: i64,
+) -> Result<i64, sqlx::Error> {
+    if sqlx::query("SELECT 1").fetch_optional(pool).await.is_err() {
+        return Ok(preferred);
+    }
+    if sqlx::query(&format!("SELECT id FROM {table} WHERE {key_column}=?"))
+        .bind(key)
+        .fetch_optional(pool)
+        .await?
+        .is_some()
+    {
+        return Ok(preferred);
+    }
+    if sqlx::query(&format!("SELECT 1 FROM {table} WHERE id=?"))
+        .bind(preferred)
+        .fetch_optional(pool)
+        .await?
+        .is_some()
+    {
         for _ in 0..32 {
             let candidate = generated_id();
-            if sqlx::query(&format!("SELECT 1 FROM {table} WHERE id=?")).bind(candidate).fetch_optional(pool).await?.is_none() { return Ok(candidate); }
+            if sqlx::query(&format!("SELECT 1 FROM {table} WHERE id=?"))
+                .bind(candidate)
+                .fetch_optional(pool)
+                .await?
+                .is_none()
+            {
+                return Ok(candidate);
+            }
         }
         return Err(sqlx::Error::Protocol("unable to allocate seed ID".into()));
     }
@@ -174,50 +216,160 @@ async fn seed_id(pool: &DbPool, table: &str, key_column: &str, key: &str, prefer
 
 fn generated_id() -> i64 {
     let bytes = *Uuid::new_v4().as_bytes();
-    let mut raw = [0u8; 8]; raw.copy_from_slice(&bytes[..8]);
+    let mut raw = [0u8; 8];
+    raw.copy_from_slice(&bytes[..8]);
     (i64::from_be_bytes(raw) & i64::MAX).max(1)
 }
 
 fn waf_mode_value(mode: WafMode) -> &'static str {
-    match mode { WafMode::MonitorOnly => "monitor-only", WafMode::Block => "block" }
+    match mode {
+        WafMode::MonitorOnly => "monitor-only",
+        WafMode::Block => "block",
+    }
 }
 fn parse_waf_mode(value: &str) -> WafMode {
-    if value == "block" { WafMode::Block } else { WafMode::MonitorOnly }
+    if value == "block" {
+        WafMode::Block
+    } else {
+        WafMode::MonitorOnly
+    }
 }
 fn waf_action_value(action: WafAction) -> &'static str {
-    match action { WafAction::Inherit => "inherit", WafAction::Allow => "allow", WafAction::Log => "log", WafAction::Block => "block" }
+    match action {
+        WafAction::Inherit => "inherit",
+        WafAction::Allow => "allow",
+        WafAction::Log => "log",
+        WafAction::Block => "block",
+    }
 }
 fn parse_waf_action(value: &str) -> WafAction {
-    match value { "allow" => WafAction::Allow, "log" => WafAction::Log, "block" => WafAction::Block, _ => WafAction::Inherit }
+    match value {
+        "allow" => WafAction::Allow,
+        "log" => WafAction::Log,
+        "block" => WafAction::Block,
+        _ => WafAction::Inherit,
+    }
 }
-fn rate_limit_action_value(a: RateLimitAction) -> &'static str { if matches!(a, RateLimitAction::Block) { "block" } else { "monitor" } }
-fn parse_rate_limit_action(v: &str) -> RateLimitAction { if v == "block" { RateLimitAction::Block } else { RateLimitAction::Monitor } }
-fn parse_rate_limit_scope(v: &str) -> Option<RateLimitKeyScope> { (v == "proxy_host_ip").then_some(RateLimitKeyScope::ProxyHostIp) }
-fn validate_rate_limit_config(c: &RateLimitConfig) -> Result<(), sqlx::Error> { RateLimitPolicy { enabled:c.enabled, action:c.action, capacity:c.capacity, refill_per_second:c.refill_per_second, key_scope:c.key_scope }.validate().map_err(|e| sqlx::Error::Protocol(e.to_string())) }
-pub async fn get_rate_limit_config(pool: &DbPool) -> Result<RateLimitConfig, sqlx::Error> { let row=sqlx::query("SELECT enabled,action,capacity,refill_per_second,key_scope,updated_at FROM rate_limit_config WHERE id=1").fetch_one(pool).await?; let scope=parse_rate_limit_scope(&row.get::<String,_>("key_scope")).ok_or_else(||sqlx::Error::Protocol("invalid rate limit key scope".into()))?; let c=RateLimitConfig{enabled:row.get::<i64,_>("enabled")!=0,action:parse_rate_limit_action(&row.get::<String,_>("action")),capacity:row.get::<i64,_>("capacity") as u32,refill_per_second:row.get::<f64,_>("refill_per_second"),key_scope:scope,updated_at:row.get("updated_at")}; validate_rate_limit_config(&c)?; Ok(c) }
-pub async fn update_rate_limit_config(pool: &DbPool, c: &RateLimitConfig) -> Result<u64, sqlx::Error> { validate_rate_limit_config(c)?; Ok(sqlx::query("UPDATE rate_limit_config SET enabled=?,action=?,capacity=?,refill_per_second=?,key_scope=?,updated_at=? WHERE id=1").bind(c.enabled as i64).bind(rate_limit_action_value(c.action)).bind(c.capacity as i64).bind(c.refill_per_second).bind("proxy_host_ip").bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?.rows_affected()) }
+fn rate_limit_action_value(a: RateLimitAction) -> &'static str {
+    if matches!(a, RateLimitAction::Block) {
+        "block"
+    } else {
+        "monitor"
+    }
+}
+fn parse_rate_limit_action(v: &str) -> RateLimitAction {
+    if v == "block" {
+        RateLimitAction::Block
+    } else {
+        RateLimitAction::Monitor
+    }
+}
+fn parse_rate_limit_scope(v: &str) -> Option<RateLimitKeyScope> {
+    (v == "proxy_host_ip").then_some(RateLimitKeyScope::ProxyHostIp)
+}
+fn validate_rate_limit_config(c: &RateLimitConfig) -> Result<(), sqlx::Error> {
+    RateLimitPolicy {
+        enabled: c.enabled,
+        action: c.action,
+        capacity: c.capacity,
+        refill_per_second: c.refill_per_second,
+        key_scope: c.key_scope,
+    }
+    .validate()
+    .map_err(|e| sqlx::Error::Protocol(e.to_string()))
+}
+pub async fn get_rate_limit_config(pool: &DbPool) -> Result<RateLimitConfig, sqlx::Error> {
+    let row=sqlx::query("SELECT enabled,action,capacity,refill_per_second,key_scope,updated_at FROM rate_limit_config WHERE id=1").fetch_one(pool).await?;
+    let scope = parse_rate_limit_scope(&row.get::<String, _>("key_scope"))
+        .ok_or_else(|| sqlx::Error::Protocol("invalid rate limit key scope".into()))?;
+    let c = RateLimitConfig {
+        enabled: row.get::<i64, _>("enabled") != 0,
+        action: parse_rate_limit_action(&row.get::<String, _>("action")),
+        capacity: row.get::<i64, _>("capacity") as u32,
+        refill_per_second: row.get::<f64, _>("refill_per_second"),
+        key_scope: scope,
+        updated_at: row.get("updated_at"),
+    };
+    validate_rate_limit_config(&c)?;
+    Ok(c)
+}
+pub async fn update_rate_limit_config(
+    pool: &DbPool,
+    c: &RateLimitConfig,
+) -> Result<u64, sqlx::Error> {
+    validate_rate_limit_config(c)?;
+    Ok(sqlx::query("UPDATE rate_limit_config SET enabled=?,action=?,capacity=?,refill_per_second=?,key_scope=?,updated_at=? WHERE id=1").bind(c.enabled as i64).bind(rate_limit_action_value(c.action)).bind(c.capacity as i64).bind(c.refill_per_second).bind("proxy_host_ip").bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?.rows_affected())
+}
 
-fn bot_mode_value(mode: BotMode) -> &'static str { match mode { BotMode::Monitor => "monitor", BotMode::Challenge => "challenge", BotMode::Block => "block" } }
-fn parse_bot_mode(value: &str) -> Result<BotMode, sqlx::Error> { match value { "monitor" => Ok(BotMode::Monitor), "challenge" => Ok(BotMode::Challenge), "block" => Ok(BotMode::Block), _ => Err(sqlx::Error::Protocol("invalid bot mode".into())) } }
-fn bot_validation(message: &str) -> sqlx::Error { sqlx::Error::Protocol(message.into()) }
+fn bot_mode_value(mode: BotMode) -> &'static str {
+    match mode {
+        BotMode::Monitor => "monitor",
+        BotMode::Challenge => "challenge",
+        BotMode::Block => "block",
+    }
+}
+fn parse_bot_mode(value: &str) -> Result<BotMode, sqlx::Error> {
+    match value {
+        "monitor" => Ok(BotMode::Monitor),
+        "challenge" => Ok(BotMode::Challenge),
+        "block" => Ok(BotMode::Block),
+        _ => Err(sqlx::Error::Protocol("invalid bot mode".into())),
+    }
+}
+fn bot_validation(message: &str) -> sqlx::Error {
+    sqlx::Error::Protocol(message.into())
+}
 fn validate_bot_config(config: &BotConfig) -> Result<(), sqlx::Error> {
-    if config.threshold == 0 || config.threshold > 100 { return Err(bot_validation("invalid bot threshold")); }
-    if config.ttl_seconds == 0 || config.ttl_seconds > MAX_TTL_SECONDS { return Err(bot_validation("invalid bot ttl")); }
-    if config.fingerprint_key.is_empty() || config.fingerprint_key.len() > MAX_FIELD_BYTES { return Err(bot_validation("invalid bot fingerprint key")); }
+    if config.threshold == 0 || config.threshold > 100 {
+        return Err(bot_validation("invalid bot threshold"));
+    }
+    if config.ttl_seconds == 0 || config.ttl_seconds > MAX_TTL_SECONDS {
+        return Err(bot_validation("invalid bot ttl"));
+    }
+    if config.fingerprint_key.is_empty() || config.fingerprint_key.len() > MAX_FIELD_BYTES {
+        return Err(bot_validation("invalid bot fingerprint key"));
+    }
     Ok(())
 }
 fn normalize_bot_rule(rule: &BotRule) -> Result<BotRule, sqlx::Error> {
     let category = rule.category.trim().to_ascii_lowercase();
-    if category.is_empty() || category.len() > MAX_FIELD_BYTES || rule.weight > 100 { return Err(bot_validation("invalid bot rule")); }
-    let ua = rule.trusted_user_agent.as_ref().map(|v| v.trim().to_string());
-    let domain = rule.trusted_domain.as_ref().map(|v| v.trim().to_ascii_lowercase());
-    if ua.as_ref().is_some_and(|v| v.is_empty() || v.len() > MAX_FIELD_BYTES) || domain.as_ref().is_some_and(|v| v.is_empty() || v.len() > MAX_FIELD_BYTES) { return Err(bot_validation("invalid bot rule predicate")); }
-    if category == "trusted_crawler" && (ua.is_none() || domain.is_none()) { return Err(bot_validation("trusted crawler requires predicates")); }
-    Ok(BotRule { category, weight: rule.weight, trusted_user_agent: ua, trusted_domain: domain, enabled: rule.enabled })
+    if category.is_empty() || category.len() > MAX_FIELD_BYTES || rule.weight > 100 {
+        return Err(bot_validation("invalid bot rule"));
+    }
+    let ua = rule
+        .trusted_user_agent
+        .as_ref()
+        .map(|v| v.trim().to_string());
+    let domain = rule
+        .trusted_domain
+        .as_ref()
+        .map(|v| v.trim().to_ascii_lowercase());
+    if ua
+        .as_ref()
+        .is_some_and(|v| v.is_empty() || v.len() > MAX_FIELD_BYTES)
+        || domain
+            .as_ref()
+            .is_some_and(|v| v.is_empty() || v.len() > MAX_FIELD_BYTES)
+    {
+        return Err(bot_validation("invalid bot rule predicate"));
+    }
+    if category == "trusted_crawler" && (ua.is_none() || domain.is_none()) {
+        return Err(bot_validation("trusted crawler requires predicates"));
+    }
+    Ok(BotRule {
+        category,
+        weight: rule.weight,
+        trusted_user_agent: ua,
+        trusted_domain: domain,
+        enabled: rule.enabled,
+    })
 }
 
 pub async fn get_bot_config(pool: &DbPool) -> Result<BotConfig, sqlx::Error> {
-    let row = sqlx::query("SELECT mode,threshold,ttl_seconds,fingerprint_key FROM bot_config WHERE id=1").fetch_one(pool).await?;
+    let row =
+        sqlx::query("SELECT mode,threshold,ttl_seconds,fingerprint_key FROM bot_config WHERE id=1")
+            .fetch_one(pool)
+            .await?;
     let key: String = row.get("fingerprint_key");
     let key = if key.is_empty() {
         let mut generated = Vec::with_capacity(32);
@@ -226,12 +378,20 @@ pub async fn get_bot_config(pool: &DbPool) -> Result<BotConfig, sqlx::Error> {
         let encoded = hex::encode(&generated);
         sqlx::query("UPDATE bot_config SET fingerprint_key=?,updated_at=? WHERE id=1 AND fingerprint_key=''")
             .bind(encoded).bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?;
-        let stored: String = sqlx::query_scalar("SELECT fingerprint_key FROM bot_config WHERE id=1").fetch_one(pool).await?;
+        let stored: String =
+            sqlx::query_scalar("SELECT fingerprint_key FROM bot_config WHERE id=1")
+                .fetch_one(pool)
+                .await?;
         hex::decode(stored).map_err(|_| bot_validation("invalid stored fingerprint key"))?
     } else {
         hex::decode(key).map_err(|_| bot_validation("invalid stored fingerprint key"))?
     };
-    let config = BotConfig { mode: parse_bot_mode(&row.get::<String, _>("mode"))?, threshold: row.get::<i64, _>("threshold") as u16, ttl_seconds: row.get::<i64, _>("ttl_seconds") as u64, fingerprint_key: key };
+    let config = BotConfig {
+        mode: parse_bot_mode(&row.get::<String, _>("mode"))?,
+        threshold: row.get::<i64, _>("threshold") as u16,
+        ttl_seconds: row.get::<i64, _>("ttl_seconds") as u64,
+        fingerprint_key: key,
+    };
     validate_bot_config(&config)?;
     Ok(config)
 }
@@ -239,79 +399,154 @@ pub async fn update_bot_config(pool: &DbPool, config: &BotConfig) -> Result<u64,
     validate_bot_config(config)?;
     Ok(sqlx::query("UPDATE bot_config SET mode=?,threshold=?,ttl_seconds=?,fingerprint_key=?,updated_at=? WHERE id=1").bind(bot_mode_value(config.mode)).bind(config.threshold as i64).bind(config.ttl_seconds as i64).bind(hex::encode(&config.fingerprint_key)).bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?.rows_affected())
 }
-fn bot_rule_from_row(row: &sqlx::any::AnyRow) -> BotRule { BotRule { category: row.get("category"), weight: row.get::<i64,_>("weight") as u16, trusted_user_agent: row.get("trusted_user_agent"), trusted_domain: row.get("trusted_domain"), enabled: row.get::<i64,_>("enabled") != 0 } }
+fn bot_rule_from_row(row: &sqlx::any::AnyRow) -> BotRule {
+    BotRule {
+        category: row.get("category"),
+        weight: row.get::<i64, _>("weight") as u16,
+        trusted_user_agent: row.get("trusted_user_agent"),
+        trusted_domain: row.get("trusted_domain"),
+        enabled: row.get::<i64, _>("enabled") != 0,
+    }
+}
 pub async fn list_bot_rules(pool: &DbPool) -> Result<Vec<BotRule>, sqlx::Error> {
     let rows = sqlx::query("SELECT category,weight,trusted_user_agent,trusted_domain,enabled FROM bot_rules ORDER BY id LIMIT ?")
         .bind(MAX_RULES as i64 + 1).fetch_all(pool).await?;
-    if rows.len() > MAX_RULES { return Err(bot_validation("too many bot rules")); }
+    if rows.len() > MAX_RULES {
+        return Err(bot_validation("too many bot rules"));
+    }
     Ok(rows.iter().map(bot_rule_from_row).collect())
 }
 pub async fn list_bot_rule_records(pool: &DbPool) -> Result<Vec<(i64, BotRule)>, sqlx::Error> {
     let rows = sqlx::query("SELECT id,category,weight,trusted_user_agent,trusted_domain,enabled FROM bot_rules ORDER BY id LIMIT ?")
         .bind(MAX_RULES as i64 + 1).fetch_all(pool).await?;
-    if rows.len() > MAX_RULES { return Err(bot_validation("too many bot rules")); }
-    Ok(rows.iter().map(|row| (row.get("id"), bot_rule_from_row(row))).collect())
+    if rows.len() > MAX_RULES {
+        return Err(bot_validation("too many bot rules"));
+    }
+    Ok(rows
+        .iter()
+        .map(|row| (row.get("id"), bot_rule_from_row(row)))
+        .collect())
 }
 pub async fn insert_bot_rule(pool: &DbPool, rule: &BotRule) -> Result<i64, sqlx::Error> {
     let rule = normalize_bot_rule(rule)?;
     let mut tx = pool.begin().await?;
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_rules").fetch_one(&mut *tx).await?;
-    if count as usize >= MAX_RULES { return Err(bot_validation("too many bot rules")); }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_rules")
+        .fetch_one(&mut *tx)
+        .await?;
+    if count as usize >= MAX_RULES {
+        return Err(bot_validation("too many bot rules"));
+    }
     let trusted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_rules WHERE enabled=1 AND (trusted_user_agent IS NOT NULL OR trusted_domain IS NOT NULL)").fetch_one(&mut *tx).await?;
-    if rule.enabled && (rule.trusted_user_agent.is_some() || rule.trusted_domain.is_some()) && trusted as usize >= MAX_TRUSTED_RULES { return Err(bot_validation("too many trusted bot rules")); }
-    let id = generated_id(); let now = chrono::Utc::now().to_rfc3339();
+    if rule.enabled
+        && (rule.trusted_user_agent.is_some() || rule.trusted_domain.is_some())
+        && trusted as usize >= MAX_TRUSTED_RULES
+    {
+        return Err(bot_validation("too many trusted bot rules"));
+    }
+    let id = generated_id();
+    let now = chrono::Utc::now().to_rfc3339();
     sqlx::query("INSERT INTO bot_rules(id,category,weight,trusted_user_agent,trusted_domain,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id).bind(&rule.category).bind(rule.weight as i64).bind(&rule.trusted_user_agent).bind(&rule.trusted_domain).bind(rule.enabled as i64).bind(&now).bind(&now).execute(&mut *tx).await?;
-    tx.commit().await?; Ok(id)
+    tx.commit().await?;
+    Ok(id)
 }
 pub async fn update_bot_rule(pool: &DbPool, id: i64, rule: &BotRule) -> Result<u64, sqlx::Error> {
     let rule = normalize_bot_rule(rule)?;
     let mut tx = pool.begin().await?;
     if rule.enabled && (rule.trusted_user_agent.is_some() || rule.trusted_domain.is_some()) {
         let trusted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_rules WHERE id<>? AND enabled=1 AND (trusted_user_agent IS NOT NULL OR trusted_domain IS NOT NULL)").bind(id).fetch_one(&mut *tx).await?;
-        if trusted as usize >= MAX_TRUSTED_RULES { return Err(bot_validation("too many trusted bot rules")); }
+        if trusted as usize >= MAX_TRUSTED_RULES {
+            return Err(bot_validation("too many trusted bot rules"));
+        }
     }
     let changed = sqlx::query("UPDATE bot_rules SET category=?,weight=?,trusted_user_agent=?,trusted_domain=?,enabled=?,updated_at=? WHERE id=?").bind(&rule.category).bind(rule.weight as i64).bind(&rule.trusted_user_agent).bind(&rule.trusted_domain).bind(rule.enabled as i64).bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(&mut *tx).await?.rows_affected();
-    tx.commit().await?; Ok(changed)
+    tx.commit().await?;
+    Ok(changed)
 }
-pub async fn delete_bot_rule(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> { Ok(sqlx::query("DELETE FROM bot_rules WHERE id=?").bind(id).execute(pool).await?.rows_affected()) }
+pub async fn delete_bot_rule(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("DELETE FROM bot_rules WHERE id=?")
+        .bind(id)
+        .execute(pool)
+        .await?
+        .rows_affected())
+}
 pub async fn restore_bot_rule(pool: &DbPool, id: i64, rule: &BotRule) -> Result<(), sqlx::Error> {
-    let rule = normalize_bot_rule(rule)?; let now = chrono::Utc::now().to_rfc3339();
-    sqlx::query("INSERT INTO bot_rules(id,category,weight,trusted_user_agent,trusted_domain,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id).bind(rule.category).bind(rule.weight as i64).bind(rule.trusted_user_agent).bind(rule.trusted_domain).bind(rule.enabled as i64).bind(&now).bind(&now).execute(pool).await?; Ok(())
+    let rule = normalize_bot_rule(rule)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO bot_rules(id,category,weight,trusted_user_agent,trusted_domain,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id).bind(rule.category).bind(rule.weight as i64).bind(rule.trusted_user_agent).bind(rule.trusted_domain).bind(rule.enabled as i64).bind(&now).bind(&now).execute(pool).await?;
+    Ok(())
 }
 
 /// Replace the persisted bot policy in one transaction. All validation is
 /// performed before opening the transaction so malformed imports cannot leave
 /// a partially applied policy behind.
-pub async fn replace_bot_policy(pool: &DbPool, config: &BotConfig, rules: &[BotRule]) -> Result<(), sqlx::Error> {
+pub async fn replace_bot_policy(
+    pool: &DbPool,
+    config: &BotConfig,
+    rules: &[BotRule],
+) -> Result<(), sqlx::Error> {
     validate_bot_config(config)?;
-    if rules.len() > MAX_RULES || rules.iter().filter(|r| r.enabled && (r.trusted_user_agent.is_some() || r.trusted_domain.is_some())).count() > MAX_TRUSTED_RULES { return Err(bot_validation("too many bot rules")); }
-    let normalized = rules.iter().map(normalize_bot_rule).collect::<Result<Vec<_>, _>>()?;
+    if rules.len() > MAX_RULES
+        || rules
+            .iter()
+            .filter(|r| r.enabled && (r.trusted_user_agent.is_some() || r.trusted_domain.is_some()))
+            .count()
+            > MAX_TRUSTED_RULES
+    {
+        return Err(bot_validation("too many bot rules"));
+    }
+    let normalized = rules
+        .iter()
+        .map(normalize_bot_rule)
+        .collect::<Result<Vec<_>, _>>()?;
     let mut tx = pool.begin().await?;
     sqlx::query("UPDATE bot_config SET mode=?,threshold=?,ttl_seconds=?,fingerprint_key=?,updated_at=? WHERE id=1")
         .bind(bot_mode_value(config.mode)).bind(config.threshold as i64).bind(config.ttl_seconds as i64).bind(hex::encode(&config.fingerprint_key)).bind(chrono::Utc::now().to_rfc3339()).execute(&mut *tx).await?;
-    sqlx::query("DELETE FROM bot_rules").execute(&mut *tx).await?;
-    for rule in normalized { let id = generated_id(); let now = chrono::Utc::now().to_rfc3339(); sqlx::query("INSERT INTO bot_rules(id,category,weight,trusted_user_agent,trusted_domain,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id).bind(rule.category).bind(rule.weight as i64).bind(rule.trusted_user_agent).bind(rule.trusted_domain).bind(rule.enabled as i64).bind(&now).bind(&now).execute(&mut *tx).await?; }
+    sqlx::query("DELETE FROM bot_rules")
+        .execute(&mut *tx)
+        .await?;
+    for rule in normalized {
+        let id = generated_id();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO bot_rules(id,category,weight,trusted_user_agent,trusted_domain,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id).bind(rule.category).bind(rule.weight as i64).bind(rule.trusted_user_agent).bind(rule.trusted_domain).bind(rule.enabled as i64).bind(&now).bind(&now).execute(&mut *tx).await?;
+    }
     tx.commit().await?;
     Ok(())
 }
 
 fn waf_rule_from_row(row: &sqlx::any::AnyRow) -> WafRule {
     WafRule {
-        id: row.get("id"), name: row.get("name"), source: row.get("source"),
-        category: row.get("category"), severity: row.get("severity"),
+        id: row.get("id"),
+        name: row.get("name"),
+        source: row.get("source"),
+        category: row.get("category"),
+        severity: row.get("severity"),
         enabled: row.get::<i64, _>("enabled") != 0,
         action: parse_waf_action(&row.get::<String, _>("action")),
-        matcher_json: row.get("matcher_json"), created_at: row.get("created_at"), updated_at: row.get("updated_at"),
+        matcher_json: row.get("matcher_json"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
     }
 }
 
 pub async fn get_waf_config(pool: &DbPool) -> Result<WafConfig, sqlx::Error> {
-    let row = sqlx::query("SELECT mode,updated_at FROM waf_config WHERE id=1").fetch_one(pool).await?;
-    Ok(WafConfig { mode: parse_waf_mode(&row.get::<String, _>("mode")), updated_at: row.get("updated_at") })
+    let row = sqlx::query("SELECT mode,updated_at FROM waf_config WHERE id=1")
+        .fetch_one(pool)
+        .await?;
+    Ok(WafConfig {
+        mode: parse_waf_mode(&row.get::<String, _>("mode")),
+        updated_at: row.get("updated_at"),
+    })
 }
 
 pub async fn update_waf_mode(pool: &DbPool, mode: WafMode) -> Result<u64, sqlx::Error> {
-    Ok(sqlx::query("UPDATE waf_config SET mode=?,updated_at=? WHERE id=1").bind(waf_mode_value(mode)).bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?.rows_affected())
+    Ok(
+        sqlx::query("UPDATE waf_config SET mode=?,updated_at=? WHERE id=1")
+            .bind(waf_mode_value(mode))
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(pool)
+            .await?
+            .rows_affected(),
+    )
 }
 
 pub async fn list_waf_rules(pool: &DbPool) -> Result<Vec<WafRule>, sqlx::Error> {
@@ -334,18 +569,55 @@ pub async fn update_waf_rule(pool: &DbPool, id: i64, rule: &WafRule) -> Result<u
 }
 
 pub async fn delete_waf_rule(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
-    Ok(sqlx::query("DELETE FROM waf_rules WHERE id=? AND source='custom'").bind(id).execute(pool).await?.rows_affected())
+    Ok(
+        sqlx::query("DELETE FROM waf_rules WHERE id=? AND source='custom'")
+            .bind(id)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+    )
 }
 
 pub async fn seed_builtin_waf_rules(pool: &DbPool) -> Result<(), sqlx::Error> {
     let rules = [
-        ("builtin-sqli", "SQL injection", "sqli", "high", r#"{"field":"any","builtin":"sqli"}"#),
-        ("builtin-xss", "Cross-site scripting", "xss", "high", r#"{"field":"any","builtin":"xss"}"#),
-        ("builtin-path-traversal", "Path traversal", "path_traversal", "high", r#"{"field":"path","builtin":"path_traversal"}"#),
-        ("builtin-command-injection", "Command injection", "command_injection", "critical", r#"{"field":"any","builtin":"command_injection"}"#),
+        (
+            "builtin-sqli",
+            "SQL injection",
+            "sqli",
+            "high",
+            r#"{"field":"any","builtin":"sqli"}"#,
+        ),
+        (
+            "builtin-xss",
+            "Cross-site scripting",
+            "xss",
+            "high",
+            r#"{"field":"any","builtin":"xss"}"#,
+        ),
+        (
+            "builtin-path-traversal",
+            "Path traversal",
+            "path_traversal",
+            "high",
+            r#"{"field":"path","builtin":"path_traversal"}"#,
+        ),
+        (
+            "builtin-command-injection",
+            "Command injection",
+            "command_injection",
+            "critical",
+            r#"{"field":"any","builtin":"command_injection"}"#,
+        ),
     ];
     for (key, name, category, severity, matcher) in rules {
-        if sqlx::query("SELECT 1 FROM waf_rules WHERE builtin_key=?").bind(key).fetch_optional(pool).await?.is_some() { continue; }
+        if sqlx::query("SELECT 1 FROM waf_rules WHERE builtin_key=?")
+            .bind(key)
+            .fetch_optional(pool)
+            .await?
+            .is_some()
+        {
+            continue;
+        }
         let id = generated_id();
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query("INSERT INTO waf_rules(id,name,source,builtin_key,category,severity,enabled,action,matcher_json,created_at,updated_at) VALUES(?,?,?,?,?,?,1,'inherit',?,?,?)")
@@ -356,14 +628,37 @@ pub async fn seed_builtin_waf_rules(pool: &DbPool) -> Result<(), sqlx::Error> {
 
 fn is_duplicate_column(error: &sqlx::Error) -> bool {
     let message = error.to_string().to_ascii_lowercase();
-    message.contains("duplicate column") || message.contains("already exists") || message.contains("1060") || message.contains("42701")
+    message.contains("duplicate column")
+        || message.contains("already exists")
+        || message.contains("1060")
+        || message.contains("42701")
 }
 
-pub async fn set_acme_secret_ref(pool: &DbPool, certificate_id: i64, secret_ref: &str) -> Result<u64, sqlx::Error> {
-    Ok(sqlx::query("UPDATE acme_certificates SET secret_ref=? WHERE certificate_id=?").bind(secret_ref).bind(certificate_id).execute(pool).await?.rows_affected())
+pub async fn set_acme_secret_ref(
+    pool: &DbPool,
+    certificate_id: i64,
+    secret_ref: &str,
+) -> Result<u64, sqlx::Error> {
+    Ok(
+        sqlx::query("UPDATE acme_certificates SET secret_ref=? WHERE certificate_id=?")
+            .bind(secret_ref)
+            .bind(certificate_id)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+    )
 }
-pub async fn acme_secret_ref(pool: &DbPool, certificate_id: i64) -> Result<Option<String>, sqlx::Error> {
-    Ok(sqlx::query("SELECT secret_ref FROM acme_certificates WHERE certificate_id=?").bind(certificate_id).fetch_optional(pool).await?.and_then(|r| r.get::<Option<String>, _>("secret_ref")))
+pub async fn acme_secret_ref(
+    pool: &DbPool,
+    certificate_id: i64,
+) -> Result<Option<String>, sqlx::Error> {
+    Ok(
+        sqlx::query("SELECT secret_ref FROM acme_certificates WHERE certificate_id=?")
+            .bind(certificate_id)
+            .fetch_optional(pool)
+            .await?
+            .and_then(|r| r.get::<Option<String>, _>("secret_ref")),
+    )
 }
 
 fn acme_status_from_row(r: &sqlx::any::AnyRow) -> Result<AcmeStatus, sqlx::Error> {
@@ -492,13 +787,16 @@ pub async fn insert_user(
     }
     let now = chrono::Utc::now().to_rfc3339();
     let id = generated_id();
-    sqlx::query("INSERT INTO users(id,email,password_hash,role,created_at,disabled) VALUES(?,?,?,?,?,0)")
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,role,created_at,disabled) VALUES(?,?,?,?,?,0)",
+    )
     .bind(id)
     .bind(email)
     .bind(hash)
     .bind(role_name)
     .bind(&now)
-    .execute(pool).await?;
+    .execute(pool)
+    .await?;
     Ok(User {
         id,
         email: email.into(),
@@ -520,9 +818,12 @@ pub async fn insert_initial_admin(
     // Lock the single sentinel row. UPDATE obtains a row/write lock on
     // PostgreSQL, MySQL, and SQLite without backend-specific syntax.
     sqlx::query("UPDATE setup_lock SET id=id WHERE id=1")
-        .execute(&mut *conn).await?;
+        .execute(&mut *conn)
+        .await?;
     let count = sqlx::query("SELECT COUNT(*) c FROM users")
-        .fetch_one(&mut *conn).await?.get::<i64, _>("c");
+        .fetch_one(&mut *conn)
+        .await?
+        .get::<i64, _>("c");
     if count != 0 {
         let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
         return Ok(None);
@@ -530,11 +831,18 @@ pub async fn insert_initial_admin(
     let role = "admin";
     let now = chrono::Utc::now().to_rfc3339();
     let id = generated_id();
-    let result = sqlx::query("INSERT INTO users(id,email,password_hash,role,created_at,disabled) VALUES(?,?,?,?,?,0)")
-    .bind(id).bind(email).bind(hash).bind(role).bind(&now)
-    .execute(&mut *conn).await;
+    let result = sqlx::query(
+        "INSERT INTO users(id,email,password_hash,role,created_at,disabled) VALUES(?,?,?,?,?,0)",
+    )
+    .bind(id)
+    .bind(email)
+    .bind(hash)
+    .bind(role)
+    .bind(&now)
+    .execute(&mut *conn)
+    .await;
     match result {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(error) => {
             let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
             return Err(error);
@@ -542,14 +850,14 @@ pub async fn insert_initial_admin(
     };
     sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(Some(User {
-        id, email: email.into(), role: role.into(),
-        created_at: now, disabled: false,
+        id,
+        email: email.into(),
+        role: role.into(),
+        created_at: now,
+        disabled: false,
     }))
 }
-pub async fn find_user(
-    pool: &DbPool,
-    email: &str,
-) -> Result<Option<(User, String)>, sqlx::Error> {
+pub async fn find_user(pool: &DbPool, email: &str) -> Result<Option<(User, String)>, sqlx::Error> {
     let r = sqlx::query("SELECT id,email,password_hash,role,created_at,disabled FROM users WHERE email=? AND disabled=0")
         .bind(email)
         .fetch_optional(pool)
@@ -567,10 +875,7 @@ pub async fn find_user(
         )
     }))
 }
-pub async fn find_user_by_session(
-    pool: &DbPool,
-    hash: &str,
-) -> Result<Option<User>, sqlx::Error> {
+pub async fn find_user_by_session(pool: &DbPool, hash: &str) -> Result<Option<User>, sqlx::Error> {
     let r=sqlx::query("SELECT u.id,u.email,u.role,u.created_at,u.disabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>? AND u.disabled=0").bind(hash).bind(chrono::Utc::now().to_rfc3339()).fetch_optional(pool).await?;
     Ok(r.map(|x| User {
         id: x.get("id"),
@@ -583,15 +888,34 @@ pub async fn find_user_by_session(
 
 pub async fn list_users(pool: &DbPool) -> Result<Vec<User>, sqlx::Error> {
     let rows = sqlx::query("SELECT id,email,role,created_at,disabled FROM users ORDER BY id")
-        .fetch_all(pool).await?;
-    Ok(rows.into_iter().map(|x| User {
-        id: x.get("id"), email: x.get("email"), role: x.get("role"),
-        created_at: x.get("created_at"), disabled: x.get::<i64, _>("disabled") != 0,
-    }).collect())
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|x| User {
+            id: x.get("id"),
+            email: x.get("email"),
+            role: x.get("role"),
+            created_at: x.get("created_at"),
+            disabled: x.get::<i64, _>("disabled") != 0,
+        })
+        .collect())
 }
 
-fn role_detail_from_row(row: &sqlx::any::AnyRow, permissions: Vec<String>, scopes: Vec<RolePermissionScope>) -> RoleDetail {
-    RoleDetail { id: row.get("id"), slug: row.get("slug"), name: row.get("name"), description: row.get("description"), system_managed: row.get::<i64, _>("system_managed") != 0, permissions, scopes }
+fn role_detail_from_row(
+    row: &sqlx::any::AnyRow,
+    permissions: Vec<String>,
+    scopes: Vec<RolePermissionScope>,
+) -> RoleDetail {
+    RoleDetail {
+        id: row.get("id"),
+        slug: row.get("slug"),
+        name: row.get("name"),
+        description: row.get("description"),
+        system_managed: row.get::<i64, _>("system_managed") != 0,
+        permissions,
+        scopes,
+    }
 }
 
 async fn role_detail(pool: &DbPool, row: sqlx::any::AnyRow) -> Result<RoleDetail, sqlx::Error> {
@@ -604,7 +928,10 @@ pub async fn role_permissions(pool: &DbPool, role_id: i64) -> Result<Vec<String>
     sqlx::query_scalar("SELECT p.key FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND rp.scope_type='' AND rp.scope_id=0 ORDER BY p.key").bind(role_id).fetch_all(pool).await
 }
 
-pub async fn role_permission_scopes(pool: &DbPool, role_id: i64) -> Result<Vec<RolePermissionScope>, sqlx::Error> {
+pub async fn role_permission_scopes(
+    pool: &DbPool,
+    role_id: i64,
+) -> Result<Vec<RolePermissionScope>, sqlx::Error> {
     let rows = sqlx::query("SELECT p.key AS permission, rp.scope_id FROM role_permissions rp JOIN permissions p ON p.id=rp.permission_id WHERE rp.role_id=? AND rp.scope_type='proxy_host' ORDER BY p.key,rp.scope_id")
         .bind(role_id).fetch_all(pool).await?;
     let mut scopes: Vec<RolePermissionScope> = Vec::new();
@@ -614,17 +941,28 @@ pub async fn role_permission_scopes(pool: &DbPool, role_id: i64) -> Result<Vec<R
         if let Some(index) = scopes.iter().position(|s| s.permission == permission) {
             scopes[index].proxy_host_ids.push(host_id);
         } else {
-            scopes.push(RolePermissionScope { permission, proxy_host_ids: vec![host_id] });
+            scopes.push(RolePermissionScope {
+                permission,
+                proxy_host_ids: vec![host_id],
+            });
         }
     }
     Ok(scopes)
 }
 
-fn normalize_scopes(scopes: &[RolePermissionScope]) -> Result<Vec<RolePermissionScope>, sqlx::Error> {
+fn normalize_scopes(
+    scopes: &[RolePermissionScope],
+) -> Result<Vec<RolePermissionScope>, sqlx::Error> {
     let mut normalized = Vec::with_capacity(scopes.len());
     for scope in scopes {
-        if !matches!(scope.permission.as_str(), "proxy_hosts.read" | "proxy_hosts.write") || scope.proxy_host_ids.is_empty() {
-            return Err(sqlx::Error::Protocol("invalid role scope permission".into()));
+        if !matches!(
+            scope.permission.as_str(),
+            "proxy_hosts.read" | "proxy_hosts.write"
+        ) || scope.proxy_host_ids.is_empty()
+        {
+            return Err(sqlx::Error::Protocol(
+                "invalid role scope permission".into(),
+            ));
         }
         let mut ids = scope.proxy_host_ids.clone();
         ids.sort_unstable();
@@ -632,22 +970,38 @@ fn normalize_scopes(scopes: &[RolePermissionScope]) -> Result<Vec<RolePermission
         if ids.iter().any(|id| *id <= 0) {
             return Err(sqlx::Error::Protocol("invalid role scope host id".into()));
         }
-        normalized.push(RolePermissionScope { permission: scope.permission.clone(), proxy_host_ids: ids });
+        normalized.push(RolePermissionScope {
+            permission: scope.permission.clone(),
+            proxy_host_ids: ids,
+        });
     }
     normalized.sort_by(|a, b| a.permission.cmp(&b.permission));
-    if normalized.windows(2).any(|pair| pair[0].permission == pair[1].permission) {
-        return Err(sqlx::Error::Protocol("duplicate role scope permission".into()));
+    if normalized
+        .windows(2)
+        .any(|pair| pair[0].permission == pair[1].permission)
+    {
+        return Err(sqlx::Error::Protocol(
+            "duplicate role scope permission".into(),
+        ));
     }
     Ok(normalized)
 }
 
-async fn replace_scopes_tx<'a>(tx: &mut sqlx::Transaction<'a, sqlx::Any>, role_id: i64, scopes: &[RolePermissionScope]) -> Result<(), sqlx::Error> {
+async fn replace_scopes_tx<'a>(
+    tx: &mut sqlx::Transaction<'a, sqlx::Any>,
+    role_id: i64,
+    scopes: &[RolePermissionScope],
+) -> Result<(), sqlx::Error> {
     let scopes = normalize_scopes(scopes)?;
     for scope in &scopes {
         for host_id in &scope.proxy_host_ids {
             let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM proxy_hosts WHERE id=?")
-                .bind(host_id).fetch_optional(&mut **tx).await?;
-            if exists.is_none() { return Err(sqlx::Error::Protocol("unknown proxy host id".into())); }
+                .bind(host_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+            if exists.is_none() {
+                return Err(sqlx::Error::Protocol("unknown proxy host id".into()));
+            }
             sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'proxy_host',? FROM permissions WHERE key=?")
                 .bind(role_id).bind(host_id).bind(&scope.permission).execute(&mut **tx).await?;
         }
@@ -655,52 +1009,129 @@ async fn replace_scopes_tx<'a>(tx: &mut sqlx::Transaction<'a, sqlx::Any>, role_i
     Ok(())
 }
 
-pub async fn replace_role_scopes(pool: &DbPool, role_id: i64, scopes: &[RolePermissionScope]) -> Result<RoleDetail, sqlx::Error> {
+pub async fn replace_role_scopes(
+    pool: &DbPool,
+    role_id: i64,
+    scopes: &[RolePermissionScope],
+) -> Result<RoleDetail, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let row = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(role_id).fetch_optional(&mut *tx).await?.ok_or(sqlx::Error::RowNotFound)?;
-    if row.get::<i64, _>("system_managed") != 0 { return Err(sqlx::Error::Protocol("system-managed role cannot be mutated".into())); }
+    let row = sqlx::query("SELECT system_managed FROM roles WHERE id=?")
+        .bind(role_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+    if row.get::<i64, _>("system_managed") != 0 {
+        return Err(sqlx::Error::Protocol(
+            "system-managed role cannot be mutated".into(),
+        ));
+    }
     normalize_scopes(scopes)?;
-    sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='proxy_host'").bind(role_id).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='proxy_host'")
+        .bind(role_id)
+        .execute(&mut *tx)
+        .await?;
     replace_scopes_tx(&mut tx, role_id, scopes).await?;
     tx.commit().await?;
-    get_role(pool, role_id).await?.ok_or(sqlx::Error::RowNotFound)
+    get_role(pool, role_id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)
 }
 
 pub async fn list_roles(pool: &DbPool) -> Result<Vec<RoleDetail>, sqlx::Error> {
-    let rows = sqlx::query("SELECT id,slug,name,description,system_managed FROM roles ORDER BY id").fetch_all(pool).await?;
+    let rows = sqlx::query("SELECT id,slug,name,description,system_managed FROM roles ORDER BY id")
+        .fetch_all(pool)
+        .await?;
     let mut result = Vec::with_capacity(rows.len());
-    for row in rows { result.push(role_detail(pool, row).await?); }
+    for row in rows {
+        result.push(role_detail(pool, row).await?);
+    }
     Ok(result)
 }
 
 pub async fn role_by_slug(pool: &DbPool, slug: &str) -> Result<Option<RoleDetail>, sqlx::Error> {
-    match sqlx::query("SELECT id,slug,name,description,system_managed FROM roles WHERE slug=?").bind(slug).fetch_optional(pool).await? { Some(row) => Ok(Some(role_detail(pool, row).await?)), None => Ok(None) }
+    match sqlx::query("SELECT id,slug,name,description,system_managed FROM roles WHERE slug=?")
+        .bind(slug)
+        .fetch_optional(pool)
+        .await?
+    {
+        Some(row) => Ok(Some(role_detail(pool, row).await?)),
+        None => Ok(None),
+    }
 }
 
 pub async fn get_role(pool: &DbPool, id: i64) -> Result<Option<RoleDetail>, sqlx::Error> {
-    match sqlx::query("SELECT id,slug,name,description,system_managed FROM roles WHERE id=?").bind(id).fetch_optional(pool).await? { Some(row) => Ok(Some(role_detail(pool, row).await?)), None => Ok(None) }
+    match sqlx::query("SELECT id,slug,name,description,system_managed FROM roles WHERE id=?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+    {
+        Some(row) => Ok(Some(role_detail(pool, row).await?)),
+        None => Ok(None),
+    }
 }
 
-pub async fn insert_role(pool: &DbPool, slug: &str, name: &str, description: &str) -> Result<RoleDetail, sqlx::Error> {
+pub async fn insert_role(
+    pool: &DbPool,
+    slug: &str,
+    name: &str,
+    description: &str,
+) -> Result<RoleDetail, sqlx::Error> {
     let now = chrono::Utc::now().to_rfc3339();
     let id = generated_id();
-    sqlx::query("INSERT INTO roles(id,slug,name,description,created_at,updated_at) VALUES(?,?,?,?,?,?)").bind(id).bind(slug).bind(name).bind(description).bind(&now).bind(&now).execute(pool).await?;
+    sqlx::query(
+        "INSERT INTO roles(id,slug,name,description,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+    )
+    .bind(id)
+    .bind(slug)
+    .bind(name)
+    .bind(description)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
     get_role(pool, id).await?.ok_or(sqlx::Error::RowNotFound)
 }
 
 /// Atomically creates a role and installs its global permissions.
-pub async fn insert_role_with_permissions(pool: &DbPool, slug: &str, name: &str, description: &str, keys: &[&str]) -> Result<RoleDetail, sqlx::Error> {
+pub async fn insert_role_with_permissions(
+    pool: &DbPool,
+    slug: &str,
+    name: &str,
+    description: &str,
+    keys: &[&str],
+) -> Result<RoleDetail, sqlx::Error> {
     insert_role_with_permissions_and_scopes(pool, slug, name, description, keys, &[]).await
 }
 
-pub async fn insert_role_with_permissions_and_scopes(pool: &DbPool, slug: &str, name: &str, description: &str, keys: &[&str], scopes: &[RolePermissionScope]) -> Result<RoleDetail, sqlx::Error> {
+pub async fn insert_role_with_permissions_and_scopes(
+    pool: &DbPool,
+    slug: &str,
+    name: &str,
+    description: &str,
+    keys: &[&str],
+    scopes: &[RolePermissionScope],
+) -> Result<RoleDetail, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let now = chrono::Utc::now().to_rfc3339();
     let id = generated_id();
-    sqlx::query("INSERT INTO roles(id,slug,name,description,created_at,updated_at) VALUES(?,?,?,?,?,?)")
-        .bind(id).bind(slug).bind(name).bind(description).bind(&now).bind(&now).execute(&mut *tx).await?;
+    sqlx::query(
+        "INSERT INTO roles(id,slug,name,description,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+    )
+    .bind(id)
+    .bind(slug)
+    .bind(name)
+    .bind(description)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
     for key in keys {
-        if sqlx::query("SELECT 1 FROM permissions WHERE key=?").bind(key).fetch_optional(&mut *tx).await?.is_none() {
+        if sqlx::query("SELECT 1 FROM permissions WHERE key=?")
+            .bind(key)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_none()
+        {
             return Err(sqlx::Error::Protocol("invalid permission".into()));
         }
         sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'',0 FROM permissions WHERE key=?")
@@ -712,54 +1143,133 @@ pub async fn insert_role_with_permissions_and_scopes(pool: &DbPool, slug: &str, 
 }
 
 /// Atomically updates role metadata and replaces its global permissions.
-pub async fn update_role_with_permissions(pool: &DbPool, id: i64, name: Option<&str>, description: Option<&str>, keys: Option<&[&str]>) -> Result<Option<RoleDetail>, sqlx::Error> {
+pub async fn update_role_with_permissions(
+    pool: &DbPool,
+    id: i64,
+    name: Option<&str>,
+    description: Option<&str>,
+    keys: Option<&[&str]>,
+) -> Result<Option<RoleDetail>, sqlx::Error> {
     update_role_with_permissions_and_scopes(pool, id, name, description, keys, None).await
 }
 
-pub async fn update_role_with_permissions_and_scopes(pool: &DbPool, id: i64, name: Option<&str>, description: Option<&str>, keys: Option<&[&str]>, scopes: Option<&[RolePermissionScope]>) -> Result<Option<RoleDetail>, sqlx::Error> {
+pub async fn update_role_with_permissions_and_scopes(
+    pool: &DbPool,
+    id: i64,
+    name: Option<&str>,
+    description: Option<&str>,
+    keys: Option<&[&str]>,
+    scopes: Option<&[RolePermissionScope]>,
+) -> Result<Option<RoleDetail>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(id).fetch_optional(&mut *tx).await?;
-    let Some(current) = current else { tx.rollback().await?; return Ok(None); };
-    if current.get::<i64, _>("system_managed") != 0 { tx.rollback().await?; return Err(sqlx::Error::Protocol("system-managed role cannot be mutated".into())); }
+    let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(current) = current else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    if current.get::<i64, _>("system_managed") != 0 {
+        tx.rollback().await?;
+        return Err(sqlx::Error::Protocol(
+            "system-managed role cannot be mutated".into(),
+        ));
+    }
     sqlx::query("UPDATE roles SET name=COALESCE(?,name),description=COALESCE(?,description),updated_at=? WHERE id=?")
         .bind(name).bind(description).bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(&mut *tx).await?;
     if let Some(keys) = keys {
         for key in keys {
-            if sqlx::query("SELECT 1 FROM permissions WHERE key=?").bind(key).fetch_optional(&mut *tx).await?.is_none() {
+            if sqlx::query("SELECT 1 FROM permissions WHERE key=?")
+                .bind(key)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_none()
+            {
                 return Err(sqlx::Error::Protocol("invalid permission".into()));
             }
         }
-        sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='' AND scope_id=0").bind(id).execute(&mut *tx).await?;
+        sqlx::query(
+            "DELETE FROM role_permissions WHERE role_id=? AND scope_type='' AND scope_id=0",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
         for key in keys {
             sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'',0 FROM permissions WHERE key=?").bind(id).bind(key).execute(&mut *tx).await?;
         }
     }
     if let Some(scopes) = scopes {
         normalize_scopes(scopes)?;
-        sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='proxy_host'").bind(id).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='proxy_host'")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         replace_scopes_tx(&mut tx, id, scopes).await?;
     }
     tx.commit().await?;
     get_role(pool, id).await
 }
 
-pub async fn update_role(pool: &DbPool, id: i64, name: Option<&str>, description: Option<&str>) -> Result<Option<RoleDetail>, sqlx::Error> {
-    let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(id).fetch_optional(pool).await?;
-    let Some(current) = current else { return Ok(None); };
-    if current.get::<i64, _>("system_managed") != 0 { return Err(sqlx::Error::Protocol("system-managed role cannot be mutated".into())); }
+pub async fn update_role(
+    pool: &DbPool,
+    id: i64,
+    name: Option<&str>,
+    description: Option<&str>,
+) -> Result<Option<RoleDetail>, sqlx::Error> {
+    let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    let Some(current) = current else {
+        return Ok(None);
+    };
+    if current.get::<i64, _>("system_managed") != 0 {
+        return Err(sqlx::Error::Protocol(
+            "system-managed role cannot be mutated".into(),
+        ));
+    }
     sqlx::query("UPDATE roles SET name=COALESCE(?,name),description=COALESCE(?,description),updated_at=? WHERE id=?").bind(name).bind(description).bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(pool).await?;
     get_role(pool, id).await
 }
 
-pub async fn set_role_permissions(pool: &DbPool, role_id: i64, keys: &[&str]) -> Result<RoleDetail, sqlx::Error> {
-    let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?").bind(role_id).fetch_optional(pool).await?.ok_or(sqlx::Error::RowNotFound)?;
-    if current.get::<i64, _>("system_managed") != 0 { return Err(sqlx::Error::Protocol("system-managed role cannot be mutated".into())); }
+pub async fn set_role_permissions(
+    pool: &DbPool,
+    role_id: i64,
+    keys: &[&str],
+) -> Result<RoleDetail, sqlx::Error> {
+    let current = sqlx::query("SELECT system_managed FROM roles WHERE id=?")
+        .bind(role_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+    if current.get::<i64, _>("system_managed") != 0 {
+        return Err(sqlx::Error::Protocol(
+            "system-managed role cannot be mutated".into(),
+        ));
+    }
     let mut tx = pool.begin().await?;
-    for key in keys { if sqlx::query("SELECT 1 FROM permissions WHERE key=?").bind(key).fetch_optional(&mut *tx).await?.is_none() { return Err(sqlx::Error::Protocol(format!("invalid permission: {key}"))); } }
-    sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='' AND scope_id=0").bind(role_id).execute(&mut *tx).await?;
-    for key in keys { sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'',0 FROM permissions WHERE key=?").bind(role_id).bind(key).execute(&mut *tx).await?; }
+    for key in keys {
+        if sqlx::query("SELECT 1 FROM permissions WHERE key=?")
+            .bind(key)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_none()
+        {
+            return Err(sqlx::Error::Protocol(format!("invalid permission: {key}")));
+        }
+    }
+    sqlx::query("DELETE FROM role_permissions WHERE role_id=? AND scope_type='' AND scope_id=0")
+        .bind(role_id)
+        .execute(&mut *tx)
+        .await?;
+    for key in keys {
+        sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,id,'',0 FROM permissions WHERE key=?").bind(role_id).bind(key).execute(&mut *tx).await?;
+    }
     tx.commit().await?;
-    get_role(pool, role_id).await?.ok_or(sqlx::Error::RowNotFound)
+    get_role(pool, role_id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)
 }
 
 pub async fn delete_role(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
@@ -786,7 +1296,9 @@ pub async fn delete_role(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
     };
     if row.get::<i64, _>("system_managed") != 0 {
         let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-        return Err(sqlx::Error::Protocol("system-managed role cannot be deleted".into()));
+        return Err(sqlx::Error::Protocol(
+            "system-managed role cannot be deleted".into(),
+        ));
     }
     let slug: String = row.get("slug");
     let assigned = match sqlx::query("SELECT 1 FROM users WHERE role=? LIMIT 1")
@@ -822,7 +1334,12 @@ pub async fn delete_role(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
     Ok(changed)
 }
 
-pub async fn user_has_permission(pool: &DbPool, user_id: i64, key: &str, scope: Option<(&str, i64)>) -> Result<bool, sqlx::Error> {
+pub async fn user_has_permission(
+    pool: &DbPool,
+    user_id: i64,
+    key: &str,
+    scope: Option<(&str, i64)>,
+) -> Result<bool, sqlx::Error> {
     let allowed = match scope {
         None => sqlx::query(
             "SELECT 1 FROM users u JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.id=? AND u.disabled=0 AND p.key=? AND rp.scope_type='' AND rp.scope_id=0 LIMIT 1",
@@ -848,7 +1365,11 @@ pub async fn user_has_permission(pool: &DbPool, user_id: i64, key: &str, scope: 
     Ok(allowed)
 }
 
-pub async fn user_has_scoped_permission(pool: &DbPool, user_id: i64, key: &str) -> Result<bool, sqlx::Error> {
+pub async fn user_has_scoped_permission(
+    pool: &DbPool,
+    user_id: i64,
+    key: &str,
+) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query("SELECT 1 FROM users u JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.id=? AND u.disabled=0 AND p.key=? AND rp.scope_type='proxy_host' AND rp.scope_id IS NOT NULL LIMIT 1")
         .bind(user_id).bind(key).fetch_optional(pool).await?.is_some())
 }
@@ -860,9 +1381,18 @@ enum AuditFilter {
 
 fn sensitive_audit_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase().replace(['-', ' '], "_");
-    ["password", "token", "secret", "private_key", "privatekey", "credential", "request_body", "requestbody"]
-        .iter()
-        .any(|needle| key.contains(needle))
+    [
+        "password",
+        "token",
+        "secret",
+        "private_key",
+        "privatekey",
+        "credential",
+        "request_body",
+        "requestbody",
+    ]
+    .iter()
+    .any(|needle| key.contains(needle))
 }
 
 fn redact_json(value: &mut serde_json::Value) {
@@ -892,7 +1422,16 @@ pub fn sanitize_audit_details(details: &str) -> String {
     let mut output = details.to_owned();
     let lower = output.to_ascii_lowercase();
     let mut replacements = Vec::new();
-    for key in ["password", "token", "secret", "private_key", "private-key", "credential", "request_body", "request-body"] {
+    for key in [
+        "password",
+        "token",
+        "secret",
+        "private_key",
+        "private-key",
+        "credential",
+        "request_body",
+        "request-body",
+    ] {
         let mut start = 0;
         while let Some(relative) = lower[start..].find(key) {
             let key_start = start + relative;
@@ -907,7 +1446,9 @@ pub fn sanitize_audit_details(details: &str) -> String {
                 replacements.push((value_start, value_end));
             }
             start = after_key;
-            if start >= lower.len() { break; }
+            if start >= lower.len() {
+                break;
+            }
         }
     }
     // A value may itself contain another sensitive key (for example
@@ -968,7 +1509,9 @@ pub async fn list_audit_logs(
     query: &AuditLogQuery,
 ) -> Result<AuditLogPage, sqlx::Error> {
     let (where_clause, filters) = audit_where(query);
-    let count_sql = format!("SELECT COUNT(*) AS c FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id{where_clause}");
+    let count_sql = format!(
+        "SELECT COUNT(*) AS c FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id{where_clause}"
+    );
     let mut count = sqlx::query(&count_sql);
     for filter in &filters {
         count = match filter {
@@ -1006,12 +1549,21 @@ pub async fn list_audit_logs(
             created_at: row.get("created_at"),
         })
         .collect();
-    Ok(AuditLogPage { items, page, page_size, total })
+    Ok(AuditLogPage {
+        items,
+        page,
+        page_size,
+        total,
+    })
 }
 
 pub async fn count_active_admins(pool: &DbPool) -> Result<i64, sqlx::Error> {
-    Ok(sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0")
-        .fetch_one(pool).await?.get("c"))
+    Ok(
+        sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0")
+            .fetch_one(pool)
+            .await?
+            .get("c"),
+    )
 }
 
 /// Atomically apply a user's role and disabled state.  The last-active-admin
@@ -1037,7 +1589,9 @@ pub async fn update_user(
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN").execute(&mut *conn).await?;
     let current = sqlx::query("SELECT id,email,role,created_at,disabled FROM users WHERE id=?")
-        .bind(id).fetch_optional(&mut *conn).await?;
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
     let Some(current) = current else {
         let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
         return Ok(None);
@@ -1046,29 +1600,41 @@ pub async fn update_user(
     let current_disabled: bool = current.get::<i64, _>("disabled") != 0;
     let next_role = role.unwrap_or(current_role.as_str());
     let next_disabled = disabled.unwrap_or(current_disabled);
-    if current_role == "admin" && !current_disabled
-        && (next_role != "admin" || next_disabled)
-    {
-        let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0")
-            .fetch_one(&mut *conn).await?.get("c");
+    if current_role == "admin" && !current_disabled && (next_role != "admin" || next_disabled) {
+        let admins: i64 =
+            sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0")
+                .fetch_one(&mut *conn)
+                .await?
+                .get("c");
         if admins <= 1 {
             let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
             return Err(last_admin_error());
         }
     }
     sqlx::query("UPDATE users SET role=?,disabled=? WHERE id=?")
-        .bind(next_role).bind(next_disabled as i64).bind(id)
-        .execute(&mut *conn).await?;
+        .bind(next_role)
+        .bind(next_disabled as i64)
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
     if next_disabled && !current_disabled {
         sqlx::query("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL")
-            .bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(&mut *conn).await?;
+            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
     }
     let updated = sqlx::query("SELECT id,email,role,created_at,disabled FROM users WHERE id=?")
-        .bind(id).fetch_one(&mut *conn).await?;
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await?;
     sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(Some(User {
-        id: updated.get("id"), email: updated.get("email"), role: updated.get("role"),
-        created_at: updated.get("created_at"), disabled: updated.get::<i64, _>("disabled") != 0,
+        id: updated.get("id"),
+        email: updated.get("email"),
+        role: updated.get("role"),
+        created_at: updated.get("created_at"),
+        disabled: updated.get::<i64, _>("disabled") != 0,
     }))
 }
 
@@ -1088,44 +1654,80 @@ pub async fn update_user_role(pool: &DbPool, id: i64, role: &str) -> Result<u64,
     }
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN").execute(&mut *conn).await?;
-    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *conn).await?;
+    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
     if let Some(row) = current {
-        let was_admin = row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0;
+        let was_admin =
+            row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0;
         if was_admin && role != "admin" {
-            let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *conn).await?.get("c");
+            let admins: i64 =
+                sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0")
+                    .fetch_one(&mut *conn)
+                    .await?
+                    .get("c");
             if admins <= 1 {
                 let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
                 return Err(last_admin_error());
             }
         }
     }
-    let changed = sqlx::query("UPDATE users SET role=? WHERE id=?").bind(role).bind(id).execute(&mut *conn).await?.rows_affected();
+    let changed = sqlx::query("UPDATE users SET role=? WHERE id=?")
+        .bind(role)
+        .bind(id)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
     sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(changed)
 }
 
 pub async fn revoke_user_sessions(pool: &DbPool, user_id: i64) -> Result<u64, sqlx::Error> {
-    Ok(sqlx::query("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL")
-        .bind(chrono::Utc::now().to_rfc3339()).bind(user_id).execute(pool).await?.rows_affected())
+    Ok(
+        sqlx::query("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL")
+            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(user_id)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+    )
 }
 
 pub async fn set_user_disabled(pool: &DbPool, id: i64, disabled: bool) -> Result<u64, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN").execute(&mut *conn).await?;
-    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *conn).await?;
+    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
     if let Some(row) = current {
-        let was_active_admin = row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0;
+        let was_active_admin =
+            row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0;
         if disabled && was_active_admin {
-            let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *conn).await?.get("c");
+            let admins: i64 =
+                sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0")
+                    .fetch_one(&mut *conn)
+                    .await?
+                    .get("c");
             if admins <= 1 {
                 let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
                 return Err(last_admin_error());
             }
         }
     }
-    let changed = sqlx::query("UPDATE users SET disabled=? WHERE id=?").bind(disabled as i64).bind(id).execute(&mut *conn).await?.rows_affected();
+    let changed = sqlx::query("UPDATE users SET disabled=? WHERE id=?")
+        .bind(disabled as i64)
+        .bind(id)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
     if disabled && changed > 0 {
-        sqlx::query("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL").bind(chrono::Utc::now().to_rfc3339()).bind(id).execute(&mut *conn).await?;
+        sqlx::query("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL")
+            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
     }
     sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(changed)
@@ -1134,18 +1736,32 @@ pub async fn set_user_disabled(pool: &DbPool, id: i64, disabled: bool) -> Result
 pub async fn delete_user(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN").execute(&mut *conn).await?;
-    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?").bind(id).fetch_optional(&mut *conn).await?;
+    let current = sqlx::query("SELECT role,disabled FROM users WHERE id=?")
+        .bind(id)
+        .fetch_optional(&mut *conn)
+        .await?;
     if let Some(row) = current {
         if row.get::<String, _>("role") == "admin" && row.get::<i64, _>("disabled") == 0 {
-            let admins: i64 = sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0").fetch_one(&mut *conn).await?.get("c");
+            let admins: i64 =
+                sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0")
+                    .fetch_one(&mut *conn)
+                    .await?
+                    .get("c");
             if admins <= 1 {
                 let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
                 return Err(last_admin_error());
             }
         }
     }
-    sqlx::query("DELETE FROM sessions WHERE user_id=?").bind(id).execute(&mut *conn).await?;
-    let changed = sqlx::query("DELETE FROM users WHERE id=?").bind(id).execute(&mut *conn).await?.rows_affected();
+    sqlx::query("DELETE FROM sessions WHERE user_id=?")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+    let changed = sqlx::query("DELETE FROM users WHERE id=?")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
     sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(changed)
 }
@@ -1179,19 +1795,22 @@ pub async fn list_hosts(pool: &DbPool) -> Result<Vec<ProxyHost>, sqlx::Error> {
 
 fn proxy_host_from_row(x: sqlx::any::AnyRow) -> ProxyHost {
     ProxyHost {
-            id: x.get("id"),
-            name: x.get("name"),
-            domain: x.get("domain"),
-            upstream_host: x.get("upstream_host"),
-            upstream_port: x.get::<i64, _>("upstream_port") as u16,
-            tls_mode: x.get("tls_mode"),
-            certificate_id: x.get("certificate_id"),
-            enabled: x.get::<i64, _>("enabled") != 0,
+        id: x.get("id"),
+        name: x.get("name"),
+        domain: x.get("domain"),
+        upstream_host: x.get("upstream_host"),
+        upstream_port: x.get::<i64, _>("upstream_port") as u16,
+        tls_mode: x.get("tls_mode"),
+        certificate_id: x.get("certificate_id"),
+        enabled: x.get::<i64, _>("enabled") != 0,
     }
 }
 
 /// Lists only hosts visible through a user's global or per-host read grants.
-pub async fn list_hosts_for_user(pool: &DbPool, user_id: i64) -> Result<Vec<ProxyHost>, sqlx::Error> {
+pub async fn list_hosts_for_user(
+    pool: &DbPool,
+    user_id: i64,
+) -> Result<Vec<ProxyHost>, sqlx::Error> {
     let rows = sqlx::query("SELECT DISTINCT h.id,h.name,h.domain,h.upstream_host,h.upstream_port,h.tls_mode,h.certificate_id,h.enabled FROM proxy_hosts h JOIN users u ON u.id=? JOIN roles r ON r.slug=u.role JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE u.disabled=0 AND p.key='proxy_hosts.read' AND ((rp.scope_type='' AND rp.scope_id=0) OR (rp.scope_type='proxy_host' AND rp.scope_id=h.id)) ORDER BY h.id")
         .bind(user_id).fetch_all(pool).await?;
     Ok(rows.into_iter().map(proxy_host_from_row).collect())
@@ -1220,13 +1839,22 @@ pub async fn delete_host_and_scopes(pool: &DbPool, id: i64) -> Result<u64, sqlx:
     sqlx::query("BEGIN").execute(&mut *conn).await?;
     let result = async {
         let changed = sqlx::query("DELETE FROM proxy_hosts WHERE id=?")
-            .bind(id).execute(&mut *conn).await?.rows_affected();
+            .bind(id)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected();
         sqlx::query("DELETE FROM role_permissions WHERE scope_type='proxy_host' AND scope_id=?")
-            .bind(id).execute(&mut *conn).await?;
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
         Ok::<u64, sqlx::Error>(changed)
-    }.await;
+    }
+    .await;
     match result {
-        Ok(changed) => { sqlx::query("COMMIT").execute(&mut *conn).await?; Ok(changed) }
+        Ok(changed) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(changed)
+        }
         Err(error) => {
             if let Err(rollback_error) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
                 eprintln!("proxy host deletion rollback failed: {rollback_error}");
@@ -1236,13 +1864,29 @@ pub async fn delete_host_and_scopes(pool: &DbPool, id: i64) -> Result<u64, sqlx:
     }
 }
 
-pub async fn host_scope_rows(pool: &DbPool, id: i64) -> Result<Vec<(i64, i64, String)>, sqlx::Error> {
+pub async fn host_scope_rows(
+    pool: &DbPool,
+    id: i64,
+) -> Result<Vec<(i64, i64, String)>, sqlx::Error> {
     let rows = sqlx::query("SELECT role_id,permission_id,scope_type FROM role_permissions WHERE scope_type='proxy_host' AND scope_id=?")
         .bind(id).fetch_all(pool).await?;
-    Ok(rows.into_iter().map(|row| (row.get("role_id"), row.get("permission_id"), row.get("scope_type"))).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("role_id"),
+                row.get("permission_id"),
+                row.get("scope_type"),
+            )
+        })
+        .collect())
 }
 
-pub async fn restore_host_scopes(pool: &DbPool, id: i64, rows: &[(i64, i64, String)]) -> Result<(), sqlx::Error> {
+pub async fn restore_host_scopes(
+    pool: &DbPool,
+    id: i64,
+    rows: &[(i64, i64, String)],
+) -> Result<(), sqlx::Error> {
     for (role_id, permission_id, scope_type) in rows {
         sqlx::query("INSERT INTO role_permissions(role_id,permission_id,scope_type,scope_id) SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM role_permissions WHERE role_id=? AND permission_id=? AND scope_type=? AND scope_id=?)")
             .bind(role_id).bind(permission_id).bind(scope_type).bind(id)
@@ -1339,10 +1983,7 @@ pub async fn active_certificate_id(pool: &DbPool) -> Result<Option<i64>, sqlx::E
 }
 
 /// Set exactly one active certificate (or none), in one transaction.
-pub async fn set_active_certificate(
-    pool: &DbPool,
-    id: Option<i64>,
-) -> Result<u64, sqlx::Error> {
+pub async fn set_active_certificate(pool: &DbPool, id: Option<i64>) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query("UPDATE certificates SET active=0")
         .execute(&mut *tx)
@@ -1364,7 +2005,10 @@ pub async fn activate_certificate(pool: &DbPool, id: i64) -> Result<u64, sqlx::E
     set_active_certificate(pool, Some(id)).await
 }
 
-pub async fn get_tuning_policy(pool: &DbPool, host_id: i64) -> Result<crate::adaptive_tuning::TuningPolicy, sqlx::Error> {
+pub async fn get_tuning_policy(
+    pool: &DbPool,
+    host_id: i64,
+) -> Result<crate::adaptive_tuning::TuningPolicy, sqlx::Error> {
     let row = sqlx::query("SELECT mode, max_delta_percent, cooldown_seconds, min_confidence FROM adaptive_tuning_policies WHERE host_id=?")
         .bind(host_id)
         .fetch_optional(pool)
@@ -1388,7 +2032,11 @@ pub async fn get_tuning_policy(pool: &DbPool, host_id: i64) -> Result<crate::ada
     }
 }
 
-pub async fn update_tuning_policy(pool: &DbPool, host_id: i64, policy: &crate::adaptive_tuning::TuningPolicy) -> Result<(), sqlx::Error> {
+pub async fn update_tuning_policy(
+    pool: &DbPool,
+    host_id: i64,
+    policy: &crate::adaptive_tuning::TuningPolicy,
+) -> Result<(), sqlx::Error> {
     let now = chrono::Utc::now().to_rfc3339();
     let mode_str = match policy.mode {
         crate::adaptive_tuning::TuningMode::Monitor => "monitor",
@@ -1405,8 +2053,10 @@ pub async fn update_tuning_policy(pool: &DbPool, host_id: i64, policy: &crate::a
 }
 
 pub async fn get_emergency_disabled(pool: &DbPool) -> Result<bool, sqlx::Error> {
-    let val: Option<i64> = sqlx::query_scalar("SELECT emergency_disabled FROM adaptive_tuning_global WHERE id=1")
-        .fetch_optional(pool).await?;
+    let val: Option<i64> =
+        sqlx::query_scalar("SELECT emergency_disabled FROM adaptive_tuning_global WHERE id=1")
+            .fetch_optional(pool)
+            .await?;
     Ok(val.unwrap_or(0) == 1)
 }
 
@@ -1419,7 +2069,9 @@ pub async fn set_emergency_disabled(pool: &DbPool, disabled: bool) -> Result<(),
     Ok(())
 }
 
-pub async fn list_tuning_recommendations(pool: &DbPool) -> Result<Vec<crate::adaptive_tuning::PolicyRecommendation>, sqlx::Error> {
+pub async fn list_tuning_recommendations(
+    pool: &DbPool,
+) -> Result<Vec<crate::adaptive_tuning::PolicyRecommendation>, sqlx::Error> {
     let rows = sqlx::query("SELECT id, host_id, patch_json, confidence, reason, created_at, applied, applied_at, previous_config_json FROM adaptive_tuning_recommendations ORDER BY id DESC LIMIT 100")
         .fetch_all(pool).await?;
 
@@ -1433,7 +2085,9 @@ pub async fn list_tuning_recommendations(pool: &DbPool) -> Result<Vec<crate::ada
             .unwrap_or_else(|_| chrono::Utc::now());
 
         let applied_at = row.get::<Option<String>, _>("applied_at").and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&chrono::Utc)).ok()
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .ok()
         });
 
         list.push(crate::adaptive_tuning::PolicyRecommendation {
@@ -1451,7 +2105,10 @@ pub async fn list_tuning_recommendations(pool: &DbPool) -> Result<Vec<crate::ada
     Ok(list)
 }
 
-pub async fn get_tuning_recommendation(pool: &DbPool, id: i64) -> Result<Option<crate::adaptive_tuning::PolicyRecommendation>, sqlx::Error> {
+pub async fn get_tuning_recommendation(
+    pool: &DbPool,
+    id: i64,
+) -> Result<Option<crate::adaptive_tuning::PolicyRecommendation>, sqlx::Error> {
     let row = sqlx::query("SELECT id, host_id, patch_json, confidence, reason, created_at, applied, applied_at, previous_config_json FROM adaptive_tuning_recommendations WHERE id=?")
         .bind(id)
         .fetch_optional(pool).await?;
@@ -1465,7 +2122,9 @@ pub async fn get_tuning_recommendation(pool: &DbPool, id: i64) -> Result<Option<
             .unwrap_or_else(|_| chrono::Utc::now());
 
         let applied_at = row.get::<Option<String>, _>("applied_at").and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&chrono::Utc)).ok()
+            chrono::DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .ok()
         });
 
         Ok(Some(crate::adaptive_tuning::PolicyRecommendation {
@@ -1484,7 +2143,10 @@ pub async fn get_tuning_recommendation(pool: &DbPool, id: i64) -> Result<Option<
     }
 }
 
-pub async fn insert_tuning_recommendation(pool: &DbPool, rec: &crate::adaptive_tuning::PolicyRecommendation) -> Result<i64, sqlx::Error> {
+pub async fn insert_tuning_recommendation(
+    pool: &DbPool,
+    rec: &crate::adaptive_tuning::PolicyRecommendation,
+) -> Result<i64, sqlx::Error> {
     let id = if rec.id > 0 { rec.id } else { generated_id() };
     let patch_json = serde_json::to_string(&rec.patch).unwrap_or_default();
     sqlx::query("INSERT INTO adaptive_tuning_recommendations (id, host_id, patch_json, confidence, reason, created_at, applied) VALUES (?, ?, ?, ?, ?, ?, ?)")
@@ -1526,12 +2188,17 @@ pub async fn insert_tuning_recommendation_dedup(
     Ok(Some(id))
 }
 
-pub async fn get_host_rate_limit_config(pool: &DbPool, host_id: i64) -> Result<super::models::RateLimitConfig, sqlx::Error> {
+pub async fn get_host_rate_limit_config(
+    pool: &DbPool,
+    host_id: i64,
+) -> Result<super::models::RateLimitConfig, sqlx::Error> {
     let global = get_rate_limit_config(pool).await?;
-    let row = sqlx::query("SELECT capacity, refill_per_second FROM host_rate_limit_configs WHERE host_id=?")
-        .bind(host_id)
-        .fetch_optional(pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT capacity, refill_per_second FROM host_rate_limit_configs WHERE host_id=?",
+    )
+    .bind(host_id)
+    .fetch_optional(pool)
+    .await?;
 
     if let Some(row) = row {
         let capacity: i64 = row.get("capacity");
@@ -1549,11 +2216,14 @@ pub async fn get_host_rate_limit_config(pool: &DbPool, host_id: i64) -> Result<s
     }
 }
 
-pub async fn list_host_rate_limit_configs(pool: &DbPool) -> Result<Vec<(i64, super::models::RateLimitConfig)>, sqlx::Error> {
+pub async fn list_host_rate_limit_configs(
+    pool: &DbPool,
+) -> Result<Vec<(i64, super::models::RateLimitConfig)>, sqlx::Error> {
     let global = get_rate_limit_config(pool).await?;
-    let rows = sqlx::query("SELECT host_id, capacity, refill_per_second FROM host_rate_limit_configs")
-        .fetch_all(pool)
-        .await?;
+    let rows =
+        sqlx::query("SELECT host_id, capacity, refill_per_second FROM host_rate_limit_configs")
+            .fetch_all(pool)
+            .await?;
 
     let mut list = Vec::new();
     for row in rows {
@@ -1581,10 +2251,12 @@ pub async fn apply_tuning_recommendation_tx(
 ) -> Result<Option<(i64, super::models::RateLimitConfig)>, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let row = sqlx::query("SELECT id, host_id, patch_json, applied FROM adaptive_tuning_recommendations WHERE id=?")
-        .bind(rec_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let row = sqlx::query(
+        "SELECT id, host_id, patch_json, applied FROM adaptive_tuning_recommendations WHERE id=?",
+    )
+    .bind(rec_id)
+    .fetch_optional(&mut *tx)
+    .await?;
 
     let Some(row) = row else {
         return Ok(None);
@@ -1597,23 +2269,36 @@ pub async fn apply_tuning_recommendation_tx(
 
     let host_id: i64 = row.get("host_id");
     let patch_json: String = row.get("patch_json");
-    let patch: crate::adaptive_tuning::PolicyPatch = serde_json::from_str(&patch_json).unwrap_or_default();
+    let patch: crate::adaptive_tuning::PolicyPatch =
+        serde_json::from_str(&patch_json).unwrap_or_default();
 
     let global_row = sqlx::query("SELECT enabled, action, capacity, refill_per_second, key_scope, updated_at FROM rate_limit_config WHERE id=1")
         .fetch_one(&mut *tx)
         .await?;
 
-    let host_override = sqlx::query("SELECT capacity, refill_per_second FROM host_rate_limit_configs WHERE host_id=?")
-        .bind(host_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let host_override = sqlx::query(
+        "SELECT capacity, refill_per_second FROM host_rate_limit_configs WHERE host_id=?",
+    )
+    .bind(host_id)
+    .fetch_optional(&mut *tx)
+    .await?;
 
-    let current_cap = host_override.as_ref().map(|r| r.get::<i64, _>("capacity") as u32).unwrap_or_else(|| global_row.get::<i64, _>("capacity") as u32);
-    let current_refill = host_override.as_ref().map(|r| r.get::<f64, _>("refill_per_second")).unwrap_or_else(|| global_row.get::<f64, _>("refill_per_second"));
+    let current_cap = host_override
+        .as_ref()
+        .map(|r| r.get::<i64, _>("capacity") as u32)
+        .unwrap_or_else(|| global_row.get::<i64, _>("capacity") as u32);
+    let current_refill = host_override
+        .as_ref()
+        .map(|r| r.get::<f64, _>("refill_per_second"))
+        .unwrap_or_else(|| global_row.get::<f64, _>("refill_per_second"));
 
     let mut current_rl = super::models::RateLimitConfig {
         enabled: global_row.get::<i64, _>("enabled") != 0,
-        action: if global_row.get::<String, _>("action") == "block" { crate::rate_limit::RateLimitAction::Block } else { crate::rate_limit::RateLimitAction::Monitor },
+        action: if global_row.get::<String, _>("action") == "block" {
+            crate::rate_limit::RateLimitAction::Block
+        } else {
+            crate::rate_limit::RateLimitAction::Monitor
+        },
         capacity: current_cap,
         refill_per_second: current_refill,
         key_scope: crate::rate_limit::RateLimitKeyScope::ProxyHostIp,
@@ -1672,7 +2357,8 @@ pub async fn rollback_tuning_recommendation_tx(
         return Ok(None);
     };
 
-    let restored_rl: super::models::RateLimitConfig = serde_json::from_str(&prev_json).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let restored_rl: super::models::RateLimitConfig =
+        serde_json::from_str(&prev_json).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query("INSERT INTO host_rate_limit_configs(host_id, capacity, refill_per_second, updated_at) VALUES(?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET capacity=?, refill_per_second=?, updated_at=?")
@@ -1682,10 +2368,10 @@ pub async fn rollback_tuning_recommendation_tx(
 
     sqlx::query("UPDATE adaptive_tuning_recommendations SET applied=0, applied_at=NULL WHERE id=?")
         .bind(rec_id)
-        .execute(&mut *tx).await?;
+        .execute(&mut *tx)
+        .await?;
 
     tx.commit().await?;
 
     Ok(Some((host_id, restored_rl)))
 }
-

@@ -30,7 +30,10 @@ impl TuningPolicy {
         if !(10..=86400).contains(&self.cooldown_seconds) {
             return Err("cooldown_seconds must be between 10 and 86400");
         }
-        if self.min_confidence.is_nan() || self.min_confidence.is_infinite() || !(0.1..=1.0).contains(&self.min_confidence) {
+        if self.min_confidence.is_nan()
+            || self.min_confidence.is_infinite()
+            || !(0.1..=1.0).contains(&self.min_confidence)
+        {
             return Err("min_confidence must be a number between 0.1 and 1.0");
         }
         Ok(())
@@ -123,7 +126,10 @@ impl AdaptiveTuningEngine {
                 reason_parts.push(format!("Adjust rate-limit capacity to {}", new_cap));
             }
             AnomalyRule::ErrorRate | AnomalyRule::Latency => {
-                reason_parts.push(format!("Investigate backend regression on host {}", anomaly.host_id));
+                reason_parts.push(format!(
+                    "Investigate backend regression on host {}",
+                    anomaly.host_id
+                ));
             }
         }
 

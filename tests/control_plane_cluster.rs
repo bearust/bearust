@@ -2,7 +2,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use bearust::cluster::ClusterService;
+use bearust::cluster::{ClusterService, HANDSHAKE_MAGIC};
 use bearust::config::{ClusterConfig, ClusterPeer};
 use bearust::control_plane::{
     auth::{hash_password, token_hash},
@@ -10,7 +10,34 @@ use bearust::control_plane::{
 };
 use std::sync::Arc;
 use tempfile::tempdir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
+
+/// Spawn a cluster listener that speaks the full Phase 10A handshake protocol.
+async fn spawn_protocol_responder(responder_node_id: &'static str) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        // Read: magic (8) + id_len (1) + id bytes
+        let mut magic = [0u8; 8];
+        stream.read_exact(&mut magic).await.unwrap();
+        let mut len_buf = [0u8; 1];
+        stream.read_exact(&mut len_buf).await.unwrap();
+        let id_len = len_buf[0] as usize;
+        let mut id_buf = vec![0u8; id_len];
+        stream.read_exact(&mut id_buf).await.unwrap();
+        // Respond
+        let peer_bytes = responder_node_id.as_bytes();
+        let resp_len = peer_bytes.len().min(255) as u8;
+        let mut resp = Vec::with_capacity(9 + resp_len as usize);
+        resp.extend_from_slice(HANDSHAKE_MAGIC);
+        resp.push(resp_len);
+        resp.extend_from_slice(&peer_bytes[..resp_len as usize]);
+        stream.write_all(&resp).await.unwrap();
+    });
+    addr
+}
 
 #[tokio::test]
 async fn cluster_status_endpoint_requires_authentication() {
@@ -34,12 +61,10 @@ async fn cluster_status_endpoint_requires_authentication() {
 async fn cluster_status_endpoint_returns_snapshot_for_authenticated_user() {
     let dir = tempdir().unwrap();
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let healthy_addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = listener.accept().await;
-    });
+    // Healthy peer: speaks the proper cluster handshake protocol.
+    let healthy_addr = spawn_protocol_responder("node2").await;
 
+    // Unhealthy peer: port closed.
     let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let closed_addr = closed_listener.local_addr().unwrap();
     drop(closed_listener);
@@ -57,7 +82,7 @@ async fn cluster_status_endpoint_returns_snapshot_for_authenticated_user() {
             },
         ],
         bind: "127.0.0.1:0".parse().unwrap(),
-        timeout_seconds: 1,
+        timeout_seconds: 2,
     };
     let cluster = Arc::new(ClusterService::new(&cluster_config));
 
@@ -105,4 +130,8 @@ async fn cluster_status_endpoint_returns_snapshot_for_authenticated_user() {
     assert_eq!(snapshot.total_peers, 2);
     assert_eq!(snapshot.healthy_peers, 1);
     assert_eq!(snapshot.peers.len(), 2);
+
+    // Verify node addresses are not in the JSON response.
+    let json = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!json.contains("127.0.0."));
 }

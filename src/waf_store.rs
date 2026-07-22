@@ -1,4 +1,11 @@
-use crate::{control_plane::{audit, realtime::RealtimeHub, repository::{self, DbPool}}, waf::{compile_snapshot, redacted_telemetry, Evaluation, WafSnapshot}};
+use crate::{
+    control_plane::{
+        audit,
+        realtime::RealtimeHub,
+        repository::{self, DbPool},
+    },
+    waf::{compile_snapshot, redacted_telemetry, Evaluation, WafSnapshot},
+};
 use arc_swap::ArcSwap;
 use std::sync::{Arc, RwLock};
 
@@ -15,13 +22,22 @@ pub struct WafStore {
 
 impl WafStore {
     pub async fn load(db: &DbPool) -> Result<Self, String> {
-        let config = repository::get_waf_config(db).await.map_err(|_| "unable to load waf configuration")?;
-        let rules = repository::list_waf_rules(db).await.map_err(|_| "unable to load waf rules")?;
+        let config = repository::get_waf_config(db)
+            .await
+            .map_err(|_| "unable to load waf configuration")?;
+        let rules = repository::list_waf_rules(db)
+            .await
+            .map_err(|_| "unable to load waf rules")?;
         let snapshot = compile_snapshot(config, rules).map_err(|_| "invalid waf configuration")?;
-        Ok(Self { current: ArcSwap::from_pointee(snapshot), audit: RwLock::new(None) })
+        Ok(Self {
+            current: ArcSwap::from_pointee(snapshot),
+            audit: RwLock::new(None),
+        })
     }
 
-    pub fn snapshot(&self) -> Arc<WafSnapshot> { self.current.load_full() }
+    pub fn snapshot(&self) -> Arc<WafSnapshot> {
+        self.current.load_full()
+    }
 
     pub fn configure_audit_sink(&self, db: DbPool, realtime: Arc<RealtimeHub>) {
         if let Ok(mut sink) = self.audit.write() {
@@ -46,8 +62,12 @@ impl WafStore {
     }
 
     pub async fn reload(&self, db: &DbPool) -> Result<(), String> {
-        let config = repository::get_waf_config(db).await.map_err(|_| "unable to load waf configuration")?;
-        let rules = repository::list_waf_rules(db).await.map_err(|_| "unable to load waf rules")?;
+        let config = repository::get_waf_config(db)
+            .await
+            .map_err(|_| "unable to load waf configuration")?;
+        let rules = repository::list_waf_rules(db)
+            .await
+            .map_err(|_| "unable to load waf rules")?;
         let snapshot = compile_snapshot(config, rules).map_err(|_| "invalid waf configuration")?;
         self.current.store(Arc::new(snapshot));
         Ok(())

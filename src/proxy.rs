@@ -147,7 +147,10 @@ impl BeaRustProxy {
         self.analytics = Some(analytics);
         self
     }
-    pub fn with_analytics_changed_notifier(mut self, notifier: Arc<dyn Fn() + Send + Sync>) -> Self {
+    pub fn with_analytics_changed_notifier(
+        mut self,
+        notifier: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         self.analytics_changed = Some(notifier);
         self
     }
@@ -856,8 +859,11 @@ fn error_status(error: &pingora_core::Error) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{error_status, invoke_analytics_changed};
-    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
     use pingora_core::{Error, ErrorType};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     #[test]
     fn preserves_explicit_http_error_status() {

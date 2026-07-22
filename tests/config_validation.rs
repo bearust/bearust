@@ -374,14 +374,12 @@ fn rejects_empty_peer_entries_in_env_var() {
 
 #[test]
 fn rejects_peer_list_exceeding_64_peers() {
-    // Build TOML with 65 [[cluster.peers]] entries.
+    // Build TOML with 65 [[cluster.peers]] entries (2..=66 gives 65 peers).
     let mut toml = format!("{VALID}\n[cluster]\nnode_id = \"node1\"\n");
     for i in 2..=66 {
         toml.push_str(&format!(
-            "[[cluster.peers]]\nnode_id = \"node{i}\"\naddress = \"127.0.0.{}.{}:{}\"\n",
-            (i / 256) + 1,
-            i % 256,
-            9000 + i
+            "[[cluster.peers]]\nnode_id = \"node{i}\"\naddress = \"127.0.0.1:{}\"\n",
+            10000 + i
         ));
     }
     let err = Config::parse(&toml).unwrap_err().to_string();

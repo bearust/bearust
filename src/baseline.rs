@@ -140,7 +140,11 @@ impl BaselineCollector {
         };
 
         let completed_cutoff = now - chrono::Duration::seconds(60);
-        for b in snapshot.timeseries.iter().filter(|b| b.timestamp <= completed_cutoff) {
+        for b in snapshot
+            .timeseries
+            .iter()
+            .filter(|b| b.timestamp <= completed_cutoff)
+        {
             let host_id = b.proxy_host_id;
             if !state.hosts.contains_key(&host_id) {
                 if state.hosts.len() >= self.max_hosts {

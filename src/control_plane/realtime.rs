@@ -20,7 +20,10 @@ pub struct RealtimeEvent {
 impl RealtimeHub {
     pub fn new(capacity: usize) -> Self {
         let (sender, _) = broadcast::channel(capacity);
-        Self { sender, sequence: AtomicU64::new(0) }
+        Self {
+            sender,
+            sequence: AtomicU64::new(0),
+        }
     }
 
     pub fn publish(&self, kind: &'static str) -> RealtimeEvent {

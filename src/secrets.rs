@@ -109,15 +109,20 @@ impl SecretStore {
 
     /// Return a persistent secret, creating it atomically when absent.
     pub fn get_or_create(&self, name: &str, len: usize) -> Result<Vec<u8>, SecretError> {
-        if let Some(value) = self.get(name)? { return Ok(value); }
+        if let Some(value) = self.get(name)? {
+            return Ok(value);
+        }
         let mut value = Vec::with_capacity(len.min(256));
         let seed = uuid::Uuid::new_v4().as_bytes().to_vec();
-        while value.len() < len.min(256) { value.extend_from_slice(&seed); }
+        while value.len() < len.min(256) {
+            value.extend_from_slice(&seed);
+        }
         value.truncate(len.min(256));
         match self.put(name, &value) {
             Ok(()) => Ok(value),
-            Err(SecretError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists =>
-                self.get(name)?.ok_or(SecretError::Io(e)),
+            Err(SecretError::Io(e)) if e.kind() == io::ErrorKind::AlreadyExists => {
+                self.get(name)?.ok_or(SecretError::Io(e))
+            }
             Err(e) => Err(e),
         }
     }

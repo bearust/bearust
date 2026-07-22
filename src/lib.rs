@@ -1,18 +1,23 @@
 pub mod acme;
+pub mod adaptive_tuning;
 pub mod analytics;
 pub mod analytics_prometheus;
+pub mod anomaly;
 pub mod balancer;
-pub mod bot_protection;
+pub mod baseline;
 pub mod bot_challenge;
+pub mod bot_protection;
 pub mod bot_store;
 pub mod certificates;
 pub mod cli;
+pub mod cluster;
 pub mod config;
 pub mod control_plane;
 pub mod health;
 pub mod observability;
 pub mod proxy;
 pub mod rate_limit;
+pub mod rate_limit_store;
 pub mod reload;
 pub mod router;
 pub mod runtime;
@@ -20,11 +25,3 @@ pub mod secrets;
 pub mod tls;
 pub mod waf;
 pub mod waf_store;
-pub mod rate_limit_store;
-pub mod baseline;
-pub mod anomaly;
-pub mod adaptive_tuning;
-pub mod cluster;
-
-
-
