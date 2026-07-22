@@ -143,6 +143,16 @@ impl TokenBucket {
             self.last_seen = Some(now);
         }
 
+        // A request cost greater than the bucket capacity can never become
+        // admissible. Return a bounded decision immediately instead of
+        // allowing callers to retry forever while retaining the bucket state.
+        if cost as f64 > self.capacity {
+            return Decision::Limited {
+                remaining_tokens: floor_tokens(self.tokens),
+                retry_after: MAX_RETRY_AFTER,
+            };
+        }
+
         let cost = cost as f64;
         if cost <= self.tokens {
             self.tokens -= cost;

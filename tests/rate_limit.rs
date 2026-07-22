@@ -90,3 +90,24 @@ fn retry_after_is_bounded() {
     };
     assert_eq!(retry_after, MAX_RETRY_AFTER);
 }
+
+#[test]
+fn cost_above_capacity_is_bounded_and_never_admitted() {
+    let start = Instant::now();
+    let mut bucket = TokenBucket::new(2, 1.0).unwrap();
+    let decision = bucket.try_consume(start, 3);
+    assert!(matches!(
+        decision,
+        Decision::Limited {
+            retry_after: MAX_RETRY_AFTER,
+            ..
+        }
+    ));
+    assert!(matches!(
+        bucket.try_consume(start + Duration::from_secs(60), 3),
+        Decision::Limited {
+            retry_after: MAX_RETRY_AFTER,
+            ..
+        }
+    ));
+}
