@@ -1,7 +1,7 @@
 # Phase 7B Final Verification Review
 
 Date: 2026-07-22
-Scope: `6023c15..d9124a5` (Phase 7B bot protection implementation and task reports)
+Scope: `6023c15..a9bbcf8` (Phase 7B bot protection implementation, hardening, and documentation)
 
 ## Verification evidence
 
