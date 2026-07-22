@@ -104,6 +104,9 @@ pub enum Decision {
     },
 }
 
+/// Decision retained on a proxy request for bounded telemetry and tests.
+pub type RateLimitDecision = Decision;
+
 pub struct TokenBucket {
     capacity: f64,
     refill_per_second: f64,

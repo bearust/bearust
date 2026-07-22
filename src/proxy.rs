@@ -1,14 +1,16 @@
 use crate::{
     acme::{lookup_http01_for_host, Http01Store},
     balancer::{BackendId, BackendLease},
+    bot_challenge::{unix_now, ChallengeService},
+    bot_protection::{evaluate as evaluate_bot, BotAction, BotEvaluation, BotInspectionContext},
+    bot_store::BotStore,
+    rate_limit::{Decision as RateLimitDecision, RateLimitAction, RateLimitKey, RateLimitPolicy},
+    rate_limit_store::{client_ip, IpNetSet, RateLimiterStore},
     observability::{append_forwarded_for, classify_error, log_request, validated_request_id},
     router::{normalize_host, ResolvedRoute},
     runtime::{RuntimeSnapshot, RuntimeStore},
     waf::{evaluate, Evaluation, InspectionContext, WafDecision, WafSnapshot},
     waf_store::WafStore,
-    bot_protection::{evaluate as evaluate_bot, BotAction, BotEvaluation, BotInspectionContext},
-    bot_store::BotStore,
-    bot_challenge::{ChallengeService, unix_now},
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -43,6 +45,7 @@ pub struct RequestContext {
     pub bot_evaluation: Option<BotEvaluation>,
     pub bot_blocked: bool,
     pub bot_challenge: bool,
+    pub rate_limit_decision: Option<RateLimitDecision>,
 }
 
 impl Default for RequestContext {
@@ -70,6 +73,7 @@ impl Default for RequestContext {
             bot_evaluation: None,
             bot_blocked: false,
             bot_challenge: false,
+            rate_limit_decision: None,
         }
     }
 }
@@ -80,6 +84,9 @@ pub struct BeaRustProxy {
     pub waf: Option<Arc<WafStore>>,
     pub bot: Option<Arc<BotStore>>,
     pub challenges: Option<Arc<ChallengeService>>,
+    pub rate_limiter: Option<Arc<RateLimiterStore>>,
+    pub rate_limit_policy: RateLimitPolicy,
+    pub trusted_proxies: IpNetSet,
 }
 
 impl BeaRustProxy {
@@ -90,6 +97,9 @@ impl BeaRustProxy {
             waf: None,
             bot: None,
             challenges: None,
+            rate_limiter: None,
+            rate_limit_policy: RateLimitPolicy::default(),
+            trusted_proxies: IpNetSet::default(),
         }
     }
     pub fn with_challenge_store(mut self, challenges: Http01Store) -> Self {
@@ -103,6 +113,18 @@ impl BeaRustProxy {
     pub fn with_bot_store(mut self, bot: Arc<BotStore>, challenges: Arc<ChallengeService>) -> Self {
         self.bot = Some(bot);
         self.challenges = Some(challenges);
+        self
+    }
+    pub fn with_rate_limiter(mut self, store: Arc<RateLimiterStore>) -> Self {
+        self.rate_limiter = Some(store);
+        self
+    }
+    pub fn with_rate_limit_policy(mut self, policy: RateLimitPolicy) -> Self {
+        self.rate_limit_policy = policy;
+        self
+    }
+    pub fn with_trusted_proxies(mut self, trusted: IpNetSet) -> Self {
+        self.trusted_proxies = trusted;
         self
     }
 }
@@ -136,6 +158,29 @@ fn emit_waf_telemetry(request_id: &str, waf: &WafStore, evaluation: &Evaluation)
     waf.record_detection(evaluation);
 }
 
+fn emit_rate_limit_telemetry(request_id: &str, decision: &RateLimitDecision, action: RateLimitAction) {
+    if let RateLimitDecision::Limited { remaining_tokens, retry_after } = decision {
+        tracing::info!(
+            event = "rate_limit_detection",
+            request_id,
+            action = ?action,
+            remaining_tokens,
+            retry_after_seconds = retry_after.as_secs().min(3_600),
+        );
+    }
+}
+
+fn route_key(route: &ResolvedRoute) -> i64 {
+    // Stable, non-sensitive identity for config-defined routes. Control-plane
+    // integrations may replace this with the persisted proxy-host id later.
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in route.host.bytes().chain([0].into_iter()).chain(route.path_prefix.bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash & i64::MAX as u64) as i64
+}
+
 #[async_trait]
 impl ProxyHttp for BeaRustProxy {
     type CTX = RequestContext;
@@ -163,20 +208,53 @@ impl ProxyHttp for BeaRustProxy {
         let challenge_host = normalize_host(host).unwrap_or_default();
         let method = session.req_header().method.as_str();
         if let Some(bot) = &self.bot {
-            let headers = session.req_header().headers.iter().filter_map(|(name, value)| {
-                let name = name.as_str().to_ascii_lowercase();
-                if !matches!(name.as_str(), "user-agent" | "accept" | "accept-language" | "sec-ch-ua" | "x-forwarded-for" | "host") { return None; }
-                value.to_str().ok().map(|value| (name, value.to_owned()))
-            }).collect::<Vec<_>>();
+            let headers = session
+                .req_header()
+                .headers
+                .iter()
+                .filter_map(|(name, value)| {
+                    let name = name.as_str().to_ascii_lowercase();
+                    if !matches!(
+                        name.as_str(),
+                        "user-agent"
+                            | "accept"
+                            | "accept-language"
+                            | "sec-ch-ua"
+                            | "x-forwarded-for"
+                            | "host"
+                    ) {
+                        return None;
+                    }
+                    value.to_str().ok().map(|value| (name, value.to_owned()))
+                })
+                .collect::<Vec<_>>();
             // Trusted crawler bypass is intentionally deferred until a signed
             // ingress marker is implemented. Client headers never verify origin.
             let inspection = BotInspectionContext::new(method, &path, headers);
             let snapshot = bot.snapshot();
             let mut evaluation = evaluate_bot(&snapshot, &inspection);
-            let valid_clearance = session.req_header().headers.get("cookie").and_then(|v| v.to_str().ok()).and_then(cookie_value).and_then(|token| self.challenges.as_ref().and_then(|service| service.verify_clearance(token, &evaluation.fingerprint, unix_now()).ok())).is_some();
-            if valid_clearance && evaluation.action == BotAction::Challenge { evaluation.action = BotAction::Allow; }
+            let valid_clearance = session
+                .req_header()
+                .headers
+                .get("cookie")
+                .and_then(|v| v.to_str().ok())
+                .and_then(cookie_value)
+                .and_then(|token| {
+                    self.challenges.as_ref().and_then(|service| {
+                        service
+                            .verify_clearance(token, &evaluation.fingerprint, unix_now())
+                            .ok()
+                    })
+                })
+                .is_some();
+            if valid_clearance && evaluation.action == BotAction::Challenge {
+                evaluation.action = BotAction::Allow;
+            }
             ctx.bot_evaluation = Some(evaluation.clone());
-            if evaluation.action != BotAction::Allow { bot.record_detection(&evaluation); tracing::info!(event="bot_detection", request_id=%ctx.request_id, action=?evaluation.action, score=evaluation.score, trusted=evaluation.trusted, categories=?evaluation.categories, fingerprint_prefix=%evaluation.fingerprint.chars().take(16).collect::<String>()); }
+            if evaluation.action != BotAction::Allow {
+                bot.record_detection(&evaluation);
+                tracing::info!(event="bot_detection", request_id=%ctx.request_id, action=?evaluation.action, score=evaluation.score, trusted=evaluation.trusted, categories=?evaluation.categories, fingerprint_prefix=%evaluation.fingerprint.chars().take(16).collect::<String>());
+            }
             ctx.bot_blocked = evaluation.action == BotAction::Block;
             ctx.bot_challenge = evaluation.action == BotAction::Challenge;
         }
@@ -190,12 +268,31 @@ impl ProxyHttp for BeaRustProxy {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.parse::<usize>().ok())
                 .is_some_and(|length| length > 0)
-                || session.req_header().headers.get("transfer-encoding").is_some();
+                || session
+                    .req_header()
+                    .headers
+                    .get("transfer-encoding")
+                    .is_some();
             let context = InspectionContext {
                 method: method.to_owned(),
                 path: path.clone(),
-                query: session.req_header().uri.query().unwrap_or_default().to_owned(),
-                headers: session.req_header().headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_owned(), value.to_owned()))).collect(),
+                query: session
+                    .req_header()
+                    .uri
+                    .query()
+                    .unwrap_or_default()
+                    .to_owned(),
+                headers: session
+                    .req_header()
+                    .headers
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        value
+                            .to_str()
+                            .ok()
+                            .map(|value| (name.as_str().to_owned(), value.to_owned()))
+                    })
+                    .collect(),
                 body: Vec::new(),
             };
             let evaluation = evaluate(&waf_snapshot, &context);
@@ -203,17 +300,21 @@ impl ProxyHttp for BeaRustProxy {
             ctx.waf_evaluation = Some(evaluation.clone());
             if !ctx.waf_body_expected && !ctx.waf_telemetry_emitted {
                 emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
-                ctx.waf_telemetry_emitted = evaluation.semantic_score > 0
-                    || !evaluation.matched_rule_ids.is_empty();
+                ctx.waf_telemetry_emitted =
+                    evaluation.semantic_score > 0 || !evaluation.matched_rule_ids.is_empty();
             }
             if evaluation.decision == WafDecision::Block {
-                session.respond_error_with_body(403, Bytes::from_static(b"Request blocked")).await?;
+                session
+                    .respond_error_with_body(403, Bytes::from_static(b"Request blocked"))
+                    .await?;
                 ctx.completion_logged = true;
                 return Ok(true);
             }
         }
         if ctx.bot_blocked {
-            session.respond_error_with_body(403, Bytes::from_static(b"Request blocked")).await?;
+            session
+                .respond_error_with_body(403, Bytes::from_static(b"Request blocked"))
+                .await?;
             ctx.completion_logged = true;
             return Ok(true);
         }
@@ -223,12 +324,28 @@ impl ProxyHttp for BeaRustProxy {
                 serde_json::to_vec(&serde_json::json!({
                     "challenge_url": format!("/bot-challenge?fingerprint_prefix={prefix}"),
                     "fingerprint_prefix": prefix,
-                })).unwrap_or_else(|_| b"Challenge required".to_vec())
-            } else { b"Challenge required".to_vec() };
-            let mut response = ResponseHeader::build(403, Some(3)).map_err(|e| pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string()))?;
-            response.insert_header("Cache-Control", "no-store").map_err(|e| pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string()))?;
-            response.insert_header("Content-Type", "application/json").map_err(|e| pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string()))?;
-            session.as_downstream_mut().write_error_response(response, Bytes::from(body)).await?;
+                }))
+                .unwrap_or_else(|_| b"Challenge required".to_vec())
+            } else {
+                b"Challenge required".to_vec()
+            };
+            let mut response = ResponseHeader::build(403, Some(3)).map_err(|e| {
+                pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string())
+            })?;
+            response
+                .insert_header("Cache-Control", "no-store")
+                .map_err(|e| {
+                    pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string())
+                })?;
+            response
+                .insert_header("Content-Type", "application/json")
+                .map_err(|e| {
+                    pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string())
+                })?;
+            session
+                .as_downstream_mut()
+                .write_error_response(response, Bytes::from(body))
+                .await?;
             ctx.completion_logged = true;
             return Ok(true);
         }
@@ -258,6 +375,51 @@ impl ProxyHttp for BeaRustProxy {
         };
         ctx.route = Some(route.clone());
         ctx.snapshot = Some(snapshot);
+        if let Some(store) = &self.rate_limiter {
+            let peer = session
+                .client_addr()
+                .and_then(|addr| addr.to_string().parse().ok());
+            if let Some(peer) = peer {
+                let ip = client_ip(
+                    peer,
+                    &session.req_header().headers,
+                    &self.trusted_proxies,
+                );
+                let decision = store.evaluate(
+                    RateLimitKey {
+                        proxy_host_id: route_key(ctx.route.as_ref().expect("route must be set")),
+                        client_ip: ip,
+                    },
+                    &self.rate_limit_policy,
+                    Instant::now(),
+                );
+                ctx.rate_limit_decision = Some(decision);
+                if let RateLimitDecision::Limited { .. } = decision {
+                    emit_rate_limit_telemetry(&ctx.request_id, &decision, self.rate_limit_policy.action);
+                    if self.rate_limit_policy.action == RateLimitAction::Block {
+                        let retry_after = match decision {
+                            RateLimitDecision::Limited { retry_after, .. } => retry_after.as_secs().clamp(1, 3_600),
+                            RateLimitDecision::Allowed { .. } => 1,
+                        };
+                        let mut response = ResponseHeader::build(429, Some(2)).map_err(|e| {
+                            pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string())
+                        })?;
+                        response.insert_header("Retry-After", retry_after.to_string()).map_err(|e| {
+                            pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string())
+                        })?;
+                        response.insert_header("Cache-Control", "no-store").map_err(|e| {
+                            pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string())
+                        })?;
+                        session.as_downstream_mut().write_error_response(
+                            response,
+                            Bytes::from_static(b"Rate limit exceeded"),
+                        ).await?;
+                        ctx.completion_logged = true;
+                        return Ok(true);
+                    }
+                }
+            }
+        }
         Ok(false)
     }
 
@@ -296,7 +458,10 @@ impl ProxyHttp for BeaRustProxy {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         if ctx.waf_blocked {
-            return Err(pingora_core::Error::explain(ErrorType::HTTPStatus(403), "request blocked by waf"));
+            return Err(pingora_core::Error::explain(
+                ErrorType::HTTPStatus(403),
+                "request blocked by waf",
+            ));
         }
         if let Some(host) = session
             .req_header()
@@ -322,10 +487,13 @@ impl ProxyHttp for BeaRustProxy {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        if self.waf.is_none() { return Ok(()); }
+        if self.waf.is_none() {
+            return Ok(());
+        }
         if ctx.waf_buffering {
             if let Some(chunk) = body.as_ref() {
-                let remaining = crate::waf::MAX_INSPECTION_BODY_BYTES.saturating_sub(ctx.waf_body.len());
+                let remaining =
+                    crate::waf::MAX_INSPECTION_BODY_BYTES.saturating_sub(ctx.waf_body.len());
                 let take = chunk.len().min(remaining);
                 ctx.waf_body.extend_from_slice(&chunk[..take]);
                 if take < chunk.len() {
@@ -341,62 +509,87 @@ impl ProxyHttp for BeaRustProxy {
             }
         }
         if let Some(waf) = &self.waf {
-                let header_values = session.req_header().headers.iter().filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_owned(), value.to_owned()))).collect();
-                let context = InspectionContext { method: session.req_header().method.as_str().to_owned(), path: session.req_header().uri.path().to_owned(), query: session.req_header().uri.query().unwrap_or_default().to_owned(), headers: header_values, body: ctx.waf_body.clone() };
-                let evaluation = ctx
-                    .waf_snapshot
-                    .as_ref()
-                    .map(|snapshot| evaluate(snapshot, &context))
-                    .unwrap_or_else(|| evaluate(&waf.snapshot(), &context));
-                ctx.waf_blocked = evaluation.decision == WafDecision::Block;
-                ctx.waf_evaluation = Some(evaluation.clone());
-                // Evaluate every bounded chunk before forwarding it. This
-                // catches body-only attacks without requiring replay/buffering.
-                if ctx.waf_blocked {
-                    emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
-                    *body = None;
-                    ctx.completion_logged = true;
-                    session
-                        .respond_error_with_body(403, Bytes::from_static(b"Request blocked"))
-                        .await?;
-                    // Returning an error is required here: `Ok(())` would let
-                    // Pingora continue its upstream body pipeline after the
-                    // downstream response was written.
-                    return Err(pingora_core::Error::explain(
-                        ErrorType::HTTPStatus(403),
-                        "request blocked by waf",
-                    ));
-                }
-                if ctx.waf_large_chunk {
-                    if !ctx.waf_large_chunk_includes_prefix && !ctx.waf_body.is_empty() {
-                        let mut forwarded = Vec::with_capacity(ctx.waf_body.len() + body.as_ref().map_or(0, |bytes| bytes.len()));
-                        forwarded.extend_from_slice(&ctx.waf_body);
-                        if let Some(chunk) = body.as_ref() {
-                            forwarded.extend_from_slice(chunk);
-                        }
-                        *body = Some(Bytes::from(forwarded));
-                    }
-                    ctx.waf_body.clear();
-                    ctx.waf_pending_suffix.clear();
-                    ctx.waf_large_chunk = false;
-                    ctx.waf_large_chunk_includes_prefix = false;
-                }
-                if end_of_stream && (evaluation.semantic_score > 0 || !evaluation.matched_rule_ids.is_empty()) {
-                    emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
-                }
-                let should_flush_buffer = !ctx.waf_blocked
-                    && ctx.waf_buffering
-                    && (end_of_stream
-                        || ctx.waf_body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES);
-                if should_flush_buffer {
-                    let mut forwarded = Vec::with_capacity(ctx.waf_body.len() + ctx.waf_pending_suffix.len());
+            let header_values = session
+                .req_header()
+                .headers
+                .iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (name.as_str().to_owned(), value.to_owned()))
+                })
+                .collect();
+            let context = InspectionContext {
+                method: session.req_header().method.as_str().to_owned(),
+                path: session.req_header().uri.path().to_owned(),
+                query: session
+                    .req_header()
+                    .uri
+                    .query()
+                    .unwrap_or_default()
+                    .to_owned(),
+                headers: header_values,
+                body: ctx.waf_body.clone(),
+            };
+            let evaluation = ctx
+                .waf_snapshot
+                .as_ref()
+                .map(|snapshot| evaluate(snapshot, &context))
+                .unwrap_or_else(|| evaluate(&waf.snapshot(), &context));
+            ctx.waf_blocked = evaluation.decision == WafDecision::Block;
+            ctx.waf_evaluation = Some(evaluation.clone());
+            // Evaluate every bounded chunk before forwarding it. This
+            // catches body-only attacks without requiring replay/buffering.
+            if ctx.waf_blocked {
+                emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
+                *body = None;
+                ctx.completion_logged = true;
+                session
+                    .respond_error_with_body(403, Bytes::from_static(b"Request blocked"))
+                    .await?;
+                // Returning an error is required here: `Ok(())` would let
+                // Pingora continue its upstream body pipeline after the
+                // downstream response was written.
+                return Err(pingora_core::Error::explain(
+                    ErrorType::HTTPStatus(403),
+                    "request blocked by waf",
+                ));
+            }
+            if ctx.waf_large_chunk {
+                if !ctx.waf_large_chunk_includes_prefix && !ctx.waf_body.is_empty() {
+                    let mut forwarded = Vec::with_capacity(
+                        ctx.waf_body.len() + body.as_ref().map_or(0, |bytes| bytes.len()),
+                    );
                     forwarded.extend_from_slice(&ctx.waf_body);
-                    forwarded.extend_from_slice(&ctx.waf_pending_suffix);
+                    if let Some(chunk) = body.as_ref() {
+                        forwarded.extend_from_slice(chunk);
+                    }
                     *body = Some(Bytes::from(forwarded));
-                    ctx.waf_body.clear();
-                    ctx.waf_pending_suffix.clear();
-                    ctx.waf_buffering = false;
                 }
+                ctx.waf_body.clear();
+                ctx.waf_pending_suffix.clear();
+                ctx.waf_large_chunk = false;
+                ctx.waf_large_chunk_includes_prefix = false;
+            }
+            if end_of_stream
+                && (evaluation.semantic_score > 0 || !evaluation.matched_rule_ids.is_empty())
+            {
+                emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
+            }
+            let should_flush_buffer = !ctx.waf_blocked
+                && ctx.waf_buffering
+                && (end_of_stream || ctx.waf_body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES);
+            if should_flush_buffer {
+                let mut forwarded =
+                    Vec::with_capacity(ctx.waf_body.len() + ctx.waf_pending_suffix.len());
+                forwarded.extend_from_slice(&ctx.waf_body);
+                forwarded.extend_from_slice(&ctx.waf_pending_suffix);
+                *body = Some(Bytes::from(forwarded));
+                ctx.waf_body.clear();
+                ctx.waf_pending_suffix.clear();
+                ctx.waf_buffering = false;
+            }
         }
         Ok(())
     }
@@ -491,7 +684,12 @@ impl ProxyHttp for BeaRustProxy {
     }
 }
 
-fn cookie_value(header: &str) -> Option<&str> { header.split(';').map(str::trim).find_map(|part| part.strip_prefix("bearust_bot_clear=")) }
+fn cookie_value(header: &str) -> Option<&str> {
+    header
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix("bearust_bot_clear="))
+}
 
 fn error_status(error: &pingora_core::Error) -> u16 {
     match error.etype() {
