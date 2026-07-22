@@ -12,6 +12,10 @@ import {
   User,
   WafConfig,
   WafRule,
+  BotConfig,
+  BotMode,
+  TrustedCrawler,
+  BotChallenge,
 } from "./api";
 import { useRealtimeUpdates, RealtimeStatus } from "./realtime";
 import { Alert, Button, Card, Field, SelectField, TextareaField, ThemeSelect } from "./ui";
@@ -602,6 +606,40 @@ export function WafSection({ user, refreshToken = 0 }: { user: User; refreshToke
   return <Card data-testid="waf-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">Basic WAF</h2><span className="rounded-full border border-border px-3 py-1 text-sm" data-testid="waf-mode">{config?.mode === "block" ? "Block" : "Monitor-only"}</span>{admin && <Button variant="secondary" disabled={busy || !config} onClick={() => void changeMode()}>{config?.mode === "block" ? "Monitor-only" : "Block"}</Button>}</div>{error && <Alert variant="danger">{error}</Alert>}<div className="mt-4 overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>Name</th><th>Category</th><th>Severity</th><th>Action</th><th>Status</th><th /></tr></thead><tbody>{rules.map(rule => <tr key={rule.id}><td>{rule.name}</td><td>{rule.category}</td><td>{rule.severity}</td><td>{rule.action}</td><td>{rule.enabled ? "Enabled" : "Disabled"}</td><td>{admin && rule.source === "custom" && <Button variant="danger" disabled={busy} onClick={() => void api.deleteWafRule(rule.id).then(reload).catch(e => setError(sanitizeError(e instanceof Error ? e.message : String(e))))}>Delete</Button>}</td></tr>)}</tbody></table></div>{admin && <div className="mt-5 grid gap-3"><TextareaField label="WAF TOML import/export" value={toml} onChange={e => setToml(e.target.value)} rows={8} placeholder="version = 1" /><div className="flex flex-wrap gap-2"><Button variant="secondary" disabled={busy || !toml.trim()} onClick={() => void importToml()}>Import TOML</Button><Button variant="secondary" disabled={busy} onClick={() => void exportToml()}>Export TOML</Button></div></div>}</Card>;
 }
 
+const browserFingerprint = () => (typeof navigator !== "undefined" && navigator.userAgent ? navigator.userAgent : "bearust-browser").slice(0, 128);
+
+export async function solveBotChallenge(challenge: BotChallenge, fingerprint: string): Promise<string> {
+  if (typeof crypto === "undefined" || !crypto.subtle) throw new Error("Proof-of-work is unavailable in this browser.");
+  const encoder = new TextEncoder();
+  const prefix = "0".repeat(Math.min(challenge.difficulty, 4));
+  for (let nonce = 0; nonce < 1_000_000; nonce += 1) {
+    const digest = await crypto.subtle.digest("SHA-256", encoder.encode(`${challenge.token.split(".")[1] ?? ""}${nonce}`));
+    const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    if (hex.startsWith(prefix)) return String(nonce);
+  }
+  throw new Error("Unable to complete the challenge.");
+}
+
+export function BotProtectionSection({ user, refreshToken = 0 }: { user: User; refreshToken?: number }) {
+  const [config, setConfig] = useState<BotConfig | null>(null), [crawlers, setCrawlers] = useState<TrustedCrawler[]>([]);
+  const [mode, setMode] = useState<BotMode>("monitor"), [threshold, setThreshold] = useState(""), [ttl, setTtl] = useState(""), [ua, setUa] = useState(""), [domain, setDomain] = useState("");
+  const [busy, setBusy] = useState(false), [error, setError] = useState(""), [saved, setSaved] = useState(false);
+  const reload = async () => { try { const [nextConfig, nextCrawlers] = await Promise.all([api.botConfig(), api.trustedCrawlers()]); setConfig(nextConfig); setMode(nextConfig.mode); setThreshold(String(nextConfig.threshold)); setTtl(String(nextConfig.ttl_seconds)); setCrawlers(nextCrawlers); setError(""); } catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); } };
+  useEffect(() => { if (user.role === "admin") void reload(); }, [refreshToken, user.role]);
+  if (user.role !== "admin") return null;
+  const run = async (action: () => Promise<unknown>) => { setBusy(true); setError(""); setSaved(false); try { await action(); setSaved(true); await reload(); } catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); } finally { setBusy(false); } };
+  const validCrawler = ua.trim().length > 0 && ua.trim().length <= 256 && domain.trim().length > 0 && domain.trim().length <= 253 && !/\s/.test(domain);
+  return <Card data-testid="bot-protection-section"><h2 className="mb-2 text-xl font-semibold">Bot protection</h2><p className="mb-4 text-sm text-muted">Monitor-only is the safe default. No keys or challenge tokens are displayed here.</p>{error && <Alert variant="danger">{error}</Alert>}{saved && <Alert variant="success">Bot protection policy saved.</Alert>}<form className="grid gap-4 sm:grid-cols-3" onSubmit={(e) => { e.preventDefault(); if (!config || !threshold || !ttl) return; void run(() => api.updateBotConfig({ mode, threshold: Number(threshold), ttl_seconds: Number(ttl) })); }}><SelectField label="Mode" value={mode} onChange={(e) => setMode(e.target.value as BotMode)} disabled={busy}><option value="monitor">Monitor-only</option><option value="challenge">Challenge</option><option value="block">Block</option></SelectField><Field label="Risk threshold" type="number" min="0" max="100" value={threshold} onChange={(e) => setThreshold(e.target.value)} disabled={busy} required /><Field label="Challenge TTL (seconds)" type="number" min="30" max="86400" value={ttl} onChange={(e) => setTtl(e.target.value)} disabled={busy} required /><Button type="submit" disabled={busy || !threshold || !ttl}>Save policy</Button></form><div className="mt-6"><h3 className="mb-3 font-semibold">Trusted crawlers</h3><div className="overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>User agent</th><th>Domain</th><th>Status</th><th /></tr></thead><tbody>{crawlers.map((crawler) => <tr key={crawler.id}><td>{crawler.trusted_user_agent ?? "—"}</td><td>{crawler.trusted_domain ?? "—"}</td><td>{crawler.enabled ? "Enabled" : "Disabled"}</td><td><Button variant="secondary" disabled={busy} onClick={() => void run(() => api.updateTrustedCrawler(crawler.id, { user_agent: crawler.trusted_user_agent ?? "", domain: crawler.trusted_domain ?? "", enabled: !crawler.enabled }))}>{crawler.enabled ? "Disable" : "Enable"}</Button> <Button variant="danger" disabled={busy} onClick={() => void run(() => api.deleteTrustedCrawler(crawler.id))}>Delete</Button></td></tr>)}</tbody></table></div><form className="mt-4 grid gap-4 sm:grid-cols-2" onSubmit={(e) => { e.preventDefault(); if (!validCrawler) return; void run(async () => { await api.createTrustedCrawler({ user_agent: ua.trim(), domain: domain.trim(), enabled: true }); setUa(""); setDomain(""); }); }}><Field label="Crawler user agent" value={ua} onChange={(e) => setUa(e.target.value)} maxLength={256} required /><Field label="Crawler domain" value={domain} onChange={(e) => setDomain(e.target.value)} maxLength={253} placeholder="example.com" required /><Button type="submit" disabled={busy || !validCrawler}>Add trusted crawler</Button></form></div></Card>;
+}
+
+export function BotChallengePage({ onComplete }: { onComplete?: () => void }) {
+  const [challenge, setChallenge] = useState<BotChallenge | null>(null), [fingerprint] = useState(browserFingerprint), [busy, setBusy] = useState(false), [error, setError] = useState(""), [complete, setComplete] = useState(false);
+  const requestChallenge = async () => { setBusy(true); setError(""); setComplete(false); try { setChallenge(await api.botChallenge(fingerprint)); } catch (e) { setError("Challenge unavailable. Please try again."); } finally { setBusy(false); } };
+  useEffect(() => { void requestChallenge(); }, []);
+  const verify = async () => { if (!challenge) return; setBusy(true); setError(""); try { const solution = await solveBotChallenge(challenge, fingerprint); await api.verifyBotChallenge({ token: challenge.token, fingerprint, solution }); setComplete(true); onComplete?.(); } catch { setError("Challenge verification failed. Please try again."); } finally { setBusy(false); } };
+  return <main className="min-h-screen bg-page px-4 py-8 text-foreground"><Card className="mx-auto max-w-lg"><h1 className="mb-2 text-2xl font-semibold">Quick browser check</h1><p className="mb-6 text-muted">Complete a small proof-of-work check to continue. Your challenge token stays in this browser and is never shown.</p>{error && <Alert variant="danger">{error}</Alert>}{complete ? <Alert variant="success">Verification complete. You may continue.</Alert> : <Button disabled={busy || !challenge} onClick={() => void verify()}>{busy ? "Verifying…" : "Verify browser"}</Button>}<Button className="ml-2" variant="secondary" disabled={busy} onClick={() => void requestChallenge()}>Try another challenge</Button></Card></main>;
+}
+
 function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: () => void; onUserRefresh: (user: User) => void }) {
   const [hosts, setHosts] = useState<Host[]>([]),
     [certs, setCerts] = useState<Certificate[]>([]),
@@ -709,6 +747,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
       <div className="mx-auto grid max-w-7xl gap-6">{error && <Alert variant="danger">{error}</Alert>}
       <CertificateTable user={user} onChanged={() => void refresh()} />
       <WafSection user={user} refreshToken={wafRefresh} />
+      <BotProtectionSection user={user} refreshToken={wafRefresh} />
       {canWrite && (
         <AcmeWizard canWrite={canWrite} onIssued={() => void refresh()} />
       )}
