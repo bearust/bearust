@@ -26,6 +26,9 @@ import {
   AnomalyRecord,
   AnomalyRule,
   AnomalySeverity,
+  TuningPolicy,
+  TuningMode,
+  PolicyRecommendation,
 } from "./api";
 import { useRealtimeUpdates, RealtimeStatus } from "./realtime";
 import { Alert, Button, Card, Field, SelectField, TextareaField, ThemeSelect } from "./ui";
@@ -921,6 +924,251 @@ export function AnomalySection({ user, hosts, refreshToken = 0 }: { user: User; 
   );
 }
 
+export function AdaptiveTuningSection({ user, hosts, refreshToken = 0 }: { user: User; hosts: Host[]; refreshToken?: number }) {
+  const [selectedHost, setSelectedHost] = useState("");
+  const [policy, setPolicy] = useState<TuningPolicy>({
+    mode: "monitor",
+    max_delta_percent: 50,
+    cooldown_seconds: 300,
+    min_confidence: 0.8,
+  });
+  const [recommendations, setRecommendations] = useState<PolicyRecommendation[]>([]);
+  const [emergencyDisabled, setEmergencyDisabled] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const isAdmin = user.role === "admin";
+
+  const load = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const hostId = selectedHost ? Number(selectedHost) : (hosts[0]?.id ?? 1);
+      const [p, recs] = await Promise.all([
+        api.getTuningPolicy(hostId),
+        api.getRecommendations(),
+      ]);
+      setPolicy(p);
+      setRecommendations(recs);
+    } catch (e) {
+      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (hosts.length > 0 && !selectedHost) {
+      setSelectedHost(String(hosts[0].id));
+    }
+  }, [hosts]);
+
+  useEffect(() => {
+    void load();
+  }, [refreshToken, selectedHost]);
+
+  const savePolicy = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin) return;
+    setSaving(true);
+    setError("");
+    setSuccess("");
+    try {
+      const hostId = selectedHost ? Number(selectedHost) : 1;
+      const updated = await api.updateTuningPolicy(hostId, policy);
+      setPolicy(updated);
+      setSuccess("Adaptive tuning policy saved.");
+    } catch {
+      setError("Unable to save adaptive tuning policy.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const applyRec = async (id: number) => {
+    if (!isAdmin) return;
+    try {
+      await api.applyRecommendation(id);
+      void load();
+    } catch {
+      setError("Unable to apply recommendation.");
+    }
+  };
+
+  const rollbackRec = async (id: number) => {
+    if (!isAdmin) return;
+    try {
+      await api.rollbackRecommendation(id);
+      void load();
+    } catch {
+      setError("Unable to rollback recommendation.");
+    }
+  };
+
+  const toggleEmergency = async () => {
+    if (!isAdmin) return;
+    try {
+      const res = await api.emergencyDisableTuning();
+      setEmergencyDisabled(res.emergency_disabled);
+      void load();
+    } catch {
+      setError("Unable to toggle emergency disable.");
+    }
+  };
+
+  return (
+    <Card data-testid="adaptive-tuning-section">
+      <div className="flex flex-wrap items-center gap-3">
+        <h2 className="mr-auto text-xl font-semibold">Adaptive Tuning</h2>
+        <span
+          className={`rounded-full px-3 py-1 text-xs font-medium ${
+            emergencyDisabled
+              ? "bg-rose-500/20 text-rose-500"
+              : policy.mode === "enforce"
+              ? "bg-emerald-500/20 text-emerald-500"
+              : policy.mode === "recommend"
+              ? "bg-blue-500/20 text-blue-500"
+              : "bg-amber-500/20 text-amber-500"
+          }`}
+        >
+          {emergencyDisabled
+            ? "Emergency Disabled"
+            : policy.mode === "enforce"
+            ? "Enforce Active"
+            : policy.mode === "recommend"
+            ? "Recommendations Only"
+            : "Monitor-only (Default)"}
+        </span>
+      </div>
+      <p className="mt-2 text-sm text-muted">
+        Opt-in policy recommendations and guarded adjustments per host. Defaults to monitor-only with maximum delta guardrails.
+      </p>
+
+      {error && <Alert variant="danger">{error}</Alert>}
+      {success && <Alert variant="success">{success}</Alert>}
+
+      <form className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4" onSubmit={(e) => void savePolicy(e)}>
+        <SelectField
+          id="tuning-proxy-host"
+          label="Proxy Host"
+          value={selectedHost}
+          onChange={(e) => setSelectedHost(e.target.value)}
+        >
+          {hosts.slice(0, 100).map((h) => (
+            <option key={h.id} value={h.id}>
+              {h.name} ({h.domain})
+            </option>
+          ))}
+        </SelectField>
+
+        <SelectField
+          label="Mode"
+          value={policy.mode}
+          onChange={(e) => setPolicy({ ...policy, mode: e.target.value as TuningMode })}
+          disabled={!isAdmin || saving}
+        >
+          <option value="monitor">Monitor-only</option>
+          <option value="recommend">Recommend</option>
+          <option value="enforce">Enforce</option>
+        </SelectField>
+
+        <Field
+          label="Max Delta %"
+          type="number"
+          min="1"
+          max="100"
+          value={String(policy.max_delta_percent)}
+          onChange={(e) => setPolicy({ ...policy, max_delta_percent: Number(e.target.value) })}
+          disabled={!isAdmin || saving}
+          required
+        />
+
+        <Field
+          label="Min Confidence"
+          type="number"
+          min="0.1"
+          max="1.0"
+          step="0.05"
+          value={String(policy.min_confidence)}
+          onChange={(e) => setPolicy({ ...policy, min_confidence: Number(e.target.value) })}
+          disabled={!isAdmin || saving}
+          required
+        />
+
+        {isAdmin && (
+          <div className="col-span-full flex gap-3">
+            <Button type="submit" disabled={saving}>
+              {saving ? "Saving…" : "Save Tuning Policy"}
+            </Button>
+            <Button
+              type="button"
+              variant={emergencyDisabled ? "secondary" : "danger"}
+              onClick={() => void toggleEmergency()}
+            >
+              {emergencyDisabled ? "Enable Tuning" : "Emergency Disable"}
+            </Button>
+          </div>
+        )}
+      </form>
+
+      <div className="mt-6 border-t border-border pt-4">
+        <h3 className="text-lg font-semibold mb-2">Recommendations & History</h3>
+        {loading && <p role="status" className="text-muted">Loading recommendations…</p>}
+        {!loading && recommendations.length === 0 && (
+          <p className="text-muted text-sm">No policy recommendations generated.</p>
+        )}
+        {!loading && recommendations.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-left text-sm">
+              <caption>Tuning recommendations</caption>
+              <thead>
+                <tr>
+                  <th>Created</th>
+                  <th>Host ID</th>
+                  <th>Confidence</th>
+                  <th>Reason</th>
+                  <th>Status</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {recommendations.map((rec) => (
+                  <tr key={rec.id}>
+                    <td>{new Date(rec.created_at).toLocaleString()}</td>
+                    <td>{rec.host_id}</td>
+                    <td>{(rec.confidence * 100).toFixed(0)}%</td>
+                    <td>{rec.reason}</td>
+                    <td>
+                      {rec.applied ? (
+                        <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-500">Applied</span>
+                      ) : (
+                        <span className="rounded bg-amber-500/20 px-2 py-0.5 text-xs text-amber-500">Pending</span>
+                      )}
+                    </td>
+                    <td>
+                      {isAdmin && !rec.applied && (
+                        <Button variant="secondary" onClick={() => void applyRec(rec.id)}>
+                          Apply
+                        </Button>
+                      )}
+                      {isAdmin && rec.applied && (
+                        <Button variant="danger" onClick={() => void rollbackRec(rec.id)}>
+                          Rollback
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 export function BotChallengePage({ fingerprint = serverChallengeFingerprint(), onComplete }: { fingerprint?: string; onComplete?: () => void }) {
   const [challenge, setChallenge] = useState<BotChallenge | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState(""), [complete, setComplete] = useState(false);
   const requestChallenge = async () => { if (!fingerprint) { setError("Challenge context unavailable. Please return to the protected page and try again."); return; } setBusy(true); setError(""); setComplete(false); try { setChallenge(await api.botChallenge(fingerprint)); } catch { setError("Challenge unavailable. Please try again."); } finally { setBusy(false); } };
@@ -940,6 +1188,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
   const [analyticsRefresh, setAnalyticsRefresh] = useState(0);
   const [baselineRefresh, setBaselineRefresh] = useState(0);
   const [anomalyRefresh, setAnomalyRefresh] = useState(0);
+  const [adaptiveTuningRefresh, setAdaptiveTuningRefresh] = useState(0);
   const [form, setForm] = useState({
     name: "",
     domain: "",
@@ -1003,6 +1252,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
     analytics: () => setAnalyticsRefresh(value => value + 1),
     baseline: () => setBaselineRefresh(value => value + 1),
     anomaly: () => setAnomalyRefresh(value => value + 1),
+    adaptiveTuning: () => setAdaptiveTuningRefresh(value => value + 1),
   });
   const refresh = async () => {
     try {
@@ -1048,6 +1298,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
       <AnalyticsSection hosts={hosts} refreshToken={analyticsRefresh} />
       <BaselineSection hosts={hosts} refreshToken={baselineRefresh} />
       <AnomalySection user={user} hosts={hosts} refreshToken={anomalyRefresh} />
+      <AdaptiveTuningSection user={user} hosts={hosts} refreshToken={adaptiveTuningRefresh} />
       {canWrite && (
         <AcmeWizard canWrite={canWrite} onIssued={() => void refresh()} />
       )}

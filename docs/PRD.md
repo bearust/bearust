@@ -767,5 +767,12 @@ external exposure requires authentication. Output uses bounded configured
 proxy-host and status-class labels with a 256 KiB default cap.
 
 Durable history, Redis/cross-node aggregation and fan-out, per-route
-dimensions, anomaly detection, adaptive tuning, custom retention, and alerting
-remain deferred to later phases.
+dimensions, custom retention, and cross-node replay remain deferred to Phase 10–13.
+
+### Phase 9 status: self-learning (traffic baseline, anomaly detection, adaptive tuning)
+
+Phase 9 delivers a complete three-stage self-learning framework:
+- **Phase 9A — Traffic Baseline**: Bounded process-local per-host baseline collector aggregating request rate, status breakdown, error rate, latency percentiles (p50, p95, p99), and security event counters across 5m, 1h, and 24h rolling windows. Status handles `warming_up` state safely until sample counts are sufficient. Exposed via host-scoped API `GET /api/analytics/baseline` and `baseline.changed` SSE event.
+- **Phase 9B — Anomaly Detection**: Deterministic monitor-only traffic deviation evaluator detecting request-rate spikes, error-rate spikes, latency regressions, and security-event surges with EWMA and standard deviation scoring. Evaluates `info`, `warning`, and `critical` severities, prevents critical anomalies during `warming_up`, enforces 5-minute deduplication cooldowns, and exposes `GET /api/analytics/anomalies` and `POST /api/analytics/anomalies/{id}/ack` with `anomaly.changed` SSE event.
+- **Phase 9C — Adaptive Tuning**: Opt-in per-host policy recommendation and tuning engine with guardrails (mode defaults to `monitor`, max delta limits, min confidence floor, emergency global disable). Persisted via SQLite migration `0007_adaptive_tuning.sql` with atomic apply/rollback, audit logging, and `adaptive_tuning.changed` SSE event.
+

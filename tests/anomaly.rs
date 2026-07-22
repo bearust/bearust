@@ -1,5 +1,5 @@
 use bearust::analytics::{AnalyticsBucket, AnalyticsSnapshot, AnalyticsSummary};
-use bearust::baseline::{BaselineCollector, BaselineSnapshot, BaselineStatus, BaselineWindow};
+use bearust::baseline::{BaselineCollector, BaselineStatus, BaselineWindow};
 use bearust::anomaly::{AnomalyDetector, AnomalyRule, AnomalySeverity};
 use chrono::{Duration, Utc};
 

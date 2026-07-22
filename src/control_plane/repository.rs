@@ -1363,3 +1363,59 @@ pub async fn set_active_certificate(
 pub async fn activate_certificate(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
     set_active_certificate(pool, Some(id)).await
 }
+
+pub async fn get_tuning_policy(pool: &DbPool, host_id: i64) -> Result<crate::adaptive_tuning::TuningPolicy, sqlx::Error> {
+    let row = sqlx::query("SELECT mode, max_delta_percent, cooldown_seconds, min_confidence FROM adaptive_tuning_policies WHERE host_id=?")
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await?;
+
+    if let Some(row) = row {
+        let mode_str: String = row.get("mode");
+        let mode = match mode_str.as_str() {
+            "recommend" => crate::adaptive_tuning::TuningMode::Recommend,
+            "enforce" => crate::adaptive_tuning::TuningMode::Enforce,
+            _ => crate::adaptive_tuning::TuningMode::Monitor,
+        };
+        Ok(crate::adaptive_tuning::TuningPolicy {
+            mode,
+            max_delta_percent: row.get::<i64, _>("max_delta_percent") as u8,
+            cooldown_seconds: row.get::<i64, _>("cooldown_seconds") as u64,
+            min_confidence: row.get::<f64, _>("min_confidence"),
+        })
+    } else {
+        Ok(crate::adaptive_tuning::TuningPolicy::default())
+    }
+}
+
+pub async fn update_tuning_policy(pool: &DbPool, host_id: i64, policy: &crate::adaptive_tuning::TuningPolicy) -> Result<(), sqlx::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mode_str = match policy.mode {
+        crate::adaptive_tuning::TuningMode::Monitor => "monitor",
+        crate::adaptive_tuning::TuningMode::Recommend => "recommend",
+        crate::adaptive_tuning::TuningMode::Enforce => "enforce",
+    };
+
+    sqlx::query("INSERT INTO adaptive_tuning_policies(host_id, mode, max_delta_percent, cooldown_seconds, min_confidence, updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(host_id) DO UPDATE SET mode=?, max_delta_percent=?, cooldown_seconds=?, min_confidence=?, updated_at=?")
+        .bind(host_id).bind(mode_str).bind(policy.max_delta_percent as i64).bind(policy.cooldown_seconds as i64).bind(policy.min_confidence).bind(&now)
+        .bind(mode_str).bind(policy.max_delta_percent as i64).bind(policy.cooldown_seconds as i64).bind(policy.min_confidence).bind(&now)
+        .execute(pool).await?;
+
+    Ok(())
+}
+
+pub async fn get_emergency_disabled(pool: &DbPool) -> Result<bool, sqlx::Error> {
+    let val: Option<i64> = sqlx::query_scalar("SELECT emergency_disabled FROM adaptive_tuning_global WHERE id=1")
+        .fetch_optional(pool).await?;
+    Ok(val.unwrap_or(0) == 1)
+}
+
+pub async fn set_emergency_disabled(pool: &DbPool, disabled: bool) -> Result<(), sqlx::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let val = if disabled { 1i64 } else { 0i64 };
+    sqlx::query("INSERT INTO adaptive_tuning_global(id, emergency_disabled, updated_at) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET emergency_disabled=?, updated_at=?")
+        .bind(val).bind(&now).bind(val).bind(&now)
+        .execute(pool).await?;
+    Ok(())
+}
+

@@ -61,6 +61,7 @@ pub struct AppState {
     pub analytics: Arc<AnalyticsCollector>,
     pub baseline: Arc<crate::baseline::BaselineCollector>,
     pub anomaly: Arc<crate::anomaly::AnomalyDetector>,
+    pub adaptive_tuning: Arc<crate::adaptive_tuning::AdaptiveTuningEngine>,
     pub prometheus: PrometheusConfig,
 }
 
@@ -306,6 +307,7 @@ pub async fn build_state(
         analytics: Arc::new(AnalyticsCollector::default()),
         baseline: Arc::new(crate::baseline::BaselineCollector::default()),
         anomaly: Arc::new(crate::anomaly::AnomalyDetector::default()),
+        adaptive_tuning: Arc::new(crate::adaptive_tuning::AdaptiveTuningEngine::default()),
         prometheus: PrometheusConfig::default(),
     })
 }
@@ -359,6 +361,11 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route("/api/analytics/baseline", get(analytics_baseline))
         .route("/api/analytics/anomalies", get(list_anomalies))
         .route("/api/analytics/anomalies/{id}/ack", post(acknowledge_anomaly))
+        .route("/api/adaptive-tuning/policy/{host_id}", get(get_tuning_policy).put(update_tuning_policy))
+        .route("/api/adaptive-tuning/recommendations", get(list_recommendations))
+        .route("/api/adaptive-tuning/recommendations/{id}/apply", post(apply_recommendation))
+        .route("/api/adaptive-tuning/recommendations/{id}/rollback", post(rollback_recommendation))
+        .route("/api/adaptive-tuning/emergency-disable", post(emergency_disable_tuning))
         .route("/api/waf/config", get(get_waf_config).patch(update_waf_config))
         .route("/api/rate-limit/config", get(get_rate_limit_config).patch(update_rate_limit_config))
         .route("/api/waf/rules", get(list_waf_rules).post(create_waf_rule))
@@ -1335,6 +1342,144 @@ async fn acknowledge_anomaly(
         }
         None => user_error(StatusCode::NOT_FOUND, "not_found", "Anomaly record not found"),
     }
+}
+
+async fn get_tuning_policy(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(host_id): Path<i64>,
+) -> Response {
+    if let Err(r) = require_analytics_read(&s, &h, Some(host_id)).await {
+        return r;
+    }
+    match repository::get_tuning_policy(&s.db, host_id).await {
+        Ok(policy) => Json(policy).into_response(),
+        Err(_) => user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Database unavailable"),
+    }
+}
+
+async fn update_tuning_policy(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(host_id): Path<i64>,
+    Json(input): Json<crate::adaptive_tuning::TuningPolicy>,
+) -> Response {
+    let user = match current(&s, &h).await {
+        Ok(u) => u,
+        Err(c) => return user_error(c, "unauthorized", "Authentication required"),
+    };
+    if !authorize(&s.db, &user, Permission::SystemSettingsManage, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        return user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required");
+    }
+
+    if repository::update_tuning_policy(&s.db, host_id, &input).await.is_err() {
+        return user_error(StatusCode::INTERNAL_SERVER_ERROR, "database_error", "Unable to update policy");
+    }
+
+    audit::record_state(&s, Some(user.id), "adaptive_tuning_policy_updated", &format!("host_id={host_id};mode={:?}", input.mode)).await;
+    s.realtime.publish("adaptive_tuning.changed");
+    Json(input).into_response()
+}
+
+async fn list_recommendations(
+    State(s): State<AppState>,
+    h: HeaderMap,
+) -> Response {
+    if let Err(r) = require_analytics_read(&s, &h, None).await {
+        return r;
+    }
+    let baseline = s.baseline.snapshot(None, crate::baseline::BaselineWindow::FiveMinutes, Utc::now() - chrono::Duration::minutes(5), Utc::now());
+    let analytics = s.analytics.snapshot();
+    let anomalies = s.anomaly.evaluate(&baseline, &analytics, Utc::now());
+
+    let current_rl = match repository::get_rate_limit_config(&s.db).await {
+        Ok(c) => crate::rate_limit::RateLimitPolicy {
+            enabled: c.enabled,
+            action: c.action,
+            capacity: c.capacity,
+            refill_per_second: c.refill_per_second,
+            key_scope: c.key_scope,
+        },
+        Err(_) => crate::rate_limit::RateLimitPolicy {
+            enabled: false,
+            action: crate::rate_limit::RateLimitAction::Monitor,
+            capacity: 100,
+            refill_per_second: 10.0,
+            key_scope: crate::rate_limit::RateLimitKeyScope::ProxyHostIp,
+        },
+    };
+
+    let mut recommendations = Vec::new();
+    for (i, anomaly) in anomalies.iter().enumerate() {
+        let policy = repository::get_tuning_policy(&s.db, anomaly.host_id).await.unwrap_or_default();
+        if let Some(mut rec) = s.adaptive_tuning.recommend(anomaly, &current_rl, &policy) {
+            rec.id = (i + 1) as i64;
+            recommendations.push(rec);
+        }
+    }
+
+    Json(recommendations).into_response()
+}
+
+async fn apply_recommendation(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    let user = match current(&s, &h).await {
+        Ok(u) => u,
+        Err(c) => return user_error(c, "unauthorized", "Authentication required"),
+    };
+    if !authorize(&s.db, &user, Permission::SystemSettingsManage, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        return user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required");
+    }
+
+    if s.adaptive_tuning.is_emergency_disabled() {
+        return user_error(StatusCode::CONFLICT, "emergency_disabled", "Adaptive tuning is globally disabled");
+    }
+
+    audit::record_state(&s, Some(user.id), "recommendation_applied", &format!("recommendation_id={id}")).await;
+    s.realtime.publish("adaptive_tuning.changed");
+    StatusCode::OK.into_response()
+}
+
+async fn rollback_recommendation(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<i64>,
+) -> Response {
+    let user = match current(&s, &h).await {
+        Ok(u) => u,
+        Err(c) => return user_error(c, "unauthorized", "Authentication required"),
+    };
+    if !authorize(&s.db, &user, Permission::SystemSettingsManage, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        return user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required");
+    }
+
+    audit::record_state(&s, Some(user.id), "recommendation_rolled_back", &format!("recommendation_id={id}")).await;
+    s.realtime.publish("adaptive_tuning.changed");
+    StatusCode::OK.into_response()
+}
+
+async fn emergency_disable_tuning(
+    State(s): State<AppState>,
+    h: HeaderMap,
+) -> Response {
+    let user = match current(&s, &h).await {
+        Ok(u) => u,
+        Err(c) => return user_error(c, "unauthorized", "Authentication required"),
+    };
+    if !authorize(&s.db, &user, Permission::SystemSettingsManage, ResourceContext::GLOBAL).await.unwrap_or(false) {
+        return user_error(StatusCode::FORBIDDEN, "forbidden", "Administrator access required");
+    }
+
+    let next_state = !s.adaptive_tuning.is_emergency_disabled();
+    s.adaptive_tuning.set_emergency_disabled(next_state);
+    let _ = repository::set_emergency_disabled(&s.db, next_state).await;
+
+    audit::record_state(&s, Some(user.id), "adaptive_tuning_emergency_toggle", &format!("disabled={next_state}")).await;
+    s.realtime.publish("adaptive_tuning.changed");
+    Json(serde_json::json!({"emergency_disabled": next_state})).into_response()
 }
 
 /// Normalize RFC3339 query bounds to the UTC representation persisted in
