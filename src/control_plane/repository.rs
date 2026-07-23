@@ -1,6 +1,7 @@
 use crate::bot_protection::{
     BotConfig, BotMode, BotRule, MAX_FIELD_BYTES, MAX_RULES, MAX_TRUSTED_RULES, MAX_TTL_SECONDS,
 };
+use crate::cluster_raft::ConfigCommand;
 use crate::control_plane::models::{
     AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AuditLogItem, AuditLogPage,
     AuditLogQuery, CertificateMetadata, ProxyHost, RateLimitConfig, RoleDetail,
@@ -264,6 +265,98 @@ pub async fn record_raft_command_id(pool: &DbPool, command_id: &str) -> Result<b
         .bind(now)
         .execute(pool)
         .await?;
+    Ok(true)
+}
+
+/// Apply a committed configuration command in one database transaction.
+/// The command ID is recorded in the same transaction as the mutation, so a
+/// replay after a crash is a no-op and cannot produce a divergent resource.
+pub async fn apply_raft_command(
+    pool: &DbPool,
+    command: &ConfigCommand,
+) -> Result<bool, sqlx::Error> {
+    command
+        .validate()
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    let command_id = command.command_id().to_string();
+    let mut tx = pool.begin().await?;
+    if sqlx::query("SELECT 1 FROM raft_command_ids WHERE command_id=?")
+        .bind(&command_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some()
+    {
+        return Ok(false);
+    }
+
+    match command {
+        ConfigCommand::CreateProxyHost { host, .. }
+        | ConfigCommand::UpdateProxyHost { host, .. } => {
+            let now = chrono::Utc::now().to_rfc3339();
+            let result = if matches!(command, ConfigCommand::CreateProxyHost { .. }) {
+                sqlx::query("INSERT INTO proxy_hosts(id,name,domain,upstream_host,upstream_port,tls_mode,certificate_id,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+                    .bind(host.id)
+                    .bind(&host.name)
+                    .bind(&host.domain)
+                    .bind(&host.upstream_host)
+                    .bind(host.upstream_port as i64)
+                    .bind(&host.tls_mode)
+                    .bind(host.certificate_id)
+                    .bind(host.enabled as i64)
+                    .bind(&now)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await?
+            } else {
+                sqlx::query("UPDATE proxy_hosts SET name=?,domain=?,upstream_host=?,upstream_port=?,tls_mode=?,certificate_id=?,enabled=?,updated_at=? WHERE id=?")
+                    .bind(&host.name)
+                    .bind(&host.domain)
+                    .bind(&host.upstream_host)
+                    .bind(host.upstream_port as i64)
+                    .bind(&host.tls_mode)
+                    .bind(host.certificate_id)
+                    .bind(host.enabled as i64)
+                    .bind(&now)
+                    .bind(host.id)
+                    .execute(&mut *tx)
+                    .await?
+            };
+            if matches!(command, ConfigCommand::UpdateProxyHost { .. })
+                && result.rows_affected() == 0
+            {
+                return Err(sqlx::Error::Protocol("proxy host not found".into()));
+            }
+        }
+        ConfigCommand::DeleteProxyHost { host_id, .. } => {
+            sqlx::query("DELETE FROM proxy_hosts WHERE id=?")
+                .bind(host_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        ConfigCommand::UpdateRuntimePolicy {
+            host_id, policy, ..
+        } => {
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query("DELETE FROM host_rate_limit_configs WHERE host_id=?")
+                .bind(host_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO host_rate_limit_configs(host_id,capacity,refill_per_second,updated_at) VALUES(?,?,?,?)")
+                .bind(host_id)
+                .bind(policy.capacity as i64)
+                .bind(policy.refill_per_second)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+
+    sqlx::query("INSERT INTO raft_command_ids(command_id,applied_at) VALUES(?,?)")
+        .bind(command_id)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(true)
 }
 

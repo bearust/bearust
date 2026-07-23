@@ -109,8 +109,16 @@ impl ConfigCommand {
             return Err(CommandError::Invalid("command_id must not be nil".into()));
         }
         match self {
-            Self::CreateProxyHost { host, .. } | Self::UpdateProxyHost { host, .. } => {
+            Self::CreateProxyHost { host, .. } => {
                 validate_host(host)?;
+            }
+            Self::UpdateProxyHost { host_id, host, .. } => {
+                validate_host(host)?;
+                if *host_id != host.id {
+                    return Err(CommandError::Invalid(
+                        "host_id must match host.id for updates".into(),
+                    ));
+                }
             }
             Self::DeleteProxyHost { host_id, .. } | Self::UpdateRuntimePolicy { host_id, .. }
                 if *host_id <= 0 =>

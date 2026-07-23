@@ -1,5 +1,6 @@
 use bearust::cluster_raft::{CommandError, ConfigCommand, ReplicatedConfig};
 use bearust::control_plane::models::ProxyHost;
+use bearust::control_plane::repository;
 use uuid::Uuid;
 
 fn host() -> ProxyHost {
@@ -62,4 +63,26 @@ fn state_machine_applies_in_order_and_ignores_duplicate_commands() {
     let restored = ReplicatedConfig::from_snapshot(&snapshot).unwrap();
     assert_eq!(restored.proxy_hosts().len(), 1);
     assert!(restored.has_applied(id));
+}
+
+#[tokio::test]
+async fn committed_proxy_host_command_is_applied_atomically_and_idempotently() {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+    let command = ConfigCommand::CreateProxyHost {
+        command_id: Uuid::new_v4(),
+        host: host(),
+    };
+
+    assert!(repository::apply_raft_command(&pool, &command)
+        .await
+        .unwrap());
+    assert!(!repository::apply_raft_command(&pool, &command)
+        .await
+        .unwrap());
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM proxy_hosts WHERE id=42")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
 }
