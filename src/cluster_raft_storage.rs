@@ -31,6 +31,13 @@ impl SqlxRaftStorage {
         &self.node_id
     }
 
+    /// Return the stable numeric identity OpenRaft requires for this node.
+    pub async fn raft_id(&self) -> Result<u64, Error> {
+        let identity = repository::register_raft_node(&self.pool, &self.node_id).await?;
+        u64::try_from(identity.raft_id)
+            .map_err(|_| Error::Protocol("persisted raft node id is out of range".into()))
+    }
+
     pub async fn save_vote(&self, term: i64, voted_for: Option<&str>) -> Result<(), Error> {
         repository::save_raft_hard_state(&self.pool, &self.node_id, term, voted_for).await
     }

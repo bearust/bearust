@@ -29,6 +29,7 @@ fn command() -> ConfigCommand {
 #[tokio::test]
 async fn persists_vote_command_log_and_snapshot_round_trip() {
     let storage = storage().await;
+    assert!(storage.raft_id().await.unwrap() > 0);
     storage.save_vote(4, Some("node-b")).await.unwrap();
     assert_eq!(storage.load_vote().await.unwrap().unwrap().current_term, 4);
 
