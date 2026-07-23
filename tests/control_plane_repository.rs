@@ -68,6 +68,7 @@ async fn raft_storage_schema_is_created_and_migration_is_repeatable() {
         "raft_log_entries",
         "raft_snapshots",
         "raft_command_ids",
+        "raft_node_ids",
     ] {
         let exists: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
@@ -89,6 +90,29 @@ async fn raft_storage_schema_is_created_and_migration_is_repeatable() {
     .execute(&pool)
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn raft_node_identity_is_stable_and_numeric_ids_are_unique() {
+    let pool = test_pool().await;
+    let first = repository::register_raft_node(&pool, "node-a")
+        .await
+        .unwrap();
+    let again = repository::register_raft_node(&pool, "node-a")
+        .await
+        .unwrap();
+    let second = repository::register_raft_node(&pool, "node-b")
+        .await
+        .unwrap();
+    assert_eq!(first, again);
+    assert!(first.raft_id > 0);
+    assert_ne!(first.raft_id, second.raft_id);
+    assert_eq!(
+        repository::load_raft_node_by_id(&pool, first.raft_id)
+            .await
+            .unwrap(),
+        Some(first)
+    );
 }
 
 #[tokio::test]
@@ -334,7 +358,7 @@ async fn migrations_record_order_and_seed_exact_permissions() {
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
     let lock_row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM setup_lock WHERE id=1")
         .fetch_one(&pool)
         .await

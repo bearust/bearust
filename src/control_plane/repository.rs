@@ -33,12 +33,72 @@ pub struct RaftHardState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftNodeIdentity {
+    pub node_id: String,
+    pub raft_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RaftLogRecord {
     pub node_id: String,
     pub log_index: i64,
     pub term: i64,
     pub command_id: Option<String>,
     pub payload: String,
+}
+
+/// Register a stable numeric OpenRaft identity for an application node name.
+/// IDs are allocated once and never derived from a hash, avoiding collisions.
+pub async fn register_raft_node(
+    pool: &DbPool,
+    node_id: &str,
+) -> Result<RaftNodeIdentity, sqlx::Error> {
+    if node_id.trim().is_empty() {
+        return Err(sqlx::Error::Protocol(
+            "raft node id must not be empty".into(),
+        ));
+    }
+    let mut tx = pool.begin().await?;
+    if let Some(row) = sqlx::query("SELECT node_id,raft_id FROM raft_node_ids WHERE node_id=?")
+        .bind(node_id)
+        .fetch_optional(&mut *tx)
+        .await?
+    {
+        tx.commit().await?;
+        return Ok(RaftNodeIdentity {
+            node_id: row.get("node_id"),
+            raft_id: row.get("raft_id"),
+        });
+    }
+    let next_id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(raft_id),0)+1 FROM raft_node_ids")
+        .fetch_one(&mut *tx)
+        .await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO raft_node_ids(node_id,raft_id,created_at) VALUES(?,?,?)")
+        .bind(node_id)
+        .bind(next_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(RaftNodeIdentity {
+        node_id: node_id.to_owned(),
+        raft_id: next_id,
+    })
+}
+
+pub async fn load_raft_node_by_id(
+    pool: &DbPool,
+    raft_id: i64,
+) -> Result<Option<RaftNodeIdentity>, sqlx::Error> {
+    let row = sqlx::query("SELECT node_id,raft_id FROM raft_node_ids WHERE raft_id=?")
+        .bind(raft_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|row| RaftNodeIdentity {
+        node_id: row.get("node_id"),
+        raft_id: row.get("raft_id"),
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
