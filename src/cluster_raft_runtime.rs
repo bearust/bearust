@@ -24,6 +24,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -83,6 +84,74 @@ pub fn decode_raft_rpc<T: DeserializeOwned>(
         return Err(RpcTransportError::Malformed);
     }
     serde_json::from_value(envelope.payload).map_err(|_| RpcTransportError::Malformed)
+}
+
+#[async_trait]
+pub trait RaftRpcHandler: Send + Sync {
+    async fn handle(&self, kind: &str, payload: &[u8]) -> Result<Vec<u8>, RpcTransportError>;
+}
+
+pub struct OpenRaftRpcHandler {
+    raft: openraft::Raft<BearustRaftConfig>,
+}
+
+pub async fn dispatch_authenticated_rpc_with_handler(
+    frame: &[u8],
+    secret: &[u8],
+    node_id: &str,
+    handler: &dyn RaftRpcHandler,
+) -> Result<Vec<u8>, RpcTransportError> {
+    let payload = crate::cluster_raft::decode_rpc_frame(frame, secret)
+        .map_err(|_| RpcTransportError::AuthenticationFailed)?;
+    let envelope: RaftRpcEnvelope = serde_json::from_slice(payload)
+        .map_err(|_| RpcTransportError::Malformed)?;
+    if envelope.kind == "status" {
+        let status = encode_raft_rpc(
+            "status",
+            &serde_json::json!({"node_id": node_id, "status": "transport_ready"}),
+        )?;
+        return crate::cluster_raft::encode_rpc_frame(&status, secret)
+            .map_err(|_| RpcTransportError::Malformed);
+    }
+    let request = serde_json::to_vec(&envelope).map_err(|_| RpcTransportError::Malformed)?;
+    let response = handler.handle(&envelope.kind, &request).await?;
+    crate::cluster_raft::encode_rpc_frame(&response, secret)
+        .map_err(|_| RpcTransportError::Malformed)
+}
+
+impl OpenRaftRpcHandler {
+    pub fn new(raft: openraft::Raft<BearustRaftConfig>) -> Self {
+        Self { raft }
+    }
+}
+
+#[async_trait]
+impl RaftRpcHandler for OpenRaftRpcHandler {
+    async fn handle(&self, kind: &str, payload: &[u8]) -> Result<Vec<u8>, RpcTransportError> {
+        match kind {
+            "vote" => {
+                let request: VoteRequest<u64> = decode_raft_rpc(payload, kind)?;
+                let response = self
+                    .raft
+                    .vote(request)
+                    .await
+                    .map_err(|_| RpcTransportError::Unavailable)?;
+                encode_raft_rpc("vote_response", &response)
+            }
+            "append_entries" => {
+                let request: AppendEntriesRequest<BearustRaftConfig> =
+                    decode_raft_rpc(payload, kind)?;
+                let response = self
+                    .raft
+                    .append_entries(request)
+                    .await
+                    .map_err(|_| RpcTransportError::Unavailable)?;
+                encode_raft_rpc("append_entries_response", &response)
+            }
+            "install_snapshot" => Err(RpcTransportError::Unavailable),
+            _ => Err(RpcTransportError::Malformed),
+        }
+    }
 }
 
 /// Send one authenticated framed request and receive one authenticated framed

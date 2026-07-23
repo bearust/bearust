@@ -6,6 +6,8 @@ use bearust::cluster_raft_runtime::{
     dispatch_authenticated_rpc, send_authenticated_rpc, validate_multi_node_join, BootstrapError,
     RpcTransportError,
 };
+use async_trait::async_trait;
+use bearust::cluster_raft_runtime::{dispatch_authenticated_rpc_with_handler, RaftRpcHandler};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -119,4 +121,23 @@ fn raft_rpc_envelope_round_trip_is_bounded_and_kind_checked() {
         decode_raft_rpc::<serde_json::Value>(&payload, "append_entries"),
         Err(RpcTransportError::Malformed)
     );
+}
+
+struct TestRpcHandler;
+#[async_trait]
+impl RaftRpcHandler for TestRpcHandler {
+    async fn handle(&self, kind: &str, _payload: &[u8]) -> Result<Vec<u8>, RpcTransportError> {
+        encode_raft_rpc("handled", &serde_json::json!({"kind": kind})).map_err(|_| RpcTransportError::Malformed)
+    }
+}
+
+#[tokio::test]
+async fn dispatcher_invokes_rpc_handler_for_authenticated_envelope() {
+    let secret = b"correct-secret";
+    let body = encode_raft_rpc("vote", &serde_json::json!({"term": 1})).unwrap();
+    let frame = bearust::cluster_raft::encode_rpc_frame(&body, secret).unwrap();
+    let response = dispatch_authenticated_rpc_with_handler(&frame, secret, "node-a", &TestRpcHandler).await.unwrap();
+    let payload = bearust::cluster_raft::decode_rpc_frame(&response, secret).unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(payload).unwrap();
+    assert_eq!(envelope["kind"], "handled");
 }
