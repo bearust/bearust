@@ -262,6 +262,21 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let mut control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
         control_state.prometheus = config.prometheus.clone();
+        // Construct the Raft runtime only for an explicitly configured,
+        // authenticated cluster. Construction does not bootstrap membership
+        // or promote this node; those transitions remain explicit lifecycle
+        // operations. Keep the handle so shutdown can stop its tick task.
+        let raft_handle = if !config.cluster.auth_token.trim().is_empty() {
+            Some(crate::cluster_raft_runtime::construct_raft(
+                control_state.db.clone(),
+                config.cluster.node_id.clone(),
+                config.cluster.auth_token.as_bytes(),
+            )
+            .await
+            .map_err(|error| AppError::Server(format!("raft startup: {error}")))?)
+        } else {
+            None
+        };
         let cluster_service = Arc::new(crate::cluster::ClusterService::new(&config.cluster));
         control_state = control_state.with_cluster(cluster_service.clone());
         let (cluster_shutdown_tx, cluster_shutdown_rx) = tokio::sync::watch::channel(false);
@@ -457,6 +472,15 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         .await
         .map_err(|_| AppError::Server("cluster shutdown timed out".into()))?
         .map_err(|_| AppError::Server("cluster listener task failed".into()))?;
+        if let Some(raft) = raft_handle {
+            tokio::time::timeout(
+                Duration::from_secs(config.server.graceful_shutdown_seconds),
+                raft.shutdown(),
+            )
+            .await
+            .map_err(|_| AppError::Server("raft shutdown timed out".into()))?
+            .map_err(|_| AppError::Server("raft shutdown failed".into()))?;
+        }
         tokio::time::timeout(
             Duration::from_secs(config.server.graceful_shutdown_seconds),
             store.shutdown(),
