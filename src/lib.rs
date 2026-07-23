@@ -11,6 +11,7 @@ pub mod bot_store;
 pub mod certificates;
 pub mod cli;
 pub mod cluster;
+pub mod cluster_raft;
 pub mod config;
 pub mod control_plane;
 pub mod health;
