@@ -156,6 +156,21 @@ pub trait RaftRuntimeAdapters:
 {
 }
 
+/// Construct an OpenRaft instance with the durable SQLx log/state-machine
+/// adapters and authenticated network factory. The caller owns the returned
+/// handle and must explicitly bootstrap/join it; construction alone does not
+/// claim quorum or leadership.
+pub async fn build_raft(
+    id: u64,
+    storage: SqlxRaftStorage,
+    secret: impl AsRef<[u8]>,
+) -> Result<openraft::Raft<BearustRaftConfig>, openraft::error::Fatal<u64>> {
+    let network = AuthenticatedRaftNetworkFactory::new(secret)
+        .ok_or(openraft::error::Fatal::Panicked)?;
+    let config = Arc::new(openraft::Config::default());
+    openraft::Raft::new(id, config, network, storage.clone(), storage).await
+}
+
 impl<T> RaftRuntimeAdapters for T where
     T: openraft::storage::RaftLogStorage<BearustRaftConfig>
         + openraft::storage::RaftStateMachine<BearustRaftConfig>
