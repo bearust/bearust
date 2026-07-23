@@ -59,6 +59,69 @@ async fn test_pool() -> repository::DbPool {
 }
 
 #[tokio::test]
+async fn raft_storage_schema_is_created_and_migration_is_repeatable() {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+
+    for table in [
+        "raft_hard_state",
+        "raft_log_entries",
+        "raft_snapshots",
+        "raft_command_ids",
+    ] {
+        let exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
+                .bind(table)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(exists, 1, "missing Raft table {table}");
+    }
+
+    repository::migrate(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO raft_hard_state(node_id,current_term,voted_for,updated_at) VALUES(?,?,?,?)",
+    )
+    .bind("node-a")
+    .bind(1_i64)
+    .bind(Option::<String>::None)
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn raft_storage_round_trip_is_bounded_and_command_ids_are_idempotent() {
+    let pool = test_pool().await;
+    repository::save_raft_hard_state(&pool, "node-a", 7, Some("node-b"))
+        .await
+        .unwrap();
+    let state = repository::load_raft_hard_state(&pool, "node-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.current_term, 7);
+    assert_eq!(state.voted_for.as_deref(), Some("node-b"));
+
+    repository::append_raft_log_entry(&pool, "node-a", 1, 7, "cmd-1", "{}")
+        .await
+        .unwrap();
+    assert!(repository::record_raft_command_id(&pool, "cmd-1")
+        .await
+        .unwrap());
+    assert!(!repository::record_raft_command_id(&pool, "cmd-1")
+        .await
+        .unwrap());
+
+    let oversized = "x".repeat(repository::MAX_RAFT_PAYLOAD_BYTES + 1);
+    let error = repository::append_raft_log_entry(&pool, "node-a", 2, 7, "cmd-2", &oversized)
+        .await
+        .expect_err("oversized log payload must be rejected");
+    assert!(error.to_string().contains("payload exceeds"));
+}
+
+#[tokio::test]
 async fn scoped_user_lists_only_assigned_proxy_hosts() {
     let pool = test_pool().await;
     sqlx::query("INSERT INTO proxy_hosts(name,domain,upstream_host,upstream_port,tls_mode,created_at,updated_at) VALUES ('one','one.test','127.0.0.1',80,'disabled',datetime('now'),datetime('now')),('two','two.test','127.0.0.1',80,'disabled',datetime('now'),datetime('now'))")
@@ -271,7 +334,7 @@ async fn migrations_record_order_and_seed_exact_permissions() {
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     let lock_row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM setup_lock WHERE id=1")
         .fetch_one(&pool)
         .await

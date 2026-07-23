@@ -17,6 +17,19 @@ use uuid::Uuid;
 /// been migrated to SQLx's backend-agnostic driver.
 pub type DbPool = sqlx::AnyPool;
 
+/// Maximum serialized command/snapshot payload persisted by the Raft layer.
+/// Keeping this bounded prevents an accidental or hostile proposal from
+/// turning the control-plane database into an unbounded blob store.
+pub const MAX_RAFT_PAYLOAD_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftHardState {
+    pub node_id: String,
+    pub current_term: i64,
+    pub voted_for: Option<String>,
+    pub updated_at: String,
+}
+
 static ANY_DRIVERS: Once = Once::new();
 
 /// Validate a database URL without including credentials in the resulting
@@ -166,6 +179,92 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
         }
     }
     Ok(())
+}
+
+pub async fn save_raft_hard_state(
+    pool: &DbPool,
+    node_id: &str,
+    current_term: i64,
+    voted_for: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM raft_hard_state WHERE node_id=?")
+        .bind(node_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO raft_hard_state(node_id,current_term,voted_for,updated_at) VALUES(?,?,?,?)",
+    )
+    .bind(node_id)
+    .bind(current_term)
+    .bind(voted_for)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
+}
+
+pub async fn load_raft_hard_state(
+    pool: &DbPool,
+    node_id: &str,
+) -> Result<Option<RaftHardState>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT node_id,current_term,voted_for,updated_at FROM raft_hard_state WHERE node_id=?",
+    )
+    .bind(node_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|row| RaftHardState {
+        node_id: row.get("node_id"),
+        current_term: row.get("current_term"),
+        voted_for: row.get("voted_for"),
+        updated_at: row.get("updated_at"),
+    }))
+}
+
+pub async fn append_raft_log_entry(
+    pool: &DbPool,
+    node_id: &str,
+    log_index: i64,
+    term: i64,
+    command_id: &str,
+    payload: &str,
+) -> Result<(), sqlx::Error> {
+    if payload.len() > MAX_RAFT_PAYLOAD_BYTES {
+        return Err(sqlx::Error::Protocol(
+            "raft payload exceeds configured limit".into(),
+        ));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO raft_log_entries(node_id,log_index,term,payload,command_id,created_at) VALUES(?,?,?,?,?,?)")
+        .bind(node_id)
+        .bind(log_index)
+        .bind(term)
+        .bind(payload)
+        .bind(command_id)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn record_raft_command_id(pool: &DbPool, command_id: &str) -> Result<bool, sqlx::Error> {
+    if sqlx::query("SELECT 1 FROM raft_command_ids WHERE command_id=?")
+        .bind(command_id)
+        .fetch_optional(pool)
+        .await?
+        .is_some()
+    {
+        return Ok(false);
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO raft_command_ids(command_id,applied_at) VALUES(?,?)")
+        .bind(command_id)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    Ok(true)
 }
 
 fn deterministic_id(value: &str) -> i64 {
