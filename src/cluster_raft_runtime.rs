@@ -148,7 +148,19 @@ impl RaftRpcHandler for OpenRaftRpcHandler {
                     .map_err(|_| RpcTransportError::Unavailable)?;
                 encode_raft_rpc("append_entries_response", &response)
             }
-            "install_snapshot" => Err(RpcTransportError::Unavailable),
+            "install_snapshot" => {
+                let request: InstallSnapshotRequest<BearustRaftConfig> =
+                    decode_raft_rpc(payload, kind)?;
+                if request.data.len() > crate::cluster_raft::MAX_RPC_FRAME_BYTES {
+                    return Err(RpcTransportError::PayloadTooLarge);
+                }
+                let response = self
+                    .raft
+                    .install_snapshot(request)
+                    .await
+                    .map_err(|_| RpcTransportError::Unavailable)?;
+                encode_raft_rpc("install_snapshot_response", &response)
+            }
             _ => Err(RpcTransportError::Malformed),
         }
     }
@@ -351,7 +363,7 @@ impl AuthenticatedRaftNetworkFactory {
 
 #[derive(Clone, Debug)]
 pub struct AuthenticatedRaftNetwork {
-    target: u64,
+    _target: u64,
     endpoint: String,
     secret: Vec<u8>,
 }
@@ -361,7 +373,7 @@ impl RaftNetworkFactory<BearustRaftConfig> for AuthenticatedRaftNetworkFactory {
 
     async fn new_client(&mut self, target: u64, node: &openraft::BasicNode) -> Self::Network {
         AuthenticatedRaftNetwork {
-            target,
+            _target: target,
             endpoint: node.addr.clone(),
             secret: self.secret.clone(),
         }
@@ -404,15 +416,38 @@ impl RaftNetwork<BearustRaftConfig> for AuthenticatedRaftNetwork {
 
     async fn install_snapshot(
         &mut self,
-        _rpc: InstallSnapshotRequest<BearustRaftConfig>,
+        rpc: InstallSnapshotRequest<BearustRaftConfig>,
         _option: RPCOption,
     ) -> Result<
         InstallSnapshotResponse<u64>,
         RPCError<u64, openraft::BasicNode, RaftError<u64, openraft::error::InstallSnapshotError>>,
     > {
-        let _ = (&self.target, &self.endpoint, &self.secret);
-        let error = io::Error::new(io::ErrorKind::NotConnected, "raft transport not started");
-        Err(RPCError::Unreachable(Unreachable::new(&error)))
+        if rpc.data.len() > crate::cluster_raft::MAX_RPC_FRAME_BYTES {
+            return Err(RPCError::Network(openraft::error::NetworkError::new(&io::Error::new(
+                io::ErrorKind::InvalidData,
+                "raft snapshot chunk exceeds transport limit",
+            ))));
+        }
+        let payload = encode_raft_rpc("install_snapshot", &rpc).map_err(|_| {
+            RPCError::Network(openraft::error::NetworkError::new(&io::Error::new(
+                io::ErrorKind::InvalidData, "raft RPC encode failed",
+            )))
+        })?;
+        let response = send_authenticated_rpc(
+            &self.endpoint,
+            &payload,
+            &self.secret,
+            Duration::from_secs(2),
+        )
+        .await
+        .map_err(|_| RPCError::Unreachable(Unreachable::new(&io::Error::new(
+            io::ErrorKind::NotConnected, "raft RPC unavailable",
+        ))))?;
+        decode_raft_rpc(&response, "install_snapshot_response").map_err(|_| {
+            RPCError::Network(openraft::error::NetworkError::new(&io::Error::new(
+                io::ErrorKind::InvalidData, "raft RPC response malformed",
+            )))
+        })
     }
 
     async fn vote(
