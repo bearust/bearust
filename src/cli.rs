@@ -267,10 +267,22 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         // or promote this node; those transitions remain explicit lifecycle
         // operations. Keep the handle so shutdown can stop its tick task.
         let raft_handle = if !config.cluster.auth_token.trim().is_empty() {
-            Some(crate::cluster_raft_runtime::construct_raft(
+            let peer_ids = config
+                .cluster
+                .peers
+                .iter()
+                .map(|peer| peer.node_id.clone())
+                .collect::<Vec<_>>();
+            let raft_id = crate::cluster_raft_runtime::deterministic_raft_id(
+                &config.cluster.node_id,
+                &peer_ids,
+            )
+            .map_err(|error| AppError::Server(format!("raft identity: {error}")))?;
+            Some(crate::cluster_raft_runtime::construct_raft_with_id(
                 control_state.db.clone(),
                 config.cluster.node_id.clone(),
                 config.cluster.auth_token.as_bytes(),
+                raft_id,
             )
             .await
             .map_err(|error| AppError::Server(format!("raft startup: {error}")))?)

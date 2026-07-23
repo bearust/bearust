@@ -516,3 +516,35 @@ pub async fn construct_raft(
         .await
         .map_err(|e| e.to_string())
 }
+
+/// Compute a cluster-wide stable numeric identity from the configured
+/// membership. Every node must use the same sorted membership list.
+pub fn deterministic_raft_id(local: &str, peers: &[String]) -> Result<u64, String> {
+    let mut members = peers.to_vec();
+    members.push(local.to_owned());
+    members.sort();
+    members.dedup();
+    let position = members
+        .iter()
+        .position(|member| member == local)
+        .ok_or_else(|| "local node is absent from cluster membership".to_string())?;
+    u64::try_from(position + 1).map_err(|_| "cluster membership exceeds raft id range".into())
+}
+
+pub async fn construct_raft_with_id(
+    pool: DbPool,
+    node_name: impl Into<String>,
+    auth_secret: impl AsRef<[u8]>,
+    raft_id: u64,
+) -> Result<openraft::Raft<BearustRaftConfig>, String> {
+    if raft_id == 0 {
+        return Err("raft id must be positive".into());
+    }
+    let storage = SqlxRaftStorage::new(pool, node_name).map_err(|e| e.to_string())?;
+    let network = AuthenticatedRaftNetworkFactory::new(auth_secret)
+        .ok_or_else(|| "raft auth secret must not be empty".to_string())?;
+    let config = openraft::Config::build(&["bearust"]).map_err(|e| e.to_string())?;
+    openraft::Raft::new(raft_id, Arc::new(config), network, storage.clone(), storage)
+        .await
+        .map_err(|e| e.to_string())
+}

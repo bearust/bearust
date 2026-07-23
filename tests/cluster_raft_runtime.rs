@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use bearust::cluster_raft::encode_rpc_frame;
 use bearust::cluster_raft::BearustRaftConfig;
+use bearust::cluster_raft_runtime::deterministic_raft_id;
 use bearust::cluster_raft_runtime::AuthenticatedRaftNetworkFactory;
 use bearust::cluster_raft_runtime::{decode_raft_rpc, encode_raft_rpc};
 use bearust::cluster_raft_runtime::{
@@ -27,6 +28,14 @@ fn openraft_runtime_requires_durable_adapter_set() {
 fn authenticated_network_factory_requires_secret() {
     assert!(AuthenticatedRaftNetworkFactory::new([]).is_none());
     assert!(AuthenticatedRaftNetworkFactory::new([7u8; 32]).is_some());
+}
+
+#[test]
+fn deterministic_raft_ids_match_across_nodes() {
+    let members = vec!["node-c".into(), "node-a".into(), "node-b".into()];
+    assert_eq!(deterministic_raft_id("node-a", &members), Ok(1));
+    assert_eq!(deterministic_raft_id("node-b", &members), Ok(2));
+    assert_eq!(deterministic_raft_id("node-c", &members), Ok(3));
 }
 
 #[tokio::test]
