@@ -8,7 +8,7 @@ use crate::control_plane::repository::{
     self, DbPool, RaftHardState, RaftLogRecord, RaftSnapshotRecord,
 };
 use base64::Engine as _;
-use openraft::storage::{LogFlushed, RaftLogReader, RaftLogStorage};
+use openraft::storage::{LogFlushed, RaftLogReader, RaftLogStorage, RaftStateMachine};
 use openraft::{
     Entry, EntryPayload, ErrorSubject, ErrorVerb, LogId, LogState, Snapshot, SnapshotMeta,
     StorageError, StoredMembership, Vote,
@@ -33,7 +33,8 @@ pub struct SqlxSnapshotBuilder {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SnapshotEnvelope {
-    payload: Vec<u8>,
+    proxy_hosts: Vec<crate::control_plane::models::ProxyHost>,
+    host_rate_limits: Vec<(i64, crate::control_plane::models::RateLimitConfig)>,
 }
 
 fn storage_error(
@@ -306,24 +307,30 @@ impl openraft::RaftSnapshotBuilder<crate::cluster_raft::BearustRaftConfig> for S
     async fn build_snapshot(
         &mut self,
     ) -> StorageResult<Snapshot<crate::cluster_raft::BearustRaftConfig>> {
-        let record = self
-            .storage
-            .load_snapshot()
+        let (last_log, _) = self.storage.clone().applied_state().await?;
+        let log_id = last_log.ok_or_else(|| {
+            storage_error(
+                ErrorSubject::Snapshot(None),
+                ErrorVerb::Read,
+                "no applied log",
+            )
+        })?;
+        let envelope = SnapshotEnvelope {
+            proxy_hosts: repository::list_hosts(&self.storage.pool)
+                .await
+                .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?,
+            host_rate_limits: repository::list_host_rate_limit_configs(&self.storage.pool)
+                .await
+                .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?,
+        };
+        let encoded = serde_json::to_vec(&envelope)
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
+        self.storage
+            .save_snapshot(log_id.index as i64, log_id.leader_id.term as i64, &encoded)
             .await
-            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?
-            .ok_or_else(|| {
-                storage_error(
-                    ErrorSubject::Snapshot(None),
-                    ErrorVerb::Read,
-                    "snapshot not found",
-                )
-            })?;
-        let envelope: SnapshotEnvelope = serde_json::from_slice(&record.payload)
-            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
-        let index = u64::try_from(record.snapshot_index)
-            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
-        let term = u64::try_from(record.snapshot_term)
-            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        let index = log_id.index;
+        let term = log_id.leader_id.term;
         let raft_id = self
             .storage
             .raft_id()
@@ -338,7 +345,7 @@ impl openraft::RaftSnapshotBuilder<crate::cluster_raft::BearustRaftConfig> for S
                 last_membership: StoredMembership::default(),
                 snapshot_id: format!("{}-{}", term, index),
             },
-            snapshot: Box::new(Cursor::new(envelope.payload)),
+            snapshot: Box::new(Cursor::new(encoded)),
         })
     }
 }
@@ -448,6 +455,29 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
                 "snapshot missing last log id",
             )
         })?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        sqlx::query("DELETE FROM proxy_hosts")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        sqlx::query("DELETE FROM host_rate_limit_configs")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        let now = chrono::Utc::now().to_rfc3339();
+        for host in &envelope.proxy_hosts {
+            sqlx::query("INSERT INTO proxy_hosts(id,name,domain,upstream_host,upstream_port,tls_mode,certificate_id,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(host.id).bind(&host.name).bind(&host.domain).bind(&host.upstream_host).bind(host.upstream_port as i64).bind(&host.tls_mode).bind(host.certificate_id).bind(host.enabled as i64).bind(&now).bind(&now).execute(&mut *tx).await.map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        }
+        for (host_id, config) in &envelope.host_rate_limits {
+            sqlx::query("INSERT INTO host_rate_limit_configs(host_id,capacity,refill_per_second,updated_at) VALUES(?,?,?,?)").bind(host_id).bind(config.capacity as i64).bind(config.refill_per_second).bind(&config.updated_at).execute(&mut *tx).await.map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
         let encoded = serde_json::to_vec(&envelope)
             .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
         self.save_snapshot(log_id.index as i64, log_id.leader_id.term as i64, &encoded)
@@ -484,7 +514,9 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
                 last_membership: StoredMembership::default(),
                 snapshot_id: format!("{}-{}", term, index),
             },
-            snapshot: Box::new(Cursor::new(envelope.payload)),
+            snapshot: Box::new(Cursor::new(serde_json::to_vec(&envelope).map_err(|e| {
+                storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e)
+            })?)),
         }))
     }
 }
