@@ -8,6 +8,8 @@
 //! integration checked while the SQLx-backed adapters are implemented.
 
 use crate::cluster_raft::BearustRaftConfig;
+use crate::cluster_raft_storage::SqlxRaftStorage;
+use crate::control_plane::repository::DbPool;
 use openraft::error::{RPCError, RaftError, Unreachable};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
@@ -17,6 +19,7 @@ use openraft::raft::{
 use serde_json::Value;
 use std::io;
 use std::time::Duration;
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -244,3 +247,29 @@ impl RaftNetwork<BearustRaftConfig> for AuthenticatedRaftNetwork {
 /// land, calling `openraft::Raft::new` from the lifecycle code can use this
 /// exact bound without changing the public command/state-machine types.
 pub fn assert_runtime_adapters<T: RaftRuntimeAdapters>() {}
+
+/// Construct an OpenRaft instance with the durable SQLx adapters and
+/// authenticated network factory. Calling this starts OpenRaft's runtime;
+/// lifecycle code must therefore invoke it only after transport/listener
+/// readiness and retain the returned handle for shutdown.
+pub async fn construct_raft(
+    pool: DbPool,
+    node_name: impl Into<String>,
+    auth_secret: impl AsRef<[u8]>,
+) -> Result<openraft::Raft<BearustRaftConfig>, String> {
+    let storage = SqlxRaftStorage::new(pool, node_name).map_err(|e| e.to_string())?;
+    let node_id = storage.raft_id().await.map_err(|e| e.to_string())?;
+    let network = AuthenticatedRaftNetworkFactory::new(auth_secret)
+        .ok_or_else(|| "raft auth secret must not be empty".to_string())?;
+    let config = openraft::Config::build(&["bearust"])
+        .map_err(|e| e.to_string())?;
+    openraft::Raft::new(
+        node_id,
+        Arc::new(config),
+        network,
+        storage.clone(),
+        storage,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
