@@ -86,3 +86,27 @@ async fn committed_proxy_host_command_is_applied_atomically_and_idempotently() {
         .unwrap();
     assert_eq!(count, 1);
 }
+
+#[test]
+fn authenticated_rpc_frame_rejects_tampering_and_oversized_payloads() {
+    let payload = br#"{"term":3,"commit_index":7}"#;
+    let secret = b"cluster-test-secret";
+    let mut frame = bearust::cluster_raft::encode_rpc_frame(payload, secret).unwrap();
+    assert_eq!(
+        bearust::cluster_raft::decode_rpc_frame(&frame, secret).unwrap(),
+        payload
+    );
+
+    let tag_offset = frame.len() - bearust::cluster_raft::RPC_TAG_BYTES;
+    frame[tag_offset] ^= 0x01;
+    assert!(matches!(
+        bearust::cluster_raft::decode_rpc_frame(&frame, secret),
+        Err(CommandError::AuthenticationFailed)
+    ));
+
+    let oversized = vec![b'x'; bearust::cluster_raft::MAX_RPC_FRAME_BYTES + 1];
+    assert!(matches!(
+        bearust::cluster_raft::encode_rpc_frame(&oversized, secret),
+        Err(CommandError::PayloadTooLarge)
+    ));
+}

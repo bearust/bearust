@@ -6,7 +6,9 @@
 
 use crate::control_plane::models::ProxyHost;
 use crate::rate_limit::RateLimitPolicy;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Cursor;
@@ -14,6 +16,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const MAX_COMMAND_BYTES: usize = 256 * 1024;
+pub const MAX_RPC_FRAME_BYTES: usize = MAX_COMMAND_BYTES;
+pub const RPC_TAG_BYTES: usize = 32;
+const RPC_MAGIC: &[u8; 7] = b"BRRAFT1";
 const MAX_NAME_BYTES: usize = 128;
 const MAX_HOSTNAME_BYTES: usize = 253;
 
@@ -90,8 +95,64 @@ pub enum CommandError {
     PayloadTooLarge,
     #[error("raft command payload is malformed")]
     MalformedPayload,
+    #[error("raft RPC authentication failed")]
+    AuthenticationFailed,
     #[error("raft command is invalid: {0}")]
     Invalid(String),
+}
+
+type RpcMac = Hmac<Sha256>;
+
+/// Encode a bounded Raft RPC payload with a detached HMAC-SHA256 tag.
+pub fn encode_rpc_frame(payload: &[u8], secret: &[u8]) -> Result<Vec<u8>, CommandError> {
+    if payload.len() > MAX_RPC_FRAME_BYTES {
+        return Err(CommandError::PayloadTooLarge);
+    }
+    if secret.is_empty() {
+        return Err(CommandError::AuthenticationFailed);
+    }
+    let length = u32::try_from(payload.len()).map_err(|_| CommandError::PayloadTooLarge)?;
+    let mut mac = RpcMac::new_from_slice(secret).map_err(|_| CommandError::AuthenticationFailed)?;
+    mac.update(payload);
+    let tag = mac.finalize().into_bytes();
+    let mut frame = Vec::with_capacity(RPC_MAGIC.len() + 4 + payload.len() + RPC_TAG_BYTES);
+    frame.extend_from_slice(RPC_MAGIC);
+    frame.extend_from_slice(&length.to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame.extend_from_slice(&tag);
+    Ok(frame)
+}
+
+/// Decode and authenticate one complete Raft RPC frame without leaking the
+/// secret or payload in the returned error.
+pub fn decode_rpc_frame<'a>(frame: &'a [u8], secret: &[u8]) -> Result<&'a [u8], CommandError> {
+    if secret.is_empty() || frame.len() < RPC_MAGIC.len() + 4 + RPC_TAG_BYTES {
+        return Err(CommandError::MalformedPayload);
+    }
+    if &frame[..RPC_MAGIC.len()] != RPC_MAGIC {
+        return Err(CommandError::MalformedPayload);
+    }
+    let length_start = RPC_MAGIC.len();
+    let length_end = length_start + 4;
+    let declared = u32::from_be_bytes(
+        frame[length_start..length_end]
+            .try_into()
+            .map_err(|_| CommandError::MalformedPayload)?,
+    ) as usize;
+    if declared > MAX_RPC_FRAME_BYTES
+        || frame.len() != RPC_MAGIC.len() + 4 + declared + RPC_TAG_BYTES
+    {
+        return Err(CommandError::MalformedPayload);
+    }
+    let payload_start = length_end;
+    let payload_end = payload_start + declared;
+    let payload = &frame[payload_start..payload_end];
+    let tag = &frame[payload_end..];
+    let mut mac = RpcMac::new_from_slice(secret).map_err(|_| CommandError::AuthenticationFailed)?;
+    mac.update(payload);
+    mac.verify_slice(tag)
+        .map_err(|_| CommandError::AuthenticationFailed)?;
+    Ok(payload)
 }
 
 impl ConfigCommand {
