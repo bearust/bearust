@@ -47,7 +47,7 @@ impl SqlxRaftStorage {
     ) -> Result<(), Error> {
         let payload = command
             .to_payload()
-            .map_err(|error| Error::Protocol(error.to_string().into()))?;
+            .map_err(|error| Error::Protocol(error.to_string()))?;
         let payload = String::from_utf8(payload)
             .map_err(|_| Error::Protocol("raft command payload is not utf-8".into()))?;
         repository::append_raft_log_entry(
@@ -83,7 +83,7 @@ impl SqlxRaftStorage {
 
     pub async fn decode_command(record: &RaftLogRecord) -> Result<ConfigCommand, Error> {
         ConfigCommand::from_payload(record.payload.as_bytes())
-            .map_err(|error| Error::Protocol(error.to_string().into()))
+            .map_err(|error| Error::Protocol(error.to_string()))
     }
 
     pub fn encode_snapshot(payload: &[u8]) -> String {
