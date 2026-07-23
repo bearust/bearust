@@ -4,6 +4,7 @@
 //! authenticated inbound listener. Raft, leader election, write forwarding,
 //! cross-node replay, and keepalived automation are deferred to Phase 10B+.
 use crate::cluster_raft_runtime::dispatch_authenticated_rpc;
+use crate::cluster_raft_runtime::{dispatch_authenticated_rpc_with_handler, RaftRpcHandler};
 use crate::config::{ClusterConfig, ClusterPeer};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -102,6 +103,7 @@ pub struct ClusterService {
     bind: SocketAddr,
     auth_token: Arc<Vec<u8>>,
     raft_status: Arc<RwLock<RaftStatus>>,
+    raft_handler: Arc<RwLock<Option<Arc<dyn RaftRpcHandler>>>>,
 }
 
 impl ClusterService {
@@ -134,6 +136,7 @@ impl ClusterService {
                     "not_started".into()
                 },
             })),
+            raft_handler: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -157,6 +160,16 @@ impl ClusterService {
         if let Ok(mut current) = self.raft_status.write() {
             *current = status;
         }
+    }
+
+    pub fn set_raft_handler(&self, handler: Arc<dyn RaftRpcHandler>) {
+        if let Ok(mut current) = self.raft_handler.write() {
+            *current = Some(handler);
+        }
+    }
+
+    fn raft_handler(&self) -> Option<Arc<dyn RaftRpcHandler>> {
+        self.raft_handler.read().ok().and_then(|handler| handler.clone())
     }
 
     /// Mark the authenticated transport as available. This deliberately does
@@ -392,10 +405,12 @@ pub async fn run_cluster_listener(
                 match accept_res {
                     Ok((stream, _remote)) => {
                         let local_id = service.node_id().to_string();
+                        let raft_handler = service.raft_handler();
                         tokio::spawn(handle_cluster_connection(
                             stream,
                             local_id,
                             Arc::clone(&service.auth_token),
+                            raft_handler,
                         ));
                     }
                     Err(e) => {
@@ -417,6 +432,7 @@ async fn handle_cluster_connection(
     mut stream: TcpStream,
     local_node_id: String,
     secret: Arc<Vec<u8>>,
+    raft_handler: Option<Arc<dyn RaftRpcHandler>>,
 ) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 
@@ -488,9 +504,18 @@ async fn handle_cluster_connection(
                     if stream.read_exact(&mut rest).await.is_ok() {
                         let mut frame = header.to_vec();
                         frame.extend_from_slice(&rest);
-                        if let Ok(response) =
+                        let response = if let Some(handler) = raft_handler.as_deref() {
+                            dispatch_authenticated_rpc_with_handler(
+                                &frame,
+                                &secret,
+                                &local_node_id,
+                                handler,
+                            )
+                            .await
+                        } else {
                             dispatch_authenticated_rpc(&frame, &secret, &local_node_id)
-                        {
+                        };
+                        if let Ok(response) = response {
                             let _ = stream.write_all(&response).await;
                         }
                     }
