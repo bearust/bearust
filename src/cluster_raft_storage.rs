@@ -13,9 +13,10 @@ use openraft::{
     Entry, EntryPayload, ErrorSubject, ErrorVerb, LogId, LogState, Snapshot, SnapshotMeta,
     StorageError, StoredMembership, Vote,
 };
+use serde::{Deserialize, Serialize};
 use sqlx::Error;
 use std::fmt::Debug;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::ops::Bound;
 
 #[derive(Clone)]
@@ -25,7 +26,15 @@ pub struct SqlxRaftStorage {
 }
 
 type StorageResult<T> = Result<T, StorageError<u64>>;
-pub struct SqlxSnapshotBuilder;
+#[derive(Clone)]
+pub struct SqlxSnapshotBuilder {
+    storage: SqlxRaftStorage,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SnapshotEnvelope {
+    payload: Vec<u8>,
+}
 
 fn storage_error(
     subject: ErrorSubject<u64>,
@@ -297,11 +306,40 @@ impl openraft::RaftSnapshotBuilder<crate::cluster_raft::BearustRaftConfig> for S
     async fn build_snapshot(
         &mut self,
     ) -> StorageResult<Snapshot<crate::cluster_raft::BearustRaftConfig>> {
-        Err(storage_error(
-            ErrorSubject::Snapshot(None),
-            ErrorVerb::Read,
-            "snapshot builder is not wired to state serialization",
-        ))
+        let record = self
+            .storage
+            .load_snapshot()
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?
+            .ok_or_else(|| {
+                storage_error(
+                    ErrorSubject::Snapshot(None),
+                    ErrorVerb::Read,
+                    "snapshot not found",
+                )
+            })?;
+        let envelope: SnapshotEnvelope = serde_json::from_slice(&record.payload)
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
+        let index = u64::try_from(record.snapshot_index)
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
+        let term = u64::try_from(record.snapshot_term)
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
+        let raft_id = self
+            .storage
+            .raft_id()
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
+        Ok(Snapshot {
+            meta: SnapshotMeta {
+                last_log_id: Some(LogId::new(
+                    openraft::CommittedLeaderId::new(term, raft_id),
+                    index,
+                )),
+                last_membership: StoredMembership::default(),
+                snapshot_id: format!("{}-{}", term, index),
+            },
+            snapshot: Box::new(Cursor::new(envelope.payload)),
+        })
     }
 }
 
@@ -373,7 +411,9 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
-        SqlxSnapshotBuilder
+        SqlxSnapshotBuilder {
+            storage: self.clone(),
+        }
     }
 
     async fn begin_receiving_snapshot(
@@ -384,23 +424,67 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
 
     async fn install_snapshot(
         &mut self,
-        _meta: &SnapshotMeta<u64, openraft::BasicNode>,
-        _snapshot: Box<Cursor<Vec<u8>>>,
+        meta: &SnapshotMeta<u64, openraft::BasicNode>,
+        snapshot: Box<Cursor<Vec<u8>>>,
     ) -> StorageResult<()> {
-        Err(storage_error(
-            ErrorSubject::Snapshot(None),
-            ErrorVerb::Write,
-            "snapshot installation is not wired to state replacement",
-        ))
+        let mut bytes = Vec::new();
+        snapshot
+            .take((repository::MAX_RAFT_PAYLOAD_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        if bytes.len() > repository::MAX_RAFT_PAYLOAD_BYTES {
+            return Err(storage_error(
+                ErrorSubject::Snapshot(None),
+                ErrorVerb::Write,
+                "snapshot exceeds configured limit",
+            ));
+        }
+        let envelope: SnapshotEnvelope = serde_json::from_slice(&bytes)
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        let log_id = meta.last_log_id.ok_or_else(|| {
+            storage_error(
+                ErrorSubject::Snapshot(None),
+                ErrorVerb::Write,
+                "snapshot missing last log id",
+            )
+        })?;
+        let encoded = serde_json::to_vec(&envelope)
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        self.save_snapshot(log_id.index as i64, log_id.leader_id.term as i64, &encoded)
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))
     }
 
     async fn get_current_snapshot(
         &mut self,
     ) -> StorageResult<Option<Snapshot<crate::cluster_raft::BearustRaftConfig>>> {
-        Err(storage_error(
-            ErrorSubject::Snapshot(None),
-            ErrorVerb::Read,
-            "snapshot serialization is not wired",
-        ))
+        let record = self
+            .load_snapshot()
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        let envelope: SnapshotEnvelope = serde_json::from_slice(&record.payload)
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
+        let index = u64::try_from(record.snapshot_index)
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
+        let term = u64::try_from(record.snapshot_term)
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
+        let raft_id = self
+            .raft_id()
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
+        Ok(Some(Snapshot {
+            meta: SnapshotMeta {
+                last_log_id: Some(LogId::new(
+                    openraft::CommittedLeaderId::new(term, raft_id),
+                    index,
+                )),
+                last_membership: StoredMembership::default(),
+                snapshot_id: format!("{}-{}", term, index),
+            },
+            snapshot: Box::new(Cursor::new(envelope.payload)),
+        }))
     }
 }
