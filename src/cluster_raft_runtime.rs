@@ -423,14 +423,17 @@ impl RaftNetwork<BearustRaftConfig> for AuthenticatedRaftNetwork {
         RPCError<u64, openraft::BasicNode, RaftError<u64, openraft::error::InstallSnapshotError>>,
     > {
         if rpc.data.len() > crate::cluster_raft::MAX_RPC_FRAME_BYTES {
-            return Err(RPCError::Network(openraft::error::NetworkError::new(&io::Error::new(
-                io::ErrorKind::InvalidData,
-                "raft snapshot chunk exceeds transport limit",
-            ))));
+            return Err(RPCError::Network(openraft::error::NetworkError::new(
+                &io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "raft snapshot chunk exceeds transport limit",
+                ),
+            )));
         }
         let payload = encode_raft_rpc("install_snapshot", &rpc).map_err(|_| {
             RPCError::Network(openraft::error::NetworkError::new(&io::Error::new(
-                io::ErrorKind::InvalidData, "raft RPC encode failed",
+                io::ErrorKind::InvalidData,
+                "raft RPC encode failed",
             )))
         })?;
         let response = send_authenticated_rpc(
@@ -440,12 +443,16 @@ impl RaftNetwork<BearustRaftConfig> for AuthenticatedRaftNetwork {
             Duration::from_secs(2),
         )
         .await
-        .map_err(|_| RPCError::Unreachable(Unreachable::new(&io::Error::new(
-            io::ErrorKind::NotConnected, "raft RPC unavailable",
-        ))))?;
+        .map_err(|_| {
+            RPCError::Unreachable(Unreachable::new(&io::Error::new(
+                io::ErrorKind::NotConnected,
+                "raft RPC unavailable",
+            )))
+        })?;
         decode_raft_rpc(&response, "install_snapshot_response").map_err(|_| {
             RPCError::Network(openraft::error::NetworkError::new(&io::Error::new(
-                io::ErrorKind::InvalidData, "raft RPC response malformed",
+                io::ErrorKind::InvalidData,
+                "raft RPC response malformed",
             )))
         })
     }
