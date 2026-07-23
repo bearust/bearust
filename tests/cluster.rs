@@ -1,4 +1,6 @@
-use bearust::cluster::{run_cluster_listener, ClusterService, PeerStatus, HANDSHAKE_MAGIC};
+use bearust::cluster::{
+    run_cluster_listener, ClusterService, PeerStatus, RaftRole, HANDSHAKE_MAGIC,
+};
 use bearust::config::{ClusterConfig, ClusterPeer};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -51,6 +53,9 @@ async fn single_node_cluster_snapshot_is_valid() {
     assert_eq!(snapshot.total_peers, 0);
     assert_eq!(snapshot.healthy_peers, 0);
     assert!(snapshot.peers.is_empty());
+    assert_eq!(snapshot.raft_role, RaftRole::Standalone);
+    assert_eq!(snapshot.raft_leader_id.as_deref(), Some("node1"));
+    assert!(snapshot.raft_quorum_available);
 }
 
 #[tokio::test]

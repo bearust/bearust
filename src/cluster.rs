@@ -29,6 +29,16 @@ pub enum PeerStatus {
     Timeout,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RaftRole {
+    Standalone,
+    Leader,
+    Follower,
+    Candidate,
+    Unknown,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerHealth {
     pub node_id: String,
@@ -45,6 +55,13 @@ pub struct ClusterSnapshot {
     pub healthy_peers: usize,
     pub peers: Vec<PeerHealth>,
     pub timestamp: DateTime<Utc>,
+    pub raft_role: RaftRole,
+    pub raft_leader_id: Option<String>,
+    pub raft_term: u64,
+    pub raft_last_log_index: u64,
+    pub raft_commit_index: u64,
+    pub raft_quorum_available: bool,
+    pub raft_sync_state: String,
 }
 
 pub struct ClusterService {
@@ -167,6 +184,13 @@ impl ClusterService {
                 healthy_peers: 0,
                 peers: vec![],
                 timestamp: now,
+                raft_role: RaftRole::Standalone,
+                raft_leader_id: Some(self.node_id.clone()),
+                raft_term: 0,
+                raft_last_log_index: 0,
+                raft_commit_index: 0,
+                raft_quorum_available: true,
+                raft_sync_state: "in_sync".into(),
             };
         }
 
@@ -177,6 +201,8 @@ impl ClusterService {
             .iter()
             .filter(|p| p.status == PeerStatus::Healthy)
             .count();
+        let total_nodes = self.peers.len() + 1;
+        let quorum_size = total_nodes.saturating_div(2).saturating_add(1);
 
         ClusterSnapshot {
             local_node_id: self.node_id.clone(),
@@ -185,6 +211,13 @@ impl ClusterService {
             healthy_peers,
             peers: peer_healths,
             timestamp: now,
+            raft_role: RaftRole::Follower,
+            raft_leader_id: None,
+            raft_term: 0,
+            raft_last_log_index: 0,
+            raft_commit_index: 0,
+            raft_quorum_available: healthy_peers + 1 >= quorum_size,
+            raft_sync_state: "not_started".into(),
         }
     }
 }
