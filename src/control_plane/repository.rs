@@ -43,8 +43,17 @@ pub struct RaftLogRecord {
     pub node_id: String,
     pub log_index: i64,
     pub term: i64,
+    pub leader_id: i64,
     pub command_id: Option<String>,
     pub payload: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftCommittedState {
+    pub node_id: String,
+    pub log_index: i64,
+    pub term: i64,
+    pub leader_id: i64,
 }
 
 /// Register a stable numeric OpenRaft identity for an application node name.
@@ -98,6 +107,48 @@ pub async fn load_raft_node_by_id(
     Ok(row.map(|row| RaftNodeIdentity {
         node_id: row.get("node_id"),
         raft_id: row.get("raft_id"),
+    }))
+}
+
+pub async fn save_raft_committed_state(
+    pool: &DbPool,
+    node_id: &str,
+    log_index: i64,
+    term: i64,
+    leader_id: i64,
+) -> Result<(), sqlx::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM raft_committed_state WHERE node_id=?")
+        .bind(node_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO raft_committed_state(node_id,log_index,term,leader_id,updated_at) VALUES(?,?,?,?,?)")
+        .bind(node_id)
+        .bind(log_index)
+        .bind(term)
+        .bind(leader_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
+}
+
+pub async fn load_raft_committed_state(
+    pool: &DbPool,
+    node_id: &str,
+) -> Result<Option<RaftCommittedState>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT node_id,log_index,term,leader_id FROM raft_committed_state WHERE node_id=?",
+    )
+    .bind(node_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|row| RaftCommittedState {
+        node_id: row.get("node_id"),
+        log_index: row.get("log_index"),
+        term: row.get("term"),
+        leader_id: row.get("leader_id"),
     }))
 }
 
@@ -307,6 +358,7 @@ pub async fn append_raft_log_entry(
     node_id: &str,
     log_index: i64,
     term: i64,
+    leader_id: i64,
     command_id: &str,
     payload: &str,
 ) -> Result<(), sqlx::Error> {
@@ -316,10 +368,11 @@ pub async fn append_raft_log_entry(
         ));
     }
     let now = chrono::Utc::now().to_rfc3339();
-    sqlx::query("INSERT INTO raft_log_entries(node_id,log_index,term,payload,command_id,created_at) VALUES(?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO raft_log_entries(node_id,log_index,term,leader_id,payload,command_id,created_at) VALUES(?,?,?,?,?,?,?)")
         .bind(node_id)
         .bind(log_index)
-        .bind(term)
+    .bind(term)
+    .bind(leader_id)
         .bind(payload)
         .bind(command_id)
         .bind(now)
@@ -334,7 +387,7 @@ pub async fn load_raft_log_entries(
     from_index: i64,
 ) -> Result<Vec<RaftLogRecord>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT node_id,log_index,term,payload,command_id FROM raft_log_entries WHERE node_id=? AND log_index>=? ORDER BY log_index ASC",
+        "SELECT node_id,log_index,term,leader_id,payload,command_id FROM raft_log_entries WHERE node_id=? AND log_index>=? ORDER BY log_index ASC",
     )
     .bind(node_id)
     .bind(from_index)
@@ -346,6 +399,7 @@ pub async fn load_raft_log_entries(
             node_id: row.get("node_id"),
             log_index: row.get("log_index"),
             term: row.get("term"),
+            leader_id: row.get("leader_id"),
             payload: row.get("payload"),
             command_id: row.get("command_id"),
         })

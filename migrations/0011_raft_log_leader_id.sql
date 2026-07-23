@@ -1,0 +1,1 @@
+ALTER TABLE raft_log_entries ADD COLUMN leader_id BIGINT NOT NULL DEFAULT 0;

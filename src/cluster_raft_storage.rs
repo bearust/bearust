@@ -78,6 +78,7 @@ impl SqlxRaftStorage {
         &self,
         index: i64,
         term: i64,
+        leader_id: u64,
         command: &ConfigCommand,
     ) -> Result<(), Error> {
         let payload = command
@@ -90,6 +91,8 @@ impl SqlxRaftStorage {
             &self.node_id,
             index,
             term,
+            i64::try_from(leader_id)
+                .map_err(|_| Error::Protocol("raft leader id is out of range".into()))?,
             &command.command_id().to_string(),
             &payload,
         )
@@ -170,8 +173,10 @@ impl RaftLogReader<crate::cluster_raft::BearustRaftConfig> for SqlxRaftStorage {
             let command = Self::decode_command(&record)
                 .await
                 .map_err(|e| storage_error(ErrorSubject::LogIndex(index), ErrorVerb::Read, e))?;
+            let leader_id = u64::try_from(record.leader_id)
+                .map_err(|e| storage_error(ErrorSubject::LogIndex(index), ErrorVerb::Read, e))?;
             result.push(Entry {
-                log_id: LogId::new(openraft::CommittedLeaderId::new(term, 0), index),
+                log_id: LogId::new(openraft::CommittedLeaderId::new(term, leader_id), index),
                 payload: EntryPayload::Normal(command),
             });
         }
@@ -191,7 +196,10 @@ impl RaftLogStorage<crate::cluster_raft::BearustRaftConfig> for SqlxRaftStorage 
             .map_err(|e| storage_error(ErrorSubject::Logs, ErrorVerb::Read, e))?;
         let last_log_id = records.last().and_then(|r| {
             Some(LogId::new(
-                openraft::CommittedLeaderId::new(u64::try_from(r.term).ok()?, 0),
+                openraft::CommittedLeaderId::new(
+                    u64::try_from(r.term).ok()?,
+                    u64::try_from(r.leader_id).ok()?,
+                ),
                 u64::try_from(r.log_index).ok()?,
             ))
         });
@@ -257,6 +265,7 @@ impl RaftLogStorage<crate::cluster_raft::BearustRaftConfig> for SqlxRaftStorage 
             self.append_command(
                 entry.log_id.index as i64,
                 entry.log_id.leader_id.term as i64,
+                entry.log_id.leader_id.node_id,
                 &command,
             )
             .await

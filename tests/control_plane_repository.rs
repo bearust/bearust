@@ -69,6 +69,7 @@ async fn raft_storage_schema_is_created_and_migration_is_repeatable() {
         "raft_snapshots",
         "raft_command_ids",
         "raft_node_ids",
+        "raft_committed_state",
     ] {
         let exists: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
@@ -116,6 +117,19 @@ async fn raft_node_identity_is_stable_and_numeric_ids_are_unique() {
 }
 
 #[tokio::test]
+async fn raft_committed_state_round_trips() {
+    let pool = test_pool().await;
+    repository::save_raft_committed_state(&pool, "node-a", 9, 4, 2)
+        .await
+        .unwrap();
+    let state = repository::load_raft_committed_state(&pool, "node-a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((state.log_index, state.term, state.leader_id), (9, 4, 2));
+}
+
+#[tokio::test]
 async fn raft_storage_round_trip_is_bounded_and_command_ids_are_idempotent() {
     let pool = test_pool().await;
     repository::save_raft_hard_state(&pool, "node-a", 7, Some("node-b"))
@@ -128,7 +142,7 @@ async fn raft_storage_round_trip_is_bounded_and_command_ids_are_idempotent() {
     assert_eq!(state.current_term, 7);
     assert_eq!(state.voted_for.as_deref(), Some("node-b"));
 
-    repository::append_raft_log_entry(&pool, "node-a", 1, 7, "cmd-1", "{}")
+    repository::append_raft_log_entry(&pool, "node-a", 1, 7, 1, "cmd-1", "{}")
         .await
         .unwrap();
     assert!(repository::record_raft_command_id(&pool, "cmd-1")
@@ -139,7 +153,7 @@ async fn raft_storage_round_trip_is_bounded_and_command_ids_are_idempotent() {
         .unwrap());
 
     let oversized = "x".repeat(repository::MAX_RAFT_PAYLOAD_BYTES + 1);
-    let error = repository::append_raft_log_entry(&pool, "node-a", 2, 7, "cmd-2", &oversized)
+    let error = repository::append_raft_log_entry(&pool, "node-a", 2, 7, 1, "cmd-2", &oversized)
         .await
         .expect_err("oversized log payload must be rejected");
     assert!(error.to_string().contains("payload exceeds"));
@@ -358,7 +372,7 @@ async fn migrations_record_order_and_seed_exact_permissions() {
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     let lock_row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM setup_lock WHERE id=1")
         .fetch_one(&pool)
         .await
