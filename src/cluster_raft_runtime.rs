@@ -15,6 +15,71 @@ use openraft::raft::{
     VoteRequest, VoteResponse,
 };
 use std::io;
+use std::time::Duration;
+use thiserror::Error;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::time::timeout;
+
+const RPC_MAGIC_LEN: usize = 7;
+const RPC_HEADER_LEN: usize = RPC_MAGIC_LEN + 4;
+const RPC_TAG_LEN: usize = 32;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RpcTransportError {
+    #[error("raft RPC transport timed out")]
+    Timeout,
+    #[error("raft RPC transport unavailable")]
+    Unavailable,
+    #[error("raft RPC response malformed")]
+    Malformed,
+    #[error("raft RPC response authentication failed")]
+    AuthenticationFailed,
+    #[error("raft RPC payload exceeds configured limit")]
+    PayloadTooLarge,
+}
+
+/// Send one authenticated framed request and receive one authenticated framed
+/// response. The operation is bounded by `timeout_duration` and the response
+/// length is checked before allocation/read, preventing oversized allocations.
+pub async fn send_authenticated_rpc(
+    endpoint: &str,
+    payload: &[u8],
+    secret: &[u8],
+    timeout_duration: Duration,
+) -> Result<Vec<u8>, RpcTransportError> {
+    let operation = async {
+        let frame = crate::cluster_raft::encode_rpc_frame(payload, secret)
+            .map_err(|error| match error {
+                crate::cluster_raft::CommandError::PayloadTooLarge => RpcTransportError::PayloadTooLarge,
+                crate::cluster_raft::CommandError::AuthenticationFailed => RpcTransportError::AuthenticationFailed,
+                _ => RpcTransportError::Malformed,
+            })?;
+        let mut stream = TcpStream::connect(endpoint)
+            .await
+            .map_err(|_| RpcTransportError::Unavailable)?;
+        stream.write_all(&frame).await.map_err(|_| RpcTransportError::Unavailable)?;
+        let mut header = [0u8; RPC_HEADER_LEN];
+        stream.read_exact(&mut header).await.map_err(|_| RpcTransportError::Malformed)?;
+        let declared = u32::from_be_bytes(header[RPC_MAGIC_LEN..].try_into().unwrap()) as usize;
+        if declared > crate::cluster_raft::MAX_RPC_FRAME_BYTES {
+            return Err(RpcTransportError::PayloadTooLarge);
+        }
+        let mut rest = vec![0u8; declared + RPC_TAG_LEN];
+        stream.read_exact(&mut rest).await.map_err(|_| RpcTransportError::Malformed)?;
+        let mut response = Vec::with_capacity(RPC_HEADER_LEN + rest.len());
+        response.extend_from_slice(&header);
+        response.extend_from_slice(&rest);
+        crate::cluster_raft::decode_rpc_frame(&response, secret)
+            .map(|value| value.to_vec())
+            .map_err(|error| match error {
+                crate::cluster_raft::CommandError::AuthenticationFailed => RpcTransportError::AuthenticationFailed,
+                crate::cluster_raft::CommandError::PayloadTooLarge => RpcTransportError::PayloadTooLarge,
+                _ => RpcTransportError::Malformed,
+            })
+    };
+    timeout(timeout_duration, operation).await.map_err(|_| RpcTransportError::Timeout)?
+}
 
 /// The complete set of adapters required by `openraft::Raft::new`.
 pub trait RaftRuntimeAdapters:
