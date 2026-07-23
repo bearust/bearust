@@ -265,7 +265,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let cluster_service = Arc::new(crate::cluster::ClusterService::new(&config.cluster));
         control_state = control_state.with_cluster(cluster_service.clone());
         let (cluster_shutdown_tx, cluster_shutdown_rx) = tokio::sync::watch::channel(false);
-        tokio::spawn(crate::cluster::run_cluster_listener(
+        let cluster_task = tokio::spawn(crate::cluster::run_cluster_listener(
             cluster_service,
             cluster_shutdown_rx,
         ));
@@ -450,6 +450,13 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         reload_task.abort();
         control_task.abort();
         let _ = cluster_shutdown_tx.send(true);
+        tokio::time::timeout(
+            Duration::from_secs(config.server.graceful_shutdown_seconds),
+            cluster_task,
+        )
+        .await
+        .map_err(|_| AppError::Server("cluster shutdown timed out".into()))?
+        .map_err(|_| AppError::Server("cluster listener task failed".into()))?;
         tokio::time::timeout(
             Duration::from_secs(config.server.graceful_shutdown_seconds),
             store.shutdown(),

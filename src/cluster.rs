@@ -3,6 +3,7 @@
 //! Phase 10A scope: node identity, bounded TCP peer health checks, and an
 //! authenticated inbound listener. Raft, leader election, write forwarding,
 //! cross-node replay, and keepalived automation are deferred to Phase 10B+.
+use crate::cluster_raft::{decode_rpc_frame, encode_rpc_frame};
 use crate::config::{ClusterConfig, ClusterPeer};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -155,6 +156,27 @@ impl ClusterService {
     pub fn set_raft_status(&self, status: RaftStatus) {
         if let Ok(mut current) = self.raft_status.write() {
             *current = status;
+        }
+    }
+
+    /// Mark the authenticated transport as available. This deliberately does
+    /// not promote a node or advance a term; those transitions require the
+    /// persistent OpenRaft storage/network adapters from the next lifecycle
+    /// milestone.
+    pub fn mark_transport_ready(&self) {
+        if let Ok(mut status) = self.raft_status.write() {
+            if !matches!(status.role, RaftRole::Standalone) {
+                status.sync_state = "transport_ready".into();
+            }
+        }
+    }
+
+    pub fn mark_stopped(&self) {
+        if let Ok(mut status) = self.raft_status.write() {
+            if !matches!(status.role, RaftRole::Standalone) {
+                status.sync_state = "stopped".into();
+                status.quorum_available = false;
+            }
         }
     }
 
@@ -355,12 +377,14 @@ pub async fn run_cluster_listener(
     };
     let bound_addr = listener.local_addr().unwrap_or(bind_addr);
     tracing::info!(event = "cluster_listener_start", bind = %bound_addr);
+    service.mark_transport_ready();
 
     loop {
         tokio::select! {
             res = shutdown.changed() => {
                 if res.is_err() || *shutdown.borrow() {
                     tracing::info!(event = "cluster_listener_stop");
+                    service.mark_stopped();
                     break;
                 }
             }
@@ -445,6 +469,42 @@ async fn handle_cluster_connection(
         resp.extend_from_slice(&local_id_bytes[..id_len as usize]);
         resp.extend_from_slice(&response_tag);
         stream.write_all(&resp).await?;
+
+        // After the identity handshake, accept one optional authenticated
+        // Raft control frame. The current milestone only supports a bounded
+        // status probe; mutation/election RPCs remain disabled until durable
+        // OpenRaft storage and network adapters are wired in.
+        let mut header = [0u8; 11]; // BRRAFT1 + u32 length + minimum tag prefix
+        if tokio::time::timeout(Duration::from_millis(50), stream.read_exact(&mut header))
+            .await
+            .is_ok()
+        {
+            // A complete frame is read only when its magic is present. Any
+            // malformed or partial probe is discarded without logging data.
+            if &header[..7] == b"BRRAFT1" {
+                let declared = u32::from_be_bytes(header[7..11].try_into().unwrap()) as usize;
+                if declared <= crate::cluster_raft::MAX_RPC_FRAME_BYTES {
+                    let mut rest = vec![0u8; declared + crate::cluster_raft::RPC_TAG_BYTES];
+                    if stream.read_exact(&mut rest).await.is_ok() {
+                        let mut frame = header.to_vec();
+                        frame.extend_from_slice(&rest);
+                        if let Ok(payload) = decode_rpc_frame(&frame, &secret) {
+                            if payload == br#"{"kind":"status"}"# {
+                                let body = serde_json::to_vec(&serde_json::json!({
+                                    "kind": "status",
+                                    "node_id": local_node_id,
+                                    "status": "transport_ready"
+                                }))
+                                .unwrap_or_default();
+                                if let Ok(response) = encode_rpc_frame(&body, &secret) {
+                                    let _ = stream.write_all(&response).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         Ok::<String, std::io::Error>(peer_id)
     })

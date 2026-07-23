@@ -1,6 +1,7 @@
 use bearust::cluster::{
     handshake_tag, run_cluster_listener, ClusterService, PeerStatus, RaftRole, HANDSHAKE_MAGIC,
 };
+use bearust::cluster_raft::{decode_rpc_frame, encode_rpc_frame};
 use bearust::config::{ClusterConfig, ClusterPeer};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -351,6 +352,7 @@ async fn cluster_listener_handshake_roundtrip_on_concrete_port() {
 
     tokio::spawn(run_cluster_listener(Arc::clone(&service), shutdown_rx));
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    assert_eq!(service.raft_status().sync_state, "transport_ready");
 
     // Connect and send the handshake as a remote peer.
     let mut stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
@@ -387,5 +389,20 @@ async fn cluster_listener_handshake_roundtrip_on_concrete_port() {
         handshake_tag(TEST_SECRET.as_bytes(), b"response", &nonce, &resp_id_buf)
     );
 
+    let status_request = encode_rpc_frame(br#"{"kind":"status"}"#, TEST_SECRET.as_bytes()).unwrap();
+    stream.write_all(&status_request).await.unwrap();
+    let mut rpc_header = [0u8; 11];
+    stream.read_exact(&mut rpc_header).await.unwrap();
+    assert_eq!(&rpc_header[..7], b"BRRAFT1");
+    let declared = u32::from_be_bytes(rpc_header[7..11].try_into().unwrap()) as usize;
+    let mut rpc_body = vec![0u8; declared + 32];
+    stream.read_exact(&mut rpc_body).await.unwrap();
+    let mut rpc_frame = rpc_header.to_vec();
+    rpc_frame.extend_from_slice(&rpc_body);
+    let status_response = decode_rpc_frame(&rpc_frame, TEST_SECRET.as_bytes()).unwrap();
+    assert!(status_response.starts_with(br#"{"kind":"status","node_id":"node-a""#));
+
     let _ = shutdown_tx.send(true);
+    tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+    assert_eq!(service.raft_status().sync_state, "stopped");
 }
