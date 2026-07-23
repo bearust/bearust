@@ -9,10 +9,13 @@ use crate::control_plane::repository::{
 };
 use base64::Engine as _;
 use openraft::storage::{LogFlushed, RaftLogReader, RaftLogStorage};
-use openraft::{Entry, EntryPayload, ErrorSubject, ErrorVerb, LogId, LogState, Snapshot, SnapshotMeta, StorageError, StoredMembership, Vote};
-use std::io::Cursor;
+use openraft::{
+    Entry, EntryPayload, ErrorSubject, ErrorVerb, LogId, LogState, Snapshot, SnapshotMeta,
+    StorageError, StoredMembership, Vote,
+};
 use sqlx::Error;
 use std::fmt::Debug;
+use std::io::Cursor;
 use std::ops::Bound;
 
 #[derive(Clone)]
@@ -291,45 +294,113 @@ impl RaftLogStorage<crate::cluster_raft::BearustRaftConfig> for SqlxRaftStorage 
 }
 
 impl openraft::RaftSnapshotBuilder<crate::cluster_raft::BearustRaftConfig> for SqlxSnapshotBuilder {
-    async fn build_snapshot(&mut self) -> StorageResult<Snapshot<crate::cluster_raft::BearustRaftConfig>> {
-        Err(storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, "snapshot builder is not wired to state serialization"))
+    async fn build_snapshot(
+        &mut self,
+    ) -> StorageResult<Snapshot<crate::cluster_raft::BearustRaftConfig>> {
+        Err(storage_error(
+            ErrorSubject::Snapshot(None),
+            ErrorVerb::Read,
+            "snapshot builder is not wired to state serialization",
+        ))
     }
 }
 
-impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig> for SqlxRaftStorage {
+impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
+    for SqlxRaftStorage
+{
     type SnapshotBuilder = SqlxSnapshotBuilder;
 
-    async fn applied_state(&mut self) -> Result<(Option<LogId<u64>>, StoredMembership<u64, openraft::BasicNode>), StorageError<u64>> {
+    async fn applied_state(
+        &mut self,
+    ) -> Result<
+        (
+            Option<LogId<u64>>,
+            StoredMembership<u64, openraft::BasicNode>,
+        ),
+        StorageError<u64>,
+    > {
         let state = repository::load_raft_committed_state(&self.pool, &self.node_id)
-            .await.map_err(|e| storage_error(ErrorSubject::StateMachine, ErrorVerb::Read, e))?;
-        let log_id = state.and_then(|s| Some(LogId::new(openraft::CommittedLeaderId::new(u64::try_from(s.term).ok()?, 0), u64::try_from(s.log_index).ok()?)));
+            .await
+            .map_err(|e| storage_error(ErrorSubject::StateMachine, ErrorVerb::Read, e))?;
+        let log_id = state.and_then(|s| {
+            Some(LogId::new(
+                openraft::CommittedLeaderId::new(
+                    u64::try_from(s.term).ok()?,
+                    u64::try_from(s.leader_id).ok()?,
+                ),
+                u64::try_from(s.log_index).ok()?,
+            ))
+        });
         Ok((log_id, StoredMembership::default()))
     }
 
-    async fn apply<I>(&mut self, entries: I) -> StorageResult<Vec<crate::cluster_raft::CommandResult>>
-    where I: IntoIterator<Item = Entry<crate::cluster_raft::BearustRaftConfig>> + openraft::OptionalSend, I::IntoIter: openraft::OptionalSend {
+    async fn apply<I>(
+        &mut self,
+        entries: I,
+    ) -> StorageResult<Vec<crate::cluster_raft::CommandResult>>
+    where
+        I: IntoIterator<Item = Entry<crate::cluster_raft::BearustRaftConfig>>
+            + openraft::OptionalSend,
+        I::IntoIter: openraft::OptionalSend,
+    {
         let mut results = Vec::new();
         for entry in entries {
             if let EntryPayload::Normal(command) = entry.payload {
-                let applied = repository::apply_raft_command(&self.pool, &command).await
-                    .map_err(|e| storage_error(ErrorSubject::Apply(entry.log_id), ErrorVerb::Write, e))?;
-                repository::save_raft_committed_state(&self.pool, &self.node_id, entry.log_id.index as i64, entry.log_id.leader_id.term as i64, 0)
-                    .await.map_err(|e| storage_error(ErrorSubject::Apply(entry.log_id), ErrorVerb::Write, e))?;
-                results.push(if applied { crate::cluster_raft::CommandResult::Applied } else { crate::cluster_raft::CommandResult::Duplicate });
+                let applied = repository::apply_raft_command(&self.pool, &command)
+                    .await
+                    .map_err(|e| {
+                        storage_error(ErrorSubject::Apply(entry.log_id), ErrorVerb::Write, e)
+                    })?;
+                repository::save_raft_committed_state(
+                    &self.pool,
+                    &self.node_id,
+                    entry.log_id.index as i64,
+                    entry.log_id.leader_id.term as i64,
+                    entry.log_id.leader_id.node_id as i64,
+                )
+                .await
+                .map_err(|e| {
+                    storage_error(ErrorSubject::Apply(entry.log_id), ErrorVerb::Write, e)
+                })?;
+                results.push(if applied {
+                    crate::cluster_raft::CommandResult::Applied
+                } else {
+                    crate::cluster_raft::CommandResult::Duplicate
+                });
             }
         }
         Ok(results)
     }
 
-    async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder { SqlxSnapshotBuilder }
-
-    async fn begin_receiving_snapshot(&mut self) -> Result<Box<Cursor<Vec<u8>>>, StorageError<u64>> { Ok(Box::new(Cursor::new(Vec::new()))) }
-
-    async fn install_snapshot(&mut self, _meta: &SnapshotMeta<u64, openraft::BasicNode>, _snapshot: Box<Cursor<Vec<u8>>>) -> StorageResult<()> {
-        Err(storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, "snapshot installation is not wired to state replacement"))
+    async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
+        SqlxSnapshotBuilder
     }
 
-    async fn get_current_snapshot(&mut self) -> StorageResult<Option<Snapshot<crate::cluster_raft::BearustRaftConfig>>> {
-        Err(storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, "snapshot serialization is not wired"))
+    async fn begin_receiving_snapshot(
+        &mut self,
+    ) -> Result<Box<Cursor<Vec<u8>>>, StorageError<u64>> {
+        Ok(Box::new(Cursor::new(Vec::new())))
+    }
+
+    async fn install_snapshot(
+        &mut self,
+        _meta: &SnapshotMeta<u64, openraft::BasicNode>,
+        _snapshot: Box<Cursor<Vec<u8>>>,
+    ) -> StorageResult<()> {
+        Err(storage_error(
+            ErrorSubject::Snapshot(None),
+            ErrorVerb::Write,
+            "snapshot installation is not wired to state replacement",
+        ))
+    }
+
+    async fn get_current_snapshot(
+        &mut self,
+    ) -> StorageResult<Option<Snapshot<crate::cluster_raft::BearustRaftConfig>>> {
+        Err(storage_error(
+            ErrorSubject::Snapshot(None),
+            ErrorVerb::Read,
+            "snapshot serialization is not wired",
+        ))
     }
 }
