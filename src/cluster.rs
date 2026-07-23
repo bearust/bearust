@@ -5,7 +5,9 @@
 //! cross-node replay, and keepalived automation are deferred to Phase 10B+.
 use crate::config::{ClusterConfig, ClusterPeer};
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -20,6 +22,22 @@ pub const MAX_PEERS: usize = 64;
 pub const HANDSHAKE_MAGIC: &[u8] = b"BEARUST1";
 /// Maximum handshake frame size to prevent oversized reads.
 const MAX_HANDSHAKE_LEN: usize = 512;
+const HANDSHAKE_NONCE_BYTES: usize = 16;
+const HANDSHAKE_TAG_BYTES: usize = 32;
+type HandshakeMac = Hmac<Sha256>;
+
+pub fn handshake_tag(
+    secret: &[u8],
+    label: &[u8],
+    nonce: &[u8],
+    node_id: &[u8],
+) -> [u8; HANDSHAKE_TAG_BYTES] {
+    let mut mac = HandshakeMac::new_from_slice(secret).expect("validated cluster secret");
+    mac.update(label);
+    mac.update(nonce);
+    mac.update(node_id);
+    mac.finalize().into_bytes().into()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,6 +99,7 @@ pub struct ClusterService {
     peers: Vec<ClusterPeer>,
     timeout: Duration,
     bind: SocketAddr,
+    auth_token: Arc<Vec<u8>>,
     raft_status: Arc<RwLock<RaftStatus>>,
 }
 
@@ -92,6 +111,7 @@ impl ClusterService {
             peers: config.peers[..peer_count].to_vec(),
             timeout: Duration::from_secs(config.timeout_seconds.clamp(1, 60)),
             bind: config.bind,
+            auth_token: Arc::new(config.auth_token.as_bytes().to_vec()),
             raft_status: Arc::new(RwLock::new(RaftStatus {
                 role: if config.peers.is_empty() {
                     RaftRole::Standalone
@@ -163,23 +183,38 @@ impl ClusterService {
         let start = Instant::now();
         let timeout = self.timeout;
         let local_id = self.node_id.as_bytes().to_vec();
+        let secret = Arc::clone(&self.auth_token);
+        let nonce = *uuid::Uuid::new_v4().as_bytes();
 
         let res = tokio::time::timeout(timeout, async move {
             let mut stream = TcpStream::connect(peer.address).await?;
-            // Send handshake: magic (8 bytes) + node_id length (1 byte) + node_id.
+            // Send handshake: magic + node_id + nonce + request proof.
             let id_len = local_id.len().min(255) as u8;
-            let mut frame = Vec::with_capacity(9 + local_id.len());
+            let tag = handshake_tag(&secret, b"request", &nonce, &local_id);
+            let mut frame = Vec::with_capacity(
+                9 + local_id.len() + HANDSHAKE_NONCE_BYTES + HANDSHAKE_TAG_BYTES,
+            );
             frame.extend_from_slice(HANDSHAKE_MAGIC);
             frame.push(id_len);
             frame.extend_from_slice(&local_id[..id_len as usize]);
+            frame.extend_from_slice(&nonce);
+            frame.extend_from_slice(&tag);
             stream.write_all(&frame).await?;
-            // Read response: magic (8) + peer_id_len (1) + peer_id.
+            // Read response: magic + nonce + peer_id + response proof.
             let mut magic = [0u8; 8];
             stream.read_exact(&mut magic).await?;
             if magic != HANDSHAKE_MAGIC {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "handshake magic mismatch",
+                ));
+            }
+            let mut response_nonce = [0u8; HANDSHAKE_NONCE_BYTES];
+            stream.read_exact(&mut response_nonce).await?;
+            if response_nonce != nonce {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "handshake nonce mismatch",
                 ));
             }
             let mut len_buf = [0u8; 1];
@@ -193,6 +228,15 @@ impl ClusterService {
             }
             let mut peer_id_buf = vec![0u8; peer_id_len];
             stream.read_exact(&mut peer_id_buf).await?;
+            let mut response_tag = [0u8; HANDSHAKE_TAG_BYTES];
+            stream.read_exact(&mut response_tag).await?;
+            let expected_tag = handshake_tag(&secret, b"response", &nonce, &peer_id_buf);
+            if !constant_time_eq(&response_tag, &expected_tag) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "handshake authentication failed",
+                ));
+            }
             Ok::<Vec<u8>, std::io::Error>(peer_id_buf)
         })
         .await;
@@ -200,12 +244,19 @@ impl ClusterService {
         let elapsed = start.elapsed().as_millis() as u64;
 
         match res {
-            Ok(Ok(_peer_id_bytes)) => PeerHealth {
-                node_id: peer.node_id.clone(),
-                status: PeerStatus::Healthy,
-                latency_ms: Some(elapsed),
-                error: None,
-            },
+            Ok(Ok(peer_id_bytes)) => {
+                let identity_ok = peer_id_bytes == peer.node_id.as_bytes();
+                PeerHealth {
+                    node_id: peer.node_id.clone(),
+                    status: if identity_ok {
+                        PeerStatus::Healthy
+                    } else {
+                        PeerStatus::Unhealthy
+                    },
+                    latency_ms: Some(elapsed),
+                    error: (!identity_ok).then(|| "peer identity mismatch".to_string()),
+                }
+            }
             Ok(Err(e)) => {
                 let err_msg = match e.kind() {
                     std::io::ErrorKind::ConnectionRefused => "connection refused".to_string(),
@@ -317,7 +368,11 @@ pub async fn run_cluster_listener(
                 match accept_res {
                     Ok((stream, _remote)) => {
                         let local_id = service.node_id().to_string();
-                        tokio::spawn(handle_cluster_connection(stream, local_id));
+                        tokio::spawn(handle_cluster_connection(
+                            stream,
+                            local_id,
+                            Arc::clone(&service.auth_token),
+                        ));
                     }
                     Err(e) => {
                         tracing::warn!(event = "cluster_accept_error", error = %e);
@@ -334,11 +389,15 @@ pub async fn run_cluster_listener(
 /// responds with local node identification, then closes the connection.
 /// Only the `node_id` of the connecting peer is logged; raw socket addresses
 /// and credentials are not included in log fields.
-async fn handle_cluster_connection(mut stream: TcpStream, local_node_id: String) {
+async fn handle_cluster_connection(
+    mut stream: TcpStream,
+    local_node_id: String,
+    secret: Arc<Vec<u8>>,
+) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 
     let result = tokio::time::timeout_at(deadline, async {
-        // Read: magic (8) + peer_id_len (1) + peer_id bytes.
+        // Read: magic + peer_id + nonce + request proof.
         let mut magic = [0u8; 8];
         stream.read_exact(&mut magic).await?;
         if magic != HANDSHAKE_MAGIC {
@@ -361,14 +420,30 @@ async fn handle_cluster_connection(mut stream: TcpStream, local_node_id: String)
         let peer_id = String::from_utf8(peer_id_buf).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "non-utf8 peer id")
         })?;
+        let peer_id_bytes = peer_id.as_bytes();
+        let mut nonce = [0u8; HANDSHAKE_NONCE_BYTES];
+        stream.read_exact(&mut nonce).await?;
+        let mut request_tag = [0u8; HANDSHAKE_TAG_BYTES];
+        stream.read_exact(&mut request_tag).await?;
+        let expected_tag = handshake_tag(&secret, b"request", &nonce, peer_id_bytes);
+        if !constant_time_eq(&request_tag, &expected_tag) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "handshake authentication failed",
+            ));
+        }
 
-        // Respond: magic (8) + local_id_len (1) + local_id bytes.
+        // Respond: magic + echoed nonce + local_id + response proof.
         let local_id_bytes = local_node_id.as_bytes();
         let id_len = local_id_bytes.len().min(255) as u8;
-        let mut resp = Vec::with_capacity(9 + id_len as usize);
+        let response_tag = handshake_tag(&secret, b"response", &nonce, local_id_bytes);
+        let mut resp =
+            Vec::with_capacity(9 + HANDSHAKE_NONCE_BYTES + id_len as usize + HANDSHAKE_TAG_BYTES);
         resp.extend_from_slice(HANDSHAKE_MAGIC);
+        resp.extend_from_slice(&nonce);
         resp.push(id_len);
         resp.extend_from_slice(&local_id_bytes[..id_len as usize]);
+        resp.extend_from_slice(&response_tag);
         stream.write_all(&resp).await?;
 
         Ok::<String, std::io::Error>(peer_id)
@@ -392,4 +467,13 @@ async fn handle_cluster_connection(mut stream: TcpStream, local_node_id: String)
             tracing::debug!(event = "cluster_peer_handshake_timeout");
         }
     }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
 }

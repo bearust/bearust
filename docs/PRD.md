@@ -779,8 +779,7 @@ Phase 9 delivers a complete three-stage self-learning framework:
 ### Phase 10A status: cluster foundation (node identity, peer configuration, bounded health)
 
 Phase 10A delivers the cluster foundation for multi-node BeaRust deployments:
-- **Node Identity & Peer Configuration**: Explicit `NODE_ID` and `CLUSTER_PEERS` configuration parsed via environment variables or TOML (`[cluster]` section). Validates non-empty node IDs, rejects malformed, duplicate, or self-referential peer definitions, and defaults to single-node operation (`peers = []`) when omitted.
-- **Bounded Peer Health Service**: `ClusterService` executes out-of-band, non-blocking TCP peer connectivity checks with bounded timeouts. Peer failures (connection refused, timeout, unreachable) produce per-peer unhealthy snapshots without causing process errors or affecting proxy request paths.
+- **Node Identity & Peer Configuration**: Explicit `NODE_ID`, `CLUSTER_PEERS`, and shared `CLUSTER_AUTH_TOKEN` configuration parsed via environment variables or TOML (`[cluster]` section). Validates non-empty node IDs, rejects malformed, duplicate, or self-referential peer definitions, enforces a 64-peer bound, and defaults to single-node operation (`peers = []`) when omitted.
+- **Bounded Peer Health Service**: `ClusterService` executes an authenticated HMAC challenge-response handshake over out-of-band TCP connections with bounded timeouts and concurrency. Peer failures (authentication failure, connection refused, timeout, unreachable) produce per-peer unhealthy snapshots without causing process errors or affecting proxy request paths.
 - **Authenticated Status API**: `GET /api/cluster/status` exposes authenticated local node identity, cluster status, and redacted peer health snapshots. Responses omit raw connection strings, secrets, and credentials.
 - **Deferred Scope**: Raft consensus/state replication, leader election, write forwarding, cross-node event fan-out/replay, and keepalived automation are deferred to Phases 10B and 10C.
-

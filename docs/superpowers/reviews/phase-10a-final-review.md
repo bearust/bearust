@@ -25,7 +25,7 @@ and keeping all peer failures completely off the proxy request path.
 
 ### 2. Authenticated Cluster Listener & Handshake (`src/cluster.rs`)
 - `run_cluster_listener(Arc<ClusterService>, watch::Receiver<bool>)`: binds `config.cluster.bind` and accepts inbound peer connections. Skipped entirely in single-node mode (zero listener overhead).
-- Two-way handshake protocol: `BEARUST1` magic (8 bytes) + node_id length (1 byte) + node_id. Framed and bounded to 512 bytes per side to prevent resource abuse.
+- Two-way HMAC challenge-response handshake: `BEARUST1` framing plus nonce, node ID, and proof derived from the shared `CLUSTER_AUTH_TOKEN`. Frames are bounded to prevent resource abuse and peer identity is checked against configured `CLUSTER_PEERS`.
 - Inbound connection handler: validates magic, enforces frame bounds, responds with local node_id, logs only peer_id (no raw addresses/credentials), closes connection after exchange.
 - Handshake timeout: 5-second deadline per inbound connection.
 - Graceful shutdown via `watch::Receiver<bool>` wired into the Tokio `select!` loop; listener is cancelled at process shutdown.

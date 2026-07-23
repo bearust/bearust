@@ -1,19 +1,28 @@
 use bearust::cluster::{
-    run_cluster_listener, ClusterService, PeerStatus, RaftRole, HANDSHAKE_MAGIC,
+    handshake_tag, run_cluster_listener, ClusterService, PeerStatus, RaftRole, HANDSHAKE_MAGIC,
 };
 use bearust::config::{ClusterConfig, ClusterPeer};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+const TEST_SECRET: &str = "01234567890123456789012345678901";
+
 /// Helper: spawn a minimal cluster-protocol responder that performs the
 /// authenticated handshake exchange for one connection.
 async fn spawn_cluster_responder(peer_node_id: &'static str) -> SocketAddr {
+    spawn_cluster_responder_with_secret(peer_node_id, TEST_SECRET).await
+}
+
+async fn spawn_cluster_responder_with_secret(
+    peer_node_id: &'static str,
+    secret: &'static str,
+) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        // Read: magic (8) + id_len (1) + id bytes
+        // Read: magic + id_len + id bytes + nonce + request proof.
         let mut magic = [0u8; 8];
         stream.read_exact(&mut magic).await.unwrap();
         assert_eq!(&magic, HANDSHAKE_MAGIC, "handshake magic mismatch");
@@ -22,16 +31,46 @@ async fn spawn_cluster_responder(peer_node_id: &'static str) -> SocketAddr {
         let id_len = len_buf[0] as usize;
         let mut id_buf = vec![0u8; id_len];
         stream.read_exact(&mut id_buf).await.unwrap();
-        // Respond: magic + peer_node_id
+        let mut nonce = [0u8; 16];
+        stream.read_exact(&mut nonce).await.unwrap();
+        let mut request_tag = [0u8; 32];
+        stream.read_exact(&mut request_tag).await.unwrap();
+        assert_eq!(
+            request_tag,
+            handshake_tag(secret.as_bytes(), b"request", &nonce, &id_buf)
+        );
+        // Respond: magic + nonce + peer_node_id + response proof.
         let peer_id_bytes = peer_node_id.as_bytes();
         let resp_len = peer_id_bytes.len().min(255) as u8;
-        let mut resp = Vec::with_capacity(9 + resp_len as usize);
+        let response_tag = handshake_tag(secret.as_bytes(), b"response", &nonce, peer_id_bytes);
+        let mut resp = Vec::with_capacity(9 + 16 + resp_len as usize + 32);
         resp.extend_from_slice(HANDSHAKE_MAGIC);
+        resp.extend_from_slice(&nonce);
         resp.push(resp_len);
         resp.extend_from_slice(&peer_id_bytes[..resp_len as usize]);
+        resp.extend_from_slice(&response_tag);
         stream.write_all(&resp).await.unwrap();
     });
     addr
+}
+
+#[tokio::test]
+async fn wrong_cluster_secret_is_rejected() {
+    let address =
+        spawn_cluster_responder_with_secret("node2", "11111111111111111111111111111111").await;
+    let config = ClusterConfig {
+        node_id: "node1".into(),
+        peers: vec![ClusterPeer {
+            node_id: "node2".into(),
+            address,
+        }],
+        bind: "127.0.0.1:0".parse().unwrap(),
+        timeout_seconds: 2,
+        auth_token: TEST_SECRET.into(),
+    };
+    let snapshot = ClusterService::new(&config).snapshot().await;
+    assert_eq!(snapshot.healthy_peers, 0);
+    assert_eq!(snapshot.peers[0].status, PeerStatus::Unhealthy);
 }
 
 #[tokio::test]
@@ -41,6 +80,7 @@ async fn single_node_cluster_snapshot_is_valid() {
         peers: vec![],
         bind: "127.0.0.1:0".parse().unwrap(),
         timeout_seconds: 2,
+        auth_token: TEST_SECRET.into(),
     };
     let service = ClusterService::new(&config);
 
@@ -65,6 +105,7 @@ async fn cluster_snapshot_reflects_runtime_raft_status_without_peer_details() {
         peers: vec![],
         bind: "127.0.0.1:0".parse().unwrap(),
         timeout_seconds: 2,
+        auth_token: TEST_SECRET.into(),
     };
     let service = ClusterService::new(&config);
     service.set_raft_status(bearust::cluster::RaftStatus {
@@ -96,6 +137,7 @@ async fn healthy_peer_passes_authenticated_handshake() {
         }],
         bind: "127.0.0.1:0".parse().unwrap(),
         timeout_seconds: 2,
+        auth_token: TEST_SECRET.into(),
     };
     let service = ClusterService::new(&config);
     let snapshot = service.snapshot().await;
@@ -145,6 +187,7 @@ async fn multi_node_cluster_detects_healthy_unhealthy_and_timeout_peers() {
         ],
         bind: "127.0.0.1:0".parse().unwrap(),
         timeout_seconds: 1,
+        auth_token: TEST_SECRET.into(),
     };
 
     let service = ClusterService::new(&config);
@@ -210,6 +253,7 @@ async fn wrong_handshake_magic_is_reported_as_unhealthy() {
         }],
         bind: "127.0.0.1:0".parse().unwrap(),
         timeout_seconds: 2,
+        auth_token: TEST_SECRET.into(),
     };
     let service = ClusterService::new(&config);
     let snapshot = service.snapshot().await;
@@ -234,6 +278,7 @@ async fn cluster_listener_binds_and_completes_handshake_from_inbound_client() {
         }],
         bind: "127.0.0.1:0".parse().unwrap(),
         timeout_seconds: 2,
+        auth_token: TEST_SECRET.into(),
     };
     let service = Arc::new(ClusterService::new(&config));
 
@@ -259,6 +304,7 @@ async fn cluster_listener_binds_and_completes_handshake_from_inbound_client() {
         peers: vec![],
         bind: "127.0.0.1:0".parse().unwrap(),
         timeout_seconds: 2,
+        auth_token: TEST_SECRET.into(),
     };
     let single_service = Arc::new(ClusterService::new(&single_config));
     let (tx2, rx2) = tokio::sync::watch::channel(false);
@@ -295,6 +341,7 @@ async fn cluster_listener_handshake_roundtrip_on_concrete_port() {
         }],
         bind: server_addr,
         timeout_seconds: 2,
+        auth_token: TEST_SECRET.into(),
     };
     let service = Arc::new(ClusterService::new(&config));
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -309,10 +356,14 @@ async fn cluster_listener_handshake_roundtrip_on_concrete_port() {
     let mut stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
     let id_bytes = incoming_node_id.as_bytes();
     let id_len = id_bytes.len() as u8;
-    let mut frame = Vec::with_capacity(9 + id_len as usize);
+    let nonce = [7u8; 16];
+    let request_tag = handshake_tag(TEST_SECRET.as_bytes(), b"request", &nonce, id_bytes);
+    let mut frame = Vec::with_capacity(9 + id_len as usize + 16 + 32);
     frame.extend_from_slice(HANDSHAKE_MAGIC);
     frame.push(id_len);
     frame.extend_from_slice(id_bytes);
+    frame.extend_from_slice(&nonce);
+    frame.extend_from_slice(&request_tag);
     stream.write_all(&frame).await.unwrap();
 
     // Read the server's response.
@@ -320,12 +371,21 @@ async fn cluster_listener_handshake_roundtrip_on_concrete_port() {
     stream.read_exact(&mut resp_magic).await.unwrap();
     assert_eq!(&resp_magic, HANDSHAKE_MAGIC);
 
+    let mut response_nonce = [0u8; 16];
+    stream.read_exact(&mut response_nonce).await.unwrap();
+    assert_eq!(response_nonce, nonce);
     let mut len_buf = [0u8; 1];
     stream.read_exact(&mut len_buf).await.unwrap();
     let resp_id_len = len_buf[0] as usize;
     let mut resp_id_buf = vec![0u8; resp_id_len];
     stream.read_exact(&mut resp_id_buf).await.unwrap();
     assert_eq!(resp_id_buf, local_node_id.as_bytes());
+    let mut response_tag = [0u8; 32];
+    stream.read_exact(&mut response_tag).await.unwrap();
+    assert_eq!(
+        response_tag,
+        handshake_tag(TEST_SECRET.as_bytes(), b"response", &nonce, &resp_id_buf)
+    );
 
     let _ = shutdown_tx.send(true);
 }

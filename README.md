@@ -111,7 +111,7 @@ Each row contains only `id`, `actor`, `event`, redacted `details`, and `created_
 
 ### Multi-Node Cluster Foundation (Phase 10A)
 
-BeaRust includes an explicit node identity and cluster peer foundation for multi-node deployments. Setting `CLUSTER_PEERS` (or configuring `[cluster]` in TOML) enables out-of-band peer connectivity checks without affecting proxy request handling or single-node operations.
+BeaRust includes an explicit node identity and cluster peer foundation for multi-node deployments. Setting `CLUSTER_PEERS` (or configuring `[cluster]` in TOML) together with a shared `CLUSTER_AUTH_TOKEN` (at least 32 bytes) enables authenticated, out-of-band peer connectivity checks without affecting proxy request handling or single-node operations.
 
 - `NODE_ID`: Unique node identifier (defaults to `node1`).
 - `CLUSTER_PEERS`: Comma-separated `node_id=host:port` peer list (defaults to empty, preserving single-node behavior).

@@ -23,10 +23,25 @@ fn parses_valid_configuration_and_defaults() {
         config.upstream_pools[0].algorithm,
         Algorithm::LeastConnections
     );
+    assert!(config.cluster.auth_token.is_empty());
     assert_eq!(
         config.upstream_pools[0].backends[0].health_check,
         HealthCheckKind::Http
     );
+}
+
+#[test]
+fn cluster_peers_require_a_shared_auth_token() {
+    let missing = format!(
+        "{VALID}\n[cluster]\nnode_id = \"node1\"\npeers = [{{ node_id = \"node2\", address = \"127.0.0.1:7001\" }}]\n"
+    );
+    assert!(Config::parse(&missing).is_err());
+
+    let configured = format!(
+        "{VALID}\n[cluster]\nnode_id = \"node1\"\nauth_token = \"01234567890123456789012345678901\"\npeers = [{{ node_id = \"node2\", address = \"127.0.0.1:7001\" }}]\n"
+    );
+    let config = Config::parse(&configured).expect("cluster secret should enable peers");
+    assert_eq!(config.cluster.auth_token.len(), 32);
 }
 
 #[test]
@@ -293,7 +308,7 @@ fn omitted_cluster_config_uses_safe_single_node_defaults() {
 #[test]
 fn parses_valid_multi_node_cluster_config() {
     let toml = format!(
-        "{VALID}\n[cluster]\nnode_id = \"node1\"\nbind = \"127.0.0.1:9092\"\ntimeout_seconds = 5\n\n[[cluster.peers]]\nnode_id = \"node2\"\naddress = \"127.0.0.1:9093\"\n\n[[cluster.peers]]\nnode_id = \"node3\"\naddress = \"127.0.0.1:9094\""
+        "{VALID}\n[cluster]\nnode_id = \"node1\"\nauth_token = \"01234567890123456789012345678901\"\nbind = \"127.0.0.1:9092\"\ntimeout_seconds = 5\n\n[[cluster.peers]]\nnode_id = \"node2\"\naddress = \"127.0.0.1:9093\"\n\n[[cluster.peers]]\nnode_id = \"node3\"\naddress = \"127.0.0.1:9094\""
     );
     let config = Config::parse(&toml).expect("valid multi-node cluster config");
     assert_eq!(config.cluster.node_id, "node1");
@@ -335,7 +350,7 @@ fn rejects_invalid_cluster_peer_format() {
 #[test]
 fn rejects_self_referential_cluster_peer() {
     let toml = format!(
-        "{VALID}\n[cluster]\nnode_id = \"node1\"\n[[cluster.peers]]\nnode_id = \"node1\"\naddress = \"127.0.0.1:9093\""
+        "{VALID}\n[cluster]\nnode_id = \"node1\"\nauth_token = \"01234567890123456789012345678901\"\n[[cluster.peers]]\nnode_id = \"node1\"\naddress = \"127.0.0.1:9093\""
     );
     let err = Config::parse(&toml).unwrap_err().to_string();
     assert!(err.contains("matches local node_id"), "{err}");
@@ -344,13 +359,13 @@ fn rejects_self_referential_cluster_peer() {
 #[test]
 fn rejects_duplicate_cluster_peer_ids_or_addresses() {
     let dup_id = format!(
-        "{VALID}\n[cluster]\nnode_id = \"node1\"\n[[cluster.peers]]\nnode_id = \"node2\"\naddress = \"127.0.0.1:9093\"\n[[cluster.peers]]\nnode_id = \"node2\"\naddress = \"127.0.0.1:9094\""
+        "{VALID}\n[cluster]\nnode_id = \"node1\"\nauth_token = \"01234567890123456789012345678901\"\n[[cluster.peers]]\nnode_id = \"node2\"\naddress = \"127.0.0.1:9093\"\n[[cluster.peers]]\nnode_id = \"node2\"\naddress = \"127.0.0.1:9094\""
     );
     let err_id = Config::parse(&dup_id).unwrap_err().to_string();
     assert!(err_id.contains("duplicate peer node_id"), "{err_id}");
 
     let dup_addr = format!(
-        "{VALID}\n[cluster]\nnode_id = \"node1\"\n[[cluster.peers]]\nnode_id = \"node2\"\naddress = \"127.0.0.1:9093\"\n[[cluster.peers]]\nnode_id = \"node3\"\naddress = \"127.0.0.1:9093\""
+        "{VALID}\n[cluster]\nnode_id = \"node1\"\nauth_token = \"01234567890123456789012345678901\"\n[[cluster.peers]]\nnode_id = \"node2\"\naddress = \"127.0.0.1:9093\"\n[[cluster.peers]]\nnode_id = \"node3\"\naddress = \"127.0.0.1:9093\""
     );
     let err_addr = Config::parse(&dup_addr).unwrap_err().to_string();
     assert!(err_addr.contains("duplicate peer address"), "{err_addr}");

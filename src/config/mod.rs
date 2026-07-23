@@ -196,6 +196,10 @@ pub struct ClusterConfig {
     pub bind: SocketAddr,
     #[serde(default = "default_cluster_timeout")]
     pub timeout_seconds: u64,
+    /// Shared secret used to authenticate cluster peer handshakes. It is
+    /// intentionally never serialized into status responses.
+    #[serde(default)]
+    pub auth_token: String,
 }
 
 impl Default for ClusterConfig {
@@ -216,6 +220,7 @@ impl Default for ClusterConfig {
             peers,
             bind: default_cluster_bind(),
             timeout_seconds: default_cluster_timeout(),
+            auth_token: std::env::var("CLUSTER_AUTH_TOKEN").unwrap_or_default(),
         }
     }
 }
@@ -306,6 +311,9 @@ impl Config {
         if let Ok(env_peers) = std::env::var("CLUSTER_PEERS") {
             config.cluster.peers = ClusterPeer::parse_peers(&env_peers)?;
         }
+        if let Ok(env_token) = std::env::var("CLUSTER_AUTH_TOKEN") {
+            config.cluster.auth_token = env_token;
+        }
         config.validate()?;
         Ok(config)
     }
@@ -329,6 +337,12 @@ impl Config {
             return err(
                 "cluster.peers",
                 "peer count exceeds maximum limit of 64 peers",
+            );
+        }
+        if !self.cluster.peers.is_empty() && !(32..=256).contains(&self.cluster.auth_token.len()) {
+            return err(
+                "cluster.auth_token",
+                "must be between 32 and 256 bytes when peers are configured",
             );
         }
         let mut peer_ids = HashSet::new();
