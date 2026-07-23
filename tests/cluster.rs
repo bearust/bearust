@@ -59,6 +59,31 @@ async fn single_node_cluster_snapshot_is_valid() {
 }
 
 #[tokio::test]
+async fn cluster_snapshot_reflects_runtime_raft_status_without_peer_details() {
+    let config = ClusterConfig {
+        node_id: "node1".into(),
+        peers: vec![],
+        bind: "127.0.0.1:0".parse().unwrap(),
+        timeout_seconds: 2,
+    };
+    let service = ClusterService::new(&config);
+    service.set_raft_status(bearust::cluster::RaftStatus {
+        role: RaftRole::Leader,
+        leader_id: Some("node1".into()),
+        term: 3,
+        last_log_index: 8,
+        commit_index: 7,
+        quorum_available: true,
+        sync_state: "in_sync".into(),
+    });
+    let snapshot = service.snapshot().await;
+    assert_eq!(snapshot.raft_role, RaftRole::Leader);
+    assert_eq!(snapshot.raft_term, 3);
+    assert_eq!(snapshot.raft_last_log_index, 8);
+    assert_eq!(snapshot.raft_commit_index, 7);
+}
+
+#[tokio::test]
 async fn healthy_peer_passes_authenticated_handshake() {
     // Spawn a peer that properly speaks the cluster protocol.
     let healthy_addr = spawn_cluster_responder("node2").await;

@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -40,6 +41,17 @@ pub enum RaftRole {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RaftStatus {
+    pub role: RaftRole,
+    pub leader_id: Option<String>,
+    pub term: u64,
+    pub last_log_index: u64,
+    pub commit_index: u64,
+    pub quorum_available: bool,
+    pub sync_state: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerHealth {
     pub node_id: String,
     pub status: PeerStatus,
@@ -69,6 +81,7 @@ pub struct ClusterService {
     peers: Vec<ClusterPeer>,
     timeout: Duration,
     bind: SocketAddr,
+    raft_status: Arc<RwLock<RaftStatus>>,
 }
 
 impl ClusterService {
@@ -79,6 +92,27 @@ impl ClusterService {
             peers: config.peers[..peer_count].to_vec(),
             timeout: Duration::from_secs(config.timeout_seconds.clamp(1, 60)),
             bind: config.bind,
+            raft_status: Arc::new(RwLock::new(RaftStatus {
+                role: if config.peers.is_empty() {
+                    RaftRole::Standalone
+                } else {
+                    RaftRole::Follower
+                },
+                leader_id: if config.peers.is_empty() {
+                    Some(config.node_id.clone())
+                } else {
+                    None
+                },
+                term: 0,
+                last_log_index: 0,
+                commit_index: 0,
+                quorum_available: config.peers.is_empty(),
+                sync_state: if config.peers.is_empty() {
+                    "in_sync".into()
+                } else {
+                    "not_started".into()
+                },
+            })),
         }
     }
 
@@ -96,6 +130,27 @@ impl ClusterService {
 
     pub fn is_single_node(&self) -> bool {
         self.peers.is_empty()
+    }
+
+    pub fn set_raft_status(&self, status: RaftStatus) {
+        if let Ok(mut current) = self.raft_status.write() {
+            *current = status;
+        }
+    }
+
+    pub fn raft_status(&self) -> RaftStatus {
+        self.raft_status
+            .read()
+            .map(|status| status.clone())
+            .unwrap_or(RaftStatus {
+                role: RaftRole::Unknown,
+                leader_id: None,
+                term: 0,
+                last_log_index: 0,
+                commit_index: 0,
+                quorum_available: false,
+                sync_state: "unknown".into(),
+            })
     }
 
     /// Perform a single authenticated TCP health check against one peer.
@@ -176,6 +231,7 @@ impl ClusterService {
 
     pub async fn snapshot(&self) -> ClusterSnapshot {
         let now = Utc::now();
+        let raft = self.raft_status();
         if self.peers.is_empty() {
             return ClusterSnapshot {
                 local_node_id: self.node_id.clone(),
@@ -184,13 +240,13 @@ impl ClusterService {
                 healthy_peers: 0,
                 peers: vec![],
                 timestamp: now,
-                raft_role: RaftRole::Standalone,
-                raft_leader_id: Some(self.node_id.clone()),
-                raft_term: 0,
-                raft_last_log_index: 0,
-                raft_commit_index: 0,
-                raft_quorum_available: true,
-                raft_sync_state: "in_sync".into(),
+                raft_role: raft.role,
+                raft_leader_id: raft.leader_id,
+                raft_term: raft.term,
+                raft_last_log_index: raft.last_log_index,
+                raft_commit_index: raft.commit_index,
+                raft_quorum_available: raft.quorum_available,
+                raft_sync_state: raft.sync_state,
             };
         }
 
@@ -201,8 +257,6 @@ impl ClusterService {
             .iter()
             .filter(|p| p.status == PeerStatus::Healthy)
             .count();
-        let total_nodes = self.peers.len() + 1;
-        let quorum_size = total_nodes.saturating_div(2).saturating_add(1);
 
         ClusterSnapshot {
             local_node_id: self.node_id.clone(),
@@ -211,13 +265,13 @@ impl ClusterService {
             healthy_peers,
             peers: peer_healths,
             timestamp: now,
-            raft_role: RaftRole::Follower,
-            raft_leader_id: None,
-            raft_term: 0,
-            raft_last_log_index: 0,
-            raft_commit_index: 0,
-            raft_quorum_available: healthy_peers + 1 >= quorum_size,
-            raft_sync_state: "not_started".into(),
+            raft_role: raft.role,
+            raft_leader_id: raft.leader_id,
+            raft_term: raft.term,
+            raft_last_log_index: raft.last_log_index,
+            raft_commit_index: raft.commit_index,
+            raft_quorum_available: raft.quorum_available,
+            raft_sync_state: raft.sync_state,
         }
     }
 }
