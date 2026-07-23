@@ -478,6 +478,15 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
         tx.commit()
             .await
             .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        repository::save_raft_committed_state(
+            &self.pool,
+            &self.node_id,
+            log_id.index as i64,
+            log_id.leader_id.term as i64,
+            0,
+        )
+        .await
+        .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
         let encoded = serde_json::to_vec(&envelope)
             .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
         self.save_snapshot(log_id.index as i64, log_id.leader_id.term as i64, &encoded)

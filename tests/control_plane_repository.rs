@@ -3,8 +3,11 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
+use bearust::cluster_raft_storage::SqlxRaftStorage;
 use bearust::control_plane::repository;
 use bearust::control_plane::{build_state, router};
+use openraft::storage::RaftStateMachine;
+use openraft::RaftSnapshotBuilder;
 use sqlx::Row;
 use tower::util::ServiceExt;
 
@@ -114,6 +117,33 @@ async fn raft_node_identity_is_stable_and_numeric_ids_are_unique() {
             .unwrap(),
         Some(first)
     );
+}
+
+#[tokio::test]
+async fn raft_snapshot_round_trip_restores_proxy_hosts_and_applied_state() {
+    let source_pool = test_pool().await;
+    sqlx::query("INSERT INTO proxy_hosts(id,name,domain,upstream_host,upstream_port,tls_mode,certificate_id,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .bind(7_i64).bind("snapshot-host").bind("snapshot.example.test").bind("127.0.0.1").bind(8080_i64).bind("passthrough").bind(None::<i64>).bind(1_i64).bind("now").bind("now").execute(&source_pool).await.unwrap();
+    repository::save_raft_committed_state(&source_pool, "node-a", 4, 2, 1)
+        .await
+        .unwrap();
+    let mut source = SqlxRaftStorage::new(source_pool.clone(), "node-a").unwrap();
+    let mut builder = source.get_snapshot_builder().await;
+    let snapshot = builder.build_snapshot().await.unwrap();
+    let meta = snapshot.meta.clone();
+    let bytes = snapshot.snapshot.into_inner();
+
+    let target_pool = test_pool().await;
+    let mut target = SqlxRaftStorage::new(target_pool.clone(), "node-b").unwrap();
+    target
+        .install_snapshot(&meta, Box::new(std::io::Cursor::new(bytes)))
+        .await
+        .unwrap();
+    let hosts = repository::list_hosts(&target_pool).await.unwrap();
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0].domain, "snapshot.example.test");
+    let (applied, _) = target.applied_state().await.unwrap();
+    assert_eq!(applied.unwrap().index, 4);
 }
 
 #[tokio::test]
