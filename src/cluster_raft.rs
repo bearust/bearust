@@ -40,6 +40,11 @@ openraft::declare_raft_types!(
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum ConfigCommand {
+    /// Internal log marker used to durably represent OpenRaft blank or
+    /// membership entries in the command-oriented SQL log.
+    Noop {
+        command_id: Uuid,
+    },
     CreateProxyHost {
         command_id: Uuid,
         host: ProxyHost,
@@ -63,6 +68,7 @@ pub enum ConfigCommand {
 impl fmt::Debug for ConfigCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (name, id, host_id) = match self {
+            Self::Noop { command_id } => ("Noop", command_id, None),
             Self::CreateProxyHost { command_id, host } => {
                 ("CreateProxyHost", command_id, Some(host.id))
             }
@@ -158,7 +164,8 @@ pub fn decode_rpc_frame<'a>(frame: &'a [u8], secret: &[u8]) -> Result<&'a [u8], 
 impl ConfigCommand {
     pub fn command_id(&self) -> Uuid {
         match self {
-            Self::CreateProxyHost { command_id, .. }
+            Self::Noop { command_id }
+            | Self::CreateProxyHost { command_id, .. }
             | Self::UpdateProxyHost { command_id, .. }
             | Self::DeleteProxyHost { command_id, .. }
             | Self::UpdateRuntimePolicy { command_id, .. } => *command_id,
@@ -170,6 +177,7 @@ impl ConfigCommand {
             return Err(CommandError::Invalid("command_id must not be nil".into()));
         }
         match self {
+            Self::Noop { .. } => {}
             Self::CreateProxyHost { host, .. } => {
                 validate_host(host)?;
             }
@@ -244,6 +252,7 @@ impl ReplicatedConfig {
             return Ok(false);
         }
         match command {
+            ConfigCommand::Noop { .. } => {}
             ConfigCommand::CreateProxyHost { host, .. }
             | ConfigCommand::UpdateProxyHost { host, .. } => {
                 self.proxy_hosts.insert(host.id, host.clone());

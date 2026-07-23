@@ -526,6 +526,7 @@ pub async fn apply_raft_command(
     }
 
     match command {
+        ConfigCommand::Noop { .. } => {}
         ConfigCommand::CreateProxyHost { host, .. }
         | ConfigCommand::UpdateProxyHost { host, .. } => {
             let now = chrono::Utc::now().to_rfc3339();

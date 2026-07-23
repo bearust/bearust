@@ -549,7 +549,7 @@ async fn handle_cluster_connection(
     }
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len()
         && left
             .iter()

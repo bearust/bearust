@@ -270,12 +270,13 @@ impl RaftLogStorage<crate::cluster_raft::BearustRaftConfig> for SqlxRaftStorage 
         I::IntoIter: openraft::OptionalSend,
     {
         for entry in entries {
-            let EntryPayload::Normal(command) = entry.payload else {
-                return Err(storage_error(
-                    ErrorSubject::Log(entry.log_id),
-                    ErrorVerb::Write,
-                    "unsupported non-normal raft entry",
-                ));
+            let command = match entry.payload {
+                EntryPayload::Normal(command) => command,
+                EntryPayload::Blank | EntryPayload::Membership(_) => {
+                    crate::cluster_raft::ConfigCommand::Noop {
+                        command_id: uuid::Uuid::new_v4(),
+                    }
+                }
             };
             self.append_command(
                 entry.log_id.index as i64,

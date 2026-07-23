@@ -229,6 +229,123 @@ pub async fn send_authenticated_rpc(
         .map_err(|_| RpcTransportError::Timeout)?
 }
 
+/// Send an authenticated Raft RPC over the production cluster protocol.
+/// The identity handshake is completed before the bounded BRRAFT1 frame.
+pub async fn send_authenticated_rpc_with_identity(
+    endpoint: &str,
+    local_node_id: &str,
+    payload: &[u8],
+    secret: &[u8],
+    timeout_duration: Duration,
+) -> Result<Vec<u8>, RpcTransportError> {
+    let operation = async {
+        let frame = crate::cluster_raft::encode_rpc_frame(payload, secret)
+            .map_err(|_| RpcTransportError::Malformed)?;
+        let mut stream = TcpStream::connect(endpoint)
+            .await
+            .map_err(|_| RpcTransportError::Unavailable)?;
+        let nonce = *uuid::Uuid::new_v4().as_bytes();
+        let id = local_node_id.as_bytes();
+        if id.is_empty() || id.len() > 255 {
+            return Err(RpcTransportError::Malformed);
+        }
+        let tag = crate::cluster::handshake_tag(secret, b"request", &nonce, id);
+        let mut handshake = Vec::with_capacity(8 + 1 + id.len() + 16 + 32);
+        handshake.extend_from_slice(crate::cluster::HANDSHAKE_MAGIC);
+        handshake.push(id.len() as u8);
+        handshake.extend_from_slice(id);
+        handshake.extend_from_slice(&nonce);
+        handshake.extend_from_slice(&tag);
+        stream
+            .write_all(&handshake)
+            .await
+            .map_err(|_| RpcTransportError::Unavailable)?;
+
+        let mut magic = [0u8; 8];
+        stream
+            .read_exact(&mut magic)
+            .await
+            .map_err(|_| RpcTransportError::Malformed)?;
+        if magic != crate::cluster::HANDSHAKE_MAGIC {
+            return Err(RpcTransportError::Malformed);
+        }
+        let mut echoed = [0u8; 16];
+        stream
+            .read_exact(&mut echoed)
+            .await
+            .map_err(|_| RpcTransportError::Malformed)?;
+        if echoed != nonce {
+            return Err(RpcTransportError::AuthenticationFailed);
+        }
+        let mut len = [0u8; 1];
+        stream
+            .read_exact(&mut len)
+            .await
+            .map_err(|_| RpcTransportError::Malformed)?;
+        let peer_len = len[0] as usize;
+        if peer_len == 0 || peer_len > 512 {
+            return Err(RpcTransportError::Malformed);
+        }
+        let mut peer_id = vec![0u8; peer_len];
+        stream
+            .read_exact(&mut peer_id)
+            .await
+            .map_err(|_| RpcTransportError::Malformed)?;
+        let mut response_tag = [0u8; 32];
+        stream
+            .read_exact(&mut response_tag)
+            .await
+            .map_err(|_| RpcTransportError::Malformed)?;
+        let expected = crate::cluster::handshake_tag(secret, b"response", &nonce, &peer_id);
+        if !crate::cluster::constant_time_eq(&response_tag, &expected) {
+            return Err(RpcTransportError::AuthenticationFailed);
+        }
+        stream
+            .write_all(&frame)
+            .await
+            .map_err(|_| RpcTransportError::Unavailable)?;
+        let mut header = [0u8; RPC_HEADER_LEN];
+        stream
+            .read_exact(&mut header)
+            .await
+            .map_err(|_| RpcTransportError::Malformed)?;
+        let declared = u32::from_be_bytes(header[RPC_MAGIC_LEN..].try_into().unwrap()) as usize;
+        if declared > crate::cluster_raft::MAX_RPC_FRAME_BYTES {
+            return Err(RpcTransportError::PayloadTooLarge);
+        }
+        let mut rest = vec![0u8; declared + RPC_TAG_LEN];
+        stream
+            .read_exact(&mut rest)
+            .await
+            .map_err(|_| RpcTransportError::Malformed)?;
+        let mut response = Vec::with_capacity(RPC_HEADER_LEN + rest.len());
+        response.extend_from_slice(&header);
+        response.extend_from_slice(&rest);
+        crate::cluster_raft::decode_rpc_frame(&response, secret)
+            .map(|v| v.to_vec())
+            .map_err(|_| RpcTransportError::AuthenticationFailed)
+    };
+    timeout(timeout_duration, operation)
+        .await
+        .map_err(|_| RpcTransportError::Timeout)?
+}
+
+async fn send_network_rpc(
+    local_node_id: Option<&str>,
+    endpoint: &str,
+    payload: &[u8],
+    secret: &[u8],
+    timeout_duration: Duration,
+) -> Result<Vec<u8>, RpcTransportError> {
+    match local_node_id {
+        Some(id) => {
+            send_authenticated_rpc_with_identity(endpoint, id, payload, secret, timeout_duration)
+                .await
+        }
+        None => send_authenticated_rpc(endpoint, payload, secret, timeout_duration).await,
+    }
+}
+
 /// Validate and classify one authenticated control-plane frame.  Until the
 /// OpenRaft instance is attached, recognized RPC kinds return an explicit
 /// protocol response instead of pretending to have handled the request.
@@ -352,12 +469,25 @@ impl<T> RaftRuntimeAdapters for T where
 #[derive(Clone, Debug)]
 pub struct AuthenticatedRaftNetworkFactory {
     secret: Vec<u8>,
+    local_node_id: Option<String>,
 }
 
 impl AuthenticatedRaftNetworkFactory {
     pub fn new(secret: impl AsRef<[u8]>) -> Option<Self> {
         let secret = secret.as_ref().to_vec();
-        (!secret.is_empty()).then_some(Self { secret })
+        (!secret.is_empty()).then_some(Self {
+            secret,
+            local_node_id: None,
+        })
+    }
+
+    pub fn with_local_id(
+        secret: impl AsRef<[u8]>,
+        local_node_id: impl Into<String>,
+    ) -> Option<Self> {
+        let mut factory = Self::new(secret)?;
+        factory.local_node_id = Some(local_node_id.into());
+        Some(factory)
     }
 }
 
@@ -366,6 +496,7 @@ pub struct AuthenticatedRaftNetwork {
     _target: u64,
     endpoint: String,
     secret: Vec<u8>,
+    local_node_id: Option<String>,
 }
 
 impl RaftNetworkFactory<BearustRaftConfig> for AuthenticatedRaftNetworkFactory {
@@ -376,6 +507,7 @@ impl RaftNetworkFactory<BearustRaftConfig> for AuthenticatedRaftNetworkFactory {
             _target: target,
             endpoint: node.addr.clone(),
             secret: self.secret.clone(),
+            local_node_id: self.local_node_id.clone(),
         }
     }
 }
@@ -393,7 +525,8 @@ impl RaftNetwork<BearustRaftConfig> for AuthenticatedRaftNetwork {
                 "raft RPC encode failed",
             )))
         })?;
-        let response = send_authenticated_rpc(
+        let response = send_network_rpc(
+            self.local_node_id.as_deref(),
             &self.endpoint,
             &payload,
             &self.secret,
@@ -436,7 +569,8 @@ impl RaftNetwork<BearustRaftConfig> for AuthenticatedRaftNetwork {
                 "raft RPC encode failed",
             )))
         })?;
-        let response = send_authenticated_rpc(
+        let response = send_network_rpc(
+            self.local_node_id.as_deref(),
             &self.endpoint,
             &payload,
             &self.secret,
@@ -468,7 +602,8 @@ impl RaftNetwork<BearustRaftConfig> for AuthenticatedRaftNetwork {
                 "raft RPC encode failed",
             )))
         })?;
-        let response = send_authenticated_rpc(
+        let response = send_network_rpc(
+            self.local_node_id.as_deref(),
             &self.endpoint,
             &payload,
             &self.secret,
@@ -507,9 +642,10 @@ pub async fn construct_raft(
     node_name: impl Into<String>,
     auth_secret: impl AsRef<[u8]>,
 ) -> Result<openraft::Raft<BearustRaftConfig>, String> {
-    let storage = SqlxRaftStorage::new(pool, node_name).map_err(|e| e.to_string())?;
+    let node_name = node_name.into();
+    let storage = SqlxRaftStorage::new(pool, node_name.clone()).map_err(|e| e.to_string())?;
     let node_id = storage.raft_id().await.map_err(|e| e.to_string())?;
-    let network = AuthenticatedRaftNetworkFactory::new(auth_secret)
+    let network = AuthenticatedRaftNetworkFactory::with_local_id(auth_secret, node_name)
         .ok_or_else(|| "raft auth secret must not be empty".to_string())?;
     let config = openraft::Config::build(&["bearust"]).map_err(|e| e.to_string())?;
     openraft::Raft::new(node_id, Arc::new(config), network, storage.clone(), storage)
@@ -540,8 +676,9 @@ pub async fn construct_raft_with_id(
     if raft_id == 0 {
         return Err("raft id must be positive".into());
     }
-    let storage = SqlxRaftStorage::new(pool, node_name).map_err(|e| e.to_string())?;
-    let network = AuthenticatedRaftNetworkFactory::new(auth_secret)
+    let node_name = node_name.into();
+    let storage = SqlxRaftStorage::new(pool, node_name.clone()).map_err(|e| e.to_string())?;
+    let network = AuthenticatedRaftNetworkFactory::with_local_id(auth_secret, node_name)
         .ok_or_else(|| "raft auth secret must not be empty".to_string())?;
     let config = openraft::Config::build(&["bearust"]).map_err(|e| e.to_string())?;
     openraft::Raft::new(raft_id, Arc::new(config), network, storage.clone(), storage)
