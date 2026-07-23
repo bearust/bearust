@@ -356,12 +356,6 @@ pub struct AuthenticatedRaftNetwork {
     secret: Vec<u8>,
 }
 
-#[allow(clippy::result_large_err)]
-fn unavailable<T>() -> Result<T, RPCError<u64, openraft::BasicNode, RaftError<u64>>> {
-    let error = io::Error::new(io::ErrorKind::NotConnected, "raft transport not started");
-    Err(RPCError::Unreachable(Unreachable::new(&error)))
-}
-
 impl RaftNetworkFactory<BearustRaftConfig> for AuthenticatedRaftNetworkFactory {
     type Network = AuthenticatedRaftNetwork;
 
@@ -377,12 +371,35 @@ impl RaftNetworkFactory<BearustRaftConfig> for AuthenticatedRaftNetworkFactory {
 impl RaftNetwork<BearustRaftConfig> for AuthenticatedRaftNetwork {
     async fn append_entries(
         &mut self,
-        _rpc: AppendEntriesRequest<BearustRaftConfig>,
+        rpc: AppendEntriesRequest<BearustRaftConfig>,
         _option: RPCOption,
     ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, openraft::BasicNode, RaftError<u64>>>
     {
-        let _ = (&self.target, &self.endpoint, &self.secret);
-        unavailable()
+        let payload = encode_raft_rpc("append_entries", &rpc).map_err(|_| {
+            RPCError::Network(openraft::error::NetworkError::new(&io::Error::new(
+                io::ErrorKind::InvalidData,
+                "raft RPC encode failed",
+            )))
+        })?;
+        let response = send_authenticated_rpc(
+            &self.endpoint,
+            &payload,
+            &self.secret,
+            Duration::from_secs(2),
+        )
+        .await
+        .map_err(|_| {
+            RPCError::Unreachable(Unreachable::new(&io::Error::new(
+                io::ErrorKind::NotConnected,
+                "raft RPC unavailable",
+            )))
+        })?;
+        decode_raft_rpc(&response, "append_entries_response").map_err(|_| {
+            RPCError::Network(openraft::error::NetworkError::new(&io::Error::new(
+                io::ErrorKind::InvalidData,
+                "raft RPC response malformed",
+            )))
+        })
     }
 
     async fn install_snapshot(
@@ -400,11 +417,34 @@ impl RaftNetwork<BearustRaftConfig> for AuthenticatedRaftNetwork {
 
     async fn vote(
         &mut self,
-        _rpc: VoteRequest<u64>,
+        rpc: VoteRequest<u64>,
         _option: RPCOption,
     ) -> Result<VoteResponse<u64>, RPCError<u64, openraft::BasicNode, RaftError<u64>>> {
-        let _ = (&self.target, &self.endpoint, &self.secret);
-        unavailable()
+        let payload = encode_raft_rpc("vote", &rpc).map_err(|_| {
+            RPCError::Network(openraft::error::NetworkError::new(&io::Error::new(
+                io::ErrorKind::InvalidData,
+                "raft RPC encode failed",
+            )))
+        })?;
+        let response = send_authenticated_rpc(
+            &self.endpoint,
+            &payload,
+            &self.secret,
+            Duration::from_secs(2),
+        )
+        .await
+        .map_err(|_| {
+            RPCError::Unreachable(Unreachable::new(&io::Error::new(
+                io::ErrorKind::NotConnected,
+                "raft RPC unavailable",
+            )))
+        })?;
+        decode_raft_rpc(&response, "vote_response").map_err(|_| {
+            RPCError::Network(openraft::error::NetworkError::new(&io::Error::new(
+                io::ErrorKind::InvalidData,
+                "raft RPC response malformed",
+            )))
+        })
     }
 }
 
