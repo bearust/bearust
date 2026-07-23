@@ -14,6 +14,7 @@ use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     VoteRequest, VoteResponse,
 };
+use serde_json::Value;
 use std::io;
 use std::time::Duration;
 use thiserror::Error;
@@ -100,6 +101,48 @@ pub async fn send_authenticated_rpc(
     timeout(timeout_duration, operation)
         .await
         .map_err(|_| RpcTransportError::Timeout)?
+}
+
+/// Validate and classify one authenticated control-plane frame.  Until the
+/// OpenRaft instance is attached, recognized RPC kinds return an explicit
+/// protocol response instead of pretending to have handled the request.
+pub fn dispatch_authenticated_rpc(
+    frame: &[u8],
+    secret: &[u8],
+    node_id: &str,
+) -> Result<Vec<u8>, RpcTransportError> {
+    let payload =
+        crate::cluster_raft::decode_rpc_frame(frame, secret).map_err(|error| match error {
+            crate::cluster_raft::CommandError::AuthenticationFailed => {
+                RpcTransportError::AuthenticationFailed
+            }
+            crate::cluster_raft::CommandError::PayloadTooLarge => {
+                RpcTransportError::PayloadTooLarge
+            }
+            _ => RpcTransportError::Malformed,
+        })?;
+    let value: Value = serde_json::from_slice(payload).map_err(|_| RpcTransportError::Malformed)?;
+    let kind = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or(RpcTransportError::Malformed)?;
+    let body = match kind {
+        "status" => {
+            serde_json::json!({"kind":"status", "node_id":node_id, "status":"transport_ready"})
+        }
+        "vote" | "append_entries" | "install_snapshot" => serde_json::json!({
+            "kind":"error", "code":"raft_handler_unavailable"
+        }),
+        _ => serde_json::json!({"kind":"error", "code":"unknown_rpc_kind"}),
+    };
+    let body = serde_json::to_vec(&body).map_err(|_| RpcTransportError::Malformed)?;
+    crate::cluster_raft::encode_rpc_frame(&body, secret).map_err(|error| match error {
+        crate::cluster_raft::CommandError::AuthenticationFailed => {
+            RpcTransportError::AuthenticationFailed
+        }
+        crate::cluster_raft::CommandError::PayloadTooLarge => RpcTransportError::PayloadTooLarge,
+        _ => RpcTransportError::Malformed,
+    })
 }
 
 /// The complete set of adapters required by `openraft::Raft::new`.

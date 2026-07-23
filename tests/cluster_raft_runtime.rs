@@ -1,7 +1,7 @@
 use bearust::cluster_raft::encode_rpc_frame;
 use bearust::cluster_raft::BearustRaftConfig;
 use bearust::cluster_raft_runtime::AuthenticatedRaftNetworkFactory;
-use bearust::cluster_raft_runtime::{send_authenticated_rpc, RpcTransportError};
+use bearust::cluster_raft_runtime::{dispatch_authenticated_rpc, send_authenticated_rpc, RpcTransportError};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -62,4 +62,28 @@ async fn authenticated_rpc_times_out_without_response() {
     )
     .await;
     assert_eq!(result, Err(RpcTransportError::Timeout));
+}
+
+#[test]
+fn dispatcher_rejects_unknown_and_unavailable_rpc_kinds() {
+    let secret = b"correct-secret";
+    for (payload, code) in [
+        (br#"{"kind":"unknown"}"#.as_slice(), "unknown_rpc_kind"),
+        (br#"{"kind":"vote"}"#.as_slice(), "raft_handler_unavailable"),
+    ] {
+        let frame = encode_rpc_frame(payload, secret).unwrap();
+        let response = dispatch_authenticated_rpc(&frame, secret, "node-a").unwrap();
+        let response = bearust::cluster_raft::decode_rpc_frame(&response, secret).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(response).unwrap();
+        assert_eq!(value["code"], code);
+    }
+}
+
+#[test]
+fn dispatcher_rejects_malformed_json() {
+    let frame = encode_rpc_frame(b"not-json", b"correct-secret").unwrap();
+    assert_eq!(
+        dispatch_authenticated_rpc(&frame, b"correct-secret", "node-a"),
+        Err(RpcTransportError::Malformed)
+    );
 }

@@ -3,7 +3,7 @@
 //! Phase 10A scope: node identity, bounded TCP peer health checks, and an
 //! authenticated inbound listener. Raft, leader election, write forwarding,
 //! cross-node replay, and keepalived automation are deferred to Phase 10B+.
-use crate::cluster_raft::{decode_rpc_frame, encode_rpc_frame};
+use crate::cluster_raft_runtime::dispatch_authenticated_rpc;
 use crate::config::{ClusterConfig, ClusterPeer};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -488,18 +488,10 @@ async fn handle_cluster_connection(
                     if stream.read_exact(&mut rest).await.is_ok() {
                         let mut frame = header.to_vec();
                         frame.extend_from_slice(&rest);
-                        if let Ok(payload) = decode_rpc_frame(&frame, &secret) {
-                            if payload == br#"{"kind":"status"}"# {
-                                let body = serde_json::to_vec(&serde_json::json!({
-                                    "kind": "status",
-                                    "node_id": local_node_id,
-                                    "status": "transport_ready"
-                                }))
-                                .unwrap_or_default();
-                                if let Ok(response) = encode_rpc_frame(&body, &secret) {
-                                    let _ = stream.write_all(&response).await;
-                                }
-                            }
+                        if let Ok(response) =
+                            dispatch_authenticated_rpc(&frame, &secret, &local_node_id)
+                        {
+                            let _ = stream.write_all(&response).await;
                         }
                     }
                 }
