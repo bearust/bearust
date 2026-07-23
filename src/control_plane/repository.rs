@@ -9,6 +9,7 @@ use crate::control_plane::models::{
 };
 use crate::control_plane::rbac::Role;
 use crate::rate_limit::{RateLimitAction, RateLimitKeyScope, RateLimitPolicy};
+use base64::Engine as _;
 use sqlx::{any::AnyPoolOptions, Row};
 use std::hash::{Hash, Hasher};
 use std::sync::Once;
@@ -29,6 +30,23 @@ pub struct RaftHardState {
     pub current_term: i64,
     pub voted_for: Option<String>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftLogRecord {
+    pub node_id: String,
+    pub log_index: i64,
+    pub term: i64,
+    pub command_id: Option<String>,
+    pub payload: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftSnapshotRecord {
+    pub node_id: String,
+    pub snapshot_index: i64,
+    pub snapshot_term: i64,
+    pub payload: Vec<u8>,
 }
 
 static ANY_DRIVERS: Once = Once::new();
@@ -248,6 +266,110 @@ pub async fn append_raft_log_entry(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+pub async fn load_raft_log_entries(
+    pool: &DbPool,
+    node_id: &str,
+    from_index: i64,
+) -> Result<Vec<RaftLogRecord>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT node_id,log_index,term,payload,command_id FROM raft_log_entries WHERE node_id=? AND log_index>=? ORDER BY log_index ASC",
+    )
+    .bind(node_id)
+    .bind(from_index)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| RaftLogRecord {
+            node_id: row.get("node_id"),
+            log_index: row.get("log_index"),
+            term: row.get("term"),
+            payload: row.get("payload"),
+            command_id: row.get("command_id"),
+        })
+        .collect())
+}
+
+pub async fn truncate_raft_log(
+    pool: &DbPool,
+    node_id: &str,
+    from_index: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM raft_log_entries WHERE node_id=? AND log_index>=?")
+        .bind(node_id)
+        .bind(from_index)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn purge_raft_log(
+    pool: &DbPool,
+    node_id: &str,
+    through_index: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM raft_log_entries WHERE node_id=? AND log_index<=?")
+        .bind(node_id)
+        .bind(through_index)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn save_raft_snapshot(
+    pool: &DbPool,
+    node_id: &str,
+    snapshot_index: i64,
+    snapshot_term: i64,
+    payload: &[u8],
+) -> Result<(), sqlx::Error> {
+    if payload.len() > MAX_RAFT_PAYLOAD_BYTES {
+        return Err(sqlx::Error::Protocol(
+            "raft snapshot exceeds configured limit".into(),
+        ));
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("DELETE FROM raft_snapshots WHERE node_id=?")
+        .bind(node_id)
+        .execute(pool)
+        .await?;
+    sqlx::query("INSERT INTO raft_snapshots(node_id,snapshot_index,snapshot_term,payload,created_at) VALUES(?,?,?,?,?)")
+        .bind(node_id)
+        .bind(snapshot_index)
+        .bind(snapshot_term)
+        .bind(encoded)
+        .bind(now)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn load_raft_snapshot(
+    pool: &DbPool,
+    node_id: &str,
+) -> Result<Option<RaftSnapshotRecord>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT node_id,snapshot_index,snapshot_term,payload FROM raft_snapshots WHERE node_id=?",
+    )
+    .bind(node_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| {
+        let encoded: String = row.get("payload");
+        let payload = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| sqlx::Error::Protocol("invalid raft snapshot encoding".into()))?;
+        Ok(RaftSnapshotRecord {
+            node_id: row.get("node_id"),
+            snapshot_index: row.get("snapshot_index"),
+            snapshot_term: row.get("snapshot_term"),
+            payload,
+        })
+    })
+    .transpose()
 }
 
 pub async fn record_raft_command_id(pool: &DbPool, command_id: &str) -> Result<bool, sqlx::Error> {
