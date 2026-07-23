@@ -17,6 +17,7 @@ use openraft::raft::{
     VoteRequest, VoteResponse,
 };
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -169,6 +170,48 @@ pub async fn build_raft(
         AuthenticatedRaftNetworkFactory::new(secret).ok_or(openraft::error::Fatal::Panicked)?;
     let config = Arc::new(openraft::Config::default());
     openraft::Raft::new(id, config, network, storage.clone(), storage).await
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum BootstrapError {
+    #[error("single-node bootstrap requires exactly one member")]
+    NotSingleNode,
+    #[error("multi-node membership must contain at least three members")]
+    InvalidMultiNodeMembership,
+    #[error("local node is not present in membership")]
+    LocalNodeMissing,
+}
+
+/// Explicitly bootstrap a pristine single-node instance. This is opt-in and
+/// never called by `build_raft`; successful initialization starts election.
+pub async fn bootstrap_single_node(
+    raft: &openraft::Raft<BearustRaftConfig>,
+    local_id: u64,
+    local_addr: impl Into<String>,
+) -> Result<(), BootstrapError> {
+    let local_addr: String = local_addr.into();
+    raft.initialize(BTreeMap::from([(
+        local_id,
+        openraft::BasicNode::new(local_addr),
+    )]))
+    .await
+    .map_err(|_| BootstrapError::NotSingleNode)
+}
+
+/// Validate a multi-node join request without mutating Raft membership. The
+/// caller must perform leader-mediated `add_learner`/`change_membership` only
+/// after this guard succeeds.
+pub fn validate_multi_node_join(
+    local_id: u64,
+    members: &BTreeMap<u64, openraft::BasicNode>,
+) -> Result<(), BootstrapError> {
+    if members.len() < 3 {
+        return Err(BootstrapError::InvalidMultiNodeMembership);
+    }
+    if !members.contains_key(&local_id) {
+        return Err(BootstrapError::LocalNodeMissing);
+    }
+    Ok(())
 }
 
 impl<T> RaftRuntimeAdapters for T where

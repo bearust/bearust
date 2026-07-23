@@ -2,8 +2,10 @@ use bearust::cluster_raft::encode_rpc_frame;
 use bearust::cluster_raft::BearustRaftConfig;
 use bearust::cluster_raft_runtime::AuthenticatedRaftNetworkFactory;
 use bearust::cluster_raft_runtime::{
-    dispatch_authenticated_rpc, send_authenticated_rpc, RpcTransportError,
+    dispatch_authenticated_rpc, send_authenticated_rpc, validate_multi_node_join, BootstrapError,
+    RpcTransportError,
 };
+use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -88,4 +90,21 @@ fn dispatcher_rejects_malformed_json() {
         dispatch_authenticated_rpc(&frame, b"correct-secret", "node-a"),
         Err(RpcTransportError::Malformed)
     );
+}
+
+#[test]
+fn multi_node_join_guard_requires_three_members_and_local_identity() {
+    let mut members = BTreeMap::new();
+    members.insert(1, openraft::BasicNode::new("a"));
+    members.insert(2, openraft::BasicNode::new("b"));
+    assert_eq!(
+        validate_multi_node_join(1, &members),
+        Err(BootstrapError::InvalidMultiNodeMembership)
+    );
+    members.insert(3, openraft::BasicNode::new("c"));
+    assert_eq!(
+        validate_multi_node_join(9, &members),
+        Err(BootstrapError::LocalNodeMissing)
+    );
+    assert!(validate_multi_node_join(1, &members).is_ok());
 }
