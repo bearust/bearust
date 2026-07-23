@@ -16,6 +16,8 @@ use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     VoteRequest, VoteResponse,
 };
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io;
@@ -42,6 +44,45 @@ pub enum RpcTransportError {
     AuthenticationFailed,
     #[error("raft RPC payload exceeds configured limit")]
     PayloadTooLarge,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct RaftRpcEnvelope {
+    pub kind: String,
+    pub payload: Value,
+}
+
+/// Serialize an OpenRaft request into a bounded, authenticated-envelope
+/// payload. The actual request type remains opaque to the transport layer.
+pub fn encode_raft_rpc<T: Serialize>(
+    kind: &str,
+    request: &T,
+) -> Result<Vec<u8>, RpcTransportError> {
+    let payload = serde_json::to_value(request).map_err(|_| RpcTransportError::Malformed)?;
+    let envelope = RaftRpcEnvelope {
+        kind: kind.to_string(),
+        payload,
+    };
+    let bytes = serde_json::to_vec(&envelope).map_err(|_| RpcTransportError::Malformed)?;
+    if bytes.len() > crate::cluster_raft::MAX_RPC_FRAME_BYTES {
+        return Err(RpcTransportError::PayloadTooLarge);
+    }
+    Ok(bytes)
+}
+
+pub fn decode_raft_rpc<T: DeserializeOwned>(
+    payload: &[u8],
+    expected_kind: &str,
+) -> Result<T, RpcTransportError> {
+    if payload.len() > crate::cluster_raft::MAX_RPC_FRAME_BYTES {
+        return Err(RpcTransportError::PayloadTooLarge);
+    }
+    let envelope: RaftRpcEnvelope =
+        serde_json::from_slice(payload).map_err(|_| RpcTransportError::Malformed)?;
+    if envelope.kind != expected_kind {
+        return Err(RpcTransportError::Malformed);
+    }
+    serde_json::from_value(envelope.payload).map_err(|_| RpcTransportError::Malformed)
 }
 
 /// Send one authenticated framed request and receive one authenticated framed

@@ -1,6 +1,7 @@
 use bearust::cluster_raft::encode_rpc_frame;
 use bearust::cluster_raft::BearustRaftConfig;
 use bearust::cluster_raft_runtime::AuthenticatedRaftNetworkFactory;
+use bearust::cluster_raft_runtime::{decode_raft_rpc, encode_raft_rpc};
 use bearust::cluster_raft_runtime::{
     dispatch_authenticated_rpc, send_authenticated_rpc, validate_multi_node_join, BootstrapError,
     RpcTransportError,
@@ -107,4 +108,15 @@ fn multi_node_join_guard_requires_three_members_and_local_identity() {
         Err(BootstrapError::LocalNodeMissing)
     );
     assert!(validate_multi_node_join(1, &members).is_ok());
+}
+
+#[test]
+fn raft_rpc_envelope_round_trip_is_bounded_and_kind_checked() {
+    let payload = encode_raft_rpc("vote", &serde_json::json!({"term": 3})).unwrap();
+    let decoded: serde_json::Value = decode_raft_rpc(&payload, "vote").unwrap();
+    assert_eq!(decoded["term"], 3);
+    assert_eq!(
+        decode_raft_rpc::<serde_json::Value>(&payload, "append_entries"),
+        Err(RpcTransportError::Malformed)
+    );
 }
