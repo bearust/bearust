@@ -1,7 +1,9 @@
 use bearust::cluster_raft::encode_rpc_frame;
 use bearust::cluster_raft::BearustRaftConfig;
 use bearust::cluster_raft_runtime::AuthenticatedRaftNetworkFactory;
-use bearust::cluster_raft_runtime::{dispatch_authenticated_rpc, send_authenticated_rpc, RpcTransportError};
+use bearust::cluster_raft_runtime::{
+    dispatch_authenticated_rpc, send_authenticated_rpc, RpcTransportError,
+};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;

@@ -18,8 +18,8 @@ use openraft::raft::{
 };
 use serde_json::Value;
 use std::io;
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -165,8 +165,8 @@ pub async fn build_raft(
     storage: SqlxRaftStorage,
     secret: impl AsRef<[u8]>,
 ) -> Result<openraft::Raft<BearustRaftConfig>, openraft::error::Fatal<u64>> {
-    let network = AuthenticatedRaftNetworkFactory::new(secret)
-        .ok_or(openraft::error::Fatal::Panicked)?;
+    let network =
+        AuthenticatedRaftNetworkFactory::new(secret).ok_or(openraft::error::Fatal::Panicked)?;
     let config = Arc::new(openraft::Config::default());
     openraft::Raft::new(id, config, network, storage.clone(), storage).await
 }
@@ -276,15 +276,8 @@ pub async fn construct_raft(
     let node_id = storage.raft_id().await.map_err(|e| e.to_string())?;
     let network = AuthenticatedRaftNetworkFactory::new(auth_secret)
         .ok_or_else(|| "raft auth secret must not be empty".to_string())?;
-    let config = openraft::Config::build(&["bearust"])
-        .map_err(|e| e.to_string())?;
-    openraft::Raft::new(
-        node_id,
-        Arc::new(config),
-        network,
-        storage.clone(),
-        storage,
-    )
-    .await
-    .map_err(|e| e.to_string())
+    let config = openraft::Config::build(&["bearust"]).map_err(|e| e.to_string())?;
+    openraft::Raft::new(node_id, Arc::new(config), network, storage.clone(), storage)
+        .await
+        .map_err(|e| e.to_string())
 }
