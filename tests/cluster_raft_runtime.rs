@@ -1,7 +1,7 @@
+use bearust::cluster_raft::encode_rpc_frame;
 use bearust::cluster_raft::BearustRaftConfig;
 use bearust::cluster_raft_runtime::AuthenticatedRaftNetworkFactory;
 use bearust::cluster_raft_runtime::{send_authenticated_rpc, RpcTransportError};
-use bearust::cluster_raft::encode_rpc_frame;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -29,7 +29,9 @@ async fn authenticated_rpc_rejects_tampered_response() {
     tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = vec![0; 50];
-        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut request).await.unwrap();
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut request)
+            .await
+            .unwrap();
         let mut response = encode_rpc_frame(b"ok", b"correct-secret").unwrap();
         *response.last_mut().unwrap() ^= 1;
         stream.write_all(&response).await.unwrap();
