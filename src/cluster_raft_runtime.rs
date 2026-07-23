@@ -10,6 +10,7 @@
 use crate::cluster_raft::BearustRaftConfig;
 use crate::cluster_raft_storage::SqlxRaftStorage;
 use crate::control_plane::repository::DbPool;
+use async_trait::async_trait;
 use openraft::error::{RPCError, RaftError, Unreachable};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
@@ -24,7 +25,6 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -103,8 +103,8 @@ pub async fn dispatch_authenticated_rpc_with_handler(
 ) -> Result<Vec<u8>, RpcTransportError> {
     let payload = crate::cluster_raft::decode_rpc_frame(frame, secret)
         .map_err(|_| RpcTransportError::AuthenticationFailed)?;
-    let envelope: RaftRpcEnvelope = serde_json::from_slice(payload)
-        .map_err(|_| RpcTransportError::Malformed)?;
+    let envelope: RaftRpcEnvelope =
+        serde_json::from_slice(payload).map_err(|_| RpcTransportError::Malformed)?;
     if envelope.kind == "status" {
         let status = encode_raft_rpc(
             "status",

@@ -278,6 +278,11 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             None
         };
         let cluster_service = Arc::new(crate::cluster::ClusterService::new(&config.cluster));
+        if let Some(raft) = raft_handle.as_ref() {
+            cluster_service.set_raft_handler(Arc::new(
+                crate::cluster_raft_runtime::OpenRaftRpcHandler::new(raft.clone()),
+            ));
+        }
         control_state = control_state.with_cluster(cluster_service.clone());
         let (cluster_shutdown_tx, cluster_shutdown_rx) = tokio::sync::watch::channel(false);
         let cluster_task = tokio::spawn(crate::cluster::run_cluster_listener(

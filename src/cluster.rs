@@ -169,7 +169,10 @@ impl ClusterService {
     }
 
     fn raft_handler(&self) -> Option<Arc<dyn RaftRpcHandler>> {
-        self.raft_handler.read().ok().and_then(|handler| handler.clone())
+        self.raft_handler
+            .read()
+            .ok()
+            .and_then(|handler| handler.clone())
     }
 
     /// Mark the authenticated transport as available. This deliberately does
