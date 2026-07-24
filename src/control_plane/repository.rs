@@ -1,7 +1,7 @@
 use crate::bot_protection::{
     BotConfig, BotMode, BotRule, MAX_FIELD_BYTES, MAX_RULES, MAX_TRUSTED_RULES, MAX_TTL_SECONDS,
 };
-use crate::cluster_raft::ConfigCommand;
+use crate::cluster_raft::{CommandResult, ConfigCommand};
 use crate::control_plane::models::{
     AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AuditLogItem, AuditLogPage,
     AuditLogQuery, CertificateMetadata, ProxyHost, RateLimitConfig, RoleDetail,
@@ -63,6 +63,7 @@ pub struct RaftCommandReceipt {
     pub log_index: i64,
     pub leader_id: i64,
     pub applied_at: String,
+    pub result_code: String,
 }
 
 /// Register a stable numeric OpenRaft identity for an application node name.
@@ -424,9 +425,11 @@ pub async fn load_raft_command_receipt(
     command_id: &str,
 ) -> Result<Option<RaftCommandReceipt>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT command_id,log_index,leader_id,applied_at
-         FROM raft_command_receipts
-         WHERE command_id=?",
+        "SELECT receipt.command_id,receipt.log_index,receipt.leader_id,receipt.applied_at,
+                result.result_code
+         FROM raft_command_receipts receipt
+         JOIN raft_command_results result ON result.command_id=receipt.command_id
+         WHERE receipt.command_id=?",
     )
     .bind(command_id)
     .fetch_optional(pool)
@@ -436,6 +439,7 @@ pub async fn load_raft_command_receipt(
         log_index: row.get("log_index"),
         leader_id: row.get("leader_id"),
         applied_at: row.get("applied_at"),
+        result_code: row.get("result_code"),
     }))
 }
 
@@ -443,9 +447,11 @@ pub async fn list_raft_command_receipts(
     pool: &DbPool,
 ) -> Result<Vec<RaftCommandReceipt>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT command_id,log_index,leader_id,applied_at
-         FROM raft_command_receipts
-         ORDER BY log_index,command_id",
+        "SELECT receipt.command_id,receipt.log_index,receipt.leader_id,receipt.applied_at,
+                result.result_code
+         FROM raft_command_receipts receipt
+         JOIN raft_command_results result ON result.command_id=receipt.command_id
+         ORDER BY receipt.log_index,receipt.command_id",
     )
     .fetch_all(pool)
     .await?;
@@ -456,6 +462,7 @@ pub async fn list_raft_command_receipts(
             log_index: row.get("log_index"),
             leader_id: row.get("leader_id"),
             applied_at: row.get("applied_at"),
+            result_code: row.get("result_code"),
         })
         .collect())
 }
@@ -470,9 +477,11 @@ pub async fn list_recent_raft_command_receipts(
     let limit = i64::try_from(limit)
         .map_err(|_| sqlx::Error::Protocol("raft receipt limit is out of range".into()))?;
     let rows = sqlx::query(
-        "SELECT command_id,log_index,leader_id,applied_at
-         FROM raft_command_receipts
-         ORDER BY log_index DESC,command_id DESC
+        "SELECT receipt.command_id,receipt.log_index,receipt.leader_id,receipt.applied_at,
+                result.result_code
+         FROM raft_command_receipts receipt
+         JOIN raft_command_results result ON result.command_id=receipt.command_id
+         ORDER BY receipt.log_index DESC,receipt.command_id DESC
          LIMIT ?",
     )
     .bind(limit)
@@ -485,6 +494,7 @@ pub async fn list_recent_raft_command_receipts(
             log_index: row.get("log_index"),
             leader_id: row.get("leader_id"),
             applied_at: row.get("applied_at"),
+            result_code: row.get("result_code"),
         })
         .collect())
 }
@@ -593,7 +603,7 @@ pub async fn record_raft_command_id(pool: &DbPool, command_id: &str) -> Result<b
 pub async fn apply_raft_command(
     pool: &DbPool,
     command: &ConfigCommand,
-) -> Result<bool, sqlx::Error> {
+) -> Result<CommandResult, sqlx::Error> {
     apply_raft_command_inner(pool, command, None).await
 }
 
@@ -604,7 +614,7 @@ pub async fn apply_raft_command_with_receipt(
     command: &ConfigCommand,
     log_index: i64,
     leader_id: i64,
-) -> Result<bool, sqlx::Error> {
+) -> Result<CommandResult, sqlx::Error> {
     if log_index < 0 || leader_id <= 0 {
         return Err(sqlx::Error::Protocol(
             "invalid raft command receipt provenance".into(),
@@ -617,7 +627,7 @@ async fn apply_raft_command_inner(
     pool: &DbPool,
     command: &ConfigCommand,
     receipt: Option<(i64, i64)>,
-) -> Result<bool, sqlx::Error> {
+) -> Result<CommandResult, sqlx::Error> {
     command
         .validate()
         .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
@@ -629,19 +639,55 @@ async fn apply_raft_command_inner(
         .await?
         .is_some()
     {
-        // A later duplicate cannot prove the original leader/index. Legacy
-        // command-ID-only rows therefore remain without a receipt rather than
-        // fabricating provenance from the replay entry.
+        let known_result: Option<String> =
+            sqlx::query_scalar("SELECT result_code FROM raft_command_results WHERE command_id=?")
+                .bind(&command_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let (Some((log_index, leader_id)), Some(result_code)) = (receipt, known_result.as_ref())
+        {
+            let applied_at = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT INTO raft_command_receipts(command_id,log_index,leader_id,applied_at)
+                 VALUES(?,?,?,?)
+                 ON CONFLICT(command_id) DO NOTHING",
+            )
+            .bind(&command_id)
+            .bind(log_index)
+            .bind(leader_id)
+            .bind(applied_at)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            CommandResult::from_code(result_code)
+                .ok_or_else(|| sqlx::Error::Protocol("invalid raft command result".into()))?;
+            return Ok(CommandResult::Duplicate);
+        }
+        // Legacy command-ID-only rows do not carry enough information to
+        // recover the original business result.
         tx.rollback().await?;
-        return Ok(false);
+        return Ok(CommandResult::Duplicate);
     }
 
-    match command {
-        ConfigCommand::Noop { .. } => {}
-        ConfigCommand::CreateProxyHost { host, .. }
-        | ConfigCommand::UpdateProxyHost { host, .. } => {
-            let now = chrono::Utc::now().to_rfc3339();
-            let result = if matches!(command, ConfigCommand::CreateProxyHost { .. }) {
+    let result = match command {
+        ConfigCommand::Noop { .. } => CommandResult::Applied,
+        ConfigCommand::CreateProxyHost { host, .. } => {
+            if sqlx::query("SELECT 1 FROM proxy_hosts WHERE id=?")
+                .bind(host.id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some()
+            {
+                CommandResult::IdCollision
+            } else if sqlx::query("SELECT 1 FROM proxy_hosts WHERE domain=?")
+                .bind(&host.domain)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some()
+            {
+                CommandResult::DuplicateDomain
+            } else {
+                let now = chrono::Utc::now().to_rfc3339();
                 sqlx::query("INSERT INTO proxy_hosts(id,name,domain,upstream_host,upstream_port,tls_mode,certificate_id,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
                     .bind(host.id)
                     .bind(&host.name)
@@ -654,8 +700,28 @@ async fn apply_raft_command_inner(
                     .bind(&now)
                     .bind(&now)
                     .execute(&mut *tx)
-                    .await?
+                    .await?;
+                CommandResult::Applied
+            }
+        }
+        ConfigCommand::UpdateProxyHost { host, .. } => {
+            if sqlx::query("SELECT 1 FROM proxy_hosts WHERE id=?")
+                .bind(host.id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_none()
+            {
+                CommandResult::NotFound
+            } else if sqlx::query("SELECT 1 FROM proxy_hosts WHERE domain=? AND id<>?")
+                .bind(&host.domain)
+                .bind(host.id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some()
+            {
+                CommandResult::DuplicateDomain
             } else {
+                let now = chrono::Utc::now().to_rfc3339();
                 sqlx::query("UPDATE proxy_hosts SET name=?,domain=?,upstream_host=?,upstream_port=?,tls_mode=?,certificate_id=?,enabled=?,updated_at=? WHERE id=?")
                     .bind(&host.name)
                     .bind(&host.domain)
@@ -667,29 +733,30 @@ async fn apply_raft_command_inner(
                     .bind(&now)
                     .bind(host.id)
                     .execute(&mut *tx)
-                    .await?
-            };
-            if matches!(command, ConfigCommand::UpdateProxyHost { .. })
-                && result.rows_affected() == 0
-            {
-                return Err(sqlx::Error::Protocol("proxy host not found".into()));
+                    .await?;
+                CommandResult::Applied
             }
         }
         ConfigCommand::DeleteProxyHost { host_id, .. } => {
-            sqlx::query("DELETE FROM proxy_hosts WHERE id=?")
+            let deleted = sqlx::query("DELETE FROM proxy_hosts WHERE id=?")
                 .bind(host_id)
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query(
-                "DELETE FROM role_permissions WHERE scope_type='proxy_host' AND scope_id=?",
-            )
-            .bind(host_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query("DELETE FROM host_rate_limit_configs WHERE host_id=?")
+            if deleted.rows_affected() == 0 {
+                CommandResult::NotFound
+            } else {
+                sqlx::query(
+                    "DELETE FROM role_permissions WHERE scope_type='proxy_host' AND scope_id=?",
+                )
                 .bind(host_id)
                 .execute(&mut *tx)
                 .await?;
+                sqlx::query("DELETE FROM host_rate_limit_configs WHERE host_id=?")
+                    .bind(host_id)
+                    .execute(&mut *tx)
+                    .await?;
+                CommandResult::Applied
+            }
         }
         ConfigCommand::UpdateRuntimePolicy {
             host_id, policy, ..
@@ -706,13 +773,19 @@ async fn apply_raft_command_inner(
                 .bind(now)
                 .execute(&mut *tx)
                 .await?;
+            CommandResult::Applied
         }
-    }
+    };
 
     let applied_at = chrono::Utc::now().to_rfc3339();
     sqlx::query("INSERT INTO raft_command_ids(command_id,applied_at) VALUES(?,?)")
         .bind(&command_id)
         .bind(&applied_at)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO raft_command_results(command_id,result_code) VALUES(?,?)")
+        .bind(&command_id)
+        .bind(result.code())
         .execute(&mut *tx)
         .await?;
     if let Some((log_index, leader_id)) = receipt {
@@ -728,7 +801,7 @@ async fn apply_raft_command_inner(
         .await?;
     }
     tx.commit().await?;
-    Ok(true)
+    Ok(result)
 }
 
 fn deterministic_id(value: &str) -> i64 {

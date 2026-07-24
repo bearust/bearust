@@ -2,7 +2,32 @@
 
 ## Status
 
-All Task 3 review findings against base `5fcfb61` are fixed.
+All Task 3 review findings through base `9578e597` are fixed.
+
+## Final review corrections
+
+- The gateway now owns the standalone-versus-Raft decision behind one
+  submission mutex. It rechecks explicit membership immediately before and
+  after the standalone transaction, and a standalone command with a known
+  durable result can be retried under the same command ID and promoted through
+  Raft after membership activates.
+- Scheduled system-actor auto-enforcement uses a leader-only gateway path.
+  Once the scheduling node is deposed it returns `LeaderUnknown`; it never
+  forwards the stale policy decision to another leader.
+- A forwarded command receipt is retained when the receiving follower cannot
+  observe local application before the deadline. The distinct
+  `LocalApplyPending { receipt }` outcome lets handlers publish and audit the
+  committed mutation, record activation as pending, and return
+  `202 local_apply_pending` without mislabeling the commit as failed.
+- Replicated proxy-host create/update/delete application now returns typed,
+  deterministic `DuplicateDomain`, `IdCollision`, and `NotFound` command
+  results. These expected conflicts are recorded with the command ID and
+  immutable receipt instead of escaping as storage errors and poisoning Raft.
+  Migration `0013_raft_command_results.sql` makes the result ledger durable and
+  snapshot transfer preserves it.
+- A real three-node regression proposes concurrent same-domain creates from
+  separate followers, observes exactly one typed conflict, then commits
+  another command to prove the cluster remains writable.
 
 ## Corrections
 
@@ -45,6 +70,28 @@ Coverage now also proves that a follower adaptive tick does not auto-enforce
 and that the system actor cannot submit proxy-host commands.
 
 ## Verification
+
+Final review gate:
+
+```text
+cargo +stable test --test control_plane_cluster \
+  --test cluster_command_gateway --test cluster --test cluster_raft \
+  --test cluster_raft_runtime --test cluster_raft_storage \
+  --test raft_three_node --test control_plane_repository \
+  --test adaptive_tuning --test adaptive_tuning_api -- --test-threads=1
+
+86 passed; 0 failed
+```
+
+```text
+cargo +stable fmt --all -- --check
+cargo +stable clippy --all-targets -- -D warnings
+git diff --check
+
+All exited 0.
+```
+
+Earlier review gate:
 
 ```text
 cargo +stable test --test control_plane_cluster --test cluster_command_gateway \

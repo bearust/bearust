@@ -55,8 +55,14 @@ fn state_machine_applies_in_order_and_ignores_duplicate_commands() {
         host: host(),
     };
     let mut state = ReplicatedConfig::default();
-    assert!(state.apply(&command).unwrap());
-    assert!(!state.apply(&command).unwrap());
+    assert_eq!(
+        state.apply(&command).unwrap(),
+        bearust::cluster_raft::CommandResult::Applied
+    );
+    assert_eq!(
+        state.apply(&command).unwrap(),
+        bearust::cluster_raft::CommandResult::Duplicate
+    );
     assert_eq!(state.proxy_hosts().len(), 1);
 
     let snapshot = state.snapshot().unwrap();
@@ -74,12 +80,18 @@ async fn committed_proxy_host_command_is_applied_atomically_and_idempotently() {
         host: host(),
     };
 
-    assert!(repository::apply_raft_command(&pool, &command)
-        .await
-        .unwrap());
-    assert!(!repository::apply_raft_command(&pool, &command)
-        .await
-        .unwrap());
+    assert_eq!(
+        repository::apply_raft_command(&pool, &command)
+            .await
+            .unwrap(),
+        bearust::cluster_raft::CommandResult::Applied
+    );
+    assert_eq!(
+        repository::apply_raft_command(&pool, &command)
+            .await
+            .unwrap(),
+        bearust::cluster_raft::CommandResult::Duplicate
+    );
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM proxy_hosts WHERE id=42")
         .fetch_one(&pool)
         .await

@@ -1674,6 +1674,7 @@ fn user_error(status: StatusCode, code: &str, message: &str) -> axum::response::
 
 enum ConfigSubmissionError {
     Cluster(ClusterWriteError),
+    LocalApplyPending(CommitReceipt),
     Database,
 }
 
@@ -1699,12 +1700,16 @@ async fn submit_config_command_as(
     actor: CommandActor,
 ) -> Result<CommitReceipt, ConfigSubmissionError> {
     if let Some(gateway) = &state.config_gateway {
-        if !state.cluster.is_single_node() || gateway.has_initialized_membership() {
-            return gateway
-                .submit(command, actor)
-                .await
-                .map_err(ConfigSubmissionError::Cluster);
-        }
+        return match gateway
+            .submit_with_standalone_fallback(command, actor)
+            .await
+        {
+            Ok(receipt) => Ok(receipt),
+            Err(ClusterWriteError::LocalApplyPending { receipt }) => {
+                Err(ConfigSubmissionError::LocalApplyPending(receipt))
+            }
+            Err(error) => Err(ConfigSubmissionError::Cluster(error)),
+        };
     }
 
     if !state.cluster.is_single_node() {
@@ -1713,9 +1718,73 @@ async fn submit_config_command_as(
         ));
     }
 
-    repository::apply_raft_command(&state.db, &command)
+    let result = repository::apply_raft_command(&state.db, &command)
         .await
         .map_err(|_| ConfigSubmissionError::Database)?;
+    match result {
+        crate::cluster_raft::CommandResult::Applied
+        | crate::cluster_raft::CommandResult::Duplicate => {}
+        crate::cluster_raft::CommandResult::DuplicateDomain => {
+            return Err(ConfigSubmissionError::Cluster(
+                ClusterWriteError::DuplicateDomain,
+            ))
+        }
+        crate::cluster_raft::CommandResult::IdCollision => {
+            return Err(ConfigSubmissionError::Cluster(
+                ClusterWriteError::IdCollision,
+            ))
+        }
+        crate::cluster_raft::CommandResult::NotFound => {
+            return Err(ConfigSubmissionError::Cluster(ClusterWriteError::NotFound))
+        }
+    }
+    Ok(CommitReceipt {
+        command_id: command.command_id(),
+        leader_id: 0,
+        commit_index: 0,
+    })
+}
+
+async fn submit_config_command_leader_only_as(
+    state: &AppState,
+    command: ConfigCommand,
+    actor: CommandActor,
+) -> Result<CommitReceipt, ConfigSubmissionError> {
+    if let Some(gateway) = &state.config_gateway {
+        return match gateway
+            .submit_leader_only_with_standalone_fallback(command, actor)
+            .await
+        {
+            Ok(receipt) => Ok(receipt),
+            Err(ClusterWriteError::LocalApplyPending { receipt }) => {
+                Err(ConfigSubmissionError::LocalApplyPending(receipt))
+            }
+            Err(error) => Err(ConfigSubmissionError::Cluster(error)),
+        };
+    }
+    if !state.cluster.is_single_node() {
+        return Err(ConfigSubmissionError::Cluster(
+            ClusterWriteError::ClusterUnavailable,
+        ));
+    }
+
+    let result = repository::apply_raft_command(&state.db, &command)
+        .await
+        .map_err(|_| ConfigSubmissionError::Database)?;
+    if !matches!(
+        result,
+        crate::cluster_raft::CommandResult::Applied | crate::cluster_raft::CommandResult::Duplicate
+    ) {
+        return Err(ConfigSubmissionError::Cluster(match result {
+            crate::cluster_raft::CommandResult::DuplicateDomain => {
+                ClusterWriteError::DuplicateDomain
+            }
+            crate::cluster_raft::CommandResult::IdCollision => ClusterWriteError::IdCollision,
+            crate::cluster_raft::CommandResult::NotFound => ClusterWriteError::NotFound,
+            crate::cluster_raft::CommandResult::Applied
+            | crate::cluster_raft::CommandResult::Duplicate => unreachable!(),
+        }));
+    }
     Ok(CommitReceipt {
         command_id: command.command_id(),
         leader_id: 0,
@@ -1750,6 +1819,11 @@ fn cluster_write_response(error: ClusterWriteError) -> Response {
             "cluster_forward_timeout",
             "Cluster write forwarding timed out",
         ),
+        ClusterWriteError::LocalApplyPending { .. } => user_error(
+            StatusCode::ACCEPTED,
+            "local_apply_pending",
+            "Configuration committed but local application is pending",
+        ),
         ClusterWriteError::ForwardAuthentication => user_error(
             StatusCode::FORBIDDEN,
             "cluster_forward_authentication",
@@ -1760,6 +1834,19 @@ fn cluster_write_response(error: ClusterWriteError) -> Response {
             "invalid_command",
             "Configuration command is invalid",
         ),
+        ClusterWriteError::DuplicateDomain => user_error(
+            StatusCode::CONFLICT,
+            "duplicate_domain",
+            "Domain already exists",
+        ),
+        ClusterWriteError::IdCollision => user_error(
+            StatusCode::CONFLICT,
+            "id_collision",
+            "Proxy host identifier already exists",
+        ),
+        ClusterWriteError::NotFound => {
+            user_error(StatusCode::NOT_FOUND, "not_found", "Proxy host not found")
+        }
     }
 }
 
@@ -3542,7 +3629,7 @@ pub async fn run_adaptive_evaluation_tick(s: &AppState, allow_auto_enforce: bool
                                 host_id: rec.host_id,
                                 policy: runtime_policy.clone(),
                             };
-                            let receipt = match submit_config_command_as(
+                            let receipt = match submit_config_command_leader_only_as(
                                 s,
                                 command.clone(),
                                 CommandActor::system(),
@@ -3567,6 +3654,30 @@ pub async fn run_adaptive_evaluation_tick(s: &AppState, allow_auto_enforce: bool
                                         host_id = rec.host_id,
                                         error = %error
                                     );
+                                    continue;
+                                }
+                                Err(ConfigSubmissionError::LocalApplyPending(receipt)) => {
+                                    audit::record_state(
+                                        s,
+                                        None,
+                                        "adaptive_tuning_auto_enforce_committed",
+                                        &format!(
+                                            "recommendation_id={rec_id};host_id={};state=committed",
+                                            rec.host_id
+                                        ),
+                                    )
+                                    .await;
+                                    audit::record_state(
+                                        s,
+                                        None,
+                                        "adaptive_tuning_auto_enforce_activation_pending",
+                                        &format!(
+                                            "recommendation_id={rec_id};host_id={};reason=local_apply_pending",
+                                            rec.host_id
+                                        ),
+                                    )
+                                    .await;
+                                    publish_committed_command(s, &command, &receipt);
                                     continue;
                                 }
                                 Err(ConfigSubmissionError::Database) => {
@@ -3921,6 +4032,26 @@ async fn apply_recommendation(
     let receipt = match submit_config_command(&s, command.clone(), &user).await {
         Ok(receipt) => receipt,
         Err(ConfigSubmissionError::Cluster(error)) => return cluster_write_response(error),
+        Err(ConfigSubmissionError::LocalApplyPending(receipt)) => {
+            audit::record_state(
+                &s,
+                Some(user.id),
+                "recommendation_apply_committed",
+                &format!("recommendation_id={id};host_id={host_id};state=committed"),
+            )
+            .await;
+            audit::record_state(
+                &s,
+                Some(user.id),
+                "recommendation_activation_pending",
+                &format!(
+                    "recommendation_id={id};host_id={host_id};operation=apply;reason=local_apply_pending"
+                ),
+            )
+            .await;
+            publish_committed_command(&s, &command, &receipt);
+            return cluster_write_response(ClusterWriteError::LocalApplyPending { receipt });
+        }
         Err(ConfigSubmissionError::Database) => {
             return user_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -4036,6 +4167,26 @@ async fn rollback_recommendation(
     let receipt = match submit_config_command(&s, command.clone(), &user).await {
         Ok(receipt) => receipt,
         Err(ConfigSubmissionError::Cluster(error)) => return cluster_write_response(error),
+        Err(ConfigSubmissionError::LocalApplyPending(receipt)) => {
+            audit::record_state(
+                &s,
+                Some(user.id),
+                "recommendation_rollback_committed",
+                &format!("recommendation_id={id};host_id={host_id};state=committed"),
+            )
+            .await;
+            audit::record_state(
+                &s,
+                Some(user.id),
+                "recommendation_activation_pending",
+                &format!(
+                    "recommendation_id={id};host_id={host_id};operation=rollback;reason=local_apply_pending"
+                ),
+            )
+            .await;
+            publish_committed_command(&s, &command, &receipt);
+            return cluster_write_response(ClusterWriteError::LocalApplyPending { receipt });
+        }
         Err(ConfigSubmissionError::Database) => {
             return user_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -4242,7 +4393,46 @@ async fn create_host(
     };
     let receipt = match submit_config_command(&s, command.clone(), &u).await {
         Ok(receipt) => receipt,
+        Err(ConfigSubmissionError::LocalApplyPending(receipt)) => {
+            audit::record_state(
+                &s,
+                Some(u.id),
+                "proxy_host_created",
+                &format!("host_id={};state=committed", host.id),
+            )
+            .await;
+            audit::record_state(
+                &s,
+                Some(u.id),
+                "proxy_host_activation_pending",
+                &format!(
+                    "host_id={};operation=create;reason=local_apply_pending",
+                    host.id
+                ),
+            )
+            .await;
+            publish_committed_command(&s, &command, &receipt);
+            return cluster_write_response(ClusterWriteError::LocalApplyPending { receipt });
+        }
         Err(ConfigSubmissionError::Cluster(error)) => {
+            if matches!(
+                error,
+                ClusterWriteError::DuplicateDomain | ClusterWriteError::IdCollision
+            ) {
+                let reason = if error == ClusterWriteError::DuplicateDomain {
+                    "duplicate_domain"
+                } else {
+                    "id_collision"
+                };
+                audit::record_state(
+                    &s,
+                    Some(u.id),
+                    "proxy_host_create_denied",
+                    &format!("reason={reason}"),
+                )
+                .await;
+                return cluster_write_response(error);
+            }
             audit::record_state(
                 &s,
                 Some(u.id),
@@ -4369,7 +4559,43 @@ async fn update_host(
     };
     let receipt = match submit_config_command(&s, command.clone(), &u).await {
         Ok(receipt) => receipt,
+        Err(ConfigSubmissionError::LocalApplyPending(receipt)) => {
+            audit::record_state(
+                &s,
+                Some(u.id),
+                "proxy_host_updated",
+                &format!("host_id={id};state=committed"),
+            )
+            .await;
+            audit::record_state(
+                &s,
+                Some(u.id),
+                "proxy_host_activation_pending",
+                &format!("host_id={id};operation=update;reason=local_apply_pending"),
+            )
+            .await;
+            publish_committed_command(&s, &command, &receipt);
+            return cluster_write_response(ClusterWriteError::LocalApplyPending { receipt });
+        }
         Err(ConfigSubmissionError::Cluster(error)) => {
+            if matches!(
+                error,
+                ClusterWriteError::DuplicateDomain | ClusterWriteError::NotFound
+            ) {
+                let reason = if error == ClusterWriteError::DuplicateDomain {
+                    "duplicate_domain"
+                } else {
+                    "not_found"
+                };
+                audit::record_state(
+                    &s,
+                    Some(u.id),
+                    "proxy_host_update_denied",
+                    &format!("reason={reason}"),
+                )
+                .await;
+                return cluster_write_response(error);
+            }
             audit::record_state(
                 &s,
                 Some(u.id),
@@ -4464,7 +4690,35 @@ async fn remove_host(
     };
     let receipt = match submit_config_command(&s, command.clone(), &u).await {
         Ok(receipt) => receipt,
+        Err(ConfigSubmissionError::LocalApplyPending(receipt)) => {
+            audit::record_state(
+                &s,
+                Some(u.id),
+                "proxy_host_deleted",
+                &format!("host_id={id};state=committed"),
+            )
+            .await;
+            audit::record_state(
+                &s,
+                Some(u.id),
+                "proxy_host_activation_pending",
+                &format!("host_id={id};operation=delete;reason=local_apply_pending"),
+            )
+            .await;
+            publish_committed_command(&s, &command, &receipt);
+            return cluster_write_response(ClusterWriteError::LocalApplyPending { receipt });
+        }
         Err(ConfigSubmissionError::Cluster(error)) => {
+            if error == ClusterWriteError::NotFound {
+                audit::record_state(
+                    &s,
+                    Some(u.id),
+                    "proxy_host_delete_denied",
+                    "reason=not_found",
+                )
+                .await;
+                return cluster_write_response(error);
+            }
             audit::record_state(
                 &s,
                 Some(u.id),

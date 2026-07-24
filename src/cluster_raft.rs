@@ -30,6 +30,32 @@ const MAX_HOSTNAME_BYTES: usize = 253;
 pub enum CommandResult {
     Applied,
     Duplicate,
+    DuplicateDomain,
+    IdCollision,
+    NotFound,
+}
+
+impl CommandResult {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Duplicate => "duplicate",
+            Self::DuplicateDomain => "duplicate_domain",
+            Self::IdCollision => "id_collision",
+            Self::NotFound => "not_found",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "applied" => Some(Self::Applied),
+            "duplicate" => Some(Self::Duplicate),
+            "duplicate_domain" => Some(Self::DuplicateDomain),
+            "id_collision" => Some(Self::IdCollision),
+            "not_found" => Some(Self::NotFound),
+            _ => None,
+        }
+    }
 }
 
 openraft::declare_raft_types!(
@@ -249,19 +275,45 @@ impl ReplicatedConfig {
         self.applied_commands.contains(&command_id)
     }
 
-    /// Apply one committed command. Replaying a command ID is a no-op.
-    pub fn apply(&mut self, command: &ConfigCommand) -> Result<bool, CommandError> {
+    /// Apply one committed command. Expected business conflicts are returned
+    /// as deterministic state-machine results instead of fatal apply errors.
+    pub fn apply(&mut self, command: &ConfigCommand) -> Result<CommandResult, CommandError> {
         command.validate()?;
         if !self.applied_commands.insert(command.command_id()) {
-            return Ok(false);
+            return Ok(CommandResult::Duplicate);
         }
         match command {
             ConfigCommand::Noop { .. } => {}
-            ConfigCommand::CreateProxyHost { host, .. }
-            | ConfigCommand::UpdateProxyHost { host, .. } => {
+            ConfigCommand::CreateProxyHost { host, .. } => {
+                if self.proxy_hosts.contains_key(&host.id) {
+                    return Ok(CommandResult::IdCollision);
+                }
+                if self
+                    .proxy_hosts
+                    .values()
+                    .any(|existing| existing.domain == host.domain)
+                {
+                    return Ok(CommandResult::DuplicateDomain);
+                }
+                self.proxy_hosts.insert(host.id, host.clone());
+            }
+            ConfigCommand::UpdateProxyHost { host, .. } => {
+                if !self.proxy_hosts.contains_key(&host.id) {
+                    return Ok(CommandResult::NotFound);
+                }
+                if self
+                    .proxy_hosts
+                    .values()
+                    .any(|existing| existing.id != host.id && existing.domain == host.domain)
+                {
+                    return Ok(CommandResult::DuplicateDomain);
+                }
                 self.proxy_hosts.insert(host.id, host.clone());
             }
             ConfigCommand::DeleteProxyHost { host_id, .. } => {
+                if !self.proxy_hosts.contains_key(host_id) {
+                    return Ok(CommandResult::NotFound);
+                }
                 self.proxy_hosts.remove(host_id);
                 self.runtime_policies.remove(host_id);
             }
@@ -271,7 +323,7 @@ impl ReplicatedConfig {
                 self.runtime_policies.insert(*host_id, policy.clone());
             }
         }
-        Ok(true)
+        Ok(CommandResult::Applied)
     }
 
     pub fn snapshot(&self) -> Result<Vec<u8>, CommandError> {

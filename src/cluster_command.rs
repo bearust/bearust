@@ -87,12 +87,20 @@ pub enum ClusterWriteError {
     CommitOutcomeUnknown,
     #[error("forwarded raft command timed out")]
     ForwardTimeout,
+    #[error("configuration command committed but local application is pending")]
+    LocalApplyPending { receipt: CommitReceipt },
     #[error("forwarded raft command authentication failed")]
     ForwardAuthentication,
     #[error("configuration command is invalid")]
     InvalidCommand,
     #[error("command is not accepted by the replicated configuration gateway")]
     NotReplicatedCommand,
+    #[error("proxy host domain already exists")]
+    DuplicateDomain,
+    #[error("proxy host identifier already exists")]
+    IdCollision,
+    #[error("proxy host does not exist")]
+    NotFound,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -197,9 +205,13 @@ impl ClusterWriteError {
             Self::ClusterUnavailable => "cluster_unavailable",
             Self::CommitOutcomeUnknown => "commit_outcome_unknown",
             Self::ForwardTimeout => "forward_timeout",
+            Self::LocalApplyPending { .. } => "local_apply_pending",
             Self::ForwardAuthentication => "forward_authentication",
             Self::InvalidCommand => "invalid_command",
             Self::NotReplicatedCommand => "not_replicated_command",
+            Self::DuplicateDomain => "duplicate_domain",
+            Self::IdCollision => "id_collision",
+            Self::NotFound => "not_found",
         }
     }
 
@@ -210,9 +222,15 @@ impl ClusterWriteError {
             "cluster_unavailable" => Self::ClusterUnavailable,
             "commit_outcome_unknown" => Self::CommitOutcomeUnknown,
             "forward_timeout" => Self::ForwardTimeout,
+            // A pending result is produced only by the receiving follower
+            // after it has decoded a concrete receipt.
+            "local_apply_pending" => Self::ForwardAuthentication,
             "forward_authentication" => Self::ForwardAuthentication,
             "invalid_command" => Self::InvalidCommand,
             "not_replicated_command" => Self::NotReplicatedCommand,
+            "duplicate_domain" => Self::DuplicateDomain,
+            "id_collision" => Self::IdCollision,
+            "not_found" => Self::NotFound,
             _ => Self::ForwardAuthentication,
         }
     }
@@ -223,7 +241,14 @@ pub struct ConfigCommandGateway {
     raft: Arc<openraft::Raft<BearustRaftConfig>>,
     cluster: Arc<ClusterService>,
     db: DbPool,
-    receipts: Arc<Mutex<std::collections::BTreeMap<Uuid, CommitReceipt>>>,
+    receipts: Arc<Mutex<std::collections::BTreeMap<Uuid, CommittedCommandOutcome>>>,
+    submission_gate: Arc<Mutex<()>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CommittedCommandOutcome {
+    receipt: CommitReceipt,
+    result: CommandResult,
 }
 
 impl ConfigCommandGateway {
@@ -237,6 +262,7 @@ impl ConfigCommandGateway {
             cluster,
             db,
             receipts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            submission_gate: Arc::new(Mutex::new(())),
         }
     }
 
@@ -272,6 +298,84 @@ impl ConfigCommandGateway {
         command: ConfigCommand,
         actor: CommandActor,
     ) -> Result<CommitReceipt, ClusterWriteError> {
+        let _submission = self.submission_gate.lock().await;
+        self.submit_inner(command, actor, false).await
+    }
+
+    /// Submit only if this node is still the elected leader. Scheduled
+    /// system-actor work uses this path so a deposed scheduler never forwards
+    /// its stale decision to a replacement leader.
+    pub async fn submit_leader_only(
+        &self,
+        command: ConfigCommand,
+        actor: CommandActor,
+    ) -> Result<CommitReceipt, ClusterWriteError> {
+        let _submission = self.submission_gate.lock().await;
+        self.submit_inner(command, actor, true).await
+    }
+
+    /// Preserve standalone behavior before explicit membership exists while
+    /// keeping the topology decision and mutation inside the gateway. The
+    /// membership check is repeated immediately before and after the local
+    /// transaction; a known local outcome can be durably promoted by retrying
+    /// the same command ID through Raft after membership activates.
+    pub async fn submit_with_standalone_fallback(
+        &self,
+        command: ConfigCommand,
+        actor: CommandActor,
+    ) -> Result<CommitReceipt, ClusterWriteError> {
+        self.submit_with_standalone_fallback_inner(command, actor, false)
+            .await
+    }
+
+    /// Standalone-compatible form of [`Self::submit_leader_only`].
+    pub async fn submit_leader_only_with_standalone_fallback(
+        &self,
+        command: ConfigCommand,
+        actor: CommandActor,
+    ) -> Result<CommitReceipt, ClusterWriteError> {
+        self.submit_with_standalone_fallback_inner(command, actor, true)
+            .await
+    }
+
+    async fn submit_with_standalone_fallback_inner(
+        &self,
+        command: ConfigCommand,
+        actor: CommandActor,
+        leader_only: bool,
+    ) -> Result<CommitReceipt, ClusterWriteError> {
+        let _submission = self.submission_gate.lock().await;
+        if !self.cluster.is_single_node() || self.has_initialized_membership() {
+            return self.submit_inner(command, actor, leader_only).await;
+        }
+        validate_command_and_actor(&command, &actor)?;
+        self.validate_authoritative_actor(&command, &actor).await?;
+
+        // Actor validation performs database I/O. Membership may have changed
+        // while it awaited, so fence again immediately before local mutation.
+        if self.has_initialized_membership() {
+            return self.submit_inner(command, actor, leader_only).await;
+        }
+        let result = repository::apply_raft_command(&self.db, &command)
+            .await
+            .map_err(|_| ClusterWriteError::QuorumUnavailable)?;
+        if self.has_initialized_membership() {
+            return self.submit_inner(command, actor, leader_only).await;
+        }
+        command_result(result)?;
+        Ok(CommitReceipt {
+            command_id: command.command_id(),
+            leader_id: 0,
+            commit_index: 0,
+        })
+    }
+
+    async fn submit_inner(
+        &self,
+        command: ConfigCommand,
+        actor: CommandActor,
+        leader_only: bool,
+    ) -> Result<CommitReceipt, ClusterWriteError> {
         validate_command_and_actor(&command, &actor)?;
         self.validate_authoritative_actor(&command, &actor).await?;
 
@@ -282,11 +386,16 @@ impl ConfigCommandGateway {
         };
 
         if !is_local_leader {
+            if leader_only {
+                return Err(ClusterWriteError::LeaderUnknown);
+            }
             let receipt = self
                 .forward_to_leader(self.wait_for_leader_endpoint().await?, command, actor)
                 .await?;
-            self.wait_for_local_apply(&receipt).await?;
-            return Ok(receipt);
+            return match self.wait_for_local_apply(&receipt).await {
+                Ok(()) => Ok(receipt),
+                Err(_) => Err(ClusterWriteError::LocalApplyPending { receipt }),
+            };
         }
 
         self.submit_local(command).await
@@ -368,12 +477,12 @@ impl ConfigCommandGateway {
     ) -> Result<CommitReceipt, ClusterWriteError> {
         let command_id = command.command_id();
         let mut receipts = self.receipts.lock().await;
-        if let Some(receipt) = receipts.get(&command_id) {
-            return Ok(receipt.clone());
+        if let Some(outcome) = receipts.get(&command_id) {
+            return committed_outcome(outcome.clone());
         }
-        if let Some(receipt) = self.load_committed_receipt(command_id).await? {
-            cache_receipt(&mut receipts, receipt.clone());
-            return Ok(receipt);
+        if let Some(outcome) = self.load_committed_outcome(command_id).await? {
+            cache_receipt(&mut receipts, outcome.clone());
+            return committed_outcome(outcome);
         }
 
         self.require_live_write_quorum()?;
@@ -381,28 +490,32 @@ impl ConfigCommandGateway {
             .await
             .map_err(|_| map_client_write_timeout())?
             .map_err(map_client_write_error)?;
-        let receipt =
-            resolve_post_write_receipt(&self.db, command_id, response.data, response.log_id)
+        let outcome =
+            resolve_post_write_outcome(&self.db, command_id, response.data, response.log_id)
                 .await?;
-        cache_receipt(&mut receipts, receipt.clone());
-        Ok(receipt)
+        cache_receipt(&mut receipts, outcome.clone());
+        committed_outcome(outcome)
     }
 
-    async fn load_committed_receipt(
+    async fn load_committed_outcome(
         &self,
         command_id: Uuid,
-    ) -> Result<Option<CommitReceipt>, ClusterWriteError> {
+    ) -> Result<Option<CommittedCommandOutcome>, ClusterWriteError> {
         let receipt = repository::load_raft_command_receipt(&self.db, &command_id.to_string())
             .await
             .map_err(|_| ClusterWriteError::QuorumUnavailable)?;
         receipt
             .map(|receipt| {
-                Ok(CommitReceipt {
-                    command_id,
-                    leader_id: u64::try_from(receipt.leader_id)
-                        .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
-                    commit_index: u64::try_from(receipt.log_index)
-                        .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
+                Ok(CommittedCommandOutcome {
+                    receipt: CommitReceipt {
+                        command_id,
+                        leader_id: u64::try_from(receipt.leader_id)
+                            .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
+                        commit_index: u64::try_from(receipt.log_index)
+                            .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
+                    },
+                    result: CommandResult::from_code(&receipt.result_code)
+                        .ok_or(ClusterWriteError::QuorumUnavailable)?,
                 })
             })
             .transpose()
@@ -531,43 +644,64 @@ impl InternalCommandHandler for ConfigCommandGateway {
     }
 }
 
-async fn resolve_post_write_receipt(
+async fn resolve_post_write_outcome(
     db: &DbPool,
     command_id: Uuid,
     result: CommandResult,
     log_id: openraft::LogId<u64>,
-) -> Result<CommitReceipt, ClusterWriteError> {
+) -> Result<CommittedCommandOutcome, ClusterWriteError> {
     let durable = repository::load_raft_command_receipt(db, &command_id.to_string())
         .await
         .map_err(|_| ClusterWriteError::QuorumUnavailable)?;
     if let Some(durable) = durable {
-        return Ok(CommitReceipt {
-            command_id,
-            leader_id: u64::try_from(durable.leader_id)
-                .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
-            commit_index: u64::try_from(durable.log_index)
-                .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
+        return Ok(CommittedCommandOutcome {
+            receipt: CommitReceipt {
+                command_id,
+                leader_id: u64::try_from(durable.leader_id)
+                    .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
+                commit_index: u64::try_from(durable.log_index)
+                    .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
+            },
+            result: CommandResult::from_code(&durable.result_code)
+                .ok_or(ClusterWriteError::QuorumUnavailable)?,
         });
     }
     if result == CommandResult::Duplicate {
         return Err(ClusterWriteError::QuorumUnavailable);
     }
-    Ok(CommitReceipt {
-        command_id,
-        leader_id: log_id.leader_id.node_id,
-        commit_index: log_id.index,
+    Ok(CommittedCommandOutcome {
+        receipt: CommitReceipt {
+            command_id,
+            leader_id: log_id.leader_id.node_id,
+            commit_index: log_id.index,
+        },
+        result,
     })
 }
 
 fn cache_receipt(
-    receipts: &mut std::collections::BTreeMap<Uuid, CommitReceipt>,
-    receipt: CommitReceipt,
+    receipts: &mut std::collections::BTreeMap<Uuid, CommittedCommandOutcome>,
+    outcome: CommittedCommandOutcome,
 ) {
     if receipts.len() >= MAX_CACHED_RECEIPTS {
         let oldest = *receipts.keys().next().expect("non-empty receipt cache");
         receipts.remove(&oldest);
     }
-    receipts.insert(receipt.command_id, receipt);
+    receipts.insert(outcome.receipt.command_id, outcome);
+}
+
+fn command_result(result: CommandResult) -> Result<(), ClusterWriteError> {
+    match result {
+        CommandResult::Applied | CommandResult::Duplicate => Ok(()),
+        CommandResult::DuplicateDomain => Err(ClusterWriteError::DuplicateDomain),
+        CommandResult::IdCollision => Err(ClusterWriteError::IdCollision),
+        CommandResult::NotFound => Err(ClusterWriteError::NotFound),
+    }
+}
+
+fn committed_outcome(outcome: CommittedCommandOutcome) -> Result<CommitReceipt, ClusterWriteError> {
+    command_result(outcome.result)?;
+    Ok(outcome.receipt)
 }
 
 fn map_forward_transport_error(error: RpcTransportError) -> ClusterWriteError {
@@ -601,7 +735,7 @@ fn map_client_write_timeout() -> ClusterWriteError {
 #[cfg(test)]
 mod tests {
     use super::{
-        map_client_write_timeout, resolve_post_write_receipt, ClusterWriteError, CommitReceipt,
+        map_client_write_timeout, resolve_post_write_outcome, ClusterWriteError, CommitReceipt,
     };
     use crate::cluster_raft::{CommandResult, ConfigCommand};
     use crate::control_plane::models::ProxyHost;
@@ -646,7 +780,7 @@ mod tests {
             .await
             .unwrap();
 
-        let resolved = resolve_post_write_receipt(
+        let resolved = resolve_post_write_outcome(
             &pool,
             command_id,
             CommandResult::Duplicate,
@@ -656,13 +790,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            resolved,
+            resolved.receipt,
             CommitReceipt {
                 command_id,
                 leader_id: 2,
                 commit_index: 7,
             }
         );
+        assert_eq!(resolved.result, CommandResult::Applied);
     }
 
     #[tokio::test]
@@ -688,10 +823,11 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert!(
-            !repository::apply_raft_command_with_receipt(&pool, &command, 8, 3)
+        assert_eq!(
+            repository::apply_raft_command_with_receipt(&pool, &command, 8, 3)
                 .await
-                .unwrap()
+                .unwrap(),
+            CommandResult::Duplicate
         );
         assert!(
             repository::load_raft_command_receipt(&pool, &command_id.to_string())
@@ -702,7 +838,7 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_post_write_receipt(
+            resolve_post_write_outcome(
                 &pool,
                 command_id,
                 CommandResult::Duplicate,

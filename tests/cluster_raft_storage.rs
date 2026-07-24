@@ -1,4 +1,4 @@
-use bearust::cluster_raft::ConfigCommand;
+use bearust::cluster_raft::{CommandResult, ConfigCommand};
 use bearust::cluster_raft_storage::SqlxRaftStorage;
 use bearust::control_plane::models::ProxyHost;
 use bearust::control_plane::repository;
@@ -27,6 +27,76 @@ fn command() -> ConfigCommand {
             certificate_id: None,
             enabled: true,
         },
+    }
+}
+
+#[tokio::test]
+async fn committed_business_conflicts_are_results_not_storage_errors() {
+    let mut storage = storage().await;
+    let created = command();
+    assert_eq!(
+        storage
+            .apply(vec![Entry {
+                log_id: LogId::new(openraft::CommittedLeaderId::new(1, 1), 1),
+                payload: EntryPayload::Normal(created.clone()),
+            }])
+            .await
+            .unwrap(),
+        vec![CommandResult::Applied]
+    );
+    let original = match created {
+        ConfigCommand::CreateProxyHost { host, .. } => host,
+        _ => unreachable!(),
+    };
+    let mut duplicate_domain = original.clone();
+    duplicate_domain.id = 12;
+    let mut id_collision = original.clone();
+    id_collision.domain = "different.example.test".into();
+    let mut missing_update = original.clone();
+    missing_update.id = 404;
+    let commands = [
+        (
+            ConfigCommand::CreateProxyHost {
+                command_id: Uuid::new_v4(),
+                host: duplicate_domain,
+            },
+            CommandResult::DuplicateDomain,
+        ),
+        (
+            ConfigCommand::CreateProxyHost {
+                command_id: Uuid::new_v4(),
+                host: id_collision,
+            },
+            CommandResult::IdCollision,
+        ),
+        (
+            ConfigCommand::UpdateProxyHost {
+                command_id: Uuid::new_v4(),
+                host_id: 404,
+                host: missing_update,
+            },
+            CommandResult::NotFound,
+        ),
+        (
+            ConfigCommand::DeleteProxyHost {
+                command_id: Uuid::new_v4(),
+                host_id: 405,
+            },
+            CommandResult::NotFound,
+        ),
+    ];
+
+    for (offset, (command, expected)) in commands.into_iter().enumerate() {
+        assert_eq!(
+            storage
+                .apply(vec![Entry {
+                    log_id: LogId::new(openraft::CommittedLeaderId::new(1, 1), offset as u64 + 2,),
+                    payload: EntryPayload::Normal(command),
+                }])
+                .await
+                .unwrap(),
+            vec![expected]
+        );
     }
 }
 
@@ -140,6 +210,11 @@ async fn snapshot_bounds_many_receipts_and_keeps_the_newest_provenance() {
         .execute(&mut *tx)
         .await
         .unwrap();
+        sqlx::query("INSERT INTO raft_command_results(command_id,result_code) VALUES(?,'applied')")
+            .bind(&command_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO raft_command_receipts(command_id,log_index,leader_id,applied_at)
              VALUES(?,?,?,?)",

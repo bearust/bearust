@@ -3,10 +3,30 @@
 ## Status
 
 Completed the proxy-host and host runtime-policy command-gateway integration
-from base commit `d28b8c2`, including the review corrections applied to
-`5fcfb61`.
+from base commit `d28b8c2`, including final review corrections through
+`9578e597`.
 
 ## Review corrections
+
+- The standalone compatibility path moved inside `ConfigCommandGateway` and
+  uses a serialized topology decision with membership checks immediately
+  before and after direct application. Known standalone command outcomes are
+  durable, so retrying the same command ID after membership activates commits
+  it through Raft instead of silently diverging.
+- Scheduled auto-enforcement calls the leader-only gateway entry point. A
+  deposed leader refuses the command and does not use follower forwarding.
+- Forwarded receipts survive a local apply-wait timeout as
+  `LocalApplyPending { receipt }`. Proxy-host and recommendation handlers audit
+  the committed mutation plus an activation-pending event, publish the
+  committed invalidation, and return `202 local_apply_pending`.
+- Proxy-host create/update/delete conflicts are deterministic replicated
+  results (`DuplicateDomain`, `IdCollision`, and `NotFound`) rather than
+  `StorageError`. The durable command-result ledger and snapshot path preserve
+  retry semantics across restart and compaction.
+- New regressions cover standalone-to-membership promotion, deposed scheduled
+  actors, committed/local-pending audit semantics, all business-conflict
+  variants, and concurrent stale-follower domain conflict without Raft
+  poisoning.
 
 - Adaptive auto-enforcement now constructs a typed
   `ConfigCommand::UpdateRuntimePolicy` and submits it through
@@ -47,6 +67,28 @@ multi_node_state_without_gateway_rejects_replication_required_mutation:
 ```
 
 ## Review verification
+
+Final combined control-plane/cluster/Raft/storage gate:
+
+```text
+cargo +stable test --test control_plane_cluster \
+  --test cluster_command_gateway --test cluster --test cluster_raft \
+  --test cluster_raft_runtime --test cluster_raft_storage \
+  --test raft_three_node --test control_plane_repository \
+  --test adaptive_tuning --test adaptive_tuning_api -- --test-threads=1
+
+86 passed; 0 failed
+```
+
+```text
+cargo +stable fmt --all -- --check
+cargo +stable clippy --all-targets -- -D warnings
+git diff --check
+
+All exited 0.
+```
+
+Earlier review verification:
 
 ```text
 cargo +stable test --test control_plane_cluster --test cluster_command_gateway \

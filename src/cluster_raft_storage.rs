@@ -446,7 +446,7 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
         let mut results = Vec::new();
         for entry in entries {
             if let EntryPayload::Normal(command) = entry.payload {
-                let applied = if matches!(command, ConfigCommand::Noop { .. }) {
+                let result = if matches!(command, ConfigCommand::Noop { .. }) {
                     repository::apply_raft_command(&self.pool, &command).await
                 } else {
                     repository::apply_raft_command_with_receipt(
@@ -471,11 +471,7 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
                 .map_err(|e| {
                     storage_error(ErrorSubject::Apply(entry.log_id), ErrorVerb::Write, e)
                 })?;
-                results.push(if applied {
-                    crate::cluster_raft::CommandResult::Applied
-                } else {
-                    crate::cluster_raft::CommandResult::Duplicate
-                });
+                results.push(result);
             }
         }
         Ok(results)
@@ -536,6 +532,10 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
             .execute(&mut *tx)
             .await
             .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        sqlx::query("DELETE FROM raft_command_results")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
         sqlx::query("DELETE FROM raft_command_ids")
             .execute(&mut *tx)
             .await
@@ -561,6 +561,19 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
             sqlx::query("INSERT INTO raft_command_ids(command_id,applied_at) VALUES(?,?)")
                 .bind(&receipt.command_id)
                 .bind(&receipt.applied_at)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+            if crate::cluster_raft::CommandResult::from_code(&receipt.result_code).is_none() {
+                return Err(storage_error(
+                    ErrorSubject::Snapshot(None),
+                    ErrorVerb::Write,
+                    "snapshot contains invalid command result",
+                ));
+            }
+            sqlx::query("INSERT INTO raft_command_results(command_id,result_code) VALUES(?,?)")
+                .bind(&receipt.command_id)
+                .bind(&receipt.result_code)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;

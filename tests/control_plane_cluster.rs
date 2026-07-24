@@ -835,6 +835,56 @@ async fn follower_proxy_host_mutations_forward_and_reads_stay_local() {
 }
 
 #[tokio::test]
+async fn committed_forward_with_local_apply_pending_is_audited_as_pending() {
+    let cluster = command_cluster().await;
+    let leader = wait_for_command_leader(&cluster.rafts).await;
+    let follower = (leader + 1) % cluster.rafts.len();
+    cluster.rafts[follower].shutdown().await.unwrap();
+
+    let (status, body) = api_request(
+        cluster.apps[follower].clone(),
+        "POST",
+        "/api/proxy-hosts",
+        Body::from(
+            r#"{"name":"pending","domain":"pending.example.test","upstream_host":"127.0.0.1","upstream_port":8080}"#,
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "response body: {body}");
+    assert_eq!(body["code"], "local_apply_pending");
+    let audits = repository::list_audit_logs(
+        &cluster.states[follower].db,
+        &AuditLogQuery {
+            page: 1,
+            event: None,
+            actor_id: None,
+            from: None,
+            to: None,
+            q: None,
+            page_size: 100,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(audits
+        .items
+        .iter()
+        .any(|entry| entry.event == "proxy_host_created"
+            && entry.details.contains("state=committed")));
+    assert!(audits
+        .items
+        .iter()
+        .any(|entry| entry.event == "proxy_host_activation_pending"
+            && entry.details.contains("reason=local_apply_pending")));
+    assert!(!audits
+        .items
+        .iter()
+        .any(|entry| entry.event == "proxy_host_create_failed"));
+    cluster.shutdown().await;
+}
+
+#[tokio::test]
 async fn follower_runtime_policy_apply_and_rollback_forward() {
     let cluster = command_cluster().await;
     let leader = wait_for_command_leader(&cluster.rafts).await;

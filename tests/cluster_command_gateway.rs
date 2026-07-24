@@ -32,12 +32,16 @@ fn test_actor() -> CommandActor {
 }
 
 fn test_create_command() -> ConfigCommand {
+    create_command(42, "gateway.example.test")
+}
+
+fn create_command(host_id: i64, domain: &str) -> ConfigCommand {
     ConfigCommand::CreateProxyHost {
         command_id: Uuid::new_v4(),
         host: ProxyHost {
-            id: 42,
+            id: host_id,
             name: "gateway-test".into(),
-            domain: "gateway.example.test".into(),
+            domain: domain.into(),
             upstream_host: "127.0.0.1".into(),
             upstream_port: 8080,
             tls_mode: "disabled".into(),
@@ -448,6 +452,35 @@ async fn follower_gateway_forwards_without_locally_committing() {
 }
 
 #[tokio::test]
+async fn forwarded_receipt_is_preserved_when_local_apply_is_pending() {
+    let cluster = three_node_gateway_cluster(42351).await;
+    let leader = wait_for_live_leader(&cluster.rafts).await;
+    let follower = (leader + 1) % cluster.rafts.len();
+    cluster.rafts[follower].shutdown().await.unwrap();
+    let command = test_create_command();
+    let command_id = command.command_id();
+
+    let result = cluster.gateways[follower]
+        .submit(command, test_actor())
+        .await;
+
+    let receipt = match result {
+        Err(ClusterWriteError::LocalApplyPending { receipt }) => receipt,
+        other => panic!("expected committed local-apply-pending outcome, got {other:?}"),
+    };
+    assert_eq!(receipt.command_id, command_id);
+    assert_eq!(receipt.leader_id, (leader + 1) as u64);
+    assert!(repository::load_raft_command_receipt(
+        &cluster.pools[leader],
+        &receipt.command_id.to_string()
+    )
+    .await
+    .unwrap()
+    .is_some());
+    cluster.shutdown().await;
+}
+
+#[tokio::test]
 async fn repeated_forwarded_command_returns_the_original_receipt() {
     let cluster = three_node_gateway_cluster(42306).await;
     let leader = wait_for_live_leader(&cluster.rafts).await;
@@ -464,6 +497,83 @@ async fn repeated_forwarded_command_returns_the_original_receipt() {
         .unwrap();
 
     assert_eq!(second, first);
+    cluster.shutdown().await;
+}
+
+#[tokio::test]
+async fn deposed_leader_only_submission_does_not_forward() {
+    let cluster = three_node_gateway_cluster(42356).await;
+    let old_leader = wait_for_live_leader(&cluster.rafts).await;
+    cluster.rafts[old_leader].shutdown().await.unwrap();
+    assert!(!cluster.gateways[old_leader].is_confirmed_local_leader());
+    let command = ConfigCommand::UpdateRuntimePolicy {
+        command_id: Uuid::new_v4(),
+        host_id: 42,
+        policy: bearust::rate_limit::RateLimitPolicy::default(),
+    };
+    let command_id = command.command_id();
+
+    let result = cluster.gateways[old_leader]
+        .submit_leader_only(command, CommandActor::system())
+        .await;
+
+    assert_eq!(result, Err(ClusterWriteError::LeaderUnknown));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    for pool in &cluster.pools {
+        assert!(
+            repository::load_raft_command_receipt(pool, &command_id.to_string())
+                .await
+                .unwrap()
+                .is_none(),
+            "a deposed scheduled actor must not forward its stale decision"
+        );
+    }
+    cluster.shutdown().await;
+}
+
+#[tokio::test]
+async fn concurrent_stale_create_conflict_is_a_result_and_raft_stays_writable() {
+    let cluster = three_node_gateway_cluster(42361).await;
+    let leader = wait_for_live_leader(&cluster.rafts).await;
+    let first_follower = (leader + 1) % cluster.rafts.len();
+    let second_follower = (leader + 2) % cluster.rafts.len();
+    let first = cluster.gateways[first_follower]
+        .submit(create_command(101, "conflict.example.test"), test_actor());
+    let second = cluster.gateways[second_follower]
+        .submit(create_command(102, "conflict.example.test"), test_actor());
+
+    let (first, second) = tokio::join!(first, second);
+
+    assert!(
+        matches!(
+            (&first, &second),
+            (Ok(_), Err(ClusterWriteError::DuplicateDomain))
+                | (Err(ClusterWriteError::DuplicateDomain), Ok(_))
+        ),
+        "one ordered create must apply and the stale concurrent create must conflict: first={first:?}, second={second:?}"
+    );
+    let receipt = cluster.gateways[leader]
+        .submit(
+            create_command(103, "still-writable.example.test"),
+            test_actor(),
+        )
+        .await
+        .unwrap();
+    for raft in &cluster.rafts {
+        raft.wait(Some(Duration::from_secs(2)))
+            .applied_index_at_least(Some(receipt.commit_index), "post-conflict command applied")
+            .await
+            .unwrap();
+    }
+    for pool in &cluster.pools {
+        let conflict_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM proxy_hosts WHERE domain=?")
+                .bind("conflict.example.test")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(conflict_count, 1);
+    }
     cluster.shutdown().await;
 }
 
@@ -509,6 +619,65 @@ async fn receipt_survives_log_purge_and_gateway_restart() {
 
     assert_eq!(retried, original);
     cluster.shutdown().await;
+}
+
+#[tokio::test]
+async fn standalone_command_retry_after_membership_transition_is_committed() {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+    seed_test_actor(&pool).await;
+    let raft = construct_raft_with_id(pool.clone(), "node-1", TEST_SECRET.as_bytes(), 1)
+        .await
+        .unwrap();
+    let config = ClusterConfig {
+        node_id: "node-1".into(),
+        peers: vec![],
+        bind: "127.0.0.1:0".parse().unwrap(),
+        timeout_seconds: 1,
+        auth_token: TEST_SECRET.into(),
+    };
+    let gateway = ConfigCommandGateway::new(
+        Arc::new(raft.clone()),
+        Arc::new(ClusterService::new(&config)),
+        pool.clone(),
+    );
+    let command = test_create_command();
+    let command_id = command.command_id();
+
+    let local = gateway
+        .submit_with_standalone_fallback(command.clone(), test_actor())
+        .await
+        .unwrap();
+    assert_eq!(local.leader_id, 0);
+    bootstrap_single_node(&raft, 1, "127.0.0.1:0")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if gateway.is_confirmed_local_leader() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("single node did not elect itself after topology transition");
+
+    let committed = gateway
+        .submit_with_standalone_fallback(command, test_actor())
+        .await
+        .unwrap();
+
+    assert_eq!(committed.command_id, command_id);
+    assert_eq!(committed.leader_id, 1);
+    assert!(committed.commit_index > 0);
+    assert!(
+        repository::load_raft_command_receipt(&pool, &command_id.to_string())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    raft.shutdown().await.unwrap();
 }
 
 #[tokio::test]
