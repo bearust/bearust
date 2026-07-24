@@ -1,7 +1,7 @@
 use bearust::cluster::{run_cluster_listener, ClusterService};
 use bearust::cluster_command::{
-    decode_forwarded_command, encode_forwarded_command, ClusterWriteError, CommandActor,
-    ConfigCommandGateway,
+    committed_event_kind, decode_forwarded_command, encode_forwarded_command, ClusterWriteError,
+    CommandActor, ConfigCommandGateway,
 };
 use bearust::cluster_raft::{decode_rpc_frame, encode_rpc_frame, ConfigCommand, RPC_TAG_BYTES};
 use bearust::cluster_raft_runtime::{
@@ -45,6 +45,25 @@ fn test_create_command() -> ConfigCommand {
             enabled: true,
         },
     }
+}
+
+#[test]
+fn replicated_commands_map_to_existing_public_event_kinds() {
+    let proxy = test_create_command();
+    let runtime = ConfigCommand::UpdateRuntimePolicy {
+        command_id: Uuid::new_v4(),
+        host_id: 42,
+        policy: bearust::rate_limit::RateLimitPolicy::default(),
+    };
+
+    assert_eq!(committed_event_kind(&proxy), Some("proxy_hosts.changed"));
+    assert_eq!(committed_event_kind(&runtime), Some("rate_limit.changed"));
+    assert_eq!(
+        committed_event_kind(&ConfigCommand::Noop {
+            command_id: Uuid::new_v4(),
+        }),
+        None
+    );
 }
 
 async fn seed_test_actor(pool: &repository::DbPool) {

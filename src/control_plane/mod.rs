@@ -21,6 +21,10 @@ use crate::certificates::{
     AcmeService as CertificateAcmeService, AcmeServiceError as CertificateAcmeError,
     CertificateStore,
 };
+use crate::cluster_command::{
+    committed_event_kind, ClusterWriteError, CommandActor, CommitReceipt, ConfigCommandGateway,
+};
+use crate::cluster_raft::ConfigCommand;
 use crate::rate_limit_store::RateLimiterStore;
 use crate::secrets::SecretStore;
 use crate::waf_store::WafStore;
@@ -76,12 +80,18 @@ pub struct AppState {
     pub anomaly: Arc<crate::anomaly::AnomalyDetector>,
     pub adaptive_tuning: Arc<crate::adaptive_tuning::AdaptiveTuningEngine>,
     pub cluster: Arc<crate::cluster::ClusterService>,
+    pub config_gateway: Option<ConfigCommandGateway>,
     pub prometheus: PrometheusConfig,
 }
 
 impl AppState {
     pub fn with_cluster(mut self, cluster: Arc<crate::cluster::ClusterService>) -> Self {
         self.cluster = cluster;
+        self
+    }
+
+    pub fn with_config_gateway(mut self, gateway: ConfigCommandGateway) -> Self {
+        self.config_gateway = Some(gateway);
         self
     }
 }
@@ -389,6 +399,7 @@ pub async fn build_state(
         cluster: Arc::new(crate::cluster::ClusterService::new(
             &crate::config::ClusterConfig::default(),
         )),
+        config_gateway: None,
         prometheus: PrometheusConfig::default(),
     })
 }
@@ -1659,6 +1670,82 @@ fn user_error(status: StatusCode, code: &str, message: &str) -> axum::response::
         }),
     )
         .into_response()
+}
+
+enum ConfigSubmissionError {
+    Cluster(ClusterWriteError),
+    Database,
+}
+
+fn command_actor(user: &User) -> CommandActor {
+    CommandActor {
+        user_id: user.id,
+        email: user.email.clone(),
+        role: user.role.clone(),
+    }
+}
+
+async fn submit_config_command(
+    state: &AppState,
+    command: ConfigCommand,
+    actor: &User,
+) -> Result<CommitReceipt, ConfigSubmissionError> {
+    if let Some(gateway) = &state.config_gateway {
+        return gateway
+            .submit(command, command_actor(actor))
+            .await
+            .map_err(ConfigSubmissionError::Cluster);
+    }
+
+    repository::apply_raft_command(&state.db, &command)
+        .await
+        .map_err(|_| ConfigSubmissionError::Database)?;
+    Ok(CommitReceipt {
+        command_id: command.command_id(),
+        leader_id: 0,
+        commit_index: 0,
+    })
+}
+
+fn cluster_write_response(error: ClusterWriteError) -> Response {
+    match error {
+        ClusterWriteError::LeaderUnknown => user_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cluster_leader_unknown",
+            "Cluster leader is unavailable",
+        ),
+        ClusterWriteError::QuorumUnavailable => user_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cluster_quorum_unavailable",
+            "Cluster quorum is unavailable",
+        ),
+        ClusterWriteError::CommitOutcomeUnknown => user_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cluster_commit_outcome_unknown",
+            "Configuration commit outcome is unknown",
+        ),
+        ClusterWriteError::ForwardTimeout => user_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "cluster_forward_timeout",
+            "Cluster write forwarding timed out",
+        ),
+        ClusterWriteError::ForwardAuthentication => user_error(
+            StatusCode::FORBIDDEN,
+            "cluster_forward_authentication",
+            "Cluster write authorization failed",
+        ),
+        ClusterWriteError::InvalidCommand | ClusterWriteError::NotReplicatedCommand => user_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_command",
+            "Configuration command is invalid",
+        ),
+    }
+}
+
+fn publish_committed_command(state: &AppState, command: &ConfigCommand, receipt: &CommitReceipt) {
+    if let Some(kind) = committed_event_kind(command) {
+        state.realtime.publish_committed(kind, receipt);
+    }
 }
 
 fn user_audit(target: Option<i64>, reason: &str) -> String {
@@ -3658,36 +3745,89 @@ async fn apply_recommendation(
             "Adaptive tuning for this host is set to monitor-only mode",
         );
     }
-
-    let res = match repository::apply_tuning_recommendation_tx(&s.db, id).await {
-        Ok(Some(res)) => res,
-        Ok(None) => {
-            return user_error(
-                StatusCode::BAD_REQUEST,
-                "already_applied_or_not_found",
-                "Recommendation cannot be applied",
-            )
-        }
+    if rec.applied {
+        return user_error(
+            StatusCode::BAD_REQUEST,
+            "already_applied_or_not_found",
+            "Recommendation cannot be applied",
+        );
+    }
+    let current = match repository::get_host_rate_limit_config(&s.db, rec.host_id).await {
+        Ok(current) => current,
         Err(_) => {
             return user_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "database_error",
-                "Atomic apply transaction failed",
+                "Unable to read runtime policy",
             )
         }
     };
-
-    let (host_id, new_rl) = res;
-    s.rate_limiter.set_host_policy(
+    let previous_config_json = match serde_json::to_string(&current) {
+        Ok(value) => value,
+        Err(_) => {
+            return user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Unable to prepare runtime policy",
+            )
+        }
+    };
+    let mut runtime_policy = crate::rate_limit::RateLimitPolicy {
+        enabled: current.enabled,
+        action: current.action,
+        capacity: current.capacity,
+        refill_per_second: current.refill_per_second,
+        key_scope: current.key_scope,
+    };
+    if let Some(capacity) = rec.patch.capacity {
+        runtime_policy.capacity = capacity;
+    }
+    if let Some(refill_per_second) = rec.patch.refill_per_second {
+        runtime_policy.refill_per_second = refill_per_second;
+    }
+    if runtime_policy.validate().is_err() {
+        return user_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Recommendation contains an invalid runtime policy",
+        );
+    }
+    let host_id = rec.host_id;
+    let command = ConfigCommand::UpdateRuntimePolicy {
+        command_id: Uuid::new_v4(),
         host_id,
-        crate::rate_limit::RateLimitPolicy {
-            enabled: new_rl.enabled,
-            action: new_rl.action,
-            capacity: new_rl.capacity,
-            refill_per_second: new_rl.refill_per_second,
-            key_scope: new_rl.key_scope,
-        },
-    );
+        policy: runtime_policy.clone(),
+    };
+    let receipt = match submit_config_command(&s, command.clone(), &user).await {
+        Ok(receipt) => receipt,
+        Err(ConfigSubmissionError::Cluster(error)) => return cluster_write_response(error),
+        Err(ConfigSubmissionError::Database) => {
+            return user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Runtime policy update failed",
+            )
+        }
+    };
+    s.rate_limiter
+        .set_host_policy(host_id, runtime_policy.clone());
+    let marked =
+        repository::mark_tuning_recommendation_applied(&s.db, id, &previous_config_json).await;
+    if !matches!(marked, Ok(true)) {
+        audit::record_state(
+            &s,
+            Some(user.id),
+            "recommendation_apply_failed",
+            &format!("recommendation_id={id};host_id={host_id};reason=metadata_update_failed"),
+        )
+        .await;
+        publish_committed_command(&s, &command, &receipt);
+        return user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Runtime policy committed but recommendation metadata could not be updated",
+        );
+    }
 
     audit::record_state(
         &s,
@@ -3697,7 +3837,7 @@ async fn apply_recommendation(
     )
     .await;
     s.realtime.publish("adaptive_tuning.changed");
-    s.realtime.publish("rate_limit.changed");
+    publish_committed_command(&s, &command, &receipt);
     StatusCode::OK.into_response()
 }
 
@@ -3726,9 +3866,9 @@ async fn rollback_recommendation(
         );
     }
 
-    let res = match repository::rollback_tuning_recommendation_tx(&s.db, id).await {
-        Ok(Some(res)) => res,
-        Ok(None) => {
+    let rec = match repository::get_tuning_recommendation(&s.db, id).await {
+        Ok(Some(rec)) if rec.applied => rec,
+        Ok(Some(_)) | Ok(None) => {
             return user_error(
                 StatusCode::BAD_REQUEST,
                 "not_applied_or_not_found",
@@ -3739,22 +3879,70 @@ async fn rollback_recommendation(
             return user_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "database_error",
-                "Atomic rollback transaction failed",
+                "Unable to read recommendation",
             )
         }
     };
-
-    let (host_id, restored_rl) = res;
-    s.rate_limiter.set_host_policy(
+    let Some(previous_config_json) = rec.previous_config_json else {
+        return user_error(
+            StatusCode::BAD_REQUEST,
+            "not_applied_or_not_found",
+            "Recommendation cannot be rolled back",
+        );
+    };
+    let restored: RateLimitConfig = match serde_json::from_str(&previous_config_json) {
+        Ok(restored) => restored,
+        Err(_) => {
+            return user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Stored runtime policy is invalid",
+            )
+        }
+    };
+    let host_id = rec.host_id;
+    let runtime_policy = crate::rate_limit::RateLimitPolicy {
+        enabled: restored.enabled,
+        action: restored.action,
+        capacity: restored.capacity,
+        refill_per_second: restored.refill_per_second,
+        key_scope: restored.key_scope,
+    };
+    let command = ConfigCommand::UpdateRuntimePolicy {
+        command_id: Uuid::new_v4(),
         host_id,
-        crate::rate_limit::RateLimitPolicy {
-            enabled: restored_rl.enabled,
-            action: restored_rl.action,
-            capacity: restored_rl.capacity,
-            refill_per_second: restored_rl.refill_per_second,
-            key_scope: restored_rl.key_scope,
-        },
-    );
+        policy: runtime_policy.clone(),
+    };
+    let receipt = match submit_config_command(&s, command.clone(), &user).await {
+        Ok(receipt) => receipt,
+        Err(ConfigSubmissionError::Cluster(error)) => return cluster_write_response(error),
+        Err(ConfigSubmissionError::Database) => {
+            return user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Runtime policy rollback failed",
+            )
+        }
+    };
+    s.rate_limiter.set_host_policy(host_id, runtime_policy);
+    if !matches!(
+        repository::mark_tuning_recommendation_rolled_back(&s.db, id).await,
+        Ok(true)
+    ) {
+        audit::record_state(
+            &s,
+            Some(user.id),
+            "recommendation_rollback_failed",
+            &format!("recommendation_id={id};host_id={host_id};reason=metadata_update_failed"),
+        )
+        .await;
+        publish_committed_command(&s, &command, &receipt);
+        return user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Runtime policy committed but recommendation metadata could not be updated",
+        );
+    }
 
     audit::record_state(
         &s,
@@ -3764,7 +3952,7 @@ async fn rollback_recommendation(
     )
     .await;
     s.realtime.publish("adaptive_tuning.changed");
-    s.realtime.publish("rate_limit.changed");
+    publish_committed_command(&s, &command, &receipt);
     StatusCode::OK.into_response()
 }
 
@@ -3919,7 +4107,7 @@ async fn create_host(
         return StatusCode::BAD_REQUEST.into_response();
     }
     let host = ProxyHost {
-        id: 0,
+        id: repository::new_proxy_host_id(),
         name: req.name,
         domain: req.domain.to_ascii_lowercase(),
         upstream_host: req.upstream_host,
@@ -3928,40 +4116,23 @@ async fn create_host(
         certificate_id: req.certificate_id,
         enabled: req.enabled,
     };
-    match repository::insert_host(&s.db, &host).await {
-        Ok(x) => {
-            let desired = DesiredConfig {
-                proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default(),
-            };
-            if s.reloader.apply(desired).await.is_err() {
-                let _ = repository::delete_host(&s.db, x.id).await;
-                audit::record_state(
-                    &s,
-                    Some(u.id),
-                    "proxy_host_create_failed",
-                    "reason=reload_failed",
-                )
-                .await;
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(ErrorEnvelope {
-                        code: "reload_failed".into(),
-                        message: "Proxy host was not activated".into(),
-                    }),
-                )
-                    .into_response();
-            }
+    let command = ConfigCommand::CreateProxyHost {
+        command_id: Uuid::new_v4(),
+        host: host.clone(),
+    };
+    let receipt = match submit_config_command(&s, command.clone(), &u).await {
+        Ok(receipt) => receipt,
+        Err(ConfigSubmissionError::Cluster(error)) => {
             audit::record_state(
                 &s,
                 Some(u.id),
-                "proxy_host_created",
-                "configuration_changed",
+                "proxy_host_create_failed",
+                "reason=cluster_write_failed",
             )
             .await;
-            s.realtime.publish("proxy_hosts.changed");
-            (StatusCode::CREATED, Json(x)).into_response()
+            return cluster_write_response(error);
         }
-        Err(_) => {
+        Err(ConfigSubmissionError::Database) => {
             audit::record_state(
                 &s,
                 Some(u.id),
@@ -3969,16 +4140,46 @@ async fn create_host(
                 "reason=duplicate_domain",
             )
             .await;
-            (
+            return (
                 StatusCode::CONFLICT,
                 Json(ErrorEnvelope {
                     code: "duplicate_domain".into(),
                     message: "Domain already exists".into(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
+    };
+    let desired = DesiredConfig {
+        proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default(),
+    };
+    if s.reloader.apply(desired).await.is_err() {
+        audit::record_state(
+            &s,
+            Some(u.id),
+            "proxy_host_create_failed",
+            "reason=reload_failed",
+        )
+        .await;
+        publish_committed_command(&s, &command, &receipt);
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorEnvelope {
+                code: "reload_failed".into(),
+                message: "Proxy host was committed but not activated".into(),
+            }),
+        )
+            .into_response();
     }
+    audit::record_state(
+        &s,
+        Some(u.id),
+        "proxy_host_created",
+        "configuration_changed",
+    )
+    .await;
+    publish_committed_command(&s, &command, &receipt);
+    (StatusCode::CREATED, Json(host)).into_response()
 }
 async fn update_host(
     State(s): State<AppState>,
@@ -4008,7 +4209,7 @@ async fn update_host(
         .await;
         return StatusCode::NOT_FOUND.into_response();
     }
-    let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
+    let Some(_) = repository::get_host(&s.db, id).await.ok().flatten() else {
         audit::record_state(
             &s,
             Some(u.id),
@@ -4042,21 +4243,38 @@ async fn update_host(
         certificate_id: req.certificate_id,
         enabled: req.enabled,
     };
-    if repository::update_host(&s.db, id, &next).await.is_err() {
-        audit::record_state(
-            &s,
-            Some(u.id),
-            "proxy_host_update_failed",
-            "reason=database_error",
-        )
-        .await;
-        return StatusCode::CONFLICT.into_response();
-    }
+    let command = ConfigCommand::UpdateProxyHost {
+        command_id: Uuid::new_v4(),
+        host_id: id,
+        host: next.clone(),
+    };
+    let receipt = match submit_config_command(&s, command.clone(), &u).await {
+        Ok(receipt) => receipt,
+        Err(ConfigSubmissionError::Cluster(error)) => {
+            audit::record_state(
+                &s,
+                Some(u.id),
+                "proxy_host_update_failed",
+                "reason=cluster_write_failed",
+            )
+            .await;
+            return cluster_write_response(error);
+        }
+        Err(ConfigSubmissionError::Database) => {
+            audit::record_state(
+                &s,
+                Some(u.id),
+                "proxy_host_update_failed",
+                "reason=database_error",
+            )
+            .await;
+            return StatusCode::CONFLICT.into_response();
+        }
+    };
     let desired = DesiredConfig {
         proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default(),
     };
     if s.reloader.apply(desired).await.is_err() {
-        let _ = repository::update_host(&s.db, id, &previous).await;
         audit::record_state(
             &s,
             Some(u.id),
@@ -4064,11 +4282,12 @@ async fn update_host(
             "reason=reload_failed",
         )
         .await;
+        publish_committed_command(&s, &command, &receipt);
         return (
             StatusCode::BAD_GATEWAY,
             Json(ErrorEnvelope {
                 code: "reload_failed".into(),
-                message: "Proxy host update was not activated".into(),
+                message: "Proxy host update was committed but not activated".into(),
             }),
         )
             .into_response();
@@ -4080,7 +4299,7 @@ async fn update_host(
         "configuration_changed",
     )
     .await;
-    s.realtime.publish("proxy_hosts.changed");
+    publish_committed_command(&s, &command, &receipt);
     Json(next).into_response()
 }
 
@@ -4111,7 +4330,7 @@ async fn remove_host(
         .await;
         return StatusCode::NOT_FOUND.into_response();
     }
-    let Some(previous) = repository::get_host(&s.db, id).await.ok().flatten() else {
+    let Some(_) = repository::get_host(&s.db, id).await.ok().flatten() else {
         audit::record_state(
             &s,
             Some(u.id),
@@ -4121,9 +4340,23 @@ async fn remove_host(
         .await;
         return StatusCode::NOT_FOUND.into_response();
     };
-    let scope_rows = match repository::host_scope_rows(&s.db, id).await {
-        Ok(rows) => rows,
-        Err(_) => {
+    let command = ConfigCommand::DeleteProxyHost {
+        command_id: Uuid::new_v4(),
+        host_id: id,
+    };
+    let receipt = match submit_config_command(&s, command.clone(), &u).await {
+        Ok(receipt) => receipt,
+        Err(ConfigSubmissionError::Cluster(error)) => {
+            audit::record_state(
+                &s,
+                Some(u.id),
+                "proxy_host_delete_failed",
+                "reason=cluster_write_failed",
+            )
+            .await;
+            return cluster_write_response(error);
+        }
+        Err(ConfigSubmissionError::Database) => {
             audit::record_state(
                 &s,
                 Some(u.id),
@@ -4134,47 +4367,23 @@ async fn remove_host(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    if repository::delete_host_and_scopes(&s.db, id).await.is_err() {
-        audit::record_state(
-            &s,
-            Some(u.id),
-            "proxy_host_delete_failed",
-            "reason=database_error",
-        )
-        .await;
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
     let desired = DesiredConfig {
         proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default(),
     };
     if s.reloader.apply(desired).await.is_err() {
-        let host_restore = repository::insert_host(&s.db, &previous).await;
-        let scopes_restore = repository::restore_host_scopes(&s.db, id, &scope_rows).await;
-        let config_restore = repository::list_hosts(&s.db)
-            .await
-            .map(|hosts| DesiredConfig { proxy_hosts: hosts })
-            .map_err(|_| ());
-        let reload_restore = match config_restore {
-            Ok(config) => s.reloader.apply(config).await.map_err(|_| ()),
-            Err(_) => Err(()),
-        };
-        let rollback_ok = host_restore.is_ok() && scopes_restore.is_ok() && reload_restore.is_ok();
         audit::record_state(
             &s,
             Some(u.id),
             "proxy_host_delete_failed",
-            if rollback_ok {
-                "reason=reload_failed"
-            } else {
-                "reason=rollback_failed"
-            },
+            "reason=reload_failed",
         )
         .await;
+        publish_committed_command(&s, &command, &receipt);
         return (
             StatusCode::BAD_GATEWAY,
             Json(ErrorEnvelope {
                 code: "reload_failed".into(),
-                message: "Proxy host deletion was not activated".into(),
+                message: "Proxy host deletion was committed but not activated".into(),
             }),
         )
             .into_response();
@@ -4186,7 +4395,7 @@ async fn remove_host(
         "configuration_changed",
     )
     .await;
-    s.realtime.publish("proxy_hosts.changed");
+    publish_committed_command(&s, &command, &receipt);
     StatusCode::NO_CONTENT.into_response()
 }
 async fn upload_certificate(

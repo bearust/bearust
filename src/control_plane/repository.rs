@@ -680,6 +680,16 @@ async fn apply_raft_command_inner(
                 .bind(host_id)
                 .execute(&mut *tx)
                 .await?;
+            sqlx::query(
+                "DELETE FROM role_permissions WHERE scope_type='proxy_host' AND scope_id=?",
+            )
+            .bind(host_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM host_rate_limit_configs WHERE host_id=?")
+                .bind(host_id)
+                .execute(&mut *tx)
+                .await?;
         }
         ConfigCommand::UpdateRuntimePolicy {
             host_id, policy, ..
@@ -772,6 +782,10 @@ fn generated_id() -> i64 {
     let mut raw = [0u8; 8];
     raw.copy_from_slice(&bytes[..8]);
     (i64::from_be_bytes(raw) & i64::MAX).max(1)
+}
+
+pub fn new_proxy_host_id() -> i64 {
+    generated_id()
 }
 
 fn waf_mode_value(mode: WafMode) -> &'static str {
@@ -2796,6 +2810,41 @@ pub async fn list_host_rate_limit_configs(
         ));
     }
     Ok(list)
+}
+
+pub async fn mark_tuning_recommendation_applied(
+    pool: &DbPool,
+    rec_id: i64,
+    previous_config_json: &str,
+) -> Result<bool, sqlx::Error> {
+    let changed = sqlx::query(
+        "UPDATE adaptive_tuning_recommendations
+         SET applied=1, applied_at=?, previous_config_json=?
+         WHERE id=? AND applied=0",
+    )
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(previous_config_json)
+    .bind(rec_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(changed == 1)
+}
+
+pub async fn mark_tuning_recommendation_rolled_back(
+    pool: &DbPool,
+    rec_id: i64,
+) -> Result<bool, sqlx::Error> {
+    let changed = sqlx::query(
+        "UPDATE adaptive_tuning_recommendations
+         SET applied=0, applied_at=NULL
+         WHERE id=? AND applied=1",
+    )
+    .bind(rec_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(changed == 1)
 }
 
 pub async fn apply_tuning_recommendation_tx(

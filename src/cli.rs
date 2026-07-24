@@ -294,6 +294,13 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             cluster_service.set_raft_handler(Arc::new(
                 crate::cluster_raft_runtime::OpenRaftRpcHandler::new(raft.clone()),
             ));
+            let gateway = crate::cluster_command::ConfigCommandGateway::new(
+                Arc::new(raft.clone()),
+                cluster_service.clone(),
+                control_state.db.clone(),
+            );
+            cluster_service.set_command_handler(Arc::new(gateway.clone()));
+            control_state = control_state.with_config_gateway(gateway);
         }
         control_state = control_state.with_cluster(cluster_service.clone());
         let (cluster_shutdown_tx, cluster_shutdown_rx) = tokio::sync::watch::channel(false);

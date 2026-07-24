@@ -31,6 +31,18 @@ const MAX_ACTOR_ROLE_BYTES: usize = 64;
 const MAX_NODE_ID_BYTES: usize = 255;
 const MAX_CACHED_RECEIPTS: usize = 1_024;
 
+/// Return the existing public invalidation kind for a committed replicated
+/// command. Internal log markers never invalidate a control-plane view.
+pub fn committed_event_kind(command: &ConfigCommand) -> Option<&'static str> {
+    match command {
+        ConfigCommand::CreateProxyHost { .. }
+        | ConfigCommand::UpdateProxyHost { .. }
+        | ConfigCommand::DeleteProxyHost { .. } => Some("proxy_hosts.changed"),
+        ConfigCommand::UpdateRuntimePolicy { .. } => Some("rate_limit.changed"),
+        ConfigCommand::Noop { .. } => None,
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandActor {
     pub user_id: i64,
@@ -215,19 +227,43 @@ impl ConfigCommandGateway {
         validate_command_and_actor(&command, &actor)?;
         self.validate_authoritative_actor(&command, &actor).await?;
 
-        let metrics = self.raft.metrics();
-        let metrics = metrics.borrow();
-        let is_local_leader =
-            metrics.state.is_leader() && metrics.current_leader == Some(metrics.id);
-        drop(metrics);
+        let is_local_leader = {
+            let metrics = self.raft.metrics();
+            let metrics = metrics.borrow();
+            metrics.state.is_leader() && metrics.current_leader == Some(metrics.id)
+        };
 
         if !is_local_leader {
-            return self
+            let receipt = self
                 .forward_to_leader(self.wait_for_leader_endpoint().await?, command, actor)
-                .await;
+                .await?;
+            self.wait_for_local_apply(&receipt).await?;
+            return Ok(receipt);
         }
 
         self.submit_local(command).await
+    }
+
+    async fn wait_for_local_apply(&self, receipt: &CommitReceipt) -> Result<(), ClusterWriteError> {
+        tokio::time::timeout(CLIENT_WRITE_TIMEOUT, async {
+            loop {
+                let local = repository::load_raft_command_receipt(
+                    &self.db,
+                    &receipt.command_id.to_string(),
+                )
+                .await
+                .map_err(|_| ClusterWriteError::QuorumUnavailable)?;
+                if local.is_some_and(|local| {
+                    u64::try_from(local.leader_id) == Ok(receipt.leader_id)
+                        && u64::try_from(local.log_index) == Ok(receipt.commit_index)
+                }) {
+                    return Ok(());
+                }
+                tokio::time::sleep(LEADER_POLL_INTERVAL).await;
+            }
+        })
+        .await
+        .map_err(|_| ClusterWriteError::ForwardTimeout)?
     }
 
     async fn wait_for_leader_endpoint(&self) -> Result<String, ClusterWriteError> {
@@ -236,16 +272,17 @@ impl ConfigCommandGateway {
         let secret = self.cluster.rpc_secret();
         tokio::time::timeout(CLIENT_WRITE_TIMEOUT, async {
             loop {
-                let metrics = self.raft.metrics();
-                let metrics = metrics.borrow();
-                let endpoint = metrics.current_leader.and_then(|leader_id| {
-                    metrics
-                        .membership_config
-                        .membership()
-                        .get_node(&leader_id)
-                        .map(|node| node.addr.clone())
-                });
-                drop(metrics);
+                let endpoint = {
+                    let metrics = self.raft.metrics();
+                    let metrics = metrics.borrow();
+                    metrics.current_leader.and_then(|leader_id| {
+                        metrics
+                            .membership_config
+                            .membership()
+                            .get_node(&leader_id)
+                            .map(|node| node.addr.clone())
+                    })
+                };
                 if let Some(endpoint) = endpoint {
                     return endpoint;
                 }
@@ -341,20 +378,17 @@ impl ConfigCommandGateway {
             return Err(ClusterWriteError::ForwardAuthentication);
         }
 
-        let scope = match command {
-            ConfigCommand::CreateProxyHost { .. } => None,
+        let (permission, scope) = match command {
+            ConfigCommand::CreateProxyHost { .. } => (Permission::ProxyHostsWrite, None),
             ConfigCommand::UpdateProxyHost { host_id, .. }
-            | ConfigCommand::DeleteProxyHost { host_id, .. }
-            | ConfigCommand::UpdateRuntimePolicy { host_id, .. } => Some(("proxy_host", *host_id)),
+            | ConfigCommand::DeleteProxyHost { host_id, .. } => {
+                (Permission::ProxyHostsWrite, Some(("proxy_host", *host_id)))
+            }
+            ConfigCommand::UpdateRuntimePolicy { .. } => (Permission::SystemSettingsManage, None),
             ConfigCommand::Noop { .. } => return Err(ClusterWriteError::NotReplicatedCommand),
         };
-        match repository::user_has_permission(
-            &self.db,
-            actor.user_id,
-            Permission::ProxyHostsWrite.key(),
-            scope,
-        )
-        .await
+        match repository::user_has_permission(&self.db, actor.user_id, permission.key(), scope)
+            .await
         {
             Ok(true) => Ok(()),
             Ok(false) | Err(_) => Err(ClusterWriteError::ForwardAuthentication),
