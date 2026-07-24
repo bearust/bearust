@@ -4,15 +4,26 @@
 
 Completed the proxy-host and host runtime-policy command-gateway integration
 from base commit `d28b8c2`, including final review corrections through
-`9578e597`.
+`8052ee9`.
 
 ## Review corrections
 
+- `ClusterService` now provides the synchronization boundary between
+  standalone submission and membership activation. The fallback path holds a
+  shared topology guard from its membership decision through direct apply;
+  the public membership initialization helper takes the exclusive guard
+  before OpenRaft activation.
+- `bootstrap_single_node` now requires the associated `ClusterService`, and
+  multi-node fixtures use the same public `initialize_membership` helper.
+  This prevents lifecycle callers from bypassing the topology boundary.
+- A deterministic overlap regression stalls the standalone gateway database
+  path independently of Raft storage. It proves initialization stays pending
+  until the local mutation returns its standalone receipt; removing the
+  exclusive guard makes the regression fail on premature activation.
 - The standalone compatibility path moved inside `ConfigCommandGateway` and
-  uses a serialized topology decision with membership checks immediately
-  before and after direct application. Known standalone command outcomes are
-  durable, so retrying the same command ID after membership activates commits
-  it through Raft instead of silently diverging.
+  uses the serialized submission and shared topology guards. Known standalone
+  command outcomes are durable, so retrying the same command ID after
+  membership activates commits it through Raft instead of silently diverging.
 - Scheduled auto-enforcement calls the leader-only gateway entry point. A
   deposed leader refuses the command and does not use follower forwarding.
 - Forwarded receipts survive a local apply-wait timeout as
@@ -67,6 +78,24 @@ multi_node_state_without_gateway_rejects_replication_required_mutation:
 ```
 
 ## Review verification
+
+Topology-transition focused gate:
+
+```text
+cargo +stable test --test cluster_command_gateway \
+  --test control_plane_cluster --test cluster --test cluster_raft \
+  --test cluster_raft_runtime --test cluster_raft_storage \
+  --test raft_three_node -- --test-threads=1
+
+61 passed; 0 failed
+```
+
+The overlap regression failed as intended when the exclusive transition lock
+was temporarily removed:
+
+```text
+membership activated while a standalone submission was in flight
+```
 
 Final combined control-plane/cluster/Raft/storage gate:
 

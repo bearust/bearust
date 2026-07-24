@@ -2,15 +2,29 @@
 
 ## Status
 
-All Task 3 review findings through base `9578e597` are fixed.
+All Task 3 review findings through base `8052ee9` are fixed.
 
 ## Final review corrections
 
+- `ClusterService` now owns one fair read/write topology-transition gate.
+  Standalone fallback acquires the shared side before checking explicit
+  membership and retains it through actor validation, direct database apply,
+  and receipt construction. Membership initialization acquires the exclusive
+  side before calling OpenRaft, so activation cannot overlap a selected local
+  mutation.
+- The public `initialize_membership` helper and the updated
+  `bootstrap_single_node` API require the corresponding `ClusterService`.
+  Single-node bootstrap and every three-node initialization fixture use that
+  guarded lifecycle path instead of calling `Raft::initialize` directly.
+- The overlap regression uses independent SQLite pools to stall a real
+  standalone gateway submission while initialization remains able to access
+  Raft storage. Without the exclusive acquisition, membership activates and
+  the test fails; with the shared gate, the local receipt completes before
+  initialization proceeds.
 - The gateway now owns the standalone-versus-Raft decision behind one
-  submission mutex. It rechecks explicit membership immediately before and
-  after the standalone transaction, and a standalone command with a known
-  durable result can be retried under the same command ID and promoted through
-  Raft after membership activates.
+  submission mutex and the shared topology guard. A standalone command with a
+  known durable result can be retried under the same command ID and promoted
+  through Raft after membership activates.
 - Scheduled system-actor auto-enforcement uses a leader-only gateway path.
   Once the scheduling node is deposed it returns `LeaderUnknown`; it never
   forwards the stale policy decision to another leader.
@@ -70,6 +84,24 @@ Coverage now also proves that a follower adaptive tick does not auto-enforce
 and that the system actor cannot submit proxy-host commands.
 
 ## Verification
+
+Topology-transition review gate:
+
+```text
+cargo +stable test --test cluster_command_gateway \
+  --test control_plane_cluster --test cluster --test cluster_raft \
+  --test cluster_raft_runtime --test cluster_raft_storage \
+  --test raft_three_node -- --test-threads=1
+
+61 passed; 0 failed
+```
+
+The overlap regression was also run with only the transition's exclusive
+acquisition temporarily removed and failed with:
+
+```text
+membership activated while a standalone submission was in flight
+```
 
 Final review gate:
 

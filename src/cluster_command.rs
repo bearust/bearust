@@ -316,9 +316,9 @@ impl ConfigCommandGateway {
 
     /// Preserve standalone behavior before explicit membership exists while
     /// keeping the topology decision and mutation inside the gateway. The
-    /// membership check is repeated immediately before and after the local
-    /// transaction; a known local outcome can be durably promoted by retrying
-    /// the same command ID through Raft after membership activates.
+    /// shared topology gate prevents membership activation from overlapping
+    /// the local transaction; a known local outcome can be durably promoted
+    /// by retrying the same command ID through Raft after membership activates.
     pub async fn submit_with_standalone_fallback(
         &self,
         command: ConfigCommand,
@@ -345,23 +345,19 @@ impl ConfigCommandGateway {
         leader_only: bool,
     ) -> Result<CommitReceipt, ClusterWriteError> {
         let _submission = self.submission_gate.lock().await;
-        if !self.cluster.is_single_node() || self.has_initialized_membership() {
+        if !self.cluster.is_single_node() {
+            return self.submit_inner(command, actor, leader_only).await;
+        }
+        let topology = self.cluster.lock_standalone_submission().await;
+        if self.has_initialized_membership() {
+            drop(topology);
             return self.submit_inner(command, actor, leader_only).await;
         }
         validate_command_and_actor(&command, &actor)?;
         self.validate_authoritative_actor(&command, &actor).await?;
-
-        // Actor validation performs database I/O. Membership may have changed
-        // while it awaited, so fence again immediately before local mutation.
-        if self.has_initialized_membership() {
-            return self.submit_inner(command, actor, leader_only).await;
-        }
         let result = repository::apply_raft_command(&self.db, &command)
             .await
             .map_err(|_| ClusterWriteError::QuorumUnavailable)?;
-        if self.has_initialized_membership() {
-            return self.submit_inner(command, actor, leader_only).await;
-        }
         command_result(result)?;
         Ok(CommitReceipt {
             command_id: command.command_id(),

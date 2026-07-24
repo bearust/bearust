@@ -9,7 +9,7 @@ use bearust::cluster::{handshake_tag, run_cluster_listener, ClusterService, HAND
 use bearust::cluster_command::ConfigCommandGateway;
 use bearust::cluster_raft_runtime::{
     bootstrap_single_node, construct_raft_with_id, decode_raft_rpc, encode_raft_rpc,
-    send_authenticated_rpc_with_identity, OpenRaftRpcHandler,
+    initialize_membership, send_authenticated_rpc_with_identity, OpenRaftRpcHandler,
 };
 use bearust::config::{ClusterConfig, ClusterPeer};
 use bearust::control_plane::{
@@ -329,7 +329,9 @@ async fn command_cluster() -> ControlPlaneCommandCluster {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    rafts[0].initialize(members).await.unwrap();
+    initialize_membership(&rafts[0], &states[0].cluster, members)
+        .await
+        .unwrap();
 
     ControlPlaneCommandCluster {
         apps: states.iter().cloned().map(router).collect(),
@@ -648,7 +650,7 @@ async fn bootstrapped_single_node_auto_enforcement_uses_gateway_receipt() {
     )
     .await
     .unwrap();
-    bootstrap_single_node(&raft, 1, "127.0.0.1:0")
+    bootstrap_single_node(&raft, &cluster, 1, "127.0.0.1:0")
         .await
         .unwrap();
     let gateway =

@@ -6,16 +6,19 @@ use bearust::cluster_command::{
 use bearust::cluster_raft::{decode_rpc_frame, encode_rpc_frame, ConfigCommand, RPC_TAG_BYTES};
 use bearust::cluster_raft_runtime::{
     bootstrap_single_node, construct_raft_with_id, decode_raft_rpc, encode_raft_rpc,
-    send_authenticated_rpc_with_identity, OpenRaftRpcHandler, RpcTransportError,
+    initialize_membership, send_authenticated_rpc_with_identity, OpenRaftRpcHandler,
+    RpcTransportError,
 };
 use bearust::config::{ClusterConfig, ClusterPeer};
 use bearust::control_plane::models::ProxyHost;
 use bearust::control_plane::repository;
 use openraft::BasicNode;
+use sqlx::any::AnyPoolOptions;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
@@ -243,7 +246,9 @@ async fn three_node_gateway_cluster(base_port: u16) -> ThreeNodeGatewayCluster {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    rafts[0].initialize(members).await.unwrap();
+    initialize_membership(&rafts[0], &clusters[0], members)
+        .await
+        .unwrap();
 
     ThreeNodeGatewayCluster {
         addresses,
@@ -636,11 +641,8 @@ async fn standalone_command_retry_after_membership_transition_is_committed() {
         timeout_seconds: 1,
         auth_token: TEST_SECRET.into(),
     };
-    let gateway = ConfigCommandGateway::new(
-        Arc::new(raft.clone()),
-        Arc::new(ClusterService::new(&config)),
-        pool.clone(),
-    );
+    let cluster = Arc::new(ClusterService::new(&config));
+    let gateway = ConfigCommandGateway::new(Arc::new(raft.clone()), cluster.clone(), pool.clone());
     let command = test_create_command();
     let command_id = command.command_id();
 
@@ -649,7 +651,7 @@ async fn standalone_command_retry_after_membership_transition_is_committed() {
         .await
         .unwrap();
     assert_eq!(local.leader_id, 0);
-    bootstrap_single_node(&raft, 1, "127.0.0.1:0")
+    bootstrap_single_node(&raft, &cluster, 1, "127.0.0.1:0")
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -677,6 +679,77 @@ async fn standalone_command_retry_after_membership_transition_is_committed() {
             .unwrap()
             .is_some()
     );
+    raft.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn membership_initialization_waits_for_in_flight_standalone_apply() {
+    let directory = tempdir().unwrap();
+    let database_path = directory.path().join("control.db");
+    std::fs::File::create(&database_path).unwrap();
+    let database_url = format!("sqlite://{}", database_path.display());
+    let raft_pool = repository::connect(&database_url).await.unwrap();
+    repository::migrate(&raft_pool).await.unwrap();
+    seed_test_actor(&raft_pool).await;
+    let gateway_pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let held_connection = gateway_pool.acquire().await.unwrap();
+    let raft = construct_raft_with_id(raft_pool, "node-1", TEST_SECRET.as_bytes(), 1)
+        .await
+        .unwrap();
+    let config = ClusterConfig {
+        node_id: "node-1".into(),
+        peers: vec![],
+        bind: "127.0.0.1:0".parse().unwrap(),
+        timeout_seconds: 1,
+        auth_token: TEST_SECRET.into(),
+    };
+    let cluster = Arc::new(ClusterService::new(&config));
+    let gateway = ConfigCommandGateway::new(Arc::new(raft.clone()), cluster.clone(), gateway_pool);
+    let fallback = tokio::spawn({
+        let gateway = gateway.clone();
+        async move {
+            gateway
+                .submit_with_standalone_fallback(test_create_command(), test_actor())
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut initialization = tokio::spawn({
+        let raft = raft.clone();
+        let cluster = cluster.clone();
+        async move {
+            initialize_membership(
+                &raft,
+                &cluster,
+                BTreeMap::from([(1, BasicNode::new("127.0.0.1:0"))]),
+            )
+            .await
+        }
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut initialization)
+            .await
+            .is_err(),
+        "membership activated while a standalone submission was in flight"
+    );
+    drop(held_connection);
+    let local = tokio::time::timeout(Duration::from_secs(2), fallback)
+        .await
+        .expect("standalone submission remained blocked")
+        .unwrap()
+        .unwrap();
+    assert_eq!(local.leader_id, 0);
+    assert_eq!(local.commit_index, 0);
+    tokio::time::timeout(Duration::from_secs(2), initialization)
+        .await
+        .expect("membership initialization remained blocked")
+        .unwrap()
+        .unwrap();
     raft.shutdown().await.unwrap();
 }
 
@@ -819,9 +892,6 @@ async fn single_node_gateway_keeps_local_command_submission() {
     let raft = construct_raft_with_id(pool.clone(), "node-1", TEST_SECRET.as_bytes(), 1)
         .await
         .unwrap();
-    bootstrap_single_node(&raft, 1, "127.0.0.1:0")
-        .await
-        .unwrap();
     let config = ClusterConfig {
         node_id: "node-1".into(),
         peers: vec![],
@@ -829,11 +899,11 @@ async fn single_node_gateway_keeps_local_command_submission() {
         timeout_seconds: 1,
         auth_token: TEST_SECRET.into(),
     };
-    let gateway = ConfigCommandGateway::new(
-        Arc::new(raft.clone()),
-        Arc::new(ClusterService::new(&config)),
-        pool,
-    );
+    let cluster = Arc::new(ClusterService::new(&config));
+    bootstrap_single_node(&raft, &cluster, 1, "127.0.0.1:0")
+        .await
+        .unwrap();
+    let gateway = ConfigCommandGateway::new(Arc::new(raft.clone()), cluster, pool);
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let metrics = raft.metrics();

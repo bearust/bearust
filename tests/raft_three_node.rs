@@ -1,5 +1,7 @@
 use bearust::cluster::{run_cluster_listener, ClusterService};
-use bearust::cluster_raft_runtime::{construct_raft_with_id, OpenRaftRpcHandler};
+use bearust::cluster_raft_runtime::{
+    construct_raft_with_id, initialize_membership, OpenRaftRpcHandler,
+};
 use bearust::config::{ClusterConfig, ClusterPeer};
 use bearust::control_plane::repository;
 use openraft::BasicNode;
@@ -84,7 +86,9 @@ async fn three_node_cluster_elects_leader_over_authenticated_transport() {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    handles[0].initialize(members).await.unwrap();
+    initialize_membership(&handles[0], &services[0], members)
+        .await
+        .unwrap();
     let leader = tokio::time::timeout(std::time::Duration::from_secs(8), async {
         loop {
             for raft in &handles {

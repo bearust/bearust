@@ -7,6 +7,7 @@
 //! losing committed data.  The contract below keeps the dependency/API
 //! integration checked while the SQLx-backed adapters are implemented.
 
+use crate::cluster::ClusterService;
 use crate::cluster_raft::BearustRaftConfig;
 use crate::cluster_raft_storage::SqlxRaftStorage;
 use crate::control_plane::repository::DbPool;
@@ -497,16 +498,29 @@ pub enum BootstrapError {
 /// never called by `build_raft`; successful initialization starts election.
 pub async fn bootstrap_single_node(
     raft: &openraft::Raft<BearustRaftConfig>,
+    cluster: &ClusterService,
     local_id: u64,
     local_addr: impl Into<String>,
 ) -> Result<(), BootstrapError> {
     let local_addr: String = local_addr.into();
-    raft.initialize(BTreeMap::from([(
-        local_id,
-        openraft::BasicNode::new(local_addr),
-    )]))
+    initialize_membership(
+        raft,
+        cluster,
+        BTreeMap::from([(local_id, openraft::BasicNode::new(local_addr))]),
+    )
     .await
     .map_err(|_| BootstrapError::NotSingleNode)
+}
+
+/// Initialize pristine Raft membership while excluding standalone local
+/// submissions from the membership activation boundary.
+pub async fn initialize_membership(
+    raft: &openraft::Raft<BearustRaftConfig>,
+    cluster: &ClusterService,
+    members: BTreeMap<u64, openraft::BasicNode>,
+) -> Result<(), RaftError<u64, openraft::error::InitializeError<u64, openraft::BasicNode>>> {
+    let _transition = cluster.lock_topology_transition().await;
+    raft.initialize(members).await
 }
 
 /// Validate a multi-node join request without mutating Raft membership. The
