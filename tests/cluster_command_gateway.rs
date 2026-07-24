@@ -1,8 +1,12 @@
 use bearust::cluster::{run_cluster_listener, ClusterService};
-use bearust::cluster_command::{ClusterWriteError, CommandActor, ConfigCommandGateway};
+use bearust::cluster_command::{
+    decode_forwarded_command, encode_forwarded_command, ClusterWriteError, CommandActor,
+    ConfigCommandGateway,
+};
 use bearust::cluster_raft::ConfigCommand;
 use bearust::cluster_raft_runtime::{
-    bootstrap_single_node, construct_raft_with_id, OpenRaftRpcHandler,
+    bootstrap_single_node, construct_raft_with_id, decode_raft_rpc, encode_raft_rpc,
+    send_authenticated_rpc_with_identity, OpenRaftRpcHandler,
 };
 use bearust::config::{ClusterConfig, ClusterPeer};
 use bearust::control_plane::models::ProxyHost;
@@ -14,6 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use uuid::Uuid;
+
+const TEST_SECRET: &str = "cluster-command-test";
 
 fn test_actor() -> CommandActor {
     CommandActor {
@@ -39,7 +45,44 @@ fn test_create_command() -> ConfigCommand {
     }
 }
 
+#[test]
+fn forwarded_command_rejects_tampered_actor_envelope() {
+    let command = test_create_command();
+    let mut payload = encode_forwarded_command("node-1", command, test_actor()).unwrap();
+    let actor = payload
+        .get_mut("actor")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("forwarded command has an actor object");
+    actor.insert("role".into(), serde_json::Value::String("viewer".into()));
+
+    assert!(matches!(
+        decode_forwarded_command(&payload),
+        Err(ClusterWriteError::ForwardAuthentication)
+    ));
+}
+
+#[test]
+fn forwarded_command_rejects_command_id_mismatch() {
+    let command = test_create_command();
+    let mut payload = encode_forwarded_command("node-1", command, test_actor()).unwrap();
+    payload["command_id"] = serde_json::json!(Uuid::new_v4());
+
+    assert!(matches!(
+        decode_forwarded_command(&payload),
+        Err(ClusterWriteError::ForwardAuthentication)
+    ));
+}
+
+#[test]
+fn forwarded_command_rejects_oversized_origin() {
+    assert_eq!(
+        encode_forwarded_command(&"n".repeat(256), test_create_command(), test_actor()),
+        Err(ClusterWriteError::ForwardAuthentication)
+    );
+}
+
 struct ThreeNodeGatewayCluster {
+    addresses: [SocketAddr; 3],
     gateways: Vec<ConfigCommandGateway>,
     rafts: Vec<openraft::Raft<bearust::cluster_raft::BearustRaftConfig>>,
     shutdowns: Vec<watch::Sender<bool>>,
@@ -57,7 +100,7 @@ impl ThreeNodeGatewayCluster {
 }
 
 async fn three_node_gateway_cluster(base_port: u16) -> ThreeNodeGatewayCluster {
-    let secret = "cluster-command-test".to_string();
+    let secret = TEST_SECRET.to_string();
     let addresses: [SocketAddr; 3] = [
         format!("127.0.0.1:{base_port}").parse().unwrap(),
         format!("127.0.0.1:{}", base_port + 1).parse().unwrap(),
@@ -94,9 +137,37 @@ async fn three_node_gateway_cluster(base_port: u16) -> ThreeNodeGatewayCluster {
         cluster.set_raft_handler(Arc::new(OpenRaftRpcHandler::new(raft.clone())));
         let (shutdown, receiver) = watch::channel(false);
         tokio::spawn(run_cluster_listener(cluster.clone(), receiver));
-        gateways.push(ConfigCommandGateway::new(Arc::new(raft.clone()), cluster));
+        let gateway = ConfigCommandGateway::new(Arc::new(raft.clone()), cluster.clone());
+        cluster.set_command_handler(Arc::new(gateway.clone()));
+        gateways.push(gateway);
         rafts.push(raft);
         shutdowns.push(shutdown);
+    }
+
+    for (index, address) in addresses.iter().enumerate() {
+        let request = encode_raft_rpc("status", &serde_json::json!({})).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(response) = send_authenticated_rpc_with_identity(
+                    &address.to_string(),
+                    "readiness-probe",
+                    &request,
+                    TEST_SECRET.as_bytes(),
+                    Duration::from_millis(100),
+                )
+                .await
+                {
+                    let response: serde_json::Value = decode_raft_rpc(&response, "status").unwrap();
+                    if response["node_id"] == ids[index] && response["status"] == "transport_ready"
+                    {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cluster listener did not accept authenticated RPCs");
     }
 
     let members = addresses
@@ -114,6 +185,7 @@ async fn three_node_gateway_cluster(base_port: u16) -> ThreeNodeGatewayCluster {
     rafts[0].initialize(members).await.unwrap();
 
     ThreeNodeGatewayCluster {
+        addresses,
         gateways,
         rafts,
         shutdowns,
@@ -134,7 +206,6 @@ async fn wait_for_live_leader(
                 {
                     return index;
                 }
-                drop(metrics);
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -144,21 +215,76 @@ async fn wait_for_live_leader(
 }
 
 #[tokio::test]
-async fn follower_gateway_does_not_mutate_local_database() {
+async fn forwarded_command_rejects_origin_that_differs_from_handshake_identity() {
+    let cluster = three_node_gateway_cluster(42291).await;
+    let leader = wait_for_live_leader(&cluster.rafts).await;
+    let caller = (leader + 1) % cluster.rafts.len();
+    let claimed_origin = format!("node-{}", ((caller + 1) % cluster.rafts.len()) + 1);
+    let authenticated_origin = format!("node-{}", caller + 1);
+    let envelope =
+        encode_forwarded_command(&claimed_origin, test_create_command(), test_actor()).unwrap();
+    let request = encode_raft_rpc("config_command", &envelope).unwrap();
+
+    let response = send_authenticated_rpc_with_identity(
+        &cluster.addresses[leader].to_string(),
+        &authenticated_origin,
+        &request,
+        TEST_SECRET.as_bytes(),
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    let response: serde_json::Value =
+        decode_raft_rpc(&response, "config_command_response").unwrap();
+    cluster.shutdown().await;
+
+    assert_eq!(
+        response,
+        serde_json::json!({
+            "result": "error",
+            "code": "forward_authentication",
+        })
+    );
+}
+
+#[tokio::test]
+async fn follower_gateway_forwards_without_locally_committing() {
     let cluster = three_node_gateway_cluster(42301).await;
     let leader = wait_for_live_leader(&cluster.rafts).await;
     let follower = (leader + 1) % cluster.rafts.len();
-    let applied_before = cluster.rafts[follower].metrics().borrow().last_applied;
 
-    let result = cluster.gateways[follower]
+    let receipt = cluster.gateways[follower]
         .submit(test_create_command(), test_actor())
-        .await;
+        .await
+        .unwrap();
 
-    assert!(matches!(result, Err(ClusterWriteError::LeaderUnknown)));
-    assert_eq!(
-        cluster.rafts[follower].metrics().borrow().last_applied,
-        applied_before
-    );
+    assert_eq!(receipt.leader_id, (leader + 1) as u64);
+    for raft in &cluster.rafts {
+        raft.wait(Some(Duration::from_secs(2)))
+            .applied_index_at_least(Some(receipt.commit_index), "forwarded command applied")
+            .await
+            .unwrap();
+    }
+    cluster.shutdown().await;
+}
+
+#[tokio::test]
+async fn repeated_forwarded_command_returns_the_original_receipt() {
+    let cluster = three_node_gateway_cluster(42306).await;
+    let leader = wait_for_live_leader(&cluster.rafts).await;
+    let follower = (leader + 1) % cluster.rafts.len();
+    let command = test_create_command();
+
+    let first = cluster.gateways[follower]
+        .submit(command.clone(), test_actor())
+        .await
+        .unwrap();
+    let second = cluster.gateways[follower]
+        .submit(command, test_actor())
+        .await
+        .unwrap();
+
+    assert_eq!(second, first);
     cluster.shutdown().await;
 }
 
@@ -233,7 +359,7 @@ async fn gateway_rejects_writes_after_actual_quorum_loss() {
 async fn single_node_gateway_keeps_local_command_submission() {
     let pool = repository::connect("sqlite::memory:").await.unwrap();
     repository::migrate(&pool).await.unwrap();
-    let raft = construct_raft_with_id(pool, "node-1", b"cluster-command-test", 1)
+    let raft = construct_raft_with_id(pool, "node-1", TEST_SECRET.as_bytes(), 1)
         .await
         .unwrap();
     bootstrap_single_node(&raft, 1, "127.0.0.1:0")
@@ -244,7 +370,7 @@ async fn single_node_gateway_keeps_local_command_submission() {
         peers: vec![],
         bind: "127.0.0.1:0".parse().unwrap(),
         timeout_seconds: 1,
-        auth_token: "cluster-command-test".into(),
+        auth_token: TEST_SECRET.into(),
     };
     let gateway = ConfigCommandGateway::new(
         Arc::new(raft.clone()),

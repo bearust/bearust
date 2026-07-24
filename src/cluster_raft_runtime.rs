@@ -89,6 +89,21 @@ pub fn decode_raft_rpc<T: DeserializeOwned>(
 #[async_trait]
 pub trait RaftRpcHandler: Send + Sync {
     async fn handle(&self, kind: &str, payload: &[u8]) -> Result<Vec<u8>, RpcTransportError>;
+
+    fn is_leader(&self) -> bool {
+        false
+    }
+}
+
+/// Handles the bounded internal configuration-command RPC after the cluster
+/// handshake and RPC-frame MAC have both been verified.
+#[async_trait]
+pub trait InternalCommandHandler: Send + Sync {
+    async fn handle_config_command(
+        &self,
+        payload: &[u8],
+        authenticated_node_id: &str,
+    ) -> Result<Vec<u8>, RpcTransportError>;
 }
 
 pub struct OpenRaftRpcHandler {
@@ -108,13 +123,59 @@ pub async fn dispatch_authenticated_rpc_with_handler(
     if envelope.kind == "status" {
         let status = encode_raft_rpc(
             "status",
-            &serde_json::json!({"node_id": node_id, "status": "transport_ready"}),
+            &serde_json::json!({
+                "node_id": node_id,
+                "status": "transport_ready",
+                "is_leader": handler.is_leader(),
+            }),
         )?;
         return crate::cluster_raft::encode_rpc_frame(&status, secret)
             .map_err(|_| RpcTransportError::Malformed);
     }
     let request = serde_json::to_vec(&envelope).map_err(|_| RpcTransportError::Malformed)?;
     let response = handler.handle(&envelope.kind, &request).await?;
+    crate::cluster_raft::encode_rpc_frame(&response, secret)
+        .map_err(|_| RpcTransportError::Malformed)
+}
+
+pub async fn dispatch_authenticated_rpc_with_handlers(
+    frame: &[u8],
+    secret: &[u8],
+    node_id: &str,
+    authenticated_node_id: &str,
+    raft_handler: Option<&dyn RaftRpcHandler>,
+    command_handler: Option<&dyn InternalCommandHandler>,
+) -> Result<Vec<u8>, RpcTransportError> {
+    let payload = crate::cluster_raft::decode_rpc_frame(frame, secret)
+        .map_err(|_| RpcTransportError::AuthenticationFailed)?;
+    let envelope: RaftRpcEnvelope =
+        serde_json::from_slice(payload).map_err(|_| RpcTransportError::Malformed)?;
+
+    if envelope.kind == "status" {
+        let status = encode_raft_rpc(
+            "status",
+            &serde_json::json!({
+                "node_id": node_id,
+                "status": "transport_ready",
+                "is_leader": raft_handler.is_some_and(RaftRpcHandler::is_leader),
+            }),
+        )?;
+        return crate::cluster_raft::encode_rpc_frame(&status, secret)
+            .map_err(|_| RpcTransportError::Malformed);
+    }
+
+    let request = serde_json::to_vec(&envelope).map_err(|_| RpcTransportError::Malformed)?;
+    let response = if envelope.kind == "config_command" {
+        command_handler
+            .ok_or(RpcTransportError::Unavailable)?
+            .handle_config_command(&request, authenticated_node_id)
+            .await?
+    } else {
+        raft_handler
+            .ok_or(RpcTransportError::Unavailable)?
+            .handle(&envelope.kind, &request)
+            .await?
+    };
     crate::cluster_raft::encode_rpc_frame(&response, secret)
         .map_err(|_| RpcTransportError::Malformed)
 }
@@ -163,6 +224,12 @@ impl RaftRpcHandler for OpenRaftRpcHandler {
             }
             _ => Err(RpcTransportError::Malformed),
         }
+    }
+
+    fn is_leader(&self) -> bool {
+        let metrics = self.raft.metrics();
+        let metrics = metrics.borrow();
+        metrics.state.is_leader() && metrics.current_leader == Some(metrics.id)
     }
 }
 

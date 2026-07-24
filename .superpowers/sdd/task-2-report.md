@@ -1,26 +1,80 @@
-# Phase 7B Task 2 report
+# Phase 10C Task 2 Report
 
 ## Status
 
-Implemented persistence, validation, immutable `BotStore` reload, and redacted detection telemetry. Commit: `03343e4` (`feat: persist bot protection policy`).
+Completed authenticated internal configuration-command forwarding.
 
-## Changes
+## Changed scope
 
-- Added idempotent `0005_bot_protection.sql` with monitor defaults, singleton config, trusted-rule uniqueness, and bounded policy fields. The initial fingerprint key is empty; first load generates and persists a per-install random key instead of shipping public key material.
-- Added `BotConfigRecord`/`BotRuleRecord` control-plane model views.
-- Added repository CRUD (`get_bot_config`, `update_bot_config`, `list_bot_rules`, `insert_bot_rule`, `update_bot_rule`, `delete_bot_rule`) with normalization and bounded validation before writes.
-- Added `BotStore::{load,snapshot,reload,record_detection}` backed by `ArcSwap`; failed reloads do not publish a partial snapshot.
-- Added focused SQLx repository tests covering idempotent migration, failed-reload atomicity, normalization, and validation.
-- Rule listing now fetches one extra row and fails instead of silently returning a truncated policy.
+- `src/cluster_raft_runtime.rs`: added authenticated `config_command` dispatch, an internal command-handler boundary, and authenticated leader status for bounded discovery.
+- `src/cluster.rs`: registered the command handler with the cluster listener and routed authenticated command frames alongside existing Raft RPCs.
+- `src/cluster_command.rs`: added bounded typed forwarding envelopes/responses, actor and command revalidation, stable transport error mapping, duplicate-command receipt caching, and bounded follower leader discovery.
+- `tests/cluster_command_gateway.rs`: added envelope/authentication/idempotency coverage and real three-node follower-to-leader forwarding with authenticated listener readiness checks.
+
+Forwarded payloads contain only the protocol version, origin node ID, command ID, typed command, and bounded actor context. The receiver compares the envelope origin with the authenticated handshake identity before invoking the leader’s local gateway. Followers never fall back to a local write.
+
+When local Raft metrics have not yet exposed a leader endpoint, the gateway polls only configured peers over the authenticated status RPC. It validates the returned node identity and accepts only a peer reporting itself as leader. Discovery is bounded by the existing two-second write deadline, uses 100 ms per-peer probes and a 25 ms polling interval, and returns `LeaderUnknown` when the deadline expires.
+
+## Red evidence
+
+After narrowing the three-node election wait to the actual live-leader condition, the forwarding test reproduced the missing discovery behavior:
+
+```text
+cargo +stable test --test cluster_command_gateway \
+  follower_gateway_forwards_without_locally_committing \
+  -- --nocapture --test-threads=1
+
+called `Result::unwrap()` on an `Err` value: LeaderUnknown
+test result: FAILED. 0 passed; 1 failed
+```
+
+The listener-readiness race was also isolated to setup that observed in-memory status before proving the endpoint accepted the authenticated protocol. The final setup performs a bounded authenticated status round trip to every listener before cluster initialization.
 
 ## Verification
 
-- `cargo +stable test --test bot_repository`: passed (3 tests).
-- `cargo +stable test --all-targets`: existing migration-order assertion fails because the repository baseline expects exactly four migrations; the new Phase 7B migration correctly makes the list `[1,2,3,4,5]`.
-- `cargo +stable clippy --all-targets --all-features -- -D warnings`: blocked by pre-existing Task 1 lint (`clippy::byte_char_slices` in `src/bot_protection.rs`).
-- `git diff --check`: passed.
+Focused forwarding and transport tests:
 
-## Concerns
+```text
+cargo +stable test --test cluster_command_gateway \
+  --test cluster_raft_runtime -- --test-threads=1
+```
 
-- Existing `control_plane_repository::migrations_record_order_and_seed_exact_permissions` must be updated by the phase-level test task to expect migration 5.
-- Task 1 should fix the byte-string Clippy warning before the final Phase 7B gate.
+Result:
+
+```text
+cluster_command_gateway: 9 passed; 0 failed
+cluster_raft_runtime: 10 passed; 0 failed
+```
+
+Formatting:
+
+```text
+cargo +stable fmt --all -- --check
+```
+
+Result: passed with no formatting changes required after applying rustfmt.
+
+Linting:
+
+```text
+cargo +stable clippy --all-targets -- -D warnings
+```
+
+Result:
+
+```text
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.39s
+```
+
+Diff validation:
+
+```text
+git diff --check
+```
+
+Result: passed with no whitespace errors.
+
+## Scope notes
+
+- `.superpowers/sdd/progress.md` remains modified but is deliberately excluded from the Task 2 commit.
+- No rate-limit or bot-protection files were changed.

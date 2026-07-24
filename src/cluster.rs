@@ -4,7 +4,10 @@
 //! authenticated inbound listener. Raft, leader election, write forwarding,
 //! cross-node replay, and keepalived automation are deferred to Phase 10B+.
 use crate::cluster_raft_runtime::dispatch_authenticated_rpc;
-use crate::cluster_raft_runtime::{dispatch_authenticated_rpc_with_handler, RaftRpcHandler};
+use crate::cluster_raft_runtime::{
+    dispatch_authenticated_rpc_with_handler, dispatch_authenticated_rpc_with_handlers,
+    InternalCommandHandler, RaftRpcHandler,
+};
 use crate::config::{ClusterConfig, ClusterPeer};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -104,6 +107,7 @@ pub struct ClusterService {
     auth_token: Arc<Vec<u8>>,
     raft_status: Arc<RwLock<RaftStatus>>,
     raft_handler: Arc<RwLock<Option<Arc<dyn RaftRpcHandler>>>>,
+    command_handler: Arc<RwLock<Option<Arc<dyn InternalCommandHandler>>>>,
 }
 
 impl ClusterService {
@@ -137,6 +141,7 @@ impl ClusterService {
                 },
             })),
             raft_handler: Arc::new(RwLock::new(None)),
+            command_handler: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -168,11 +173,28 @@ impl ClusterService {
         }
     }
 
+    pub fn set_command_handler(&self, handler: Arc<dyn InternalCommandHandler>) {
+        if let Ok(mut current) = self.command_handler.write() {
+            *current = Some(handler);
+        }
+    }
+
     fn raft_handler(&self) -> Option<Arc<dyn RaftRpcHandler>> {
         self.raft_handler
             .read()
             .ok()
             .and_then(|handler| handler.clone())
+    }
+
+    fn command_handler(&self) -> Option<Arc<dyn InternalCommandHandler>> {
+        self.command_handler
+            .read()
+            .ok()
+            .and_then(|handler| handler.clone())
+    }
+
+    pub(crate) fn rpc_secret(&self) -> Vec<u8> {
+        self.auth_token.as_ref().clone()
     }
 
     /// Mark the authenticated transport as available. This deliberately does
@@ -415,11 +437,13 @@ pub async fn run_cluster_listener(
                     Ok((stream, _remote)) => {
                         let local_id = service.node_id().to_string();
                         let raft_handler = service.raft_handler();
+                        let command_handler = service.command_handler();
                         tokio::spawn(handle_cluster_connection(
                             stream,
                             local_id,
                             Arc::clone(&service.auth_token),
                             raft_handler,
+                            command_handler,
                         ));
                     }
                     Err(e) => {
@@ -442,6 +466,7 @@ async fn handle_cluster_connection(
     local_node_id: String,
     secret: Arc<Vec<u8>>,
     raft_handler: Option<Arc<dyn RaftRpcHandler>>,
+    command_handler: Option<Arc<dyn InternalCommandHandler>>,
 ) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 
@@ -513,7 +538,17 @@ async fn handle_cluster_connection(
                     if stream.read_exact(&mut rest).await.is_ok() {
                         let mut frame = header.to_vec();
                         frame.extend_from_slice(&rest);
-                        let response = if let Some(handler) = raft_handler.as_deref() {
+                        let response = if command_handler.is_some() {
+                            dispatch_authenticated_rpc_with_handlers(
+                                &frame,
+                                &secret,
+                                &local_node_id,
+                                &peer_id,
+                                raft_handler.as_deref(),
+                                command_handler.as_deref(),
+                            )
+                            .await
+                        } else if let Some(handler) = raft_handler.as_deref() {
                             dispatch_authenticated_rpc_with_handler(
                                 &frame,
                                 &secret,
@@ -526,6 +561,8 @@ async fn handle_cluster_connection(
                         };
                         if let Ok(response) = response {
                             let _ = stream.write_all(&response).await;
+                        } else if let Err(error) = response {
+                            eprintln!("cluster RPC dispatch error from {peer_id}: {error:?}");
                         }
                     }
                 }
