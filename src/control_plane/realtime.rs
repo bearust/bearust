@@ -47,6 +47,24 @@ impl RealtimeHub {
         event
     }
 
+    /// Publish one authenticated remote cluster invalidation through the same
+    /// public SSE shape as a local event.
+    pub fn publish_cluster_event(&self, kind: &str) -> Option<RealtimeEvent> {
+        match kind {
+            "proxy_hosts.changed" => Some(self.publish("proxy_hosts.changed")),
+            "rate_limit.changed" => Some(self.publish("rate_limit.changed")),
+            _ => None,
+        }
+    }
+
+    /// Invalidate every replicated control-plane view after a cluster event
+    /// gap or reconnect. Raft state remains authoritative; these events make
+    /// local consumers reload that already-applied state.
+    pub fn publish_cluster_catch_up(&self) {
+        self.publish("proxy_hosts.changed");
+        self.publish("rate_limit.changed");
+    }
+
     pub fn publish_committed(
         &self,
         kind: &'static str,

@@ -12,6 +12,7 @@ pub mod certificates;
 pub mod cli;
 pub mod cluster;
 pub mod cluster_command;
+pub mod cluster_events;
 pub mod cluster_raft;
 pub mod cluster_raft_runtime;
 pub mod cluster_raft_storage;

@@ -107,6 +107,17 @@ pub trait InternalCommandHandler: Send + Sync {
     ) -> Result<Vec<u8>, RpcTransportError>;
 }
 
+/// Handles one bounded cluster invalidation after the identity handshake and
+/// RPC-frame MAC have both been verified.
+#[async_trait]
+pub trait ClusterEventHandler: Send + Sync {
+    async fn handle_cluster_event(
+        &self,
+        payload: &[u8],
+        authenticated_node_id: &str,
+    ) -> Result<Vec<u8>, RpcTransportError>;
+}
+
 pub struct OpenRaftRpcHandler {
     raft: openraft::Raft<BearustRaftConfig>,
 }
@@ -147,6 +158,46 @@ pub async fn dispatch_authenticated_rpc_with_handlers(
     raft_handler: Option<&dyn RaftRpcHandler>,
     command_handler: Option<&dyn InternalCommandHandler>,
 ) -> Result<Vec<u8>, RpcTransportError> {
+    dispatch_authenticated_rpc_with_all_handlers(
+        frame,
+        secret,
+        node_id,
+        authenticated_node_id,
+        raft_handler,
+        command_handler,
+        None,
+    )
+    .await
+}
+
+pub async fn dispatch_authenticated_rpc_with_event_handler(
+    frame: &[u8],
+    secret: &[u8],
+    node_id: &str,
+    authenticated_node_id: &str,
+    event_handler: &dyn ClusterEventHandler,
+) -> Result<Vec<u8>, RpcTransportError> {
+    dispatch_authenticated_rpc_with_all_handlers(
+        frame,
+        secret,
+        node_id,
+        authenticated_node_id,
+        None,
+        None,
+        Some(event_handler),
+    )
+    .await
+}
+
+pub async fn dispatch_authenticated_rpc_with_all_handlers(
+    frame: &[u8],
+    secret: &[u8],
+    node_id: &str,
+    authenticated_node_id: &str,
+    raft_handler: Option<&dyn RaftRpcHandler>,
+    command_handler: Option<&dyn InternalCommandHandler>,
+    event_handler: Option<&dyn ClusterEventHandler>,
+) -> Result<Vec<u8>, RpcTransportError> {
     let payload = crate::cluster_raft::decode_rpc_frame(frame, secret)
         .map_err(|_| RpcTransportError::AuthenticationFailed)?;
     let envelope: RaftRpcEnvelope =
@@ -166,16 +217,25 @@ pub async fn dispatch_authenticated_rpc_with_handlers(
     }
 
     let request = serde_json::to_vec(&envelope).map_err(|_| RpcTransportError::Malformed)?;
-    let response = if envelope.kind == "config_command" {
-        command_handler
-            .ok_or(RpcTransportError::Unavailable)?
-            .handle_config_command(&request, authenticated_node_id)
-            .await?
-    } else {
-        raft_handler
-            .ok_or(RpcTransportError::Unavailable)?
-            .handle(&envelope.kind, &request)
-            .await?
+    let response = match envelope.kind.as_str() {
+        "config_command" => {
+            command_handler
+                .ok_or(RpcTransportError::Unavailable)?
+                .handle_config_command(&request, authenticated_node_id)
+                .await?
+        }
+        "cluster_event" => {
+            event_handler
+                .ok_or(RpcTransportError::Unavailable)?
+                .handle_cluster_event(&request, authenticated_node_id)
+                .await?
+        }
+        _ => {
+            raft_handler
+                .ok_or(RpcTransportError::Unavailable)?
+                .handle(&envelope.kind, &request)
+                .await?
+        }
     };
     crate::cluster_raft::encode_rpc_frame(&response, secret)
         .map_err(|_| RpcTransportError::Malformed)

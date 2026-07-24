@@ -5,8 +5,8 @@
 //! cross-node replay, and keepalived automation are deferred to Phase 10B+.
 use crate::cluster_raft_runtime::dispatch_authenticated_rpc;
 use crate::cluster_raft_runtime::{
-    dispatch_authenticated_rpc_with_handler, dispatch_authenticated_rpc_with_handlers,
-    InternalCommandHandler, RaftRpcHandler,
+    dispatch_authenticated_rpc_with_all_handlers, dispatch_authenticated_rpc_with_handler,
+    ClusterEventHandler, InternalCommandHandler, RaftRpcHandler,
 };
 use crate::config::{ClusterConfig, ClusterPeer};
 use chrono::{DateTime, Utc};
@@ -110,7 +110,14 @@ pub struct ClusterService {
     raft_status: Arc<RwLock<RaftStatus>>,
     raft_handler: Arc<RwLock<Option<Arc<dyn RaftRpcHandler>>>>,
     command_handler: Arc<RwLock<Option<Arc<dyn InternalCommandHandler>>>>,
+    event_handler: Arc<RwLock<Option<Arc<dyn ClusterEventHandler>>>>,
     topology_transition_gate: tokio::sync::RwLock<bool>,
+}
+
+struct ClusterRpcHandlers {
+    raft: Option<Arc<dyn RaftRpcHandler>>,
+    command: Option<Arc<dyn InternalCommandHandler>>,
+    event: Option<Arc<dyn ClusterEventHandler>>,
 }
 
 impl ClusterService {
@@ -147,6 +154,7 @@ impl ClusterService {
             })),
             raft_handler: Arc::new(RwLock::new(None)),
             command_handler: Arc::new(RwLock::new(None)),
+            event_handler: Arc::new(RwLock::new(None)),
             topology_transition_gate: tokio::sync::RwLock::new(false),
         }
     }
@@ -195,6 +203,12 @@ impl ClusterService {
         }
     }
 
+    pub fn set_event_handler(&self, handler: Arc<dyn ClusterEventHandler>) {
+        if let Ok(mut current) = self.event_handler.write() {
+            *current = Some(handler);
+        }
+    }
+
     fn raft_handler(&self) -> Option<Arc<dyn RaftRpcHandler>> {
         self.raft_handler
             .read()
@@ -209,8 +223,19 @@ impl ClusterService {
             .and_then(|handler| handler.clone())
     }
 
+    fn event_handler(&self) -> Option<Arc<dyn ClusterEventHandler>> {
+        self.event_handler
+            .read()
+            .ok()
+            .and_then(|handler| handler.clone())
+    }
+
     pub(crate) fn rpc_secret(&self) -> Vec<u8> {
         self.auth_token.as_ref().clone()
+    }
+
+    pub(crate) fn rpc_timeout(&self) -> Duration {
+        self.timeout
     }
 
     /// Mark the authenticated transport as available. This deliberately does
@@ -452,16 +477,17 @@ pub async fn run_cluster_listener(
                 match accept_res {
                     Ok((stream, _remote)) => {
                         let local_id = service.node_id().to_string();
-                        let raft_handler = service.raft_handler();
-                        let command_handler = service.command_handler();
                         tokio::spawn(handle_cluster_connection(
                             stream,
                             local_id,
                             Arc::clone(&service.peer_ids),
                             Arc::clone(&service.auth_token),
                             service.timeout,
-                            raft_handler,
-                            command_handler,
+                            ClusterRpcHandlers {
+                                raft: service.raft_handler(),
+                                command: service.command_handler(),
+                                event: service.event_handler(),
+                            },
                         ));
                     }
                     Err(e) => {
@@ -485,8 +511,7 @@ async fn handle_cluster_connection(
     peer_ids: Arc<BTreeSet<String>>,
     secret: Arc<Vec<u8>>,
     operation_timeout: Duration,
-    raft_handler: Option<Arc<dyn RaftRpcHandler>>,
-    command_handler: Option<Arc<dyn InternalCommandHandler>>,
+    handlers: ClusterRpcHandlers,
 ) {
     let handshake = tokio::time::timeout(Duration::from_secs(5), async {
         // Read: magic + peer_id + nonce + request proof.
@@ -566,17 +591,19 @@ async fn handle_cluster_connection(
                         if stream.read_exact(&mut rest).await.is_ok() {
                             let mut frame = header.to_vec();
                             frame.extend_from_slice(&rest);
-                            let response = if command_handler.is_some() {
-                                dispatch_authenticated_rpc_with_handlers(
+                            let response = if handlers.command.is_some() || handlers.event.is_some()
+                            {
+                                dispatch_authenticated_rpc_with_all_handlers(
                                     &frame,
                                     &secret,
                                     &local_node_id,
                                     &peer_id,
-                                    raft_handler.as_deref(),
-                                    command_handler.as_deref(),
+                                    handlers.raft.as_deref(),
+                                    handlers.command.as_deref(),
+                                    handlers.event.as_deref(),
                                 )
                                 .await
-                            } else if let Some(handler) = raft_handler.as_deref() {
+                            } else if let Some(handler) = handlers.raft.as_deref() {
                                 dispatch_authenticated_rpc_with_handler(
                                     &frame,
                                     &secret,
