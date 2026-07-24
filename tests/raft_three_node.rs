@@ -121,3 +121,133 @@ async fn three_node_cluster_elects_leader_over_authenticated_transport() {
     }
     drop(services);
 }
+
+/// A failed leader must not strand the remaining majority.  Stop both the
+/// leader's listener and Raft runtime, then assert that the two surviving
+/// nodes elect a different leader over the authenticated transport.
+#[tokio::test]
+async fn three_node_cluster_re_elects_after_leader_shutdown() {
+    let secret = "three-node-reelection-secret";
+    let mut reserved = Vec::new();
+    for _ in 0..3 {
+        reserved.push(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+    }
+    let addresses: [SocketAddr; 3] = reserved
+        .iter()
+        .map(|listener| listener.local_addr().unwrap())
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    drop(reserved);
+
+    let ids = ["reelect-1", "reelect-2", "reelect-3"];
+    let members = addresses
+        .into_iter()
+        .enumerate()
+        .map(|(index, address)| ((index + 1) as u64, BasicNode::new(address.to_string())))
+        .collect::<BTreeMap<_, _>>();
+    let mut services = Vec::new();
+    let mut rafts = Vec::new();
+    let mut shutdowns = Vec::new();
+    let mut listeners = Vec::new();
+    for (index, (id, address)) in ids.iter().zip(addresses).enumerate() {
+        let peers = ids
+            .iter()
+            .zip(addresses)
+            .filter(|(peer_id, _)| *peer_id != id)
+            .map(|(peer_id, address)| ClusterPeer {
+                node_id: (*peer_id).to_string(),
+                address,
+            })
+            .collect();
+        let config = ClusterConfig {
+            node_id: (*id).to_string(),
+            peers,
+            bind: address,
+            timeout_seconds: 1,
+            auth_token: secret.into(),
+        };
+        let service = Arc::new(ClusterService::new(&config));
+        let pool = repository::connect("sqlite::memory:").await.unwrap();
+        repository::migrate(&pool).await.unwrap();
+        let raft = construct_raft_with_id(pool, *id, secret.as_bytes(), (index + 1) as u64)
+            .await
+            .unwrap();
+        initialize_membership(&raft, &service, members.clone())
+            .await
+            .unwrap();
+        service.set_raft_handler(Arc::new(OpenRaftRpcHandler::new(raft.clone())));
+        let (tx, rx) = watch::channel(false);
+        listeners.push(tokio::spawn(run_cluster_listener(service.clone(), rx)));
+        services.push(service);
+        rafts.push(raft);
+        shutdowns.push(tx);
+    }
+
+    let old_leader = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            for raft in &rafts {
+                let metrics = raft.metrics();
+                let metrics = metrics.borrow();
+                if metrics.state.is_leader() && metrics.current_leader == Some(metrics.id) {
+                    return metrics.id;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("initial leader election timed out");
+    let old_index = (old_leader - 1) as usize;
+
+    // Do not fail the leader before its membership entry has reached both
+    // followers; until then OpenRaft correctly keeps them as learners.
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let replicated = rafts.iter().all(|raft| {
+                let metrics = raft.metrics();
+                let metrics = metrics.borrow();
+                metrics.membership_config.membership().nodes().count() == 3
+            });
+            if replicated {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("membership did not reach all nodes");
+
+    shutdowns[old_index].send(true).unwrap();
+    listeners.swap_remove(old_index).await.unwrap();
+    // Stopping the runtime as well as its listener models a crashed leader;
+    // leaving it alive would allow heartbeats to keep renewing its lease.
+    rafts[old_index].shutdown().await.unwrap();
+
+    let new_leader = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            for (index, raft) in rafts.iter().enumerate() {
+                if index == old_index {
+                    continue;
+                }
+                let metrics = raft.metrics();
+                let metrics = metrics.borrow();
+                if metrics.state.is_leader() && metrics.current_leader == Some(metrics.id) {
+                    return metrics.id;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("surviving majority did not re-elect a leader");
+    assert_ne!(new_leader, old_leader);
+
+    for index in 0..rafts.len() {
+        if index != old_index {
+            let _ = shutdowns[index].send(true);
+            let _ = rafts[index].shutdown().await;
+        }
+    }
+    drop(services);
+}
