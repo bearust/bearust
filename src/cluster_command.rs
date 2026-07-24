@@ -4,12 +4,16 @@
 //! gateway then ensures a command is offered to OpenRaft only by a local
 //! leader with quorum; it never calls repository mutation helpers directly.
 
-use crate::cluster::{ClusterService, RaftRole};
+use crate::cluster::ClusterService;
 use crate::cluster_raft::{BearustRaftConfig, ConfigCommand};
 use openraft::error::{ClientWriteError, RaftError};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
+
+const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_QUORUM_ACK_AGE_MILLIS: u64 = 1_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandActor {
@@ -68,24 +72,12 @@ impl ConfigCommandGateway {
             return Err(ClusterWriteError::NotReplicatedCommand);
         }
 
-        let write_state = self.cluster.raft_write_state();
-        match write_state.role {
-            RaftRole::Standalone => {}
-            RaftRole::Leader => {
-                if !write_state.quorum_available {
-                    return Err(ClusterWriteError::QuorumUnavailable);
-                }
-            }
-            RaftRole::Follower | RaftRole::Candidate | RaftRole::Unknown => {
-                return Err(ClusterWriteError::LeaderUnknown);
-            }
-        }
+        self.require_live_write_quorum()?;
 
         let command_id = command.command_id();
-        let response = self
-            .raft
-            .client_write(command)
+        let response = tokio::time::timeout(CLIENT_WRITE_TIMEOUT, self.raft.client_write(command))
             .await
+            .map_err(|_| ClusterWriteError::QuorumUnavailable)?
             .map_err(map_client_write_error)?;
         let leader_id = self
             .raft
@@ -99,6 +91,25 @@ impl ConfigCommandGateway {
             leader_id,
             commit_index: response.log_id.index,
         })
+    }
+
+    fn require_live_write_quorum(&self) -> Result<(), ClusterWriteError> {
+        let metrics = self.raft.metrics();
+        let metrics = metrics.borrow();
+        if !metrics.state.is_leader() || metrics.current_leader != Some(metrics.id) {
+            return Err(ClusterWriteError::LeaderUnknown);
+        }
+
+        let single_voter_membership =
+            metrics.membership_config.membership().voter_ids().count() == 1;
+        if self.cluster.is_single_node() && single_voter_membership {
+            return Ok(());
+        }
+
+        match metrics.millis_since_quorum_ack {
+            Some(age) if age <= MAX_QUORUM_ACK_AGE_MILLIS => Ok(()),
+            _ => Err(ClusterWriteError::QuorumUnavailable),
+        }
     }
 }
 
