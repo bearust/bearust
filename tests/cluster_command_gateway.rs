@@ -27,7 +27,7 @@ fn test_actor() -> CommandActor {
     CommandActor {
         user_id: 7,
         email: "operator@example.test".into(),
-        role: "admin".into(),
+        role: "operator".into(),
     }
 }
 
@@ -50,7 +50,7 @@ fn test_create_command() -> ConfigCommand {
 async fn seed_test_actor(pool: &repository::DbPool) {
     sqlx::query(
         "INSERT INTO users(id,email,password_hash,role,created_at,disabled)
-         VALUES(7,'operator@example.test','hash','admin','2026-01-01T00:00:00Z',0)",
+         VALUES(7,'operator@example.test','hash','operator','2026-01-01T00:00:00Z',0)",
     )
     .execute(pool)
     .await
@@ -58,7 +58,7 @@ async fn seed_test_actor(pool: &repository::DbPool) {
 }
 
 #[test]
-fn forwarded_command_rejects_tampered_actor_envelope() {
+fn forwarded_command_accepts_structurally_valid_viewer_for_authoritative_authorization() {
     let command = test_create_command();
     let mut payload = encode_forwarded_command("node-1", command, test_actor()).unwrap();
     let actor = payload
@@ -67,10 +67,8 @@ fn forwarded_command_rejects_tampered_actor_envelope() {
         .expect("forwarded command has an actor object");
     actor.insert("role".into(), serde_json::Value::String("viewer".into()));
 
-    assert!(matches!(
-        decode_forwarded_command(&payload),
-        Err(ClusterWriteError::ForwardAuthentication)
-    ));
+    let (_, _, decoded_actor) = decode_forwarded_command(&payload).unwrap();
+    assert_eq!(decoded_actor.role, "viewer");
 }
 
 #[test]
@@ -436,13 +434,21 @@ async fn repeated_forwarded_command_returns_the_original_receipt() {
 }
 
 #[tokio::test]
-async fn repeated_command_after_gateway_restart_returns_the_original_receipt() {
+async fn receipt_survives_log_purge_and_gateway_restart() {
     let cluster = three_node_gateway_cluster(42326).await;
+    for pool in &cluster.pools {
+        sqlx::query("UPDATE users SET role='admin' WHERE id=7")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    let mut actor = test_actor();
+    actor.role = "admin".into();
     let leader = wait_for_live_leader(&cluster.rafts).await;
     let follower = (leader + 1) % cluster.rafts.len();
     let command = test_create_command();
     let original = cluster.gateways[follower]
-        .submit(command.clone(), test_actor())
+        .submit(command.clone(), actor.clone())
         .await
         .unwrap();
     for raft in &cluster.rafts {
@@ -451,19 +457,87 @@ async fn repeated_command_after_gateway_restart_returns_the_original_receipt() {
             .await
             .unwrap();
     }
+    repository::purge_raft_log(
+        &cluster.pools[leader],
+        &format!("node-{}", leader + 1),
+        original.commit_index as i64,
+    )
+    .await
+    .unwrap();
     let restarted = ConfigCommandGateway::new(
         Arc::new(cluster.rafts[leader].clone()),
         cluster.clusters[leader].clone(),
         cluster.pools[leader].clone(),
     );
-    cluster.clusters[leader].set_command_handler(Arc::new(restarted));
+    cluster.clusters[leader].set_command_handler(Arc::new(restarted.clone()));
 
-    let retried = cluster.gateways[follower]
-        .submit(command, test_actor())
-        .await
-        .unwrap();
+    let retried = restarted.submit(command, actor).await.unwrap();
 
     assert_eq!(retried, original);
+    cluster.shutdown().await;
+}
+
+#[tokio::test]
+async fn gateway_denies_viewer_disabled_and_actor_mismatch() {
+    let cluster = three_node_gateway_cluster(42331).await;
+    let node = wait_for_live_leader(&cluster.rafts).await;
+    let pool = &cluster.pools[node];
+
+    sqlx::query("UPDATE users SET role='viewer',disabled=0 WHERE id=7")
+        .execute(pool)
+        .await
+        .unwrap();
+    let mut actor = test_actor();
+    actor.role = "viewer".into();
+    assert_eq!(
+        cluster.gateways[node]
+            .submit(test_create_command(), actor)
+            .await,
+        Err(ClusterWriteError::ForwardAuthentication)
+    );
+
+    sqlx::query("UPDATE users SET role='operator',disabled=1 WHERE id=7")
+        .execute(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        cluster.gateways[node]
+            .submit(test_create_command(), test_actor())
+            .await,
+        Err(ClusterWriteError::ForwardAuthentication)
+    );
+
+    sqlx::query("UPDATE users SET disabled=0 WHERE id=7")
+        .execute(pool)
+        .await
+        .unwrap();
+    let mut mismatched = test_actor();
+    mismatched.role = "admin".into();
+    assert_eq!(
+        cluster.gateways[node]
+            .submit(test_create_command(), mismatched)
+            .await,
+        Err(ClusterWriteError::ForwardAuthentication)
+    );
+
+    let mut mismatched = test_actor();
+    mismatched.user_id += 1;
+    assert_eq!(
+        cluster.gateways[node]
+            .submit(test_create_command(), mismatched)
+            .await,
+        Err(ClusterWriteError::ForwardAuthentication)
+    );
+
+    let mut mismatched = test_actor();
+    mismatched.email = "different@example.test".into();
+    assert_eq!(
+        cluster.gateways[node]
+            .submit(test_create_command(), mismatched)
+            .await,
+        Err(ClusterWriteError::ForwardAuthentication)
+    );
+
     cluster.shutdown().await;
 }
 

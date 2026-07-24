@@ -35,6 +35,8 @@ pub struct SqlxSnapshotBuilder {
 struct SnapshotEnvelope {
     proxy_hosts: Vec<crate::control_plane::models::ProxyHost>,
     host_rate_limits: Vec<(i64, crate::control_plane::models::RateLimitConfig)>,
+    #[serde(default)]
+    command_receipts: Vec<repository::RaftCommandReceipt>,
 }
 
 fn storage_error(
@@ -323,6 +325,9 @@ impl openraft::RaftSnapshotBuilder<crate::cluster_raft::BearustRaftConfig> for S
             host_rate_limits: repository::list_host_rate_limit_configs(&self.storage.pool)
                 .await
                 .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?,
+            command_receipts: repository::list_raft_command_receipts(&self.storage.pool)
+                .await
+                .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?,
         };
         let encoded = serde_json::to_vec(&envelope)
             .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
@@ -392,11 +397,20 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
         let mut results = Vec::new();
         for entry in entries {
             if let EntryPayload::Normal(command) = entry.payload {
-                let applied = repository::apply_raft_command(&self.pool, &command)
+                let applied = if matches!(command, ConfigCommand::Noop { .. }) {
+                    repository::apply_raft_command(&self.pool, &command).await
+                } else {
+                    repository::apply_raft_command_with_receipt(
+                        &self.pool,
+                        &command,
+                        entry.log_id.index as i64,
+                        entry.log_id.leader_id.node_id as i64,
+                    )
                     .await
-                    .map_err(|e| {
-                        storage_error(ErrorSubject::Apply(entry.log_id), ErrorVerb::Write, e)
-                    })?;
+                }
+                .map_err(|e| {
+                    storage_error(ErrorSubject::Apply(entry.log_id), ErrorVerb::Write, e)
+                })?;
                 repository::save_raft_committed_state(
                     &self.pool,
                     &self.node_id,
@@ -469,12 +483,49 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
             .execute(&mut *tx)
             .await
             .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        sqlx::query("DELETE FROM raft_command_receipts")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        sqlx::query("DELETE FROM raft_command_ids")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
         let now = chrono::Utc::now().to_rfc3339();
         for host in &envelope.proxy_hosts {
             sqlx::query("INSERT INTO proxy_hosts(id,name,domain,upstream_host,upstream_port,tls_mode,certificate_id,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(host.id).bind(&host.name).bind(&host.domain).bind(&host.upstream_host).bind(host.upstream_port as i64).bind(&host.tls_mode).bind(host.certificate_id).bind(host.enabled as i64).bind(&now).bind(&now).execute(&mut *tx).await.map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
         }
         for (host_id, config) in &envelope.host_rate_limits {
             sqlx::query("INSERT INTO host_rate_limit_configs(host_id,capacity,refill_per_second,updated_at) VALUES(?,?,?,?)").bind(host_id).bind(config.capacity as i64).bind(config.refill_per_second).bind(&config.updated_at).execute(&mut *tx).await.map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        }
+        for receipt in &envelope.command_receipts {
+            if uuid::Uuid::parse_str(&receipt.command_id).is_err()
+                || receipt.log_index < 0
+                || receipt.leader_id <= 0
+            {
+                return Err(storage_error(
+                    ErrorSubject::Snapshot(None),
+                    ErrorVerb::Write,
+                    "snapshot contains invalid command receipt provenance",
+                ));
+            }
+            sqlx::query("INSERT INTO raft_command_ids(command_id,applied_at) VALUES(?,?)")
+                .bind(&receipt.command_id)
+                .bind(&receipt.applied_at)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+            sqlx::query(
+                "INSERT INTO raft_command_receipts(command_id,log_index,leader_id,applied_at)
+                 VALUES(?,?,?,?)",
+            )
+            .bind(&receipt.command_id)
+            .bind(receipt.log_index)
+            .bind(receipt.leader_id)
+            .bind(&receipt.applied_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
         }
         tx.commit()
             .await

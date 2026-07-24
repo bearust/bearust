@@ -2,76 +2,104 @@
 
 ## Status
 
-Completed the requested command-forwarding and cluster-listener review fixes.
+Completed the authenticated command-forwarding fixes, including the final
+durable-receipt and actor-authorization findings.
 
 ## Source changes
 
-- `ConfigCommandGateway` now owns the node database pool. Before a write or
-  forwarded write is accepted, it resolves the active persisted user, verifies
-  the actor ID/email/role against that record, and checks the existing
-  `proxy_hosts.write` RBAC grant at the command's global or host scope.
-- Duplicate command retries now look up the first applied, committed Raft log
-  record by local node ID and `command_id`. The gateway reconstructs the
-  original leader ID and commit index from that durable record, so a recreated
-  gateway or a new leader returns the original receipt instead of appending a
-  duplicate entry.
-- Inbound handshakes now accept only configured peer node IDs and explicitly
-  reject the local node ID, even when the caller knows the cluster HMAC secret.
-- The post-handshake RPC operation is bounded by the configured cluster timeout
-  instead of a hard-coded 50 ms header window. The bound covers the complete
-  frame read, dispatch, and response write while preserving status and Raft RPC
-  routing.
+- `ConfigCommandGateway` resolves duplicate command receipts from the
+  `raft_command_receipts` state-machine ledger rather than purgeable Raft log
+  rows. A recreated gateway therefore returns the first applied leader ID and
+  commit index without appending another command.
+- Migration `0012_raft_command_receipts.sql` creates the command-keyed receipt
+  ledger and backfills the earliest recoverable committed receipt for existing
+  applied commands whose log provenance is still present.
+- State-machine apply records a real configuration command's ID, first log
+  index, leader ID, and replicated mutation in one transaction. A duplicate
+  apply, including one under a later leader, retains the original receipt.
+- Raft snapshots now carry command receipt provenance. Snapshot installation
+  atomically replaces both the receipt ledger and the applied-command ID ledger
+  alongside replicated configuration, so a snapshot-recovered node can return
+  the original receipt after compaction or leadership change.
+- Forwarded actor shape validation no longer hard-codes the `admin` role. It
+  bounds the ID, email, and role metadata, then both the submitting node and
+  receiving leader re-resolve the active persisted user, require exact
+  ID/email/role consistency, reject disabled or mismatched users, and consult
+  the authoritative `proxy_hosts.write` grant at global or host scope.
+- The earlier Task 2 fixes remain in place: inbound handshakes accept only
+  configured peers, and the complete post-handshake operation uses the
+  configured cluster timeout.
 
 ## Test updates
 
-- Existing three-node gateway fixtures now seed the persisted actor on every
-  node and pass each node's database pool into the gateway.
-- Added regression coverage for an unknown authenticated origin, an RPC frame
-  delayed beyond 50 ms, and receipt recovery after gateway recreation.
-- Updated listener/readiness callers to use node IDs present in the configured
-  peer membership.
+- Three-node gateway fixtures use an authorized persisted operator, proving
+  that non-admin writers can submit and forward commands.
+- Added denial coverage for a permissionless viewer, a disabled operator, and
+  actor/persisted ID, email, or role mismatch.
+- Added a regression that commits a command, purges its leader log row,
+  recreates the gateway, retries the same command ID, and receives the original
+  receipt.
+- Added state-machine/snapshot coverage that applies a duplicate command under
+  a later leader, installs the snapshot on another node, and verifies that the
+  original leader ID, log index, and applied-command identity survive.
 
 ## Red evidence
 
-Before the source fixes, the requested focused command reported three failures:
+Before the final fixes:
 
 ```text
-cluster_listener_accepts_rpc_frame_delayed_beyond_fifty_milliseconds ... FAILED
-cluster_listener_rejects_valid_hmac_from_unknown_node_id ... FAILED
-repeated_command_after_gateway_restart_returns_the_original_receipt ... FAILED
+forwarded_command_accepts_structurally_valid_viewer_for_authoritative_authorization
+called `Result::unwrap()` on an `Err` value: ForwardAuthentication
 
-test result: FAILED. 9 passed; 3 failed
+follower_gateway_forwards_without_locally_committing
+called `Result::unwrap()` on an `Err` value: ForwardAuthentication
 ```
 
-The delayed connection closed with `UnexpectedEof`, the unknown identity
-received a valid status response, and the gateway retry returned commit index 3
-instead of the original commit index 2.
+The structural gate rejected both viewer metadata that should reach
+authoritative authorization and an operator with the built-in
+`proxy_hosts.write` grant.
+
+After log purge and gateway recreation, the receipt regression reproduced the
+provenance loss:
+
+```text
+assertion `left == right` failed
+left:  CommitReceipt { leader_id: 1, commit_index: 3, ... }
+right: CommitReceipt { leader_id: 1, commit_index: 2, ... }
+```
+
+Before receipt provenance was added to the snapshot envelope:
+
+```text
+snapshot_install_preserves_applied_command_provenance ... FAILED
+snapshot install must preserve applied command identity
+```
 
 ## Verification
 
-```text
-cargo +stable test --test cluster_command_gateway --test cluster -- --test-threads=1
-```
-
-Result:
+Exact requested focused suite:
 
 ```text
+cargo +stable test --test cluster_command_gateway --test cluster_raft_storage --test cluster -- --test-threads=1
+
 cluster: 8 passed; 0 failed
-cluster_command_gateway: 12 passed; 0 failed
+cluster_command_gateway: 13 passed; 0 failed
+cluster_raft_storage: 3 passed; 0 failed
 ```
+
+Formatting and lint:
 
 ```text
 cargo +stable fmt --all -- --check
 cargo +stable clippy --all-targets -- -D warnings
-git diff --check
 ```
 
-All three commands completed successfully. Clippy finished the all-target check
-with warnings denied.
+Both commands completed successfully; Clippy finished with warnings denied.
+`git diff --check` also completed without whitespace errors.
 
 ## Scope
 
-The Task 2 commit includes only the gateway, cluster listener, Raft repository
-lookup, focused cluster tests, and this report.
-`.superpowers/sdd/progress.md` remains modified in the shared worktree and is
-deliberately excluded.
+The final Task 2 fix is limited to the receipt migration, Raft
+repository/state-machine/snapshot path, command gateway authorization and
+receipt lookup, focused tests, and this report. `.superpowers/sdd/progress.md`
+remains modified in the shared worktree and is deliberately excluded.

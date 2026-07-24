@@ -10,6 +10,7 @@ use crate::control_plane::models::{
 use crate::control_plane::rbac::Role;
 use crate::rate_limit::{RateLimitAction, RateLimitKeyScope, RateLimitPolicy};
 use base64::Engine as _;
+use serde::{Deserialize, Serialize};
 use sqlx::{any::AnyPoolOptions, Row};
 use std::hash::{Hash, Hasher};
 use std::sync::Once;
@@ -54,6 +55,14 @@ pub struct RaftCommittedState {
     pub log_index: i64,
     pub term: i64,
     pub leader_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaftCommandReceipt {
+    pub command_id: String,
+    pub log_index: i64,
+    pub leader_id: i64,
+    pub applied_at: String,
 }
 
 /// Register a stable numeric OpenRaft identity for an application node name.
@@ -406,39 +415,49 @@ pub async fn load_raft_log_entries(
         .collect())
 }
 
-/// Load the first committed log entry for an already-applied command.
+/// Load receipt provenance recorded atomically by the Raft state machine.
 ///
-/// Joining both the committed watermark and the applied-command ledger keeps
-/// an appended but uncommitted entry from being mistaken for a durable
-/// command receipt.
-pub async fn load_committed_raft_log_entry_by_command_id(
+/// Receipt rows are independent of the purgeable Raft log, so retries keep
+/// returning the first applied index and leader after compaction or restart.
+pub async fn load_raft_command_receipt(
     pool: &DbPool,
-    node_id: &str,
     command_id: &str,
-) -> Result<Option<RaftLogRecord>, sqlx::Error> {
+) -> Result<Option<RaftCommandReceipt>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT l.node_id,l.log_index,l.term,l.leader_id,l.payload,l.command_id
-         FROM raft_log_entries l
-         JOIN raft_committed_state c
-           ON c.node_id=l.node_id AND l.log_index<=c.log_index
-         JOIN raft_command_ids a
-           ON a.command_id=l.command_id
-         WHERE l.node_id=? AND l.command_id=?
-         ORDER BY l.log_index ASC
-         LIMIT 1",
+        "SELECT command_id,log_index,leader_id,applied_at
+         FROM raft_command_receipts
+         WHERE command_id=?",
     )
-    .bind(node_id)
     .bind(command_id)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|row| RaftLogRecord {
-        node_id: row.get("node_id"),
-        log_index: row.get("log_index"),
-        term: row.get("term"),
-        leader_id: row.get("leader_id"),
-        payload: row.get("payload"),
+    Ok(row.map(|row| RaftCommandReceipt {
         command_id: row.get("command_id"),
+        log_index: row.get("log_index"),
+        leader_id: row.get("leader_id"),
+        applied_at: row.get("applied_at"),
     }))
+}
+
+pub async fn list_raft_command_receipts(
+    pool: &DbPool,
+) -> Result<Vec<RaftCommandReceipt>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT command_id,log_index,leader_id,applied_at
+         FROM raft_command_receipts
+         ORDER BY log_index,command_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| RaftCommandReceipt {
+            command_id: row.get("command_id"),
+            log_index: row.get("log_index"),
+            leader_id: row.get("leader_id"),
+            applied_at: row.get("applied_at"),
+        })
+        .collect())
 }
 
 pub async fn truncate_raft_log(
@@ -546,6 +565,30 @@ pub async fn apply_raft_command(
     pool: &DbPool,
     command: &ConfigCommand,
 ) -> Result<bool, sqlx::Error> {
+    apply_raft_command_inner(pool, command, None).await
+}
+
+/// Apply a committed command and persist its immutable receipt provenance in
+/// the same transaction as the replicated mutation and command ID.
+pub async fn apply_raft_command_with_receipt(
+    pool: &DbPool,
+    command: &ConfigCommand,
+    log_index: i64,
+    leader_id: i64,
+) -> Result<bool, sqlx::Error> {
+    if log_index < 0 || leader_id <= 0 {
+        return Err(sqlx::Error::Protocol(
+            "invalid raft command receipt provenance".into(),
+        ));
+    }
+    apply_raft_command_inner(pool, command, Some((log_index, leader_id))).await
+}
+
+async fn apply_raft_command_inner(
+    pool: &DbPool,
+    command: &ConfigCommand,
+    receipt: Option<(i64, i64)>,
+) -> Result<bool, sqlx::Error> {
     command
         .validate()
         .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
@@ -557,6 +600,27 @@ pub async fn apply_raft_command(
         .await?
         .is_some()
     {
+        if let Some((log_index, leader_id)) = receipt {
+            let receipt_exists =
+                sqlx::query("SELECT 1 FROM raft_command_receipts WHERE command_id=?")
+                    .bind(&command_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .is_some();
+            if !receipt_exists {
+                sqlx::query(
+                    "INSERT INTO raft_command_receipts(command_id,log_index,leader_id,applied_at)
+                     VALUES(?,?,?,?)",
+                )
+                .bind(&command_id)
+                .bind(log_index)
+                .bind(leader_id)
+                .bind(chrono::Utc::now().to_rfc3339())
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+            }
+        }
         return Ok(false);
     }
 
@@ -623,11 +687,24 @@ pub async fn apply_raft_command(
         }
     }
 
+    let applied_at = chrono::Utc::now().to_rfc3339();
     sqlx::query("INSERT INTO raft_command_ids(command_id,applied_at) VALUES(?,?)")
-        .bind(command_id)
-        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(&command_id)
+        .bind(&applied_at)
         .execute(&mut *tx)
         .await?;
+    if let Some((log_index, leader_id)) = receipt {
+        sqlx::query(
+            "INSERT INTO raft_command_receipts(command_id,log_index,leader_id,applied_at)
+             VALUES(?,?,?,?)",
+        )
+        .bind(command_id)
+        .bind(log_index)
+        .bind(leader_id)
+        .bind(applied_at)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     Ok(true)
 }

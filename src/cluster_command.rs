@@ -27,6 +27,7 @@ const LEADER_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 const MAX_QUORUM_ACK_AGE_MILLIS: u64 = 1_000;
 const FORWARDED_COMMAND_PROTOCOL_VERSION: u8 = 1;
 const MAX_ACTOR_EMAIL_BYTES: usize = 320;
+const MAX_ACTOR_ROLE_BYTES: usize = 64;
 const MAX_NODE_ID_BYTES: usize = 255;
 const MAX_CACHED_RECEIPTS: usize = 1_024;
 
@@ -143,7 +144,8 @@ fn validate_command_and_actor(
     if actor.user_id <= 0
         || actor.email.is_empty()
         || actor.email.len() > MAX_ACTOR_EMAIL_BYTES
-        || actor.role != "admin"
+        || actor.role.is_empty()
+        || actor.role.len() > MAX_ACTOR_ROLE_BYTES
     {
         return Err(ClusterWriteError::ForwardAuthentication);
     }
@@ -314,20 +316,16 @@ impl ConfigCommandGateway {
         &self,
         command_id: Uuid,
     ) -> Result<Option<CommitReceipt>, ClusterWriteError> {
-        let entry = repository::load_committed_raft_log_entry_by_command_id(
-            &self.db,
-            self.cluster.node_id(),
-            &command_id.to_string(),
-        )
-        .await
-        .map_err(|_| ClusterWriteError::QuorumUnavailable)?;
-        entry
-            .map(|entry| {
+        let receipt = repository::load_raft_command_receipt(&self.db, &command_id.to_string())
+            .await
+            .map_err(|_| ClusterWriteError::QuorumUnavailable)?;
+        receipt
+            .map(|receipt| {
                 Ok(CommitReceipt {
                     command_id,
-                    leader_id: u64::try_from(entry.leader_id)
+                    leader_id: u64::try_from(receipt.leader_id)
                         .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
-                    commit_index: u64::try_from(entry.log_index)
+                    commit_index: u64::try_from(receipt.log_index)
                         .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
                 })
             })
