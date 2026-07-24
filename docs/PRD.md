@@ -782,4 +782,31 @@ Phase 10A delivers the cluster foundation for multi-node BeaRust deployments:
 - **Node Identity & Peer Configuration**: Explicit `NODE_ID`, `CLUSTER_PEERS`, and shared `CLUSTER_AUTH_TOKEN` configuration parsed via environment variables or TOML (`[cluster]` section). Validates non-empty node IDs, rejects malformed, duplicate, or self-referential peer definitions, enforces a 64-peer bound, and defaults to single-node operation (`peers = []`) when omitted.
 - **Bounded Peer Health Service**: `ClusterService` executes an authenticated HMAC challenge-response handshake over out-of-band TCP connections with bounded timeouts and concurrency. Peer failures (authentication failure, connection refused, timeout, unreachable) produce per-peer unhealthy snapshots without causing process errors or affecting proxy request paths.
 - **Authenticated Status API**: `GET /api/cluster/status` exposes authenticated local node identity, cluster status, and redacted peer health snapshots. Responses omit raw connection strings, secrets, and credentials.
-- **Deferred Scope**: Raft consensus/state replication, leader election, write forwarding, cross-node event fan-out/replay, and keepalived automation are deferred to Phases 10B and 10C.
+- **Delivered in Phases 10B–10C**: Raft consensus/state replication, leader election, authenticated write forwarding, committed cross-node invalidation fan-out, and documented host-level keepalived/VIP operation. BeaRust does not execute keepalived or mutate host interfaces.
+
+### Phase 10B status: durable Raft configuration synchronization
+
+Phase 10B adds bounded, authenticated OpenRaft storage and membership
+management for multi-node configuration state. Replicated commands are applied
+through the state machine with idempotent command receipts; single-node
+configurations remain compatible, and follower reads remain local. Cluster
+transport frames are size-limited and authenticated with the existing
+handshake; sensitive request data and raw database errors are not forwarded.
+
+### Phase 10C status: HA operations and keepalived/VIP guidance
+
+Phase 10C completes the multi-node control-plane operations increment. Writes
+from followers use the authenticated leader gateway and return stable errors
+when leadership or quorum is unavailable. Committed invalidation events fan
+out through bounded peer queues, are deduplicated, and trigger local state
+reload/catch-up without changing the public SSE payload contract. Failover,
+quorum loss, reconnect, and idempotent retry behavior are covered by the
+three-node acceptance tests.
+
+Keepalived remains a host-level VRRP responsibility. The
+[keepalived operations guide](keepalived.md) supplies a bounded, authenticated
+readiness check, three-node priorities and `nopreempt` example, split-brain
+fencing warnings, and rollback steps. The readiness check is fail-closed on
+proxy/control listener failure, unknown leader, stale quorum, unhealthy peer
+set, timeout, or malformed status; it never changes a container or host
+interface. Phase 11 (localization) is next.

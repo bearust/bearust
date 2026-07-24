@@ -66,6 +66,28 @@ async fn spawn_protocol_responder(responder_node_id: &'static str) -> std::net::
     addr
 }
 
+#[test]
+fn keepalived_documentation_has_bounded_fail_closed_readiness_contract() {
+    let docs = include_str!("../docs/keepalived.md");
+    for required in [
+        "--max-time",
+        "/api/health",
+        "/api/cluster/status",
+        "raft_quorum_available",
+        "raft_role == \"leader\"",
+        "nopreempt",
+        "split brain",
+        "systemctl stop keepalived",
+        "Do not resolve a split brain by adding or deleting the VIP from inside a",
+    ] {
+        assert!(
+            docs.contains(required),
+            "missing keepalived contract: {required}"
+        );
+    }
+    assert!(docs.contains("does not mutate a container or host interface"));
+}
+
 #[tokio::test]
 async fn cluster_status_endpoint_requires_authentication() {
     let dir = tempdir().unwrap();

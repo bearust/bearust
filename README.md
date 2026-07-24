@@ -109,15 +109,22 @@ The endpoint accepts these optional query parameters:
 
 Each row contains only `id`, `actor`, `event`, redacted `details`, and `created_at`. Actor labels are the current user email, `system` for system-generated events, or `deleted-user` when the original account no longer exists. Passwords, session/token hashes, setup tokens, private keys, provider credentials, request bodies, and raw SQL/database errors are sanitized at the read boundary and never serialized, rendered, or otherwise exposed. Audit history is strictly read-only: there are no delete, mutation, or export endpoints.
 
-### Multi-Node Cluster Foundation (Phase 10A)
+### Multi-Node Cluster and HA operations (Phases 10A–10C)
 
 BeaRust includes an explicit node identity and cluster peer foundation for multi-node deployments. Setting `CLUSTER_PEERS` (or configuring `[cluster]` in TOML) together with a shared `CLUSTER_AUTH_TOKEN` (at least 32 bytes) enables authenticated, out-of-band peer connectivity checks without affecting proxy request handling or single-node operations.
 
 - `NODE_ID`: Unique node identifier (defaults to `node1`).
 - `CLUSTER_PEERS`: Comma-separated `node_id=host:port` peer list (defaults to empty, preserving single-node behavior).
-- `GET /api/cluster/status`: Authenticated control-plane status endpoint returning local node identity and redacted peer connectivity health snapshots.
+- `GET /api/cluster/status`: Authenticated control-plane status endpoint returning local node identity, redacted peer connectivity health snapshots, and additive Raft leader/quorum readiness fields.
 
-> **Note**: Phase 10A establishes explicit node identity, validation, and peer health visibility. Raft state replication, leader election, write forwarding, cross-node event replay, and keepalived automation are deferred to Phases 10B and 10C.
+Phase 10B adds durable Raft-backed configuration replication. Phase 10C adds
+leader-aware write forwarding, committed cross-node invalidations, bounded
+failover/quorum coverage, and the host-level keepalived/VIP procedure. BeaRust
+never changes host interfaces or runs keepalived inside a container; follow
+[the keepalived operations guide](docs/keepalived.md) for the readiness check,
+fencing procedure, and three-node VRRP example.
+
+Phase 11 (localization) is the next planned product phase.
 
 ### Phase 4D.2 realtime updates
 
