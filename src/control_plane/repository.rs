@@ -629,27 +629,10 @@ async fn apply_raft_command_inner(
         .await?
         .is_some()
     {
-        if let Some((log_index, leader_id)) = receipt {
-            let receipt_exists =
-                sqlx::query("SELECT 1 FROM raft_command_receipts WHERE command_id=?")
-                    .bind(&command_id)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .is_some();
-            if !receipt_exists {
-                sqlx::query(
-                    "INSERT INTO raft_command_receipts(command_id,log_index,leader_id,applied_at)
-                     VALUES(?,?,?,?)",
-                )
-                .bind(&command_id)
-                .bind(log_index)
-                .bind(leader_id)
-                .bind(chrono::Utc::now().to_rfc3339())
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
-            }
-        }
+        // A later duplicate cannot prove the original leader/index. Legacy
+        // command-ID-only rows therefore remain without a receipt rather than
+        // fabricating provenance from the replay entry.
+        tx.rollback().await?;
         return Ok(false);
     }
 

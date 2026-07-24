@@ -463,6 +463,11 @@ pub trait RaftRuntimeAdapters:
 {
 }
 
+fn bounded_raft_config(mut config: openraft::Config) -> openraft::Config {
+    config.snapshot_max_chunk_size = crate::cluster_raft::MAX_SNAPSHOT_CHUNK_BYTES as u64;
+    config
+}
+
 /// Construct an OpenRaft instance with the durable SQLx log/state-machine
 /// adapters and authenticated network factory. The caller owns the returned
 /// handle and must explicitly bootstrap/join it; construction alone does not
@@ -474,7 +479,7 @@ pub async fn build_raft(
 ) -> Result<openraft::Raft<BearustRaftConfig>, openraft::error::Fatal<u64>> {
     let network =
         AuthenticatedRaftNetworkFactory::new(secret).ok_or(openraft::error::Fatal::Panicked)?;
-    let config = Arc::new(openraft::Config::default());
+    let config = Arc::new(bounded_raft_config(openraft::Config::default()));
     openraft::Raft::new(id, config, network, storage.clone(), storage).await
 }
 
@@ -714,8 +719,8 @@ pub async fn construct_raft(
     let node_id = storage.raft_id().await.map_err(|e| e.to_string())?;
     let network = AuthenticatedRaftNetworkFactory::with_local_id(auth_secret, node_name)
         .ok_or_else(|| "raft auth secret must not be empty".to_string())?;
-    let mut config = openraft::Config::build(&["bearust"]).map_err(|e| e.to_string())?;
-    config.snapshot_max_chunk_size = crate::cluster_raft::MAX_SNAPSHOT_CHUNK_BYTES as u64;
+    let config =
+        bounded_raft_config(openraft::Config::build(&["bearust"]).map_err(|e| e.to_string())?);
     openraft::Raft::new(node_id, Arc::new(config), network, storage.clone(), storage)
         .await
         .map_err(|e| e.to_string())
@@ -748,9 +753,23 @@ pub async fn construct_raft_with_id(
     let storage = SqlxRaftStorage::new(pool, node_name.clone()).map_err(|e| e.to_string())?;
     let network = AuthenticatedRaftNetworkFactory::with_local_id(auth_secret, node_name)
         .ok_or_else(|| "raft auth secret must not be empty".to_string())?;
-    let mut config = openraft::Config::build(&["bearust"]).map_err(|e| e.to_string())?;
-    config.snapshot_max_chunk_size = crate::cluster_raft::MAX_SNAPSHOT_CHUNK_BYTES as u64;
+    let config =
+        bounded_raft_config(openraft::Config::build(&["bearust"]).map_err(|e| e.to_string())?);
     openraft::Raft::new(raft_id, Arc::new(config), network, storage.clone(), storage)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_raft_config;
+
+    #[test]
+    fn every_raft_constructor_uses_transport_safe_snapshot_chunks() {
+        let config = bounded_raft_config(openraft::Config::default());
+        assert_eq!(
+            config.snapshot_max_chunk_size,
+            crate::cluster_raft::MAX_SNAPSHOT_CHUNK_BYTES as u64
+        );
+    }
 }

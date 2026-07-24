@@ -128,6 +128,7 @@ async fn snapshot_bounds_many_receipts_and_keeps_the_newest_provenance() {
     repository::migrate(&source_pool).await.unwrap();
     let mut source = SqlxRaftStorage::new(source_pool.clone(), "node-a").unwrap();
     let mut tx = source_pool.begin().await.unwrap();
+    let byte_pressure_applied_at = format!("2026-07-24T00:00:00Z-{}", "x".repeat(1_024));
     for index in 1..=RECEIPT_COUNT {
         let command_id = Uuid::from_u128(index as u128).to_string();
         sqlx::query(
@@ -135,7 +136,7 @@ async fn snapshot_bounds_many_receipts_and_keeps_the_newest_provenance() {
              ON CONFLICT(command_id) DO NOTHING",
         )
         .bind(&command_id)
-        .bind("2026-07-24T00:00:00Z")
+        .bind(&byte_pressure_applied_at)
         .execute(&mut *tx)
         .await
         .unwrap();
@@ -146,7 +147,7 @@ async fn snapshot_bounds_many_receipts_and_keeps_the_newest_provenance() {
         .bind(command_id)
         .bind(index)
         .bind(1_i64)
-        .bind("2026-07-24T00:00:00Z")
+        .bind(&byte_pressure_applied_at)
         .execute(&mut *tx)
         .await
         .unwrap();
@@ -191,6 +192,20 @@ async fn snapshot_bounds_many_receipts_and_keeps_the_newest_provenance() {
             .unwrap()
             .get("count");
     assert!(target_receipt_count < RECEIPT_COUNT);
+    assert!(
+        target_receipt_count <= bearust::cluster_raft_storage::MAX_SNAPSHOT_COMMAND_RECEIPTS as i64
+    );
+    let oldest_retained_index: i64 =
+        sqlx::query("SELECT MIN(log_index) AS log_index FROM raft_command_receipts")
+            .fetch_one(&target_pool)
+            .await
+            .unwrap()
+            .get("log_index");
+    assert_eq!(
+        oldest_retained_index,
+        RECEIPT_COUNT - target_receipt_count + 1,
+        "the byte budget must retain one contiguous newest receipt window"
+    );
     assert!(
         repository::load_raft_command_receipt(
             &target_pool,

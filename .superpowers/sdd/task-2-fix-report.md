@@ -16,6 +16,9 @@ durable-receipt race, bounded-snapshot, and actor-authorization findings.
   between the retry's pre-check and apply, the retry's `Duplicate` result
   returns the earlier leader/index. A duplicate without durable provenance
   fails closed and is never synthesized or cached at the retry log position.
+- The state machine likewise never backfills missing provenance from a later
+  duplicate. Legacy command-ID-only rows remain receipt-less because the
+  original leader/index is unknowable; the gateway returns a safe error.
 - Migration `0012_raft_command_receipts.sql` creates the command-keyed receipt
   ledger and backfills the earliest recoverable committed receipt for existing
   applied commands whose log provenance is still present.
@@ -35,7 +38,8 @@ durable-receipt race, bounded-snapshot, and actor-authorization findings.
   node recovered solely from that snapshot.
 - OpenRaft snapshot transfer uses 48 KiB chunks so worst-case JSON byte-array
   expansion plus InstallSnapshot metadata stays within the authenticated RPC
-  frame limit.
+  frame limit. One centralized configuration helper applies that bound to all
+  three Raft constructors.
 - Forwarded actor shape validation no longer hard-codes the `admin` role. It
   bounds the ID, email, and role metadata, then both the submitting node and
   receiving leader re-resolve the active persisted user, require exact
@@ -60,11 +64,13 @@ durable-receipt race, bounded-snapshot, and actor-authorization findings.
 - Added a late-visibility regression that first observes no receipt, makes an
   earlier leader/index durable, then resolves a later duplicate response to
   the original receipt.
+- Added an ID-only legacy regression proving a later duplicate neither creates
+  a receipt nor returns the replay's leader/index.
 - Added a 4,000-receipt regression proving that snapshot payloads remain within
   repository/RPC limits, the source ledger remains intact, the newest receipt
   survives installation, and receipts outside the retained window are omitted.
 - Added worst-case snapshot-chunk encoding coverage against the authenticated
-  RPC frame limit.
+  RPC frame limit and constructor coverage for the centralized chunk setting.
 
 ## Red evidence
 
@@ -107,15 +113,21 @@ called `Result::unwrap()` on an `Err` value:
 raft snapshot exceeds configured limit
 ```
 
+The final review's ID-only regression also reproduced provenance fabrication:
+
+```text
+a later duplicate cannot prove the original receipt provenance
+```
+
 ## Verification
 
 Exact requested focused suites:
 
 ```text
-cargo +stable test --lib cluster_command::tests -- --test-threads=1
+cargo +stable test --lib cluster_ -- --test-threads=1
 cargo +stable test --test cluster_command_gateway --test cluster_raft_storage --test cluster_raft --test cluster -- --test-threads=1
 
-cluster_command unit tests: 2 passed; 0 failed
+cluster command/runtime unit tests: 4 passed; 0 failed
 cluster: 8 passed; 0 failed
 cluster_command_gateway: 13 passed; 0 failed
 cluster_raft: 6 passed; 0 failed

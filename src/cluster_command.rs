@@ -575,4 +575,52 @@ mod tests {
             }
         );
     }
+
+    #[tokio::test]
+    async fn duplicate_without_original_provenance_is_not_synthesized() {
+        let pool = repository::connect("sqlite::memory:").await.unwrap();
+        repository::migrate(&pool).await.unwrap();
+        let command_id = Uuid::new_v4();
+        let command = ConfigCommand::CreateProxyHost {
+            command_id,
+            host: ProxyHost {
+                id: 92,
+                name: "legacy-command".into(),
+                domain: "legacy-command.example.test".into(),
+                upstream_host: "127.0.0.1".into(),
+                upstream_port: 8080,
+                tls_mode: "disabled".into(),
+                certificate_id: None,
+                enabled: true,
+            },
+        };
+        assert!(
+            repository::record_raft_command_id(&pool, &command_id.to_string())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !repository::apply_raft_command_with_receipt(&pool, &command, 8, 3)
+                .await
+                .unwrap()
+        );
+        assert!(
+            repository::load_raft_command_receipt(&pool, &command_id.to_string())
+                .await
+                .unwrap()
+                .is_none(),
+            "a later duplicate cannot prove the original receipt provenance"
+        );
+
+        assert_eq!(
+            resolve_post_write_receipt(
+                &pool,
+                command_id,
+                CommandResult::Duplicate,
+                LogId::new(openraft::CommittedLeaderId::new(4, 3), 8),
+            )
+            .await,
+            Err(ClusterWriteError::QuorumUnavailable)
+        );
+    }
 }

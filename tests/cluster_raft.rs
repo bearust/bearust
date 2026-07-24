@@ -129,4 +129,10 @@ fn configured_snapshot_chunk_fits_authenticated_rpc_envelope() {
     let encoded =
         bearust::cluster_raft_runtime::encode_raft_rpc("install_snapshot", &request).unwrap();
     assert!(encoded.len() <= bearust::cluster_raft::MAX_RPC_FRAME_BYTES);
+    let frame =
+        bearust::cluster_raft::encode_rpc_frame(&encoded, b"snapshot-frame-test-secret").unwrap();
+    assert_eq!(
+        bearust::cluster_raft::decode_rpc_frame(&frame, b"snapshot-frame-test-secret").unwrap(),
+        encoded
+    );
 }
