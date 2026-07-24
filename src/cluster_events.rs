@@ -11,12 +11,14 @@ use crate::cluster_raft_runtime::{
     RpcTransportError,
 };
 use crate::control_plane::realtime::{CommittedRealtimeEvent, RealtimeHub};
+use crate::control_plane::repository::{self, DbPool};
 use async_trait::async_trait;
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
@@ -60,6 +62,8 @@ pub enum ClusterEventError {
     AuthenticationFailed,
     #[error("cluster event queue capacity is invalid")]
     InvalidQueueCapacity,
+    #[error("local Raft state did not catch up to the cluster event")]
+    AppliedStateUnavailable,
 }
 
 impl ClusterEventEnvelope {
@@ -139,14 +143,18 @@ pub fn encode_cluster_event_rpc(
     reconnected: bool,
 ) -> Result<Vec<u8>, ClusterEventError> {
     event.encode()?;
-    encode_raft_rpc(
+    let request = encode_raft_rpc(
         "cluster_event",
         &ClusterEventRequest {
             reconnected,
             event: event.clone(),
         },
     )
-    .map_err(map_transport_encoding_error)
+    .map_err(map_transport_encoding_error)?;
+    if request.len() > MAX_CLUSTER_EVENT_BYTES {
+        return Err(ClusterEventError::PayloadTooLarge);
+    }
+    Ok(request)
 }
 
 fn map_transport_encoding_error(error: RpcTransportError) -> ClusterEventError {
@@ -167,18 +175,68 @@ struct EventIdentity {
 struct ReceiverState {
     identities: BTreeSet<EventIdentity>,
     identity_order: VecDeque<EventIdentity>,
-    last_commit_by_origin: BTreeMap<String, u64>,
+    last_commit_index: Option<u64>,
+}
+
+#[async_trait]
+/// Waits until authoritative local state includes a received commit index.
+///
+/// Implementations observe Raft-applied state only. Cluster events remain
+/// invalidation hints and never apply or mutate replicated state themselves.
+pub trait AppliedStateLoader: Send + Sync {
+    async fn wait_until_applied(&self, commit_index: u64) -> Result<(), ClusterEventError>;
+}
+
+/// Bounded applied-index loader backed by the durable local Raft state machine.
+pub struct SqlxAppliedStateLoader {
+    pool: DbPool,
+    node_id: String,
+    timeout: Duration,
+}
+
+impl SqlxAppliedStateLoader {
+    pub fn new(pool: DbPool, node_id: impl Into<String>, timeout: Duration) -> Self {
+        Self {
+            pool,
+            node_id: node_id.into(),
+            timeout,
+        }
+    }
+}
+
+#[async_trait]
+impl AppliedStateLoader for SqlxAppliedStateLoader {
+    async fn wait_until_applied(&self, commit_index: u64) -> Result<(), ClusterEventError> {
+        let wait = async {
+            loop {
+                let applied = repository::load_raft_committed_state(&self.pool, &self.node_id)
+                    .await
+                    .map_err(|_| ClusterEventError::AppliedStateUnavailable)?
+                    .and_then(|state| u64::try_from(state.log_index).ok())
+                    .unwrap_or(0);
+                if applied >= commit_index {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(self.timeout, wait)
+            .await
+            .map_err(|_| ClusterEventError::AppliedStateUnavailable)?
+    }
 }
 
 pub struct ClusterEventReceiver {
     hub: Arc<RealtimeHub>,
+    applied_state: Arc<dyn AppliedStateLoader>,
     state: Mutex<ReceiverState>,
 }
 
 impl ClusterEventReceiver {
-    pub fn new(hub: Arc<RealtimeHub>) -> Self {
+    pub fn new(hub: Arc<RealtimeHub>, applied_state: Arc<dyn AppliedStateLoader>) -> Self {
         Self {
             hub,
+            applied_state,
             state: Mutex::new(ReceiverState::default()),
         }
     }
@@ -204,15 +262,17 @@ impl ClusterEventReceiver {
             if state.identities.contains(&identity) {
                 return Ok(ClusterEventDisposition::Duplicate);
             }
+            self.applied_state
+                .wait_until_applied(event.commit_index)
+                .await?;
             let gap = state
-                .last_commit_by_origin
-                .get(&event.origin_node_id)
+                .last_commit_index
                 .is_some_and(|last| event.commit_index > last.saturating_add(1));
-            state
-                .last_commit_by_origin
-                .entry(event.origin_node_id.clone())
-                .and_modify(|last| *last = (*last).max(event.commit_index))
-                .or_insert(event.commit_index);
+            state.last_commit_index = Some(
+                state
+                    .last_commit_index
+                    .map_or(event.commit_index, |last| last.max(event.commit_index)),
+            );
             if state.identities.len() >= MAX_DEDUPLICATION_KEYS {
                 if let Some(oldest) = state.identity_order.pop_front() {
                     state.identities.remove(&oldest);
@@ -240,6 +300,9 @@ impl ClusterEventHandler for ClusterEventReceiver {
         payload: &[u8],
         authenticated_node_id: &str,
     ) -> Result<Vec<u8>, RpcTransportError> {
+        if payload.len() > MAX_CLUSTER_EVENT_BYTES {
+            return Err(RpcTransportError::PayloadTooLarge);
+        }
         let request: ClusterEventRequest = decode_raft_rpc(payload, "cluster_event")?;
         let response = match self
             .accept(request.event, authenticated_node_id, request.reconnected)
@@ -252,6 +315,9 @@ impl ClusterEventHandler for ClusterEventReceiver {
             }
             Err(ClusterEventError::PayloadTooLarge) => {
                 return Err(RpcTransportError::PayloadTooLarge);
+            }
+            Err(ClusterEventError::AppliedStateUnavailable) => {
+                return Err(RpcTransportError::Unavailable);
             }
             Err(_) => return Err(RpcTransportError::Malformed),
         };

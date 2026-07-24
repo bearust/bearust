@@ -2,17 +2,31 @@
 
 ## Delivered
 
+- Wired `ClusterEventReceiver` and `ClusterEventFanout` into normal
+  cluster-enabled startup in `src/cli.rs`. The receiver is registered before
+  the cluster listener starts, the fanout subscribes to the committed event
+  stream before API traffic begins, and the retained fanout is shut down before
+  the listener and Raft runtime. Auth-token-only single-node configurations
+  retain their zero-peer behavior.
 - Added a versioned `ClusterEventEnvelope` containing only event ID, command
   ID, commit index, event type, origin node ID, and timestamp.
-- Enforced a 2 KiB envelope limit, strict field decoding, supported event
-  kinds, authenticated origin matching, and rejection of unknown protocol
-  versions.
+- Enforced the 2 KiB limit over the complete cluster-event RPC envelope.
+  Authenticated dispatch first decodes only the outer RPC kind, so leading
+  whitespace and unknown outer fields cannot be parsed into an unbounded
+  semantic value before rejection. The handler independently enforces the same
+  bound.
+- Added a bounded SQLx applied-state loader. A received event waits until the
+  durable local Raft applied index reaches its commit index before any local SSE
+  invalidation is published. Events remain hints and never mutate replicated
+  state.
 - Added bounded non-blocking per-peer queues. Queue overflow, transport
   failure, or committed-stream lag marks a peer stale; the next authenticated
   `cluster_event` RPC requests catch-up.
 - Added bounded deduplication by `(origin_node_id, commit_index, event_id)`.
-  Commit gaps and reconnect markers trigger both replicated resource
-  invalidations before the accepted event is published.
+  Gap detection now uses one global Raft commit watermark, avoiding false gaps
+  when consecutive commits arrive from alternating origins. Real gaps and
+  reconnect markers trigger both replicated resource invalidations before the
+  accepted event is published.
 - Routed `cluster_event` through the existing BEARUST1 identity handshake and
   HMAC-authenticated BRRAFT1 frame.
 - Kept public SSE compatibility: remote events become the existing
@@ -21,25 +35,35 @@
 
 ## Red evidence
 
-The new focused suite initially failed because the Task 4 interfaces did not
-exist:
+The review regressions failed against Task 4 base `bf8ca515` for the expected
+reasons:
 
 ```text
-error[E0432]: unresolved import `bearust::cluster_events`
-error[E0432]: no `dispatch_authenticated_rpc_with_event_handler`
-error[E0599]: no method named `set_event_handler`
+authenticated_dispatcher_rejects_oversized_event_rpc_before_semantic_parse
+left: Ok(<accepted response>)
+right: Err(PayloadTooLarge)
+
+alternating_origins_share_one_commit_watermark_without_false_gaps
+left: "proxy_hosts.changed"
+right: "rate_limit.changed"
+
+error[E0432]: unresolved import `bearust::cluster_events::AppliedStateLoader`
 ```
 
 ## Verification
 
 ```text
 cargo +stable test --test cluster_events
-6 passed; 0 failed
+9 passed; 0 failed
 
-cargo +stable test --test cluster_events --test cluster \
-  --test cluster_raft_runtime --test control_plane_realtime \
-  --test cluster_command_gateway
-52 passed; 0 failed
+cargo +stable test --test cli --test cluster --test cluster_raft \
+  --test cluster_raft_runtime --test cluster_raft_storage \
+  --test cluster_command_gateway --test control_plane_cluster \
+  --test control_plane_realtime --test raft_three_node
+72 passed; 0 failed
+
+cargo +stable test --test shutdown
+3 passed; 0 failed
 
 cargo +stable fmt --all -- --check
 passed
@@ -51,12 +75,16 @@ git diff --check
 passed
 ```
 
-The queue test uses a stalled authenticated peer to prove publisher calls stay
-non-blocking and overflow is accounted for. The transport test starts the real
-cluster listener and verifies end-to-end authenticated fan-out.
+The applied-state regression delivers an event before the local durable applied
+index advances and verifies that SSE remains silent until
+`raft_committed_state` reaches the event commit. The alternating-origin
+regression proves contiguous global commits do not create catch-up noise. The
+queue test uses a stalled authenticated peer to prove publisher calls stay
+non-blocking and overflow is accounted for, and the transport test starts the
+real cluster listener for end-to-end authenticated fan-out.
 
 ## Scope
 
-Task 4 changes are limited to the event module, cluster listener/RPC dispatch,
-realtime translation, module registration, focused tests, and this report.
-The pre-existing `.superpowers/sdd/progress.md` modification is excluded.
+The review fix is based on `bf8ca515` and is limited to cluster event startup
+wiring, event receiver/dispatcher correctness, focused tests, and this report.
+The pre-existing `.superpowers/sdd/progress.md` modification remains excluded.

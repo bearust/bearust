@@ -302,6 +302,29 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             cluster_service.set_command_handler(Arc::new(gateway.clone()));
             control_state = control_state.with_config_gateway(gateway);
         }
+        let cluster_event_fanout = if raft_handle.is_some() {
+            let receiver = Arc::new(crate::cluster_events::ClusterEventReceiver::new(
+                control_state.realtime.clone(),
+                Arc::new(crate::cluster_events::SqlxAppliedStateLoader::new(
+                    control_state.db.clone(),
+                    config.cluster.node_id.clone(),
+                    Duration::from_secs(config.cluster.timeout_seconds),
+                )),
+            ));
+            cluster_service.set_event_handler(receiver);
+            Some(
+                crate::cluster_events::ClusterEventFanout::start(
+                    cluster_service.clone(),
+                    control_state.realtime.clone(),
+                    crate::cluster_events::MAX_CLUSTER_EVENT_QUEUE_CAPACITY,
+                )
+                .map_err(|error| {
+                    AppError::Server(format!("cluster event fanout startup: {error}"))
+                })?,
+            )
+        } else {
+            None
+        };
         control_state = control_state.with_cluster(cluster_service.clone());
         let (cluster_shutdown_tx, cluster_shutdown_rx) = tokio::sync::watch::channel(false);
         let cluster_task = tokio::spawn(crate::cluster::run_cluster_listener(
@@ -488,6 +511,9 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             .map_err(|error| AppError::Server(error.to_string()))?;
         reload_task.abort();
         control_task.abort();
+        if let Some(fanout) = cluster_event_fanout {
+            fanout.shutdown().await;
+        }
         let _ = cluster_shutdown_tx.send(true);
         tokio::time::timeout(
             Duration::from_secs(config.server.graceful_shutdown_seconds),

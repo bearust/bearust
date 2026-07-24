@@ -1,9 +1,9 @@
 use bearust::cluster::{run_cluster_listener, ClusterService};
 use bearust::cluster_command::CommitReceipt;
 use bearust::cluster_events::{
-    encode_cluster_event_rpc, ClusterEventDisposition, ClusterEventEnvelope, ClusterEventError,
-    ClusterEventFanout, ClusterEventReceiver, CLUSTER_EVENT_PROTOCOL_VERSION,
-    MAX_CLUSTER_EVENT_BYTES,
+    encode_cluster_event_rpc, AppliedStateLoader, ClusterEventDisposition, ClusterEventEnvelope,
+    ClusterEventError, ClusterEventFanout, ClusterEventReceiver, SqlxAppliedStateLoader,
+    CLUSTER_EVENT_PROTOCOL_VERSION, MAX_CLUSTER_EVENT_BYTES,
 };
 use bearust::cluster_raft::encode_rpc_frame;
 use bearust::cluster_raft_runtime::{
@@ -11,6 +11,7 @@ use bearust::cluster_raft_runtime::{
 };
 use bearust::config::{ClusterConfig, ClusterPeer};
 use bearust::control_plane::realtime::{CommittedRealtimeEvent, RealtimeEvent, RealtimeHub};
+use bearust::control_plane::repository;
 use chrono::{SecondsFormat, Utc};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +19,20 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 const SECRET: &str = "01234567890123456789012345678901";
+
+#[derive(Default)]
+struct ImmediateAppliedState;
+
+#[async_trait::async_trait]
+impl AppliedStateLoader for ImmediateAppliedState {
+    async fn wait_until_applied(&self, _commit_index: u64) -> Result<(), ClusterEventError> {
+        Ok(())
+    }
+}
+
+fn receiver(hub: Arc<RealtimeHub>) -> ClusterEventReceiver {
+    ClusterEventReceiver::new(hub, Arc::new(ImmediateAppliedState))
+}
 
 fn committed_event(event_id: u64, commit_index: u64, kind: &str) -> CommittedRealtimeEvent {
     CommittedRealtimeEvent {
@@ -33,8 +48,20 @@ fn committed_event(event_id: u64, commit_index: u64, kind: &str) -> CommittedRea
 }
 
 fn envelope(event_id: u64, commit_index: u64, kind: &str) -> ClusterEventEnvelope {
-    ClusterEventEnvelope::from_committed(&committed_event(event_id, commit_index, kind), "node-a")
-        .unwrap()
+    envelope_for("node-a", event_id, commit_index, kind)
+}
+
+fn envelope_for(
+    origin_node_id: &str,
+    event_id: u64,
+    commit_index: u64,
+    kind: &str,
+) -> ClusterEventEnvelope {
+    ClusterEventEnvelope::from_committed(
+        &committed_event(event_id, commit_index, kind),
+        origin_node_id,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -75,7 +102,7 @@ fn event_envelope_is_versioned_bounded_and_redacted() {
 
 #[tokio::test]
 async fn authenticated_event_rpc_rejects_tampered_hmac() {
-    let receiver = ClusterEventReceiver::new(Arc::new(RealtimeHub::new(8)));
+    let receiver = receiver(Arc::new(RealtimeHub::new(8)));
     let payload = encode_cluster_event_rpc(&envelope(1, 1, "proxy_hosts.changed"), false).unwrap();
     let mut frame = encode_rpc_frame(&payload, SECRET.as_bytes()).unwrap();
     *frame.last_mut().unwrap() ^= 1;
@@ -93,10 +120,53 @@ async fn authenticated_event_rpc_rejects_tampered_hmac() {
 }
 
 #[tokio::test]
+async fn authenticated_dispatcher_rejects_oversized_event_rpc_before_semantic_parse() {
+    let receiver = receiver(Arc::new(RealtimeHub::new(8)));
+    let valid = encode_cluster_event_rpc(&envelope(1, 1, "proxy_hosts.changed"), false).unwrap();
+
+    let mut whitespace_padded = vec![b' '; MAX_CLUSTER_EVENT_BYTES];
+    whitespace_padded.extend_from_slice(&valid);
+    let whitespace_frame = encode_rpc_frame(&whitespace_padded, SECRET.as_bytes()).unwrap();
+    assert_eq!(
+        dispatch_authenticated_rpc_with_event_handler(
+            &whitespace_frame,
+            SECRET.as_bytes(),
+            "node-b",
+            "node-a",
+            &receiver,
+        )
+        .await,
+        Err(RpcTransportError::PayloadTooLarge)
+    );
+
+    let mut outer_padded: serde_json::Value = serde_json::from_slice(&valid).unwrap();
+    outer_padded.as_object_mut().unwrap().insert(
+        "padding".into(),
+        serde_json::json!("x".repeat(MAX_CLUSTER_EVENT_BYTES)),
+    );
+    let outer_frame = encode_rpc_frame(
+        &serde_json::to_vec(&outer_padded).unwrap(),
+        SECRET.as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        dispatch_authenticated_rpc_with_event_handler(
+            &outer_frame,
+            SECRET.as_bytes(),
+            "node-b",
+            "node-a",
+            &receiver,
+        )
+        .await,
+        Err(RpcTransportError::PayloadTooLarge)
+    );
+}
+
+#[tokio::test]
 async fn duplicate_remote_events_are_suppressed_without_leaking_cluster_metadata() {
     let hub = Arc::new(RealtimeHub::new(8));
     let mut local_events = hub.subscribe();
-    let receiver = ClusterEventReceiver::new(hub);
+    let receiver = receiver(hub);
     let envelope = envelope(9, 44, "rate_limit.changed");
 
     assert_eq!(
@@ -125,10 +195,86 @@ async fn duplicate_remote_events_are_suppressed_without_leaking_cluster_metadata
 }
 
 #[tokio::test]
+async fn alternating_origins_share_one_commit_watermark_without_false_gaps() {
+    let hub = Arc::new(RealtimeHub::new(16));
+    let mut local_events = hub.subscribe();
+    let receiver = receiver(hub);
+    let events = [
+        envelope_for("node-a", 1, 10, "proxy_hosts.changed"),
+        envelope_for("node-b", 2, 11, "rate_limit.changed"),
+        envelope_for("node-a", 3, 12, "rate_limit.changed"),
+    ];
+
+    for event in events {
+        let expected_kind = event.event_type.clone();
+        let authenticated_node_id = event.origin_node_id.clone();
+        receiver
+            .accept(event, &authenticated_node_id, false)
+            .await
+            .unwrap();
+        assert_eq!(local_events.recv().await.unwrap().kind, expected_kind);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), local_events.recv())
+                .await
+                .is_err(),
+            "contiguous global commits must not trigger catch-up invalidations"
+        );
+    }
+}
+
+#[tokio::test]
+async fn remote_invalidation_waits_for_local_state_machine_apply() {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+    let hub = Arc::new(RealtimeHub::new(8));
+    let mut local_events = hub.subscribe();
+    let receiver = Arc::new(ClusterEventReceiver::new(
+        hub,
+        Arc::new(SqlxAppliedStateLoader::new(
+            pool.clone(),
+            "node-b",
+            Duration::from_secs(1),
+        )),
+    ));
+    let accept_task = tokio::spawn({
+        let receiver = receiver.clone();
+        async move {
+            receiver
+                .accept(envelope(5, 5, "proxy_hosts.changed"), "node-a", false)
+                .await
+        }
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), local_events.recv())
+            .await
+            .is_err(),
+        "SSE invalidation was published before local Raft apply"
+    );
+    assert!(!accept_task.is_finished());
+
+    repository::save_raft_committed_state(&pool, "node-b", 5, 1, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), accept_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        ClusterEventDisposition::Accepted
+    );
+    assert_eq!(
+        local_events.recv().await.unwrap().kind,
+        "proxy_hosts.changed"
+    );
+}
+
+#[tokio::test]
 async fn reconnect_or_commit_gap_triggers_local_resource_catch_up() {
     let hub = Arc::new(RealtimeHub::new(16));
     let mut local_events = hub.subscribe();
-    let receiver = ClusterEventReceiver::new(hub);
+    let receiver = receiver(hub);
 
     receiver
         .accept(envelope(1, 10, "proxy_hosts.changed"), "node-a", false)
@@ -211,7 +357,7 @@ async fn committed_events_fan_out_over_the_authenticated_cluster_transport() {
     let source_hub = Arc::new(RealtimeHub::new(8));
     let target_hub = Arc::new(RealtimeHub::new(16));
     let mut target_events = target_hub.subscribe();
-    node_b.set_event_handler(Arc::new(ClusterEventReceiver::new(target_hub)));
+    node_b.set_event_handler(Arc::new(receiver(target_hub)));
 
     let (shutdown, shutdown_rx) = watch::channel(false);
     let listener = tokio::spawn(run_cluster_listener(node_b, shutdown_rx));

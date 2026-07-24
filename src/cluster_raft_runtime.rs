@@ -54,6 +54,11 @@ pub struct RaftRpcEnvelope {
     pub payload: Value,
 }
 
+#[derive(serde::Deserialize)]
+struct RaftRpcKind {
+    kind: String,
+}
+
 /// Serialize an OpenRaft request into a bounded, authenticated-envelope
 /// payload. The actual request type remains opaque to the transport layer.
 pub fn encode_raft_rpc<T: Serialize>(
@@ -200,6 +205,17 @@ pub async fn dispatch_authenticated_rpc_with_all_handlers(
 ) -> Result<Vec<u8>, RpcTransportError> {
     let payload = crate::cluster_raft::decode_rpc_frame(frame, secret)
         .map_err(|_| RpcTransportError::AuthenticationFailed)?;
+    if payload.len() > crate::cluster_events::MAX_CLUSTER_EVENT_BYTES {
+        // Decode only the outer method name before allocating the semantic
+        // payload. Unknown outer fields are skipped by serde, so whitespace or
+        // padding cannot bypass the cluster-event-specific wire bound.
+        let kind = serde_json::from_slice::<RaftRpcKind>(payload)
+            .map_err(|_| RpcTransportError::Malformed)?
+            .kind;
+        if kind == "cluster_event" {
+            return Err(RpcTransportError::PayloadTooLarge);
+        }
+    }
     let envelope: RaftRpcEnvelope =
         serde_json::from_slice(payload).map_err(|_| RpcTransportError::Malformed)?;
 
