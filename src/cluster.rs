@@ -211,6 +211,12 @@ impl ClusterService {
             })
     }
 
+    /// Return the latest local Raft state used to decide whether this node
+    /// may accept a configuration write.
+    pub fn raft_write_state(&self) -> RaftStatus {
+        self.raft_status()
+    }
+
     /// Perform a single authenticated TCP health check against one peer.
     ///
     /// Sends the cluster handshake (BEARUST1 + local node_id length byte +
