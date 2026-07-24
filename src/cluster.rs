@@ -21,6 +21,49 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+/// Convert the OpenRaft metrics snapshot into the API-facing status model.
+/// Keeping this mapping in the cluster service ensures readiness reflects the
+/// committed Raft view (leader, follower, unknown leader, or lost quorum),
+/// rather than transport reachability alone.
+pub fn raft_status_from_metrics(
+    metrics: &openraft::metrics::RaftMetrics<u64, openraft::BasicNode>,
+) -> RaftStatus {
+    let role = match metrics.state {
+        openraft::ServerState::Leader => RaftRole::Leader,
+        openraft::ServerState::Follower | openraft::ServerState::Learner => RaftRole::Follower,
+        openraft::ServerState::Candidate => RaftRole::Candidate,
+        openraft::ServerState::Shutdown => RaftRole::Unknown,
+    };
+    let quorum_available = match role {
+        RaftRole::Leader => metrics
+            .millis_since_quorum_ack
+            .is_some_and(|age| age <= 1_000),
+        RaftRole::Follower => metrics.current_leader.is_some(),
+        _ => false,
+    } && metrics.running_state.is_ok();
+    RaftStatus {
+        role,
+        leader_id: metrics.current_leader.map(|id| id.to_string()),
+        term: metrics.current_term,
+        last_log_index: metrics.last_log_index.unwrap_or_default(),
+        commit_index: metrics
+            .last_applied
+            .as_ref()
+            .map(|log_id| log_id.index)
+            .unwrap_or_default(),
+        quorum_available,
+        sync_state: if !metrics.running_state.is_ok() {
+            "unavailable".into()
+        } else if !quorum_available {
+            "quorum_unavailable".into()
+        } else if matches!(role, RaftRole::Leader) {
+            "leader_ready".into()
+        } else {
+            "follower_ready".into()
+        },
+    }
+}
+
 /// Maximum number of peer health checks to run concurrently.
 pub const MAX_PEERS: usize = 64;
 
@@ -189,6 +232,15 @@ impl ClusterService {
         if let Ok(mut current) = self.raft_status.write() {
             *current = status;
         }
+    }
+
+    /// Refresh the API-facing readiness state from one OpenRaft metrics
+    /// snapshot. Callers should invoke this whenever the Raft watch changes.
+    pub fn update_raft_status_from_metrics(
+        &self,
+        metrics: &openraft::metrics::RaftMetrics<u64, openraft::BasicNode>,
+    ) {
+        self.set_raft_status(raft_status_from_metrics(metrics));
     }
 
     pub fn set_raft_handler(&self, handler: Arc<dyn RaftRpcHandler>) {

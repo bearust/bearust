@@ -34,11 +34,17 @@ async fn three_node_raft_handles_construct_and_shutdown() {
 #[tokio::test]
 async fn three_node_cluster_elects_leader_over_authenticated_transport() {
     let secret = "three-node-test-secret".to_string();
-    let addresses: [SocketAddr; 3] = [
-        "127.0.0.1:42101".parse().unwrap(),
-        "127.0.0.1:42102".parse().unwrap(),
-        "127.0.0.1:42103".parse().unwrap(),
-    ];
+    let mut reserved = Vec::new();
+    for _ in 0..3 {
+        reserved.push(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+    }
+    let addresses: [SocketAddr; 3] = reserved
+        .iter()
+        .map(|listener| listener.local_addr().unwrap())
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    drop(reserved);
     let ids = ["node-1", "node-2", "node-3"];
     let mut services = Vec::new();
     let mut handles = Vec::new();
