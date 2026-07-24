@@ -161,3 +161,29 @@ Output (exit 0):
 Checking bearust v0.1.0 (/home/rizalord/Projects/personal/bearust)
 Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.35s
 ```
+
+## Timeout-outcome contract hardening
+
+`ConfigCommandGateway::submit` now maps an elapsed local
+`Raft::client_write` deadline to the stable
+`ClusterWriteError::CommitOutcomeUnknown` error, rather than reporting a
+quorum failure. A local timeout occurs after submission and cannot prove that
+the command was not or will not be committed. The public error and `submit`
+documentation therefore require callers to retry the same command with its
+original `command_id`; replicated command application is idempotent by that
+identifier.
+
+The existing real three-node tests are retained. The live write-quorum gate
+continues to use `RaftMetrics::millis_since_quorum_ack`: OpenRaft 0.9.21 does
+not expose a public `last_quorum_acked` API, so no unavailable metric is
+invented. A focused deterministic unit test covers the timeout-to-unknown
+outcome mapping.
+
+Validation (all exit 0):
+
+```text
+cargo +stable fmt --all -- --check
+cargo +stable test --lib client_write_timeout_reports_unknown_commit_outcome -- --test-threads=1
+cargo +stable test --test cluster_command_gateway -- --test-threads=1
+cargo +stable clippy --all-targets -- -D warnings
+```

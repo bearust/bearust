@@ -35,6 +35,10 @@ pub enum ClusterWriteError {
     LeaderUnknown,
     #[error("raft quorum is unavailable")]
     QuorumUnavailable,
+    /// `Raft::client_write` exceeded its local deadline after the command was
+    /// submitted. The command may still commit; retry the same `command_id`.
+    #[error("raft command commit outcome is unknown; retry the same command_id")]
+    CommitOutcomeUnknown,
     #[error("forwarded raft command timed out")]
     ForwardTimeout,
     #[error("forwarded raft command authentication failed")]
@@ -59,6 +63,11 @@ impl ConfigCommandGateway {
     ///
     /// Multi-node followers intentionally stop at the leader boundary here;
     /// authenticated forwarding is added by the next lifecycle task.
+    ///
+    /// A [`ClusterWriteError::CommitOutcomeUnknown`] result means the local
+    /// `client_write` wait timed out after submission. The command may commit
+    /// later, so callers must retry the same command with its original
+    /// `command_id`.
     pub async fn submit(
         &self,
         command: ConfigCommand,
@@ -77,7 +86,7 @@ impl ConfigCommandGateway {
         let command_id = command.command_id();
         let response = tokio::time::timeout(CLIENT_WRITE_TIMEOUT, self.raft.client_write(command))
             .await
-            .map_err(|_| ClusterWriteError::QuorumUnavailable)?
+            .map_err(|_| map_client_write_timeout())?
             .map_err(map_client_write_error)?;
         let leader_id = self
             .raft
@@ -123,5 +132,22 @@ fn map_client_write_error(
         RaftError::APIError(ClientWriteError::ChangeMembershipError(_)) | RaftError::Fatal(_) => {
             ClusterWriteError::QuorumUnavailable
         }
+    }
+}
+
+fn map_client_write_timeout() -> ClusterWriteError {
+    ClusterWriteError::CommitOutcomeUnknown
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_client_write_timeout, ClusterWriteError};
+
+    #[test]
+    fn client_write_timeout_reports_unknown_commit_outcome() {
+        assert_eq!(
+            map_client_write_timeout(),
+            ClusterWriteError::CommitOutcomeUnknown
+        );
     }
 }
