@@ -31,6 +31,18 @@ pub struct SqlxSnapshotBuilder {
     storage: SqlxRaftStorage,
 }
 
+/// Snapshots retain at most this newest receipt window. The database receipt
+/// ledger remains durable and unbounded; only snapshot transfer provenance is
+/// truncated, with an additional serialized-byte budget applied below.
+pub const MAX_SNAPSHOT_COMMAND_RECEIPTS: usize = 1_024;
+
+const MAX_SNAPSHOT_PAYLOAD_BYTES: usize =
+    if repository::MAX_RAFT_PAYLOAD_BYTES < crate::cluster_raft::MAX_RPC_FRAME_BYTES {
+        repository::MAX_RAFT_PAYLOAD_BYTES
+    } else {
+        crate::cluster_raft::MAX_RPC_FRAME_BYTES
+    };
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SnapshotEnvelope {
     proxy_hosts: Vec<crate::control_plane::models::ProxyHost>,
@@ -45,6 +57,39 @@ fn storage_error(
     error: impl std::fmt::Display,
 ) -> StorageError<u64> {
     StorageError::from_io_error(subject, verb, std::io::Error::other(error.to_string()))
+}
+
+fn encode_bounded_snapshot(
+    mut envelope: SnapshotEnvelope,
+    newest_receipts: Vec<repository::RaftCommandReceipt>,
+) -> Result<Vec<u8>, std::io::Error> {
+    let empty_encoded = serde_json::to_vec(&envelope)
+        .map_err(|_| std::io::Error::other("snapshot serialization failed"))?;
+    if empty_encoded.len() > MAX_SNAPSHOT_PAYLOAD_BYTES {
+        return Err(std::io::Error::other(
+            "replicated configuration exceeds snapshot payload limit",
+        ));
+    }
+
+    let mut remaining = MAX_SNAPSHOT_PAYLOAD_BYTES - empty_encoded.len();
+    for receipt in newest_receipts {
+        let receipt_bytes = serde_json::to_vec(&receipt)
+            .map_err(|_| std::io::Error::other("snapshot serialization failed"))?;
+        let required = receipt_bytes.len() + usize::from(!envelope.command_receipts.is_empty());
+        if required > remaining {
+            break;
+        }
+        remaining -= required;
+        envelope.command_receipts.push(receipt);
+    }
+    envelope.command_receipts.reverse();
+
+    let encoded = serde_json::to_vec(&envelope)
+        .map_err(|_| std::io::Error::other("snapshot serialization failed"))?;
+    if encoded.len() > MAX_SNAPSHOT_PAYLOAD_BYTES {
+        return Err(std::io::Error::other("snapshot exceeds configured limit"));
+    }
+    Ok(encoded)
 }
 
 impl SqlxRaftStorage {
@@ -325,11 +370,15 @@ impl openraft::RaftSnapshotBuilder<crate::cluster_raft::BearustRaftConfig> for S
             host_rate_limits: repository::list_host_rate_limit_configs(&self.storage.pool)
                 .await
                 .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?,
-            command_receipts: repository::list_raft_command_receipts(&self.storage.pool)
-                .await
-                .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?,
+            command_receipts: Vec::new(),
         };
-        let encoded = serde_json::to_vec(&envelope)
+        let newest_receipts = repository::list_recent_raft_command_receipts(
+            &self.storage.pool,
+            MAX_SNAPSHOT_COMMAND_RECEIPTS,
+        )
+        .await
+        .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
+        let encoded = encode_bounded_snapshot(envelope, newest_receipts)
             .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?;
         self.storage
             .save_snapshot(log_id.index as i64, log_id.leader_id.term as i64, &encoded)

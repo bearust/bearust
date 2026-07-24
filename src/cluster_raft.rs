@@ -17,6 +17,10 @@ use uuid::Uuid;
 
 pub const MAX_COMMAND_BYTES: usize = 256 * 1024;
 pub const MAX_RPC_FRAME_BYTES: usize = MAX_COMMAND_BYTES;
+/// JSON serializes each snapshot byte as up to three digits plus a separator.
+/// This chunk size leaves room for that expansion and the InstallSnapshot RPC
+/// metadata inside one authenticated transport frame.
+pub const MAX_SNAPSHOT_CHUNK_BYTES: usize = 48 * 1024;
 pub const RPC_TAG_BYTES: usize = 32;
 const RPC_MAGIC: &[u8; 7] = b"BRRAFT1";
 const MAX_NAME_BYTES: usize = 128;

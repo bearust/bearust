@@ -460,6 +460,35 @@ pub async fn list_raft_command_receipts(
         .collect())
 }
 
+/// Load a bounded newest-first receipt window for Raft snapshot provenance.
+///
+/// The durable receipt ledger itself is never pruned by this read.
+pub async fn list_recent_raft_command_receipts(
+    pool: &DbPool,
+    limit: usize,
+) -> Result<Vec<RaftCommandReceipt>, sqlx::Error> {
+    let limit = i64::try_from(limit)
+        .map_err(|_| sqlx::Error::Protocol("raft receipt limit is out of range".into()))?;
+    let rows = sqlx::query(
+        "SELECT command_id,log_index,leader_id,applied_at
+         FROM raft_command_receipts
+         ORDER BY log_index DESC,command_id DESC
+         LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| RaftCommandReceipt {
+            command_id: row.get("command_id"),
+            log_index: row.get("log_index"),
+            leader_id: row.get("leader_id"),
+            applied_at: row.get("applied_at"),
+        })
+        .collect())
+}
+
 pub async fn truncate_raft_log(
     pool: &DbPool,
     node_id: &str,

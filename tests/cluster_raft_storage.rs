@@ -5,6 +5,7 @@ use bearust::control_plane::repository;
 use openraft::storage::RaftStateMachine;
 use openraft::RaftSnapshotBuilder;
 use openraft::{Entry, EntryPayload, LogId};
+use sqlx::Row;
 use uuid::Uuid;
 
 async fn storage() -> SqlxRaftStorage {
@@ -116,5 +117,95 @@ async fn snapshot_install_preserves_applied_command_provenance() {
             .await
             .unwrap(),
         "snapshot install must preserve applied command identity"
+    );
+}
+
+#[tokio::test]
+async fn snapshot_bounds_many_receipts_and_keeps_the_newest_provenance() {
+    const RECEIPT_COUNT: i64 = 4_000;
+
+    let source_pool = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&source_pool).await.unwrap();
+    let mut source = SqlxRaftStorage::new(source_pool.clone(), "node-a").unwrap();
+    let mut tx = source_pool.begin().await.unwrap();
+    for index in 1..=RECEIPT_COUNT {
+        let command_id = Uuid::from_u128(index as u128).to_string();
+        sqlx::query(
+            "INSERT INTO raft_command_ids(command_id,applied_at) VALUES(?,?)
+             ON CONFLICT(command_id) DO NOTHING",
+        )
+        .bind(&command_id)
+        .bind("2026-07-24T00:00:00Z")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO raft_command_receipts(command_id,log_index,leader_id,applied_at)
+             VALUES(?,?,?,?)",
+        )
+        .bind(command_id)
+        .bind(index)
+        .bind(1_i64)
+        .bind("2026-07-24T00:00:00Z")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    repository::save_raft_committed_state(&source_pool, "node-a", RECEIPT_COUNT, 1, 1)
+        .await
+        .unwrap();
+
+    let mut builder = source.get_snapshot_builder().await;
+    let snapshot = builder.build_snapshot().await.unwrap();
+    let snapshot_meta = snapshot.meta.clone();
+    let snapshot_bytes = snapshot.snapshot.get_ref().clone();
+    assert!(snapshot_bytes.len() <= repository::MAX_RAFT_PAYLOAD_BYTES);
+    assert!(snapshot_bytes.len() <= bearust::cluster_raft::MAX_RPC_FRAME_BYTES);
+    let source_receipt_count: i64 =
+        sqlx::query("SELECT COUNT(*) AS count FROM raft_command_receipts")
+            .fetch_one(&source_pool)
+            .await
+            .unwrap()
+            .get("count");
+    assert_eq!(
+        source_receipt_count, RECEIPT_COUNT,
+        "snapshot truncation must not prune the durable source ledger"
+    );
+
+    let target_pool = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&target_pool).await.unwrap();
+    let mut target = SqlxRaftStorage::new(target_pool.clone(), "node-b").unwrap();
+    target
+        .install_snapshot(
+            &snapshot_meta,
+            Box::new(std::io::Cursor::new(snapshot_bytes)),
+        )
+        .await
+        .unwrap();
+
+    let target_receipt_count: i64 =
+        sqlx::query("SELECT COUNT(*) AS count FROM raft_command_receipts")
+            .fetch_one(&target_pool)
+            .await
+            .unwrap()
+            .get("count");
+    assert!(target_receipt_count < RECEIPT_COUNT);
+    assert!(
+        repository::load_raft_command_receipt(
+            &target_pool,
+            &Uuid::from_u128(RECEIPT_COUNT as u128).to_string(),
+        )
+        .await
+        .unwrap()
+        .is_some(),
+        "the newest receipt must survive bounded snapshot retention"
+    );
+    assert!(
+        repository::load_raft_command_receipt(&target_pool, &Uuid::from_u128(1).to_string())
+            .await
+            .unwrap()
+            .is_none(),
+        "receipts outside the newest bounded window must be omitted"
     );
 }

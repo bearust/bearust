@@ -110,3 +110,23 @@ fn authenticated_rpc_frame_rejects_tampering_and_oversized_payloads() {
         Err(CommandError::PayloadTooLarge)
     ));
 }
+
+#[test]
+fn configured_snapshot_chunk_fits_authenticated_rpc_envelope() {
+    let request =
+        openraft::raft::InstallSnapshotRequest::<bearust::cluster_raft::BearustRaftConfig> {
+            vote: openraft::Vote::new_committed(2, 1),
+            meta: openraft::SnapshotMeta {
+                last_log_id: None,
+                last_membership: openraft::StoredMembership::default(),
+                snapshot_id: "2-4000".into(),
+            },
+            offset: 0,
+            data: vec![u8::MAX; bearust::cluster_raft::MAX_SNAPSHOT_CHUNK_BYTES],
+            done: false,
+        };
+
+    let encoded =
+        bearust::cluster_raft_runtime::encode_raft_rpc("install_snapshot", &request).unwrap();
+    assert!(encoded.len() <= bearust::cluster_raft::MAX_RPC_FRAME_BYTES);
+}

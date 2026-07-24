@@ -5,7 +5,7 @@
 //! leader with quorum; it never calls repository mutation helpers directly.
 
 use crate::cluster::ClusterService;
-use crate::cluster_raft::{BearustRaftConfig, ConfigCommand};
+use crate::cluster_raft::{BearustRaftConfig, CommandResult, ConfigCommand};
 use crate::cluster_raft_runtime::{
     decode_raft_rpc, encode_raft_rpc, send_authenticated_rpc_with_identity, InternalCommandHandler,
     RpcTransportError,
@@ -296,18 +296,9 @@ impl ConfigCommandGateway {
             .await
             .map_err(|_| map_client_write_timeout())?
             .map_err(map_client_write_error)?;
-        let leader_id = self
-            .raft
-            .metrics()
-            .borrow()
-            .current_leader
-            .ok_or(ClusterWriteError::LeaderUnknown)?;
-
-        let receipt = CommitReceipt {
-            command_id,
-            leader_id,
-            commit_index: response.log_id.index,
-        };
+        let receipt =
+            resolve_post_write_receipt(&self.db, command_id, response.data, response.log_id)
+                .await?;
         cache_receipt(&mut receipts, receipt.clone());
         Ok(receipt)
     }
@@ -451,6 +442,34 @@ impl InternalCommandHandler for ConfigCommandGateway {
     }
 }
 
+async fn resolve_post_write_receipt(
+    db: &DbPool,
+    command_id: Uuid,
+    result: CommandResult,
+    log_id: openraft::LogId<u64>,
+) -> Result<CommitReceipt, ClusterWriteError> {
+    let durable = repository::load_raft_command_receipt(db, &command_id.to_string())
+        .await
+        .map_err(|_| ClusterWriteError::QuorumUnavailable)?;
+    if let Some(durable) = durable {
+        return Ok(CommitReceipt {
+            command_id,
+            leader_id: u64::try_from(durable.leader_id)
+                .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
+            commit_index: u64::try_from(durable.log_index)
+                .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
+        });
+    }
+    if result == CommandResult::Duplicate {
+        return Err(ClusterWriteError::QuorumUnavailable);
+    }
+    Ok(CommitReceipt {
+        command_id,
+        leader_id: log_id.leader_id.node_id,
+        commit_index: log_id.index,
+    })
+}
+
 fn cache_receipt(
     receipts: &mut std::collections::BTreeMap<Uuid, CommitReceipt>,
     receipt: CommitReceipt,
@@ -492,13 +511,68 @@ fn map_client_write_timeout() -> ClusterWriteError {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_client_write_timeout, ClusterWriteError};
+    use super::{
+        map_client_write_timeout, resolve_post_write_receipt, ClusterWriteError, CommitReceipt,
+    };
+    use crate::cluster_raft::{CommandResult, ConfigCommand};
+    use crate::control_plane::models::ProxyHost;
+    use crate::control_plane::repository;
+    use openraft::LogId;
+    use uuid::Uuid;
 
     #[test]
     fn client_write_timeout_reports_unknown_commit_outcome() {
         assert_eq!(
             map_client_write_timeout(),
             ClusterWriteError::CommitOutcomeUnknown
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_after_precheck_returns_receipt_that_became_durable() {
+        let pool = repository::connect("sqlite::memory:").await.unwrap();
+        repository::migrate(&pool).await.unwrap();
+        let command_id = Uuid::new_v4();
+        let command = ConfigCommand::CreateProxyHost {
+            command_id,
+            host: ProxyHost {
+                id: 91,
+                name: "late-commit".into(),
+                domain: "late-commit.example.test".into(),
+                upstream_host: "127.0.0.1".into(),
+                upstream_port: 8080,
+                tls_mode: "disabled".into(),
+                certificate_id: None,
+                enabled: true,
+            },
+        };
+        assert!(
+            repository::load_raft_command_receipt(&pool, &command_id.to_string())
+                .await
+                .unwrap()
+                .is_none(),
+            "the retry pre-check must run before the earlier commit becomes visible"
+        );
+        repository::apply_raft_command_with_receipt(&pool, &command, 7, 2)
+            .await
+            .unwrap();
+
+        let resolved = resolve_post_write_receipt(
+            &pool,
+            command_id,
+            CommandResult::Duplicate,
+            LogId::new(openraft::CommittedLeaderId::new(4, 3), 8),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            CommitReceipt {
+                command_id,
+                leader_id: 2,
+                commit_index: 7,
+            }
         );
     }
 }

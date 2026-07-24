@@ -3,7 +3,7 @@
 ## Status
 
 Completed the authenticated command-forwarding fixes, including the final
-durable-receipt and actor-authorization findings.
+durable-receipt race, bounded-snapshot, and actor-authorization findings.
 
 ## Source changes
 
@@ -11,16 +11,31 @@ durable-receipt and actor-authorization findings.
   `raft_command_receipts` state-machine ledger rather than purgeable Raft log
   rows. A recreated gateway therefore returns the first applied leader ID and
   commit index without appending another command.
+- After `client_write`, the gateway inspects `CommandResult` and reloads the
+  authoritative receipt row. If a timed-out earlier proposal becomes visible
+  between the retry's pre-check and apply, the retry's `Duplicate` result
+  returns the earlier leader/index. A duplicate without durable provenance
+  fails closed and is never synthesized or cached at the retry log position.
 - Migration `0012_raft_command_receipts.sql` creates the command-keyed receipt
   ledger and backfills the earliest recoverable committed receipt for existing
   applied commands whose log provenance is still present.
 - State-machine apply records a real configuration command's ID, first log
   index, leader ID, and replicated mutation in one transaction. A duplicate
   apply, including one under a later leader, retains the original receipt.
-- Raft snapshots now carry command receipt provenance. Snapshot installation
-  atomically replaces both the receipt ledger and the applied-command ID ledger
-  alongside replicated configuration, so a snapshot-recovered node can return
-  the original receipt after compaction or leadership change.
+- Raft snapshots carry a deterministic newest receipt window. At most 1,024
+  receipts are selected by descending `(log_index, command_id)`, then the
+  oldest selected receipts are omitted as needed to keep the complete
+  serialized snapshot at or below both the 256 KiB repository payload limit
+  and `MAX_RPC_FRAME_BYTES`. Building rejects replicated configuration that is
+  already oversized before provenance is added.
+- Snapshot construction does not prune `raft_command_receipts`; the source
+  database ledger remains durable. Snapshot installation atomically restores
+  the retained receipt and command-ID window. Commands older than that explicit
+  1,024-entry/byte-budget snapshot window cannot retain retry provenance on a
+  node recovered solely from that snapshot.
+- OpenRaft snapshot transfer uses 48 KiB chunks so worst-case JSON byte-array
+  expansion plus InstallSnapshot metadata stays within the authenticated RPC
+  frame limit.
 - Forwarded actor shape validation no longer hard-codes the `admin` role. It
   bounds the ID, email, and role metadata, then both the submitting node and
   receiving leader re-resolve the active persisted user, require exact
@@ -42,6 +57,14 @@ durable-receipt and actor-authorization findings.
 - Added state-machine/snapshot coverage that applies a duplicate command under
   a later leader, installs the snapshot on another node, and verifies that the
   original leader ID, log index, and applied-command identity survive.
+- Added a late-visibility regression that first observes no receipt, makes an
+  earlier leader/index durable, then resolves a later duplicate response to
+  the original receipt.
+- Added a 4,000-receipt regression proving that snapshot payloads remain within
+  repository/RPC limits, the source ledger remains intact, the newest receipt
+  survives installation, and receipts outside the retained window are omitted.
+- Added worst-case snapshot-chunk encoding coverage against the authenticated
+  RPC frame limit.
 
 ## Red evidence
 
@@ -75,16 +98,28 @@ snapshot_install_preserves_applied_command_provenance ... FAILED
 snapshot install must preserve applied command identity
 ```
 
-## Verification
-
-Exact requested focused suite:
+Before the final hardening, the late-visibility regression did not compile
+because there was no post-write receipt resolver; the production path ignored
+`response.data`. The many-receipt regression then failed at snapshot build:
 
 ```text
-cargo +stable test --test cluster_command_gateway --test cluster_raft_storage --test cluster -- --test-threads=1
+called `Result::unwrap()` on an `Err` value:
+raft snapshot exceeds configured limit
+```
 
+## Verification
+
+Exact requested focused suites:
+
+```text
+cargo +stable test --lib cluster_command::tests -- --test-threads=1
+cargo +stable test --test cluster_command_gateway --test cluster_raft_storage --test cluster_raft --test cluster -- --test-threads=1
+
+cluster_command unit tests: 2 passed; 0 failed
 cluster: 8 passed; 0 failed
 cluster_command_gateway: 13 passed; 0 failed
-cluster_raft_storage: 3 passed; 0 failed
+cluster_raft: 6 passed; 0 failed
+cluster_raft_storage: 4 passed; 0 failed
 ```
 
 Formatting and lint:

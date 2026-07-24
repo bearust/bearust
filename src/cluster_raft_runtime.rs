@@ -714,7 +714,8 @@ pub async fn construct_raft(
     let node_id = storage.raft_id().await.map_err(|e| e.to_string())?;
     let network = AuthenticatedRaftNetworkFactory::with_local_id(auth_secret, node_name)
         .ok_or_else(|| "raft auth secret must not be empty".to_string())?;
-    let config = openraft::Config::build(&["bearust"]).map_err(|e| e.to_string())?;
+    let mut config = openraft::Config::build(&["bearust"]).map_err(|e| e.to_string())?;
+    config.snapshot_max_chunk_size = crate::cluster_raft::MAX_SNAPSHOT_CHUNK_BYTES as u64;
     openraft::Raft::new(node_id, Arc::new(config), network, storage.clone(), storage)
         .await
         .map_err(|e| e.to_string())
@@ -747,7 +748,8 @@ pub async fn construct_raft_with_id(
     let storage = SqlxRaftStorage::new(pool, node_name.clone()).map_err(|e| e.to_string())?;
     let network = AuthenticatedRaftNetworkFactory::with_local_id(auth_secret, node_name)
         .ok_or_else(|| "raft auth secret must not be empty".to_string())?;
-    let config = openraft::Config::build(&["bearust"]).map_err(|e| e.to_string())?;
+    let mut config = openraft::Config::build(&["bearust"]).map_err(|e| e.to_string())?;
+    config.snapshot_max_chunk_size = crate::cluster_raft::MAX_SNAPSHOT_CHUNK_BYTES as u64;
     openraft::Raft::new(raft_id, Arc::new(config), network, storage.clone(), storage)
         .await
         .map_err(|e| e.to_string())
