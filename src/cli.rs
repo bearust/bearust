@@ -290,6 +290,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             None
         };
         let cluster_service = Arc::new(crate::cluster::ClusterService::new(&config.cluster));
+        let mut cluster_status_task = None;
         if let Some(raft) = raft_handle.as_ref() {
             cluster_service.set_raft_handler(Arc::new(
                 crate::cluster_raft_runtime::OpenRaftRpcHandler::new(raft.clone()),
@@ -301,6 +302,10 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             );
             cluster_service.set_command_handler(Arc::new(gateway.clone()));
             control_state = control_state.with_config_gateway(gateway);
+            cluster_status_task = Some(crate::cluster_raft_runtime::spawn_cluster_status_sync(
+                cluster_service.clone(),
+                raft.clone(),
+            ));
         }
         let cluster_event_fanout = if raft_handle.is_some() {
             let receiver = Arc::new(crate::cluster_events::ClusterEventReceiver::new(
@@ -513,6 +518,10 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         control_task.abort();
         if let Some(fanout) = cluster_event_fanout {
             fanout.shutdown().await;
+        }
+        if let Some(status_task) = cluster_status_task {
+            status_task.abort();
+            let _ = status_task.await;
         }
         let _ = cluster_shutdown_tx.send(true);
         tokio::time::timeout(

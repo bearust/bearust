@@ -30,6 +30,22 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+/// Keep the API-facing cluster readiness snapshot synchronized with the
+/// authoritative OpenRaft metrics watch for the lifetime of a node.
+pub fn spawn_cluster_status_sync(
+    cluster: Arc<ClusterService>,
+    raft: openraft::Raft<BearustRaftConfig>,
+) -> tokio::task::JoinHandle<()> {
+    let mut metrics = raft.metrics();
+    tokio::spawn(async move {
+        cluster.update_raft_status_from_metrics(&metrics.borrow());
+        while metrics.changed().await.is_ok() {
+            cluster.update_raft_status_from_metrics(&metrics.borrow());
+        }
+        cluster.mark_stopped();
+    })
+}
+
 const RPC_MAGIC_LEN: usize = 7;
 const RPC_HEADER_LEN: usize = RPC_MAGIC_LEN + 4;
 const RPC_TAG_LEN: usize = 32;

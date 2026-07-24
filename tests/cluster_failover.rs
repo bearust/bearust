@@ -26,6 +26,7 @@ async fn three_node_failover_fixture_elects_a_leader_and_shuts_down_cleanly() {
     let mut services = Vec::new();
     let mut rafts = Vec::new();
     let mut shutdowns = Vec::new();
+    let mut listeners = Vec::new();
 
     for (index, (id, address)) in ids.iter().zip(addresses).enumerate() {
         let pool = repository::connect("sqlite::memory:").await.unwrap();
@@ -54,7 +55,10 @@ async fn three_node_failover_fixture_elects_a_leader_and_shuts_down_cleanly() {
             bearust::cluster_raft_runtime::OpenRaftRpcHandler::new(raft.clone()),
         ));
         let (tx, rx) = watch::channel(false);
-        tokio::spawn(bearust::cluster::run_cluster_listener(service.clone(), rx));
+        listeners.push(tokio::spawn(bearust::cluster::run_cluster_listener(
+            service.clone(),
+            rx,
+        )));
         services.push(service);
         rafts.push(raft);
         shutdowns.push(tx);
@@ -84,9 +88,16 @@ async fn three_node_failover_fixture_elects_a_leader_and_shuts_down_cleanly() {
     .await
     .expect("three-node failover fixture did not elect a leader");
     assert!((1..=3).contains(&leader));
+    let leader_index = (leader - 1) as usize;
+    let leader_metrics = rafts[leader_index].metrics();
+    services[leader_index].update_raft_status_from_metrics(&leader_metrics.borrow());
+    assert_eq!(services[leader_index].raft_status().role, RaftRole::Leader);
 
     for shutdown in shutdowns {
         shutdown.send(true).unwrap();
+    }
+    for listener in listeners {
+        listener.await.unwrap();
     }
     for raft in rafts {
         raft.shutdown().await.unwrap();
