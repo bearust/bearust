@@ -10,6 +10,8 @@ use crate::cluster_raft_runtime::{
     decode_raft_rpc, encode_raft_rpc, send_authenticated_rpc_with_identity, InternalCommandHandler,
     RpcTransportError,
 };
+use crate::control_plane::rbac::Permission;
+use crate::control_plane::repository::{self, DbPool};
 use async_trait::async_trait;
 use openraft::error::{ClientWriteError, RaftError};
 use serde::{Deserialize, Serialize};
@@ -179,14 +181,20 @@ impl ClusterWriteError {
 pub struct ConfigCommandGateway {
     raft: Arc<openraft::Raft<BearustRaftConfig>>,
     cluster: Arc<ClusterService>,
+    db: DbPool,
     receipts: Arc<Mutex<std::collections::BTreeMap<Uuid, CommitReceipt>>>,
 }
 
 impl ConfigCommandGateway {
-    pub fn new(raft: Arc<openraft::Raft<BearustRaftConfig>>, cluster: Arc<ClusterService>) -> Self {
+    pub fn new(
+        raft: Arc<openraft::Raft<BearustRaftConfig>>,
+        cluster: Arc<ClusterService>,
+        db: DbPool,
+    ) -> Self {
         Self {
             raft,
             cluster,
+            db,
             receipts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
         }
     }
@@ -203,6 +211,7 @@ impl ConfigCommandGateway {
         actor: CommandActor,
     ) -> Result<CommitReceipt, ClusterWriteError> {
         validate_command_and_actor(&command, &actor)?;
+        self.validate_authoritative_actor(&command, &actor).await?;
 
         let metrics = self.raft.metrics();
         let metrics = metrics.borrow();
@@ -275,6 +284,10 @@ impl ConfigCommandGateway {
         if let Some(receipt) = receipts.get(&command_id) {
             return Ok(receipt.clone());
         }
+        if let Some(receipt) = self.load_committed_receipt(command_id).await? {
+            cache_receipt(&mut receipts, receipt.clone());
+            return Ok(receipt);
+        }
 
         self.require_live_write_quorum()?;
         let response = tokio::time::timeout(CLIENT_WRITE_TIMEOUT, self.raft.client_write(command))
@@ -293,12 +306,70 @@ impl ConfigCommandGateway {
             leader_id,
             commit_index: response.log_id.index,
         };
-        if receipts.len() >= MAX_CACHED_RECEIPTS {
-            let oldest = *receipts.keys().next().expect("non-empty receipt cache");
-            receipts.remove(&oldest);
-        }
-        receipts.insert(command_id, receipt.clone());
+        cache_receipt(&mut receipts, receipt.clone());
         Ok(receipt)
+    }
+
+    async fn load_committed_receipt(
+        &self,
+        command_id: Uuid,
+    ) -> Result<Option<CommitReceipt>, ClusterWriteError> {
+        let entry = repository::load_committed_raft_log_entry_by_command_id(
+            &self.db,
+            self.cluster.node_id(),
+            &command_id.to_string(),
+        )
+        .await
+        .map_err(|_| ClusterWriteError::QuorumUnavailable)?;
+        entry
+            .map(|entry| {
+                Ok(CommitReceipt {
+                    command_id,
+                    leader_id: u64::try_from(entry.leader_id)
+                        .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
+                    commit_index: u64::try_from(entry.log_index)
+                        .map_err(|_| ClusterWriteError::QuorumUnavailable)?,
+                })
+            })
+            .transpose()
+    }
+
+    async fn validate_authoritative_actor(
+        &self,
+        command: &ConfigCommand,
+        actor: &CommandActor,
+    ) -> Result<(), ClusterWriteError> {
+        let persisted = repository::find_user(&self.db, &actor.email)
+            .await
+            .map_err(|_| ClusterWriteError::ForwardAuthentication)?
+            .map(|(user, _)| user)
+            .ok_or(ClusterWriteError::ForwardAuthentication)?;
+        if persisted.id != actor.user_id
+            || persisted.email != actor.email
+            || persisted.role != actor.role
+            || persisted.disabled
+        {
+            return Err(ClusterWriteError::ForwardAuthentication);
+        }
+
+        let scope = match command {
+            ConfigCommand::CreateProxyHost { .. } => None,
+            ConfigCommand::UpdateProxyHost { host_id, .. }
+            | ConfigCommand::DeleteProxyHost { host_id, .. }
+            | ConfigCommand::UpdateRuntimePolicy { host_id, .. } => Some(("proxy_host", *host_id)),
+            ConfigCommand::Noop { .. } => return Err(ClusterWriteError::NotReplicatedCommand),
+        };
+        match repository::user_has_permission(
+            &self.db,
+            actor.user_id,
+            Permission::ProxyHostsWrite.key(),
+            scope,
+        )
+        .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(_) => Err(ClusterWriteError::ForwardAuthentication),
+        }
     }
 
     async fn forward_to_leader(
@@ -358,9 +429,14 @@ impl InternalCommandHandler for ConfigCommandGateway {
     ) -> Result<Vec<u8>, RpcTransportError> {
         let envelope: serde_json::Value = decode_raft_rpc(payload, "config_command")?;
         let response = match decode_forwarded_command(&envelope) {
-            Ok((origin, command, _actor)) if origin == authenticated_node_id => {
-                match self.submit_local(command).await {
-                    Ok(receipt) => ForwardedCommandResponse::Receipt { receipt },
+            Ok((origin, command, actor)) if origin == authenticated_node_id => {
+                match self.validate_authoritative_actor(&command, &actor).await {
+                    Ok(()) => match self.submit_local(command).await {
+                        Ok(receipt) => ForwardedCommandResponse::Receipt { receipt },
+                        Err(error) => ForwardedCommandResponse::Error {
+                            code: error.code().to_string(),
+                        },
+                    },
                     Err(error) => ForwardedCommandResponse::Error {
                         code: error.code().to_string(),
                     },
@@ -375,6 +451,17 @@ impl InternalCommandHandler for ConfigCommandGateway {
         };
         encode_raft_rpc("config_command_response", &response)
     }
+}
+
+fn cache_receipt(
+    receipts: &mut std::collections::BTreeMap<Uuid, CommitReceipt>,
+    receipt: CommitReceipt,
+) {
+    if receipts.len() >= MAX_CACHED_RECEIPTS {
+        let oldest = *receipts.keys().next().expect("non-empty receipt cache");
+        receipts.remove(&oldest);
+    }
+    receipts.insert(receipt.command_id, receipt);
 }
 
 fn map_forward_transport_error(error: RpcTransportError) -> ClusterWriteError {

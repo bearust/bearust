@@ -337,7 +337,7 @@ async fn cluster_listener_handshake_roundtrip_on_concrete_port() {
         node_id: local_node_id.into(),
         // One fake peer so is_single_node() = false.
         peers: vec![ClusterPeer {
-            node_id: "node-c".into(),
+            node_id: incoming_node_id.into(),
             address: server_addr,
         }],
         bind: server_addr,

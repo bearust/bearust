@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -102,6 +103,7 @@ pub struct ClusterSnapshot {
 pub struct ClusterService {
     node_id: String,
     peers: Vec<ClusterPeer>,
+    peer_ids: Arc<BTreeSet<String>>,
     timeout: Duration,
     bind: SocketAddr,
     auth_token: Arc<Vec<u8>>,
@@ -113,9 +115,11 @@ pub struct ClusterService {
 impl ClusterService {
     pub fn new(config: &ClusterConfig) -> Self {
         let peer_count = config.peers.len().min(MAX_PEERS);
+        let peers = config.peers[..peer_count].to_vec();
         Self {
             node_id: config.node_id.clone(),
-            peers: config.peers[..peer_count].to_vec(),
+            peer_ids: Arc::new(peers.iter().map(|peer| peer.node_id.clone()).collect()),
+            peers,
             timeout: Duration::from_secs(config.timeout_seconds.clamp(1, 60)),
             bind: config.bind,
             auth_token: Arc::new(config.auth_token.as_bytes().to_vec()),
@@ -441,7 +445,9 @@ pub async fn run_cluster_listener(
                         tokio::spawn(handle_cluster_connection(
                             stream,
                             local_id,
+                            Arc::clone(&service.peer_ids),
                             Arc::clone(&service.auth_token),
+                            service.timeout,
                             raft_handler,
                             command_handler,
                         ));
@@ -464,13 +470,13 @@ pub async fn run_cluster_listener(
 async fn handle_cluster_connection(
     mut stream: TcpStream,
     local_node_id: String,
+    peer_ids: Arc<BTreeSet<String>>,
     secret: Arc<Vec<u8>>,
+    operation_timeout: Duration,
     raft_handler: Option<Arc<dyn RaftRpcHandler>>,
     command_handler: Option<Arc<dyn InternalCommandHandler>>,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-
-    let result = tokio::time::timeout_at(deadline, async {
+    let handshake = tokio::time::timeout(Duration::from_secs(5), async {
         // Read: magic + peer_id + nonce + request proof.
         let mut magic = [0u8; 8];
         stream.read_exact(&mut magic).await?;
@@ -506,6 +512,12 @@ async fn handle_cluster_connection(
                 "handshake authentication failed",
             ));
         }
+        if peer_id == local_node_id || !peer_ids.contains(&peer_id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "peer identity is not configured",
+            ));
+        }
 
         // Respond: magic + echoed nonce + local_id + response proof.
         let local_id_bytes = local_node_id.as_bytes();
@@ -520,58 +532,66 @@ async fn handle_cluster_connection(
         resp.extend_from_slice(&response_tag);
         stream.write_all(&resp).await?;
 
-        // After the identity handshake, accept one optional authenticated
-        // Raft control frame. The current milestone only supports a bounded
-        // status probe; mutation/election RPCs remain disabled until durable
-        // OpenRaft storage and network adapters are wired in.
-        let mut header = [0u8; 11]; // BRRAFT1 + u32 length + minimum tag prefix
-        if tokio::time::timeout(Duration::from_millis(50), stream.read_exact(&mut header))
-            .await
-            .is_ok()
-        {
-            // A complete frame is read only when its magic is present. Any
-            // malformed or partial probe is discarded without logging data.
-            if &header[..7] == b"BRRAFT1" {
-                let declared = u32::from_be_bytes(header[7..11].try_into().unwrap()) as usize;
-                if declared <= crate::cluster_raft::MAX_RPC_FRAME_BYTES {
-                    let mut rest = vec![0u8; declared + crate::cluster_raft::RPC_TAG_BYTES];
-                    if stream.read_exact(&mut rest).await.is_ok() {
-                        let mut frame = header.to_vec();
-                        frame.extend_from_slice(&rest);
-                        let response = if command_handler.is_some() {
-                            dispatch_authenticated_rpc_with_handlers(
-                                &frame,
-                                &secret,
-                                &local_node_id,
-                                &peer_id,
-                                raft_handler.as_deref(),
-                                command_handler.as_deref(),
-                            )
-                            .await
-                        } else if let Some(handler) = raft_handler.as_deref() {
-                            dispatch_authenticated_rpc_with_handler(
-                                &frame,
-                                &secret,
-                                &local_node_id,
-                                handler,
-                            )
-                            .await
-                        } else {
-                            dispatch_authenticated_rpc(&frame, &secret, &local_node_id)
-                        };
-                        if let Ok(response) = response {
-                            let _ = stream.write_all(&response).await;
-                        } else if let Err(error) = response {
-                            eprintln!("cluster RPC dispatch error from {peer_id}: {error:?}");
-                        }
-                    }
-                }
-            }
-        }
-
         Ok::<String, std::io::Error>(peer_id)
     })
     .await;
+
+    let result = match handshake {
+        Ok(Ok(peer_id)) => {
+            // After the identity handshake, accept one optional authenticated
+            // Raft control frame. The current milestone only supports a bounded
+            // status probe; mutation/election RPCs remain disabled until durable
+            // OpenRaft storage and network adapters are wired in.
+            let _ = tokio::time::timeout(operation_timeout, async {
+                let mut header = [0u8; 11]; // BRRAFT1 + u32 length + minimum tag prefix
+                stream.read_exact(&mut header).await?;
+                // A complete frame is read only when its magic is present. Any
+                // malformed or partial probe is discarded without logging data.
+                if &header[..7] == b"BRRAFT1" {
+                    let declared = u32::from_be_bytes(header[7..11].try_into().unwrap()) as usize;
+                    if declared <= crate::cluster_raft::MAX_RPC_FRAME_BYTES {
+                        let mut rest = vec![0u8; declared + crate::cluster_raft::RPC_TAG_BYTES];
+                        if stream.read_exact(&mut rest).await.is_ok() {
+                            let mut frame = header.to_vec();
+                            frame.extend_from_slice(&rest);
+                            let response = if command_handler.is_some() {
+                                dispatch_authenticated_rpc_with_handlers(
+                                    &frame,
+                                    &secret,
+                                    &local_node_id,
+                                    &peer_id,
+                                    raft_handler.as_deref(),
+                                    command_handler.as_deref(),
+                                )
+                                .await
+                            } else if let Some(handler) = raft_handler.as_deref() {
+                                dispatch_authenticated_rpc_with_handler(
+                                    &frame,
+                                    &secret,
+                                    &local_node_id,
+                                    handler,
+                                )
+                                .await
+                            } else {
+                                dispatch_authenticated_rpc(&frame, &secret, &local_node_id)
+                            };
+                            if let Ok(response) = response {
+                                let _ = stream.write_all(&response).await;
+                            } else if let Err(error) = response {
+                                eprintln!("cluster RPC dispatch error from {peer_id}: {error:?}");
+                            }
+                        }
+                    }
+                }
+                Ok::<(), std::io::Error>(())
+            })
+            .await;
+
+            Ok(Ok(peer_id))
+        }
+        Ok(Err(error)) => Ok(Err(error)),
+        Err(error) => Err(error),
+    };
 
     match result {
         Ok(Ok(peer_id)) => {

@@ -406,6 +406,41 @@ pub async fn load_raft_log_entries(
         .collect())
 }
 
+/// Load the first committed log entry for an already-applied command.
+///
+/// Joining both the committed watermark and the applied-command ledger keeps
+/// an appended but uncommitted entry from being mistaken for a durable
+/// command receipt.
+pub async fn load_committed_raft_log_entry_by_command_id(
+    pool: &DbPool,
+    node_id: &str,
+    command_id: &str,
+) -> Result<Option<RaftLogRecord>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT l.node_id,l.log_index,l.term,l.leader_id,l.payload,l.command_id
+         FROM raft_log_entries l
+         JOIN raft_committed_state c
+           ON c.node_id=l.node_id AND l.log_index<=c.log_index
+         JOIN raft_command_ids a
+           ON a.command_id=l.command_id
+         WHERE l.node_id=? AND l.command_id=?
+         ORDER BY l.log_index ASC
+         LIMIT 1",
+    )
+    .bind(node_id)
+    .bind(command_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|row| RaftLogRecord {
+        node_id: row.get("node_id"),
+        log_index: row.get("log_index"),
+        term: row.get("term"),
+        leader_id: row.get("leader_id"),
+        payload: row.get("payload"),
+        command_id: row.get("command_id"),
+    }))
+}
+
 pub async fn truncate_raft_log(
     pool: &DbPool,
     node_id: &str,

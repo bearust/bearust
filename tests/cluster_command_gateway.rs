@@ -3,10 +3,10 @@ use bearust::cluster_command::{
     decode_forwarded_command, encode_forwarded_command, ClusterWriteError, CommandActor,
     ConfigCommandGateway,
 };
-use bearust::cluster_raft::ConfigCommand;
+use bearust::cluster_raft::{decode_rpc_frame, encode_rpc_frame, ConfigCommand, RPC_TAG_BYTES};
 use bearust::cluster_raft_runtime::{
     bootstrap_single_node, construct_raft_with_id, decode_raft_rpc, encode_raft_rpc,
-    send_authenticated_rpc_with_identity, OpenRaftRpcHandler,
+    send_authenticated_rpc_with_identity, OpenRaftRpcHandler, RpcTransportError,
 };
 use bearust::config::{ClusterConfig, ClusterPeer};
 use bearust::control_plane::models::ProxyHost;
@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -43,6 +45,16 @@ fn test_create_command() -> ConfigCommand {
             enabled: true,
         },
     }
+}
+
+async fn seed_test_actor(pool: &repository::DbPool) {
+    sqlx::query(
+        "INSERT INTO users(id,email,password_hash,role,created_at,disabled)
+         VALUES(7,'operator@example.test','hash','admin','2026-01-01T00:00:00Z',0)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 #[test]
@@ -83,7 +95,9 @@ fn forwarded_command_rejects_oversized_origin() {
 
 struct ThreeNodeGatewayCluster {
     addresses: [SocketAddr; 3],
+    clusters: Vec<Arc<ClusterService>>,
     gateways: Vec<ConfigCommandGateway>,
+    pools: Vec<repository::DbPool>,
     rafts: Vec<openraft::Raft<bearust::cluster_raft::BearustRaftConfig>>,
     shutdowns: Vec<watch::Sender<bool>>,
 }
@@ -94,7 +108,7 @@ impl ThreeNodeGatewayCluster {
             let _ = shutdown.send(true);
         }
         for raft in self.rafts {
-            raft.shutdown().await.unwrap();
+            let _ = raft.shutdown().await;
         }
     }
 }
@@ -107,7 +121,9 @@ async fn three_node_gateway_cluster(base_port: u16) -> ThreeNodeGatewayCluster {
         format!("127.0.0.1:{}", base_port + 2).parse().unwrap(),
     ];
     let ids = ["node-1", "node-2", "node-3"];
+    let mut clusters = Vec::new();
     let mut gateways = Vec::new();
+    let mut pools = Vec::new();
     let mut rafts = Vec::new();
     let mut shutdowns = Vec::new();
 
@@ -131,15 +147,24 @@ async fn three_node_gateway_cluster(base_port: u16) -> ThreeNodeGatewayCluster {
         let cluster = Arc::new(ClusterService::new(&config));
         let pool = repository::connect("sqlite::memory:").await.unwrap();
         repository::migrate(&pool).await.unwrap();
-        let raft = construct_raft_with_id(pool, *node_id, secret.as_bytes(), (index + 1) as u64)
-            .await
-            .unwrap();
+        seed_test_actor(&pool).await;
+        let raft = construct_raft_with_id(
+            pool.clone(),
+            *node_id,
+            secret.as_bytes(),
+            (index + 1) as u64,
+        )
+        .await
+        .unwrap();
         cluster.set_raft_handler(Arc::new(OpenRaftRpcHandler::new(raft.clone())));
         let (shutdown, receiver) = watch::channel(false);
         tokio::spawn(run_cluster_listener(cluster.clone(), receiver));
-        let gateway = ConfigCommandGateway::new(Arc::new(raft.clone()), cluster.clone());
+        let gateway =
+            ConfigCommandGateway::new(Arc::new(raft.clone()), cluster.clone(), pool.clone());
         cluster.set_command_handler(Arc::new(gateway.clone()));
+        clusters.push(cluster);
         gateways.push(gateway);
+        pools.push(pool);
         rafts.push(raft);
         shutdowns.push(shutdown);
     }
@@ -150,7 +175,7 @@ async fn three_node_gateway_cluster(base_port: u16) -> ThreeNodeGatewayCluster {
             loop {
                 if let Ok(response) = send_authenticated_rpc_with_identity(
                     &address.to_string(),
-                    "readiness-probe",
+                    ids[(index + 1) % ids.len()],
                     &request,
                     TEST_SECRET.as_bytes(),
                     Duration::from_millis(100),
@@ -186,7 +211,9 @@ async fn three_node_gateway_cluster(base_port: u16) -> ThreeNodeGatewayCluster {
 
     ThreeNodeGatewayCluster {
         addresses,
+        clusters,
         gateways,
+        pools,
         rafts,
         shutdowns,
     }
@@ -195,7 +222,7 @@ async fn three_node_gateway_cluster(base_port: u16) -> ThreeNodeGatewayCluster {
 async fn wait_for_live_leader(
     rafts: &[openraft::Raft<bearust::cluster_raft::BearustRaftConfig>],
 ) -> usize {
-    tokio::time::timeout(Duration::from_secs(8), async {
+    tokio::time::timeout(Duration::from_secs(12), async {
         loop {
             for (index, raft) in rafts.iter().enumerate() {
                 let metrics = raft.metrics();
@@ -212,6 +239,126 @@ async fn wait_for_live_leader(
     })
     .await
     .expect("three-node leader did not receive a quorum acknowledgement")
+}
+
+async fn listener_fixture(
+    timeout_seconds: u64,
+) -> (SocketAddr, watch::Sender<bool>, Arc<ClusterService>) {
+    let reservation = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = reservation.local_addr().unwrap();
+    drop(reservation);
+    let config = ClusterConfig {
+        node_id: "node-a".into(),
+        peers: vec![ClusterPeer {
+            node_id: "node-b".into(),
+            address: "127.0.0.1:1".parse().unwrap(),
+        }],
+        bind: address,
+        timeout_seconds,
+        auth_token: TEST_SECRET.into(),
+    };
+    let service = Arc::new(ClusterService::new(&config));
+    let (shutdown, receiver) = watch::channel(false);
+    tokio::spawn(run_cluster_listener(service.clone(), receiver));
+    let request = encode_raft_rpc("status", &serde_json::json!({})).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if send_authenticated_rpc_with_identity(
+                &address.to_string(),
+                "node-b",
+                &request,
+                TEST_SECRET.as_bytes(),
+                Duration::from_millis(100),
+            )
+            .await
+            .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cluster listener did not become ready");
+    (address, shutdown, service)
+}
+
+async fn complete_handshake(stream: &mut TcpStream, node_id: &str) {
+    let nonce = *Uuid::new_v4().as_bytes();
+    let node_id = node_id.as_bytes();
+    let tag = bearust::cluster::handshake_tag(TEST_SECRET.as_bytes(), b"request", &nonce, node_id);
+    let mut request = Vec::new();
+    request.extend_from_slice(bearust::cluster::HANDSHAKE_MAGIC);
+    request.push(node_id.len() as u8);
+    request.extend_from_slice(node_id);
+    request.extend_from_slice(&nonce);
+    request.extend_from_slice(&tag);
+    stream.write_all(&request).await.unwrap();
+
+    let mut magic = [0u8; 8];
+    stream.read_exact(&mut magic).await.unwrap();
+    assert_eq!(&magic, bearust::cluster::HANDSHAKE_MAGIC);
+    let mut echoed_nonce = [0u8; 16];
+    stream.read_exact(&mut echoed_nonce).await.unwrap();
+    assert_eq!(echoed_nonce, nonce);
+    let mut len = [0u8; 1];
+    stream.read_exact(&mut len).await.unwrap();
+    let mut peer_id = vec![0u8; len[0] as usize];
+    stream.read_exact(&mut peer_id).await.unwrap();
+    let mut response_tag = [0u8; 32];
+    stream.read_exact(&mut response_tag).await.unwrap();
+    let expected =
+        bearust::cluster::handshake_tag(TEST_SECRET.as_bytes(), b"response", &nonce, &peer_id);
+    assert_eq!(response_tag, expected);
+}
+
+#[tokio::test]
+async fn cluster_listener_rejects_valid_hmac_from_unknown_node_id() {
+    let (address, shutdown, _service) = listener_fixture(2).await;
+    let request = encode_raft_rpc("status", &serde_json::json!({})).unwrap();
+
+    let result = send_authenticated_rpc_with_identity(
+        &address.to_string(),
+        "unknown-node",
+        &request,
+        TEST_SECRET.as_bytes(),
+        Duration::from_secs(1),
+    )
+    .await;
+
+    let _ = shutdown.send(true);
+    assert_eq!(result, Err(RpcTransportError::Malformed));
+}
+
+#[tokio::test]
+async fn cluster_listener_accepts_rpc_frame_delayed_beyond_fifty_milliseconds() {
+    let (address, shutdown, _service) = listener_fixture(2).await;
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    complete_handshake(&mut stream, "node-b").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let request = encode_raft_rpc("status", &serde_json::json!({})).unwrap();
+    let frame = encode_rpc_frame(&request, TEST_SECRET.as_bytes()).unwrap();
+    stream.write_all(&frame).await.unwrap();
+
+    let response = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut header = [0u8; 11];
+        stream.read_exact(&mut header).await.unwrap();
+        let declared = u32::from_be_bytes(header[7..11].try_into().unwrap()) as usize;
+        let mut rest = vec![0u8; declared + RPC_TAG_BYTES];
+        stream.read_exact(&mut rest).await.unwrap();
+        let mut frame = header.to_vec();
+        frame.extend_from_slice(&rest);
+        decode_rpc_frame(&frame, TEST_SECRET.as_bytes())
+            .unwrap()
+            .to_vec()
+    })
+    .await
+    .expect("listener closed before the configured operation timeout");
+    let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
+
+    let _ = shutdown.send(true);
+    assert_eq!(response["kind"], "status");
+    assert_eq!(response["node_id"], "node-a");
 }
 
 #[tokio::test]
@@ -289,6 +436,38 @@ async fn repeated_forwarded_command_returns_the_original_receipt() {
 }
 
 #[tokio::test]
+async fn repeated_command_after_gateway_restart_returns_the_original_receipt() {
+    let cluster = three_node_gateway_cluster(42326).await;
+    let leader = wait_for_live_leader(&cluster.rafts).await;
+    let follower = (leader + 1) % cluster.rafts.len();
+    let command = test_create_command();
+    let original = cluster.gateways[follower]
+        .submit(command.clone(), test_actor())
+        .await
+        .unwrap();
+    for raft in &cluster.rafts {
+        raft.wait(Some(Duration::from_secs(2)))
+            .applied_index_at_least(Some(original.commit_index), "original command applied")
+            .await
+            .unwrap();
+    }
+    let restarted = ConfigCommandGateway::new(
+        Arc::new(cluster.rafts[leader].clone()),
+        cluster.clusters[leader].clone(),
+        cluster.pools[leader].clone(),
+    );
+    cluster.clusters[leader].set_command_handler(Arc::new(restarted));
+
+    let retried = cluster.gateways[follower]
+        .submit(command, test_actor())
+        .await
+        .unwrap();
+
+    assert_eq!(retried, original);
+    cluster.shutdown().await;
+}
+
+#[tokio::test]
 async fn leader_gateway_commits_through_actual_three_node_quorum() {
     let cluster = three_node_gateway_cluster(42311).await;
     let leader = wait_for_live_leader(&cluster.rafts).await;
@@ -359,7 +538,8 @@ async fn gateway_rejects_writes_after_actual_quorum_loss() {
 async fn single_node_gateway_keeps_local_command_submission() {
     let pool = repository::connect("sqlite::memory:").await.unwrap();
     repository::migrate(&pool).await.unwrap();
-    let raft = construct_raft_with_id(pool, "node-1", TEST_SECRET.as_bytes(), 1)
+    seed_test_actor(&pool).await;
+    let raft = construct_raft_with_id(pool.clone(), "node-1", TEST_SECRET.as_bytes(), 1)
         .await
         .unwrap();
     bootstrap_single_node(&raft, 1, "127.0.0.1:0")
@@ -375,6 +555,7 @@ async fn single_node_gateway_keeps_local_command_submission() {
     let gateway = ConfigCommandGateway::new(
         Arc::new(raft.clone()),
         Arc::new(ClusterService::new(&config)),
+        pool,
     );
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
