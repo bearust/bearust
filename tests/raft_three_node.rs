@@ -49,6 +49,7 @@ async fn three_node_cluster_elects_leader_over_authenticated_transport() {
     let mut services = Vec::new();
     let mut handles = Vec::new();
     let mut shutdowns = Vec::new();
+    let mut listeners = Vec::new();
     for (idx, (id, address)) in ids.iter().zip(addresses).enumerate() {
         let peers = ids
             .iter()
@@ -74,7 +75,7 @@ async fn three_node_cluster_elects_leader_over_authenticated_transport() {
             .unwrap();
         service.set_raft_handler(Arc::new(OpenRaftRpcHandler::new(raft.clone())));
         let (tx, rx) = watch::channel(false);
-        tokio::spawn(run_cluster_listener(service.clone(), rx));
+        listeners.push(tokio::spawn(run_cluster_listener(service.clone(), rx)));
         services.push(service);
         handles.push(raft);
         shutdowns.push(tx);
@@ -111,6 +112,9 @@ async fn three_node_cluster_elects_leader_over_authenticated_transport() {
 
     for shutdown in shutdowns {
         shutdown.send(true).unwrap();
+    }
+    for listener in listeners {
+        listener.await.unwrap();
     }
     for raft in handles {
         raft.shutdown().await.unwrap();

@@ -34,13 +34,17 @@ pub fn raft_status_from_metrics(
         openraft::ServerState::Candidate => RaftRole::Candidate,
         openraft::ServerState::Shutdown => RaftRole::Unknown,
     };
-    let quorum_available = match role {
-        RaftRole::Leader => metrics
+    // OpenRaft only exposes a quorum acknowledgement lease for the leader.
+    // A follower knowing a leader ID is not evidence that this node can reach
+    // a quorum (or that the leader still can), so followers remain
+    // conservatively unready until an explicit, node-local quorum signal is
+    // available.  This prevents stale leader metadata from making readiness
+    // optimistic during a partition.
+    let quorum_available = matches!(role, RaftRole::Leader)
+        && metrics
             .millis_since_quorum_ack
-            .is_some_and(|age| age <= 1_000),
-        RaftRole::Follower => metrics.current_leader.is_some(),
-        _ => false,
-    } && metrics.running_state.is_ok();
+            .is_some_and(|age| age <= 1_000)
+        && metrics.running_state.is_ok();
     RaftStatus {
         role,
         leader_id: metrics.current_leader.map(|id| id.to_string()),

@@ -122,5 +122,16 @@ async fn readiness_mapping_exposes_leader_and_quorum_loss() {
     ));
     assert!(!status.quorum_available);
     assert_eq!(status.sync_state, "quorum_unavailable");
+
+    // A stale leader announcement must not make a follower report quorum
+    // readiness: OpenRaft's quorum lease is leader-only.
+    let mut follower_metrics = metrics.borrow().clone();
+    follower_metrics.state = openraft::ServerState::Follower;
+    follower_metrics.current_leader = Some(99);
+    let follower_status = raft_status_from_metrics(&follower_metrics);
+    assert_eq!(follower_status.role, RaftRole::Follower);
+    assert!(!follower_status.quorum_available);
+    assert_eq!(follower_status.sync_state, "quorum_unavailable");
+
     raft.shutdown().await.unwrap();
 }

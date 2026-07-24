@@ -18,8 +18,10 @@ The status mapping is intentionally exposed as an explicit update method because
 `ClusterService` does not own the OpenRaft handle; the runtime lifecycle should
 call it whenever the Raft metrics watch changes.
 
-Follow-up commit `4eecfe1` wires that watch into the CLI lifecycle and joins it
-by cancellation during shutdown. The current network adapter deliberately
-returns `Unreachable` for Raft RPCs, so a leader-stop/re-election assertion is
-not claimed until transport replication is enabled; the fixture covers
-deterministic election and clean shutdown without fabricating failover.
+Commit `8efc1f6` wires that watch into the CLI lifecycle and joins it by
+cancellation during shutdown. The current `AuthenticatedRaftNetwork` adapter
+deliberately returns `Unreachable` for Raft RPCs. Therefore transport failover
+scenarios (leader stop followed by a replicated re-election, catch-up, or
+write continuity) are explicitly deferred until transport replication is
+enabled; this task only claims deterministic election, quorum/readiness
+mapping, and clean listener/Raft shutdown without fabricating failover.
