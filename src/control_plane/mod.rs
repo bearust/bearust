@@ -1690,11 +1690,27 @@ async fn submit_config_command(
     command: ConfigCommand,
     actor: &User,
 ) -> Result<CommitReceipt, ConfigSubmissionError> {
+    submit_config_command_as(state, command, command_actor(actor)).await
+}
+
+async fn submit_config_command_as(
+    state: &AppState,
+    command: ConfigCommand,
+    actor: CommandActor,
+) -> Result<CommitReceipt, ConfigSubmissionError> {
     if let Some(gateway) = &state.config_gateway {
-        return gateway
-            .submit(command, command_actor(actor))
-            .await
-            .map_err(ConfigSubmissionError::Cluster);
+        if !state.cluster.is_single_node() || gateway.has_initialized_membership() {
+            return gateway
+                .submit(command, actor)
+                .await
+                .map_err(ConfigSubmissionError::Cluster);
+        }
+    }
+
+    if !state.cluster.is_single_node() {
+        return Err(ConfigSubmissionError::Cluster(
+            ClusterWriteError::ClusterUnavailable,
+        ));
     }
 
     repository::apply_raft_command(&state.db, &command)
@@ -1718,6 +1734,11 @@ fn cluster_write_response(error: ClusterWriteError) -> Response {
             StatusCode::SERVICE_UNAVAILABLE,
             "cluster_quorum_unavailable",
             "Cluster quorum is unavailable",
+        ),
+        ClusterWriteError::ClusterUnavailable => user_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cluster_unavailable",
+            "Cluster configuration gateway is unavailable",
         ),
         ClusterWriteError::CommitOutcomeUnknown => user_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -3388,11 +3409,21 @@ struct AnomalyQuery {
     rule: Option<String>,
 }
 
+fn has_auto_enforcement_authority(state: &AppState) -> bool {
+    match &state.config_gateway {
+        Some(gateway) if gateway.has_initialized_membership() => {
+            gateway.is_confirmed_local_leader()
+        }
+        _ => state.cluster.is_single_node(),
+    }
+}
+
 pub async fn run_adaptive_evaluation_tick(s: &AppState, allow_auto_enforce: bool) {
     let now = Utc::now();
     let analytics = s.analytics.snapshot();
     let hosts = repository::list_hosts(&s.db).await.unwrap_or_default();
     let mut baseline_updated = false;
+    let can_auto_enforce = allow_auto_enforce && has_auto_enforcement_authority(s);
 
     for host in &hosts {
         // 1. Take baseline snapshot BEFORE recording current traffic into baseline (prevents spike normalization)
@@ -3419,7 +3450,8 @@ pub async fn run_adaptive_evaluation_tick(s: &AppState, allow_auto_enforce: bool
         let policy = repository::get_tuning_policy(&s.db, host.id)
             .await
             .unwrap_or_default();
-        let current_rl = match repository::get_host_rate_limit_config(&s.db, host.id).await {
+        let current_config = repository::get_host_rate_limit_config(&s.db, host.id).await;
+        let current_rl = match &current_config {
             Ok(c) => crate::rate_limit::RateLimitPolicy {
                 enabled: c.enabled,
                 action: c.action,
@@ -3446,57 +3478,145 @@ pub async fn run_adaptive_evaluation_tick(s: &AppState, allow_auto_enforce: bool
                         if policy.mode == crate::adaptive_tuning::TuningMode::Enforce
                             && !s.adaptive_tuning.is_emergency_disabled()
                             && rec.confidence >= policy.min_confidence
+                            && can_auto_enforce
                         {
-                            match repository::apply_tuning_recommendation_tx(&s.db, rec_id).await {
-                                Ok(Some((h_id, new_rl))) => {
-                                    s.rate_limiter.set_host_policy(
-                                        h_id,
-                                        crate::rate_limit::RateLimitPolicy {
-                                            enabled: new_rl.enabled,
-                                            action: new_rl.action,
-                                            capacity: new_rl.capacity,
-                                            refill_per_second: new_rl.refill_per_second,
-                                            key_scope: new_rl.key_scope,
-                                        },
-                                    );
-                                    audit::record_state(
-                                        s,
-                                        None,
-                                        "adaptive_tuning_auto_enforced",
-                                        &format!("recommendation_id={rec_id};host_id={h_id};confidence={}", rec.confidence),
-                                    ).await;
-                                    s.realtime.publish("adaptive_tuning.changed");
-                                    s.realtime.publish("rate_limit.changed");
-                                }
-                                Ok(None) => {
+                            let current = match &current_config {
+                                Ok(current) => current,
+                                Err(error) => {
                                     audit::record_state(
                                         s,
                                         None,
                                         "adaptive_tuning_auto_enforce_failed",
-                                        &format!("recommendation_id={rec_id};host_id={};reason=already_applied_or_not_found", rec.host_id),
-                                    ).await;
-                                    tracing::warn!(
-                                        event = "adaptive_tuning_auto_enforce_failed",
-                                        recommendation_id = rec_id,
-                                        host_id = rec.host_id,
-                                        reason = "already_applied_or_not_found"
-                                    );
-                                }
-                                Err(e) => {
-                                    audit::record_state(
-                                        s,
-                                        None,
-                                        "adaptive_tuning_auto_enforce_failed",
-                                        &format!("recommendation_id={rec_id};host_id={};reason=database_error", rec.host_id),
-                                    ).await;
+                                        &format!(
+                                            "recommendation_id={rec_id};host_id={};reason=database_error",
+                                            rec.host_id
+                                        ),
+                                    )
+                                    .await;
                                     tracing::error!(
                                         event = "adaptive_tuning_auto_enforce_failed",
                                         recommendation_id = rec_id,
                                         host_id = rec.host_id,
-                                        error = %e
+                                        error = %error
                                     );
+                                    continue;
                                 }
+                            };
+                            let previous_config_json = match serde_json::to_string(current) {
+                                Ok(previous) => previous,
+                                Err(_) => {
+                                    audit::record_state(
+                                        s,
+                                        None,
+                                        "adaptive_tuning_auto_enforce_failed",
+                                        &format!(
+                                            "recommendation_id={rec_id};host_id={};reason=serialization_error",
+                                            rec.host_id
+                                        ),
+                                    )
+                                    .await;
+                                    tracing::error!(
+                                        event = "adaptive_tuning_auto_enforce_failed",
+                                        recommendation_id = rec_id,
+                                        host_id = rec.host_id,
+                                        reason = "serialization_error"
+                                    );
+                                    continue;
+                                }
+                            };
+                            let mut runtime_policy = crate::rate_limit::RateLimitPolicy {
+                                enabled: current.enabled,
+                                action: current.action,
+                                capacity: current.capacity,
+                                refill_per_second: current.refill_per_second,
+                                key_scope: current.key_scope,
+                            };
+                            if let Some(capacity) = rec.patch.capacity {
+                                runtime_policy.capacity = capacity;
                             }
+                            if let Some(refill_per_second) = rec.patch.refill_per_second {
+                                runtime_policy.refill_per_second = refill_per_second;
+                            }
+                            let command = ConfigCommand::UpdateRuntimePolicy {
+                                command_id: Uuid::new_v4(),
+                                host_id: rec.host_id,
+                                policy: runtime_policy.clone(),
+                            };
+                            let receipt = match submit_config_command_as(
+                                s,
+                                command.clone(),
+                                CommandActor::system(),
+                            )
+                            .await
+                            {
+                                Ok(receipt) => receipt,
+                                Err(ConfigSubmissionError::Cluster(error)) => {
+                                    audit::record_state(
+                                        s,
+                                        None,
+                                        "adaptive_tuning_auto_enforce_failed",
+                                        &format!(
+                                            "recommendation_id={rec_id};host_id={};reason=cluster_write_failed",
+                                            rec.host_id
+                                        ),
+                                    )
+                                    .await;
+                                    tracing::warn!(
+                                        event = "adaptive_tuning_auto_enforce_failed",
+                                        recommendation_id = rec_id,
+                                        host_id = rec.host_id,
+                                        error = %error
+                                    );
+                                    continue;
+                                }
+                                Err(ConfigSubmissionError::Database) => {
+                                    audit::record_state(
+                                        s,
+                                        None,
+                                        "adaptive_tuning_auto_enforce_failed",
+                                        &format!(
+                                            "recommendation_id={rec_id};host_id={};reason=database_error",
+                                            rec.host_id
+                                        ),
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            };
+                            s.rate_limiter.set_host_policy(rec.host_id, runtime_policy);
+                            publish_committed_command(s, &command, &receipt);
+                            if !matches!(
+                                repository::mark_tuning_recommendation_applied(
+                                    &s.db,
+                                    rec_id,
+                                    &previous_config_json,
+                                )
+                                .await,
+                                Ok(true)
+                            ) {
+                                audit::record_state(
+                                    s,
+                                    None,
+                                    "adaptive_tuning_auto_enforce_metadata_failed",
+                                    &format!(
+                                        "recommendation_id={rec_id};host_id={};reason=metadata_update_failed",
+                                        rec.host_id
+                                    ),
+                                )
+                                .await;
+                                continue;
+                            }
+                            audit::record_state(
+                                s,
+                                None,
+                                "adaptive_tuning_auto_enforced",
+                                &format!(
+                                    "recommendation_id={rec_id};host_id={};confidence={};state=committed",
+                                    rec.host_id, rec.confidence
+                                ),
+                            )
+                            .await;
+                            s.realtime.publish("adaptive_tuning.changed");
                         }
                     }
                 }
@@ -4150,6 +4270,14 @@ async fn create_host(
                 .into_response();
         }
     };
+    audit::record_state(
+        &s,
+        Some(u.id),
+        "proxy_host_created",
+        &format!("host_id={};state=committed", host.id),
+    )
+    .await;
+    publish_committed_command(&s, &command, &receipt);
     let desired = DesiredConfig {
         proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default(),
     };
@@ -4157,11 +4285,10 @@ async fn create_host(
         audit::record_state(
             &s,
             Some(u.id),
-            "proxy_host_create_failed",
-            "reason=reload_failed",
+            "proxy_host_activation_failed",
+            &format!("host_id={};operation=create;reason=reload_failed", host.id),
         )
         .await;
-        publish_committed_command(&s, &command, &receipt);
         return (
             StatusCode::BAD_GATEWAY,
             Json(ErrorEnvelope {
@@ -4171,14 +4298,6 @@ async fn create_host(
         )
             .into_response();
     }
-    audit::record_state(
-        &s,
-        Some(u.id),
-        "proxy_host_created",
-        "configuration_changed",
-    )
-    .await;
-    publish_committed_command(&s, &command, &receipt);
     (StatusCode::CREATED, Json(host)).into_response()
 }
 async fn update_host(
@@ -4271,6 +4390,14 @@ async fn update_host(
             return StatusCode::CONFLICT.into_response();
         }
     };
+    audit::record_state(
+        &s,
+        Some(u.id),
+        "proxy_host_updated",
+        &format!("host_id={id};state=committed"),
+    )
+    .await;
+    publish_committed_command(&s, &command, &receipt);
     let desired = DesiredConfig {
         proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default(),
     };
@@ -4278,11 +4405,10 @@ async fn update_host(
         audit::record_state(
             &s,
             Some(u.id),
-            "proxy_host_update_failed",
-            "reason=reload_failed",
+            "proxy_host_activation_failed",
+            &format!("host_id={id};operation=update;reason=reload_failed"),
         )
         .await;
-        publish_committed_command(&s, &command, &receipt);
         return (
             StatusCode::BAD_GATEWAY,
             Json(ErrorEnvelope {
@@ -4292,14 +4418,6 @@ async fn update_host(
         )
             .into_response();
     }
-    audit::record_state(
-        &s,
-        Some(u.id),
-        "proxy_host_updated",
-        "configuration_changed",
-    )
-    .await;
-    publish_committed_command(&s, &command, &receipt);
     Json(next).into_response()
 }
 
@@ -4367,6 +4485,14 @@ async fn remove_host(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+    audit::record_state(
+        &s,
+        Some(u.id),
+        "proxy_host_deleted",
+        &format!("host_id={id};state=committed"),
+    )
+    .await;
+    publish_committed_command(&s, &command, &receipt);
     let desired = DesiredConfig {
         proxy_hosts: repository::list_hosts(&s.db).await.unwrap_or_default(),
     };
@@ -4374,11 +4500,10 @@ async fn remove_host(
         audit::record_state(
             &s,
             Some(u.id),
-            "proxy_host_delete_failed",
-            "reason=reload_failed",
+            "proxy_host_activation_failed",
+            &format!("host_id={id};operation=delete;reason=reload_failed"),
         )
         .await;
-        publish_committed_command(&s, &command, &receipt);
         return (
             StatusCode::BAD_GATEWAY,
             Json(ErrorEnvelope {
@@ -4388,14 +4513,6 @@ async fn remove_host(
         )
             .into_response();
     }
-    audit::record_state(
-        &s,
-        Some(u.id),
-        "proxy_host_deleted",
-        "configuration_changed",
-    )
-    .await;
-    publish_committed_command(&s, &command, &receipt);
     StatusCode::NO_CONTENT.into_response()
 }
 async fn upload_certificate(

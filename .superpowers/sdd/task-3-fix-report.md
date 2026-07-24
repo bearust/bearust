@@ -1,36 +1,74 @@
-# Task 3 review fixes
+# Phase 10C Task 3 Review-Fix Report
 
-## Changes
+## Status
 
-- Extract the peer IP directly from Pingora's `SocketAddr::Inet` via
-  `as_inet().ip()`, preserving both IPv4 and IPv6 addresses and avoiding the
-  lossy string round-trip that previously skipped real requests.
-- Derive the temporary proxy-host identity from `ResolvedRoute.host` only;
-  `path_prefix` is excluded so all paths on one host share one client quota.
-- Added regressions for direct IPv4/IPv6 extraction, trusted bracketed IPv6
-  forwarding, and shared host quota across paths.
+All Task 3 review findings against base `5fcfb61` are fixed.
+
+## Corrections
+
+- Adaptive auto-enforcement now submits a typed
+  `ConfigCommand::UpdateRuntimePolicy` through `ConfigCommandGateway` with a
+  constrained system actor.
+- Clustered auto-enforcement is fenced to the confirmed local Raft leader.
+  Followers do not write host runtime policy. Standalone deployments retain
+  local enforcement, including auth-token-only startup with no explicit Raft
+  membership.
+- Local configuration-command fallback now requires
+  `cluster.is_single_node()`. A multi-node `AppState` without a gateway returns
+  `503 cluster_unavailable` and performs no local mutation.
+- Explicit or persisted single-node Raft membership still uses the gateway and
+  emits a committed receipt. The recommendation retains its pre-change policy
+  metadata, preserving the existing rollback path.
+- Proxy-host mutations are audited as actor-attributed committed operations
+  immediately after receipt. A subsequent runtime reload failure records a
+  separate `proxy_host_activation_failed` event with the operation and stable
+  `reload_failed` reason.
+- The public realtime payload remains unchanged; committed runtime-policy and
+  proxy-host invalidations are emitted only after a receipt exists.
+
+## Regression evidence
+
+The new control-plane cluster regressions initially failed as expected:
+
+```text
+auth_token_only_single_node_without_membership_keeps_local_mutations:
+  expected 201, received 503
+bootstrapped_single_node_auto_enforcement_uses_gateway_receipt:
+  committed gateway event timed out
+committed_proxy_mutations_and_activation_failures_are_audited_separately:
+  missing committed mutation audit proxy_host_created
+multi_node_state_without_gateway_rejects_replication_required_mutation:
+  expected 503, received 201
+```
+
+Coverage now also proves that a follower adaptive tick does not auto-enforce
+and that the system actor cannot submit proxy-host commands.
 
 ## Verification
 
-Command:
-
 ```text
-cargo +nightly test --test proxy_rate_limit
+cargo +stable test --test control_plane_cluster --test cluster_command_gateway \
+  --test cluster --test cluster_raft --test cluster_raft_runtime \
+  --test cluster_raft_storage --test raft_three_node \
+  --test adaptive_tuning --test adaptive_tuning_api -- --test-threads=1
+
+60 passed; 0 failed
 ```
 
-Output:
-
 ```text
-running 6 tests
-test block_mode_exposes_retry_after_for_429_response ... ok
-test buckets_are_isolated_by_proxy_host_and_client_ip ... ok
-test client_ip_preserves_ipv4_and_ipv6_peer_addresses ... ok
-test monitor_mode_records_limit_without_changing_decision_math ... ok
-test one_host_quota_is_shared_across_paths ... ok
-test trusted_forwarded_client_ip_supports_bracketed_ipv6 ... ok
-
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+cargo +stable clippy --all-targets -- -D warnings
+Finished successfully with no warnings.
 ```
 
-The repository's default Cargo 1.84.1 cannot parse the cached `clap_lex`
-2024-edition manifest, so verification used the installed nightly toolchain.
+The final formatting and diff checks also passed:
+
+```text
+cargo +stable fmt --all -- --check
+git diff --check
+```
+
+## Scope
+
+Task 3 source, tests, and reports only. The pre-existing
+`.superpowers/sdd/progress.md` modification is excluded from the commit. No bot
+files were changed.

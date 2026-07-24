@@ -30,6 +30,8 @@ const MAX_ACTOR_EMAIL_BYTES: usize = 320;
 const MAX_ACTOR_ROLE_BYTES: usize = 64;
 const MAX_NODE_ID_BYTES: usize = 255;
 const MAX_CACHED_RECEIPTS: usize = 1_024;
+const SYSTEM_ACTOR_EMAIL: &str = "system";
+const SYSTEM_ACTOR_ROLE: &str = "system";
 
 /// Return the existing public invalidation kind for a committed replicated
 /// command. Internal log markers never invalidate a control-plane view.
@@ -50,6 +52,20 @@ pub struct CommandActor {
     pub role: String,
 }
 
+impl CommandActor {
+    pub fn system() -> Self {
+        Self {
+            user_id: 0,
+            email: SYSTEM_ACTOR_EMAIL.into(),
+            role: SYSTEM_ACTOR_ROLE.into(),
+        }
+    }
+
+    fn is_system(&self) -> bool {
+        self.user_id == 0 && self.email == SYSTEM_ACTOR_EMAIL && self.role == SYSTEM_ACTOR_ROLE
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommitReceipt {
     pub command_id: Uuid,
@@ -63,6 +79,8 @@ pub enum ClusterWriteError {
     LeaderUnknown,
     #[error("raft quorum is unavailable")]
     QuorumUnavailable,
+    #[error("cluster configuration gateway is unavailable")]
+    ClusterUnavailable,
     /// `Raft::client_write` exceeded its local deadline after the command was
     /// submitted. The command may still commit; retry the same `command_id`.
     #[error("raft command commit outcome is unknown; retry the same command_id")]
@@ -153,6 +171,13 @@ fn validate_command_and_actor(
     if matches!(command, ConfigCommand::Noop { .. }) {
         return Err(ClusterWriteError::NotReplicatedCommand);
     }
+    if actor.is_system() {
+        return if matches!(command, ConfigCommand::UpdateRuntimePolicy { .. }) {
+            Ok(())
+        } else {
+            Err(ClusterWriteError::ForwardAuthentication)
+        };
+    }
     if actor.user_id <= 0
         || actor.email.is_empty()
         || actor.email.len() > MAX_ACTOR_EMAIL_BYTES
@@ -169,6 +194,7 @@ impl ClusterWriteError {
         match self {
             Self::LeaderUnknown => "leader_unknown",
             Self::QuorumUnavailable => "quorum_unavailable",
+            Self::ClusterUnavailable => "cluster_unavailable",
             Self::CommitOutcomeUnknown => "commit_outcome_unknown",
             Self::ForwardTimeout => "forward_timeout",
             Self::ForwardAuthentication => "forward_authentication",
@@ -181,6 +207,7 @@ impl ClusterWriteError {
         match code {
             "leader_unknown" => Self::LeaderUnknown,
             "quorum_unavailable" => Self::QuorumUnavailable,
+            "cluster_unavailable" => Self::ClusterUnavailable,
             "commit_outcome_unknown" => Self::CommitOutcomeUnknown,
             "forward_timeout" => Self::ForwardTimeout,
             "forward_authentication" => Self::ForwardAuthentication,
@@ -211,6 +238,27 @@ impl ConfigCommandGateway {
             db,
             receipts: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
         }
+    }
+
+    /// Whether OpenRaft has an explicit voter membership. An auth token alone
+    /// starts the transport but does not opt a standalone deployment into
+    /// replicated writes.
+    pub fn has_initialized_membership(&self) -> bool {
+        self.raft
+            .metrics()
+            .borrow()
+            .membership_config
+            .membership()
+            .voter_ids()
+            .next()
+            .is_some()
+    }
+
+    /// True only while this local Raft node is the elected leader.
+    pub fn is_confirmed_local_leader(&self) -> bool {
+        let metrics = self.raft.metrics();
+        let metrics = metrics.borrow();
+        metrics.state.is_leader() && metrics.current_leader == Some(metrics.id)
     }
 
     /// Submit one already-authorized configuration command for Raft commit.
@@ -365,6 +413,13 @@ impl ConfigCommandGateway {
         command: &ConfigCommand,
         actor: &CommandActor,
     ) -> Result<(), ClusterWriteError> {
+        if actor.is_system() {
+            return if matches!(command, ConfigCommand::UpdateRuntimePolicy { .. }) {
+                Ok(())
+            } else {
+                Err(ClusterWriteError::ForwardAuthentication)
+            };
+        }
         let persisted = repository::find_user(&self.db, &actor.email)
             .await
             .map_err(|_| ClusterWriteError::ForwardAuthentication)?

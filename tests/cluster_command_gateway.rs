@@ -66,6 +66,21 @@ fn replicated_commands_map_to_existing_public_event_kinds() {
     );
 }
 
+#[test]
+fn system_actor_is_limited_to_runtime_policy_commands() {
+    let runtime = ConfigCommand::UpdateRuntimePolicy {
+        command_id: Uuid::new_v4(),
+        host_id: 42,
+        policy: bearust::rate_limit::RateLimitPolicy::default(),
+    };
+
+    assert!(encode_forwarded_command("node-1", runtime, CommandActor::system()).is_ok());
+    assert_eq!(
+        encode_forwarded_command("node-1", test_create_command(), CommandActor::system()),
+        Err(ClusterWriteError::ForwardAuthentication)
+    );
+}
+
 async fn seed_test_actor(pool: &repository::DbPool) {
     sqlx::query(
         "INSERT INTO users(id,email,password_hash,role,created_at,disabled)

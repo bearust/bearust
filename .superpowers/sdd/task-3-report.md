@@ -3,7 +3,64 @@
 ## Status
 
 Completed the proxy-host and host runtime-policy command-gateway integration
-from base commit `d28b8c2`.
+from base commit `d28b8c2`, including the review corrections applied to
+`5fcfb61`.
+
+## Review corrections
+
+- Adaptive auto-enforcement now constructs a typed
+  `ConfigCommand::UpdateRuntimePolicy` and submits it through
+  `ConfigCommandGateway` with the constrained system actor. Clustered
+  auto-enforcement runs only on the confirmed local leader; followers remain
+  non-mutating. A committed receipt is published before recommendation
+  metadata is finalized, and the previous policy remains persisted for the
+  existing rollback path.
+- Local state-machine fallback now requires `cluster.is_single_node()`.
+  Multi-node state without a gateway returns the stable
+  `cluster_unavailable` response and performs no local write.
+- A standalone node configured with only a cluster auth token remains on the
+  local path while Raft has no explicit voter membership. A bootstrapped or
+  persisted single-node membership continues to use the gateway.
+- Proxy-host create, update, and delete record the actor-attributed committed
+  mutation immediately after receipt. Runtime reload failures are recorded
+  separately as `proxy_host_activation_failed`, with a redacted operation and
+  stable failure reason, without relabeling the durable mutation as failed.
+- Added regressions for missing-gateway multi-node writes, auth-token-only
+  standalone startup, bootstrapped auto-enforcement receipts, follower
+  auto-enforcement fencing, constrained system actors, and commit/activation
+  audit separation.
+
+## Review red evidence
+
+Before the corrections, the expanded control-plane cluster suite failed four
+regressions:
+
+```text
+auth_token_only_single_node_without_membership_keeps_local_mutations:
+  expected 201, received 503
+bootstrapped_single_node_auto_enforcement_uses_gateway_receipt:
+  committed gateway event timed out
+committed_proxy_mutations_and_activation_failures_are_audited_separately:
+  missing committed mutation audit proxy_host_created
+multi_node_state_without_gateway_rejects_replication_required_mutation:
+  expected 503, received 201
+```
+
+## Review verification
+
+```text
+cargo +stable test --test control_plane_cluster --test cluster_command_gateway \
+  --test cluster --test cluster_raft --test cluster_raft_runtime \
+  --test cluster_raft_storage --test raft_three_node \
+  --test adaptive_tuning --test adaptive_tuning_api -- --test-threads=1
+
+60 passed; 0 failed
+```
+
+```text
+cargo +stable clippy --all-targets -- -D warnings
+Finished successfully with no warnings.
+```
 
 ## Changed scope
 

@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use axum::{
     body::{to_bytes, Body},
     http::{Request, StatusCode},
@@ -7,13 +8,15 @@ use bearust::adaptive_tuning::{PolicyPatch, PolicyRecommendation, TuningMode, Tu
 use bearust::cluster::{handshake_tag, run_cluster_listener, ClusterService, HANDSHAKE_MAGIC};
 use bearust::cluster_command::ConfigCommandGateway;
 use bearust::cluster_raft_runtime::{
-    construct_raft_with_id, decode_raft_rpc, encode_raft_rpc, send_authenticated_rpc_with_identity,
-    OpenRaftRpcHandler,
+    bootstrap_single_node, construct_raft_with_id, decode_raft_rpc, encode_raft_rpc,
+    send_authenticated_rpc_with_identity, OpenRaftRpcHandler,
 };
 use bearust::config::{ClusterConfig, ClusterPeer};
 use bearust::control_plane::{
     auth::{hash_password, token_hash},
-    build_state, repository, router, AppState,
+    build_state,
+    models::{AuditLogQuery, DesiredConfig},
+    repository, router, AppState, ConfigReloader, ReloadError,
 };
 use openraft::BasicNode;
 use std::collections::BTreeMap;
@@ -162,6 +165,34 @@ async fn cluster_status_endpoint_returns_snapshot_for_authenticated_user() {
 }
 
 const COMMAND_TEST_SECRET: &str = "01234567890123456789012345678901";
+
+async fn seed_admin_session(state: &AppState, session_token: &str) {
+    let admin = repository::insert_initial_admin(
+        &state.db,
+        "admin@example.test",
+        &hash_password("admin12345678").unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    repository::create_session(
+        &state.db,
+        admin.id,
+        &token_hash(session_token),
+        "2099-01-01T00:00:00Z",
+    )
+    .await
+    .unwrap();
+}
+
+struct AlwaysFailReloader;
+
+#[async_trait]
+impl ConfigReloader for AlwaysFailReloader {
+    async fn apply(&self, _: DesiredConfig) -> Result<(), ReloadError> {
+        Err(ReloadError::Failed("test activation failure".into()))
+    }
+}
 
 struct ControlPlaneCommandCluster {
     states: Vec<AppState>,
@@ -377,6 +408,320 @@ async fn wait_for_applied_command(cluster: &ControlPlaneCommandCluster, command_
     })
     .await
     .expect("replicated API command did not apply on every node");
+}
+
+#[tokio::test]
+async fn multi_node_state_without_gateway_rejects_replication_required_mutation() {
+    let dir = tempdir().unwrap();
+    let mut state = build_state("sqlite::memory:", dir.path(), "setup-token")
+        .await
+        .unwrap();
+    let cluster = Arc::new(ClusterService::new(&ClusterConfig {
+        node_id: "api-node-1".into(),
+        peers: vec![ClusterPeer {
+            node_id: "api-node-2".into(),
+            address: "127.0.0.1:65530".parse().unwrap(),
+        }],
+        bind: "127.0.0.1:0".parse().unwrap(),
+        timeout_seconds: 1,
+        auth_token: COMMAND_TEST_SECRET.into(),
+    }));
+    state = state.with_cluster(cluster);
+    seed_admin_session(&state, "cluster-admin-token").await;
+
+    let (status, body) = api_request(
+        router(state.clone()),
+        "POST",
+        "/api/proxy-hosts",
+        Body::from(
+            r#"{"name":"must-replicate","domain":"must-replicate.example.test","upstream_host":"127.0.0.1","upstream_port":8080}"#,
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["code"], "cluster_unavailable");
+    assert!(repository::list_hosts(&state.db).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn auth_token_only_single_node_without_membership_keeps_local_mutations() {
+    let dir = tempdir().unwrap();
+    let mut state = build_state("sqlite::memory:", dir.path(), "setup-token")
+        .await
+        .unwrap();
+    let cluster = Arc::new(ClusterService::new(&ClusterConfig {
+        node_id: "api-node-1".into(),
+        peers: vec![],
+        bind: "127.0.0.1:0".parse().unwrap(),
+        timeout_seconds: 1,
+        auth_token: COMMAND_TEST_SECRET.into(),
+    }));
+    let raft = construct_raft_with_id(
+        state.db.clone(),
+        "api-node-1",
+        COMMAND_TEST_SECRET.as_bytes(),
+        1,
+    )
+    .await
+    .unwrap();
+    let gateway =
+        ConfigCommandGateway::new(Arc::new(raft.clone()), cluster.clone(), state.db.clone());
+    state = state.with_cluster(cluster).with_config_gateway(gateway);
+    seed_admin_session(&state, "cluster-admin-token").await;
+
+    let (status, body) = api_request(
+        router(state.clone()),
+        "POST",
+        "/api/proxy-hosts",
+        Body::from(
+            r#"{"name":"standalone","domain":"standalone.example.test","upstream_host":"127.0.0.1","upstream_port":8080}"#,
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["domain"], "standalone.example.test");
+    assert_eq!(repository::list_hosts(&state.db).await.unwrap().len(), 1);
+    let receipt_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM raft_command_receipts")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(receipt_count, 0);
+    raft.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn committed_proxy_mutations_and_activation_failures_are_audited_separately() {
+    let dir = tempdir().unwrap();
+    let mut state = build_state("sqlite::memory:", dir.path(), "setup-token")
+        .await
+        .unwrap();
+    state.reloader = Arc::new(AlwaysFailReloader);
+    seed_admin_session(&state, "cluster-admin-token").await;
+    let app = router(state.clone());
+
+    let (status, _) = api_request(
+        app.clone(),
+        "POST",
+        "/api/proxy-hosts",
+        Body::from(
+            r#"{"name":"committed","domain":"committed.example.test","upstream_host":"127.0.0.1","upstream_port":8080}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let host_id = repository::list_hosts(&state.db).await.unwrap()[0].id;
+
+    let (status, _) = api_request(
+        app.clone(),
+        "PATCH",
+        format!("/api/proxy-hosts/{host_id}"),
+        Body::from(
+            r#"{"name":"updated","domain":"updated.example.test","upstream_host":"127.0.0.1","upstream_port":8081}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+    let (status, _) = api_request(
+        app,
+        "DELETE",
+        format!("/api/proxy-hosts/{host_id}"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+    let logs = repository::list_audit_logs(
+        &state.db,
+        &AuditLogQuery {
+            event: None,
+            actor_id: None,
+            from: None,
+            to: None,
+            q: None,
+            page: 1,
+            page_size: 100,
+        },
+    )
+    .await
+    .unwrap();
+    for event in [
+        "proxy_host_created",
+        "proxy_host_updated",
+        "proxy_host_deleted",
+    ] {
+        let mutation = logs
+            .items
+            .iter()
+            .find(|entry| entry.event == event)
+            .unwrap_or_else(|| panic!("missing committed mutation audit {event}"));
+        assert_eq!(mutation.actor, "admin@example.test");
+        assert!(mutation.details.contains("state=committed"));
+    }
+    for operation in ["create", "update", "delete"] {
+        let failure = logs
+            .items
+            .iter()
+            .find(|entry| {
+                entry.event == "proxy_host_activation_failed"
+                    && entry.details.contains(&format!("operation={operation}"))
+            })
+            .unwrap_or_else(|| panic!("missing activation failure audit for {operation}"));
+        assert_eq!(failure.actor, "admin@example.test");
+        assert!(failure.details.contains("reason=reload_failed"));
+    }
+}
+
+async fn configure_auto_enforcement_anomaly(state: &AppState, host_id: i64) {
+    repository::insert_host(
+        &state.db,
+        &bearust::control_plane::models::ProxyHost {
+            id: host_id,
+            name: "adaptive".into(),
+            domain: "adaptive.example.test".into(),
+            upstream_host: "127.0.0.1".into(),
+            upstream_port: 8080,
+            tls_mode: "disabled".into(),
+            certificate_id: None,
+            enabled: true,
+        },
+    )
+    .await
+    .unwrap();
+    repository::update_tuning_policy(
+        &state.db,
+        host_id,
+        &TuningPolicy {
+            mode: TuningMode::Enforce,
+            max_delta_percent: 50,
+            cooldown_seconds: 300,
+            min_confidence: 0.8,
+        },
+    )
+    .await
+    .unwrap();
+    let now = chrono::Utc::now();
+    for minute in (1..=6).rev() {
+        state.analytics.record(bearust::analytics::AnalyticsEvent {
+            proxy_host_id: host_id,
+            timestamp: now - chrono::Duration::seconds(minute * 60 + 5),
+            status_code: 200,
+            latency_ms: 10,
+            security: bearust::analytics::SecurityCounters::default(),
+        });
+    }
+    state.baseline.record(
+        &state.analytics.snapshot(),
+        now - chrono::Duration::seconds(65),
+    );
+    for _ in 0..500 {
+        state.analytics.record(bearust::analytics::AnalyticsEvent {
+            proxy_host_id: host_id,
+            timestamp: now,
+            status_code: 200,
+            latency_ms: 10,
+            security: bearust::analytics::SecurityCounters::default(),
+        });
+    }
+}
+
+#[tokio::test]
+async fn bootstrapped_single_node_auto_enforcement_uses_gateway_receipt() {
+    let dir = tempdir().unwrap();
+    let mut state = build_state("sqlite::memory:", dir.path(), "setup-token")
+        .await
+        .unwrap();
+    let cluster = Arc::new(ClusterService::new(&ClusterConfig {
+        node_id: "api-node-1".into(),
+        peers: vec![],
+        bind: "127.0.0.1:0".parse().unwrap(),
+        timeout_seconds: 1,
+        auth_token: COMMAND_TEST_SECRET.into(),
+    }));
+    let raft = construct_raft_with_id(
+        state.db.clone(),
+        "api-node-1",
+        COMMAND_TEST_SECRET.as_bytes(),
+        1,
+    )
+    .await
+    .unwrap();
+    bootstrap_single_node(&raft, 1, "127.0.0.1:0")
+        .await
+        .unwrap();
+    let gateway =
+        ConfigCommandGateway::new(Arc::new(raft.clone()), cluster.clone(), state.db.clone());
+    state = state.with_cluster(cluster).with_config_gateway(gateway);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let metrics = raft.metrics();
+            let metrics = metrics.borrow();
+            if metrics.state.is_leader() && metrics.current_leader == Some(1) {
+                return;
+            }
+            drop(metrics);
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("single node did not elect itself");
+    configure_auto_enforcement_anomaly(&state, 88).await;
+    let mut committed = state.realtime.subscribe_committed();
+
+    bearust::control_plane::run_adaptive_evaluation_tick(&state, true).await;
+
+    let event = tokio::time::timeout(Duration::from_secs(1), committed.recv())
+        .await
+        .expect("auto-enforcement did not publish a committed gateway event")
+        .unwrap();
+    assert_eq!(event.event.kind, "rate_limit.changed");
+    assert_eq!(event.leader_id, 1);
+    assert!(event.commit_index > 0);
+    assert!(
+        repository::load_raft_command_receipt(&state.db, &event.command_id.to_string())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        repository::get_host_rate_limit_config(&state.db, 88)
+            .await
+            .unwrap()
+            .capacity,
+        75
+    );
+    let recommendations = repository::list_tuning_recommendations(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(recommendations.len(), 1);
+    assert!(recommendations[0].applied);
+    raft.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn follower_adaptive_tick_does_not_auto_enforce() {
+    let cluster = command_cluster().await;
+    let leader = wait_for_command_leader(&cluster.rafts).await;
+    let follower = (leader + 1) % cluster.rafts.len();
+    configure_auto_enforcement_anomaly(&cluster.states[follower], 89).await;
+
+    bearust::control_plane::run_adaptive_evaluation_tick(&cluster.states[follower], true).await;
+
+    assert_eq!(
+        repository::get_host_rate_limit_config(&cluster.states[follower].db, 89)
+            .await
+            .unwrap()
+            .capacity,
+        100
+    );
+    let receipt_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM raft_command_receipts")
+        .fetch_one(&cluster.states[follower].db)
+        .await
+        .unwrap();
+    assert_eq!(receipt_count, 0);
+    cluster.shutdown().await;
 }
 
 #[tokio::test]
