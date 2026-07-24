@@ -754,6 +754,45 @@ async fn membership_initialization_waits_for_in_flight_standalone_apply() {
 }
 
 #[tokio::test]
+async fn completed_membership_initialization_prevents_immediate_standalone_fallback() {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+    seed_test_actor(&pool).await;
+    let raft = construct_raft_with_id(pool.clone(), "node-1", TEST_SECRET.as_bytes(), 1)
+        .await
+        .unwrap();
+    let config = ClusterConfig {
+        node_id: "node-1".into(),
+        peers: vec![],
+        bind: "127.0.0.1:0".parse().unwrap(),
+        timeout_seconds: 1,
+        auth_token: TEST_SECRET.into(),
+    };
+    let cluster = Arc::new(ClusterService::new(&config));
+    let gateway = ConfigCommandGateway::new(Arc::new(raft.clone()), cluster.clone(), pool);
+
+    initialize_membership(
+        &raft,
+        &cluster,
+        BTreeMap::from([(1, BasicNode::new("127.0.0.1:0"))]),
+    )
+    .await
+    .unwrap();
+    let result = gateway
+        .submit_with_standalone_fallback(test_create_command(), test_actor())
+        .await;
+
+    if let Ok(receipt) = result {
+        assert_ne!(
+            (receipt.leader_id, receipt.commit_index),
+            (0, 0),
+            "completed membership initialization returned a standalone receipt"
+        );
+    }
+    raft.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn gateway_denies_viewer_disabled_and_actor_mismatch() {
     let cluster = three_node_gateway_cluster(42331).await;
     let node = wait_for_live_leader(&cluster.rafts).await;

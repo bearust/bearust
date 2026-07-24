@@ -2,10 +2,23 @@
 
 ## Status
 
-All Task 3 review findings through base `8052ee9` are fixed.
+All Task 3 review findings through base `bb1dbe3`, including the final
+topology-state race, are fixed.
 
 ## Final review corrections
 
+- The topology gate now protects a membership-initialized boolean as well as
+  the operation boundary. `initialize_membership` marks it only after
+  `Raft::initialize` succeeds and before releasing the write guard. A
+  subsequent read guard therefore observes initialized membership without
+  depending on asynchronous OpenRaft metrics publication.
+- A reverse-order regression covers initialization completing immediately
+  before fallback selection. It rejects a synthetic standalone receipt and
+  accepts only a Raft receipt or cluster error. On `bb1dbe3`, the regression
+  failed deterministically with `(leader_id=0, commit_index=0)`.
+- The existing auth-token-only single-node regression remains green, proving
+  that a node whose membership was never initialized still retains local
+  standalone behavior.
 - `ClusterService` now owns one fair read/write topology-transition gate.
   Standalone fallback acquires the shared side before checking explicit
   membership and retains it through actor validation, direct database apply,
@@ -84,6 +97,17 @@ Coverage now also proves that a follower adaptive tick does not auto-enforce
 and that the system actor cannot submit proxy-host commands.
 
 ## Verification
+
+Final topology-race gate:
+
+```text
+cargo +stable test --test cluster_command_gateway \
+  --test control_plane_cluster --test raft_three_node -- --test-threads=1
+
+cluster_command_gateway: 21 passed; 0 failed
+control_plane_cluster: 10 passed; 0 failed
+raft_three_node: 2 passed; 0 failed
+```
 
 Topology-transition review gate:
 

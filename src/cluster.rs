@@ -110,7 +110,7 @@ pub struct ClusterService {
     raft_status: Arc<RwLock<RaftStatus>>,
     raft_handler: Arc<RwLock<Option<Arc<dyn RaftRpcHandler>>>>,
     command_handler: Arc<RwLock<Option<Arc<dyn InternalCommandHandler>>>>,
-    topology_transition_gate: tokio::sync::RwLock<()>,
+    topology_transition_gate: tokio::sync::RwLock<bool>,
 }
 
 impl ClusterService {
@@ -147,7 +147,7 @@ impl ClusterService {
             })),
             raft_handler: Arc::new(RwLock::new(None)),
             command_handler: Arc::new(RwLock::new(None)),
-            topology_transition_gate: tokio::sync::RwLock::new(()),
+            topology_transition_gate: tokio::sync::RwLock::new(false),
         }
     }
 
@@ -167,11 +167,13 @@ impl ClusterService {
         self.peers.is_empty()
     }
 
-    pub(crate) async fn lock_standalone_submission(&self) -> tokio::sync::RwLockReadGuard<'_, ()> {
+    pub(crate) async fn lock_standalone_submission(
+        &self,
+    ) -> tokio::sync::RwLockReadGuard<'_, bool> {
         self.topology_transition_gate.read().await
     }
 
-    pub(crate) async fn lock_topology_transition(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+    pub(crate) async fn lock_topology_transition(&self) -> tokio::sync::RwLockWriteGuard<'_, bool> {
         self.topology_transition_gate.write().await
     }
 

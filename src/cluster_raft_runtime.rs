@@ -519,8 +519,10 @@ pub async fn initialize_membership(
     cluster: &ClusterService,
     members: BTreeMap<u64, openraft::BasicNode>,
 ) -> Result<(), RaftError<u64, openraft::error::InitializeError<u64, openraft::BasicNode>>> {
-    let _transition = cluster.lock_topology_transition().await;
-    raft.initialize(members).await
+    let mut membership_initialized = cluster.lock_topology_transition().await;
+    raft.initialize(members).await?;
+    *membership_initialized = true;
+    Ok(())
 }
 
 /// Validate a multi-node join request without mutating Raft membership. The

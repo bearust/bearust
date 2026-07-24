@@ -349,7 +349,7 @@ impl ConfigCommandGateway {
             return self.submit_inner(command, actor, leader_only).await;
         }
         let topology = self.cluster.lock_standalone_submission().await;
-        if self.has_initialized_membership() {
+        if *topology || self.has_initialized_membership() {
             drop(topology);
             return self.submit_inner(command, actor, leader_only).await;
         }

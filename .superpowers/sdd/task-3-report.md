@@ -4,10 +4,21 @@
 
 Completed the proxy-host and host runtime-policy command-gateway integration
 from base commit `d28b8c2`, including final review corrections through
-`8052ee9`.
+`8052ee9` and the final topology-state correction after `bb1dbe3`.
 
 ## Review corrections
 
+- The topology-transition `RwLock` now carries the authoritative
+  membership-initialized flag instead of only serializing access. Successful
+  `initialize_membership` calls set the flag while still holding the write
+  guard, so an immediately waiting standalone fallback cannot mistake
+  eventually updated OpenRaft metrics for an uninitialized topology.
+- The reverse-order regression initializes membership first and submits
+  immediately afterward. On `bb1dbe3` it deterministically returned the
+  forbidden standalone receipt `(leader_id=0, commit_index=0)`; the corrected
+  gateway now requires the Raft path or returns a cluster error. The existing
+  forward-order overlap regression and auth-token-only local behavior remain
+  covered.
 - `ClusterService` now provides the synchronization boundary between
   standalone submission and membership activation. The fallback path holds a
   shared topology guard from its membership decision through direct apply;
@@ -78,6 +89,26 @@ multi_node_state_without_gateway_rejects_replication_required_mutation:
 ```
 
 ## Review verification
+
+Final topology-race gate:
+
+```text
+cargo +stable test --test cluster_command_gateway \
+  --test control_plane_cluster --test raft_three_node -- --test-threads=1
+
+cluster_command_gateway: 21 passed; 0 failed
+control_plane_cluster: 10 passed; 0 failed
+raft_three_node: 2 passed; 0 failed
+```
+
+Before the state-carrying lock correction, the new reverse-order regression
+failed as intended:
+
+```text
+completed membership initialization returned a standalone receipt
+left: (0, 0)
+right: (0, 0)
+```
 
 Topology-transition focused gate:
 
