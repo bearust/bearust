@@ -36,6 +36,20 @@ impl LlmProvider for TestProvider {
     }
 }
 
+struct BlockingProvider {
+    started: Arc<tokio::sync::Notify>,
+}
+#[async_trait]
+impl LlmProvider for BlockingProvider {
+    async fn complete(
+        &self,
+        _: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
 fn enabled_service() -> AiAdvisorService {
     AiAdvisorService::from_env_with(|name| match name {
         "LLM_API_URL" => Some("https://llm.example.test".into()),
@@ -171,4 +185,26 @@ async fn bounded_queue_rejects_when_capacity_is_full() {
         Err(bearust::ai_advisor::AdvisorErrorCode::Busy)
     ));
     service.shutdown();
+}
+
+#[tokio::test]
+async fn shutdown_cancels_inflight_job_to_one_terminal_result() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let service = enabled_service().with_provider(
+        Arc::new(BlockingProvider {
+            started: started.clone(),
+        }),
+        2,
+        1,
+    );
+    let job = service.enqueue(request()).unwrap();
+    started.notified().await;
+    service.shutdown();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let result = service.result(&job).unwrap();
+    assert_eq!(result.status, bearust::ai_advisor::AdvisorJobStatus::Failed);
+    assert_eq!(
+        result.error_code,
+        Some(bearust::ai_advisor::AdvisorErrorCode::Timeout)
+    );
 }

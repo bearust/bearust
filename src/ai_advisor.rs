@@ -9,7 +9,7 @@ mod redaction;
 use crate::ai_advisor_provider::{ChatCompletionMessage, ChatCompletionRequest, LlmProvider};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::{fmt, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -212,6 +212,7 @@ pub struct AiAdvisorService {
 struct AdvisorRuntime {
     sender: mpsc::Sender<(AdvisorJobId, AdvisorRequest)>,
     results: Arc<std::sync::Mutex<HashMap<String, AdvisorResponse>>>,
+    terminal_order: Arc<std::sync::Mutex<VecDeque<String>>>,
     shutdown: watch::Sender<bool>,
 }
 
@@ -219,12 +220,47 @@ const MAX_RETAINED_ADVISOR_RESULTS: usize = 1024;
 
 fn store_result(
     results: &std::sync::Mutex<HashMap<String, AdvisorResponse>>,
+    terminal_order: &std::sync::Mutex<VecDeque<String>>,
     response: AdvisorResponse,
 ) {
     let mut results = results.lock().unwrap();
-    if results.len() >= MAX_RETAINED_ADVISOR_RESULTS && !results.contains_key(&response.job_id.0) {
-        if let Some(key) = results.keys().next().cloned() {
-            results.remove(&key);
+    let terminal = matches!(
+        response.status,
+        AdvisorJobStatus::Completed
+            | AdvisorJobStatus::Failed
+            | AdvisorJobStatus::Approved
+            | AdvisorJobStatus::Rejected
+            | AdvisorJobStatus::Expired
+    );
+    if terminal
+        && !matches!(
+            results.get(&response.job_id.0).map(|r| r.status),
+            Some(
+                AdvisorJobStatus::Completed
+                    | AdvisorJobStatus::Failed
+                    | AdvisorJobStatus::Approved
+                    | AdvisorJobStatus::Rejected
+                    | AdvisorJobStatus::Expired
+            )
+        )
+    {
+        let mut order = terminal_order.lock().unwrap();
+        order.push_back(response.job_id.0.clone());
+        while order.len() > MAX_RETAINED_ADVISOR_RESULTS {
+            if let Some(old) = order.pop_front() {
+                if matches!(
+                    results.get(&old).map(|r| r.status),
+                    Some(
+                        AdvisorJobStatus::Completed
+                            | AdvisorJobStatus::Failed
+                            | AdvisorJobStatus::Approved
+                            | AdvisorJobStatus::Rejected
+                            | AdvisorJobStatus::Expired
+                    )
+                ) {
+                    results.remove(&old);
+                }
+            }
         }
     }
     results.insert(response.job_id.0.clone(), response);
@@ -257,11 +293,27 @@ impl AiAdvisorService {
         let (sender, mut receiver) =
             mpsc::channel::<(AdvisorJobId, AdvisorRequest)>(capacity.max(1));
         let results = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let terminal_order = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+        let worker_terminal_order = terminal_order.clone();
         let (shutdown, mut worker_shutdown) = watch::channel(false);
         let worker_results = results.clone();
         let concurrency = Arc::new(tokio::sync::Semaphore::new(worker_count.max(1)));
         tokio::spawn(async move {
             loop {
+                if *worker_shutdown.borrow() {
+                    while let Ok((queued_id, _)) = receiver.try_recv() {
+                        store_result(
+                            &worker_results,
+                            &worker_terminal_order,
+                            AdvisorResponse {
+                                job_id: queued_id,
+                                status: AdvisorJobStatus::Failed,
+                                error_code: Some(AdvisorErrorCode::Timeout),
+                            },
+                        );
+                    }
+                    break;
+                }
                 let next = tokio::select! {
                     value = receiver.recv() => value,
                     _ = worker_shutdown.changed() => None,
@@ -270,6 +322,7 @@ impl AiAdvisorService {
                     while let Ok((queued_id, _)) = receiver.try_recv() {
                         store_result(
                             &worker_results,
+                            &worker_terminal_order,
                             AdvisorResponse {
                                 job_id: queued_id,
                                 status: AdvisorJobStatus::Failed,
@@ -281,6 +334,7 @@ impl AiAdvisorService {
                 };
                 store_result(
                     &worker_results,
+                    &worker_terminal_order,
                     AdvisorResponse {
                         job_id: job_id.clone(),
                         status: AdvisorJobStatus::Running,
@@ -289,7 +343,7 @@ impl AiAdvisorService {
                 );
                 let permit = tokio::select! {
                     permit = concurrency.clone().acquire_owned() => permit,
-                    _ = worker_shutdown.changed() => { store_result(&worker_results, AdvisorResponse { job_id, status: AdvisorJobStatus::Failed, error_code: Some(AdvisorErrorCode::Timeout) }); continue; }
+                    _ = worker_shutdown.changed() => { store_result(&worker_results, &worker_terminal_order, AdvisorResponse { job_id, status: AdvisorJobStatus::Failed, error_code: Some(AdvisorErrorCode::Timeout) }); continue; }
                 };
                 let Ok(_permit) = permit else { break };
                 let provider = provider.clone();
@@ -302,7 +356,7 @@ impl AiAdvisorService {
                             }],
                         }) => result,
                     _ = worker_shutdown.changed() => {
-                        store_result(&worker_results, AdvisorResponse { job_id: job_id.clone(), status: AdvisorJobStatus::Failed, error_code: Some(AdvisorErrorCode::Timeout) });
+                        store_result(&worker_results, &worker_terminal_order, AdvisorResponse { job_id: job_id.clone(), status: AdvisorJobStatus::Failed, error_code: Some(AdvisorErrorCode::Timeout) });
                         continue;
                     },
                 };
@@ -315,6 +369,7 @@ impl AiAdvisorService {
                 };
                 store_result(
                     &worker_results,
+                    &worker_terminal_order,
                     AdvisorResponse {
                         job_id,
                         status,
@@ -326,6 +381,7 @@ impl AiAdvisorService {
         self.runtime = Some(Arc::new(AdvisorRuntime {
             sender,
             results,
+            terminal_order,
             shutdown,
         }));
         self
@@ -401,6 +457,7 @@ impl AiAdvisorService {
         let id = AdvisorJobId::new();
         store_result(
             &runtime.results,
+            &runtime.terminal_order,
             AdvisorResponse {
                 job_id: id.clone(),
                 status: AdvisorJobStatus::Queued,

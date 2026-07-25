@@ -140,3 +140,12 @@ fn provider_debug_never_formats_api_key() {
     assert!(!value.contains("secret-key"));
     assert!(value.contains("REDACTED"));
 }
+
+#[test]
+fn breaker_open_short_circuits_and_success_resets_failures() {
+    let guard = ProviderGuard::new(1, Duration::from_secs(60));
+    guard.record_failure(std::time::Instant::now());
+    assert!(!guard.allow_request());
+    guard.record_success();
+    assert!(guard.allow_request());
+}

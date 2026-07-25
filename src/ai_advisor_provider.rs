@@ -1,6 +1,5 @@
 use crate::ai_advisor::{ProviderGuard, Redactor};
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc, time::Duration};
@@ -151,10 +150,13 @@ impl LlmProvider for OpenAiCompatibleProvider {
         }
         let limit = self.config.response_limit_bytes;
         let read_result = tokio::time::timeout(self.config.request_timeout, async {
-            let mut stream = response.bytes_stream();
+            let mut response = response;
             let mut bytes = Vec::new();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|_| ProviderError::Unavailable)?;
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|_| ProviderError::Unavailable)?
+            {
                 if bytes.len().saturating_add(chunk.len()) > limit {
                     return Err(ProviderError::ResponseTooLarge);
                 }
