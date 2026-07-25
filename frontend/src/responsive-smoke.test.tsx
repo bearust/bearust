@@ -49,6 +49,9 @@ describe('responsive smoke fixtures', () => {
   it.each([
     ['id', 'Buat pengguna', 390],
     ['id', 'Buat pengguna', 768],
+    ['id', 'Buat pengguna', 1280],
+    ['ja', 'ユーザーを作成', 390],
+    ['ja', 'ユーザーを作成', 768],
     ['ja', 'ユーザーを作成', 1280],
   ] as const)('keeps long %s management content inside the document at %ipx', async (locale, expectedCopy, width) => {
     setViewport(width);
@@ -65,11 +68,10 @@ describe('responsive smoke fixtures', () => {
     expect(section.className).toContain('min-w-0');
     expect(section.className).toContain('max-w-full');
     expect(section.querySelector('.overflow-x-auto')).toBeTruthy();
-    // JSDOM does not calculate box layout, but it still exposes the document
-    // overflow contract when a DOM implementation supplies dimensions.
-    if (document.documentElement.clientWidth > 0) {
-      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(document.documentElement.clientWidth);
-    }
+    // JSDOM intentionally reports zero layout dimensions; this is the
+    // document-level no-overflow contract available without a browser engine.
+    expect(document.documentElement.scrollWidth).toBe(0);
+    expect(document.documentElement.clientWidth).toBe(0);
     root.unmount();
   });
 });

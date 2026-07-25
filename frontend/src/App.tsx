@@ -59,7 +59,10 @@ import { useTranslation } from "react-i18next";
 
 void initI18n();
 
-const SERVER_ERROR_KEYS: Record<string, string> = {
+export const ANOMALY_RULE_KEYS = ["request_rate", "error_rate", "latency", "security_events"] as const;
+export const ANOMALY_SEVERITY_KEYS = ["info", "warning", "critical"] as const;
+
+export const SERVER_ERROR_KEYS: Record<string, string> = {
   invalid_credentials: "errors.authInvalidCredentials",
   rate_limited: "errors.authRateLimited",
   invalid_setup_token: "errors.authInvalidSetupToken",
@@ -75,7 +78,7 @@ const SERVER_ERROR_KEYS: Record<string, string> = {
   self_mutation: "errors.selfMutation",
 };
 
-const SERVER_MESSAGE_KEYS: Record<string, string> = {
+export const SERVER_MESSAGE_KEYS: Record<string, string> = {
   "Invalid email or password": "errors.authInvalidCredentials",
   "Too many authentication attempts": "errors.authRateLimited",
   "Invalid setup token": "errors.authInvalidSetupToken",
@@ -104,7 +107,7 @@ function serverErrorKey(error: unknown): string | undefined {
 export const sanitizeError = (error: unknown) =>
   i18n.t(serverErrorKey(error) ?? "errors.generic");
 
-const BUILTIN_ROLE_KEYS: Record<string, string> = {
+export const BUILTIN_ROLE_KEYS: Record<string, string> = {
   admin: "roles.builtin.admin",
   operator: "roles.builtin.operator",
   viewer: "roles.builtin.viewer",
@@ -115,15 +118,14 @@ function displayRole(t: (key: string) => string, slug: string, fallback = slug) 
 }
 export const userError = (error: unknown) => {
   const { code, status } = errorDetails(error);
+  const directKey = serverErrorKey(error);
+  if (directKey) return i18n.t(directKey);
   if (
-    code === "unauthorized" ||
-    code === "forbidden" ||
     status === 401 ||
     status === 403
   )
     return i18n.t("errors.usersPermission");
   if (
-    code === "invalid_input" ||
     status === 400 ||
     status === 422
   )

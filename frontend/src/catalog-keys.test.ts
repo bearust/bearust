@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import componentSource from "./App.tsx?raw";
 import uiSource from "./ui.tsx?raw";
 import en from "./locales/en.json";
+import {
+  ANOMALY_RULE_KEYS,
+  ANOMALY_SEVERITY_KEYS,
+  BUILTIN_ROLE_KEYS,
+  SERVER_ERROR_KEYS,
+  SERVER_MESSAGE_KEYS,
+} from "./App";
+import { REALTIME_STATUSES } from "./realtime";
 
 function flatten(value: object, prefix = ""): string[] {
   return Object.entries(value).flatMap(([key, child]) => {
@@ -87,15 +95,16 @@ describe("dashboard catalog keys", () => {
 
   it("keeps dynamic translation families bounded by runtime enums", () => {
     const catalogKeys = new Set(flatten(en));
-    const families = {
-      "anomaly.rules": ["request_rate", "error_rate", "latency", "security_events"],
-      anomaly: ["info", "warning", "critical"],
-      "dashboard.realtimeStates": ["connecting", "connected", "disconnected"],
-      "roles.builtin": ["admin", "operator", "viewer"],
-    };
+    for (const value of ANOMALY_RULE_KEYS) expect(catalogKeys, `anomaly.rules.${value}`).toContain(`anomaly.rules.${value}`);
+    for (const value of ANOMALY_SEVERITY_KEYS) expect(catalogKeys, `anomaly.${value}`).toContain(`anomaly.${value}`);
+    for (const value of REALTIME_STATUSES) expect(catalogKeys, `dashboard.realtimeStates.${value}`).toContain(`dashboard.realtimeStates.${value}`);
+    for (const key of Object.values(BUILTIN_ROLE_KEYS)) expect(catalogKeys, key).toContain(key);
+  });
 
-    for (const [family, values] of Object.entries(families)) {
-      for (const value of values) expect(catalogKeys, `${family}.${value}`).toContain(`${family}.${value}`);
+  it("keeps every allowlisted API error mapping catalogued", () => {
+    const catalogKeys = new Set(flatten(en));
+    for (const key of [...Object.values(SERVER_ERROR_KEYS), ...Object.values(SERVER_MESSAGE_KEYS)]) {
+      expect(catalogKeys, key).toContain(key);
     }
   });
 });

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
-export type RealtimeStatus = "connecting" | "connected" | "disconnected";
+export const REALTIME_STATUSES = ["connecting", "connected", "disconnected"] as const;
+export type RealtimeStatus = (typeof REALTIME_STATUSES)[number];
 export type RealtimeLoaders = Partial<{
   hosts: () => unknown | Promise<unknown>;
   certificates: () => unknown | Promise<unknown>;

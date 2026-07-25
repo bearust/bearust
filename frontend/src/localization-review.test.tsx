@@ -3,7 +3,7 @@ import React from 'react';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import App, { RolesSection, sanitizeError } from './App';
+import App, { RolesSection, sanitizeError, userError } from './App';
 import { api, type RoleRecord, type User } from './api';
 import { i18n, initI18n } from './i18n';
 import { ThemeProvider } from './theme';
@@ -54,6 +54,19 @@ describe('localized API errors', () => {
     expect(sanitizeError(error)).toBe('Email atau kata sandi tidak valid.');
     expect(sanitizeError(new Error('English upstream diagnostic'))).toBe(
       'Permintaan tidak dapat diselesaikan. Silakan coba lagi.',
+    );
+  });
+
+  it('uses an allowlisted server code before its HTTP status fallback', async () => {
+    await i18n.changeLanguage('en');
+    expect(userError(Object.assign(new Error('Role conflict'), { code: 'duplicate_email', status: 409 }))).toBe(
+      'A user already uses this email address.',
+    );
+    expect(userError(Object.assign(new Error('Cannot mutate'), { code: 'self_mutation', status: 403 }))).toBe(
+      'You cannot change your own account this way.',
+    );
+    expect(userError(Object.assign(new Error('Last administrator'), { code: 'last_admin', status: 409 }))).toBe(
+      'At least one active administrator is required.',
     );
   });
 });

@@ -25,3 +25,11 @@ Resolved all Important findings from the Phase 11 broad review.
 ## Concerns
 
 - JSDOM does not calculate layout dimensions, so the document-overflow assertion executes only when its DOM implementation supplies dimensions. The responsive tests also assert the required responsive card and designated table-scroll structure at every requested viewport.
+
+## Re-review follow-up
+
+- Allowlisted server error codes now take precedence over status-only user-error fallbacks, with regression coverage for duplicate email, self mutation, and last-admin responses.
+- Source validation imports the production allowlists and runtime enum arrays directly, checking every mapped catalog key without duplicated key lists.
+- Responsive coverage now runs both Indonesian and Japanese long-string cases at 390, 768, and 1280 pixels. JSDOM’s explicit zero-layout contract is asserted unconditionally alongside the card/table structural overflow contract.
+
+Re-review verification: frontend 137/137 tests, locale validator, build, full Rust test suite, fmt, Clippy, and diff checks all passed.
