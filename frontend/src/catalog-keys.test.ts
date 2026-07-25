@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import componentSource from "./App.tsx?raw";
 import uiSource from "./ui.tsx?raw";
+import en from "./locales/en.json";
+
+function flatten(value: object, prefix = ""): string[] {
+  return Object.entries(value).flatMap(([key, child]) => {
+    const path = prefix ? `${prefix}.${key}` : key;
+    return typeof child === "string" ? [path] : flatten(child, path);
+  });
+}
 
 describe("dashboard catalog keys", () => {
   const source = `${componentSource}\n${uiSource}`;
@@ -66,5 +74,28 @@ describe("dashboard catalog keys", () => {
 
     expect(inlineText).toEqual([]);
     expect(inlineCopyAttributes).toEqual([]);
+  });
+
+  it("references only catalogued literal translation keys", () => {
+    const catalogKeys = new Set(flatten(en));
+    const literalKeys = [...source.matchAll(/\bt\(\s*["']([^"']+)["']/g)].map((match) => match[1]);
+
+    for (const key of literalKeys) {
+      expect(catalogKeys, key).toContain(key);
+    }
+  });
+
+  it("keeps dynamic translation families bounded by runtime enums", () => {
+    const catalogKeys = new Set(flatten(en));
+    const families = {
+      "anomaly.rules": ["request_rate", "error_rate", "latency", "security_events"],
+      anomaly: ["info", "warning", "critical"],
+      "dashboard.realtimeStates": ["connecting", "connected", "disconnected"],
+      "roles.builtin": ["admin", "operator", "viewer"],
+    };
+
+    for (const [family, values] of Object.entries(families)) {
+      for (const value of values) expect(catalogKeys, `${family}.${value}`).toContain(`${family}.${value}`);
+    }
   });
 });

@@ -11,9 +11,11 @@ describe('ACME wizard validation',()=>{
     expect(validHostname('*.example.com','cloudflare_dns01')).toBe(true);
     expect(validHostname('*.*.example.com','cloudflare_dns01')).toBe(false);
   });
-  it('redacts tokens from errors before rendering',()=>{
-    expect(sanitizeError('cloudflare_api_token=super-secret-token-value-123456789012345')).toContain('[redacted]');
-    expect(sanitizeError('invalid hostname')).toBe('invalid hostname');
+  it('replaces unknown error details with safe localized copy',()=>{
+    const secret = 'cloudflare_api_token=super-secret-token-value-123456789012345';
+    expect(sanitizeError(secret)).toBe('Unable to complete the request. Please try again.');
+    expect(sanitizeError(secret)).not.toContain('super-secret');
+    expect(sanitizeError('invalid hostname')).toBe('Unable to complete the request. Please try again.');
   });
   it('requires a Cloudflare token for DNS-01 but not HTTP-01',()=>{
     expect(acmeSubmissionReady('cloudflare_dns01',['example.com'],'')).toBe(false);

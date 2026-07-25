@@ -61,7 +61,8 @@ describe("analytics dashboard", () => {
     vi.mocked(api.getAnalyticsSummary).mockRejectedValue(new Error("offline"));
     await act(async () => root.render(<AnalyticsSection hosts={[]} refreshToken={1} />));
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 200)); });
-    expect(document.body.textContent).toContain("offline");
+    expect(document.body.textContent).toContain("Unable to complete the request. Please try again.");
+    expect(document.body.textContent).not.toContain("offline");
     root.unmount();
   });
 });

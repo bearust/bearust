@@ -36,6 +36,19 @@
     "required": "This field is required.",
     "unexpected": "Something went wrong.",
     "generic": "Unable to complete the request. Please try again.",
+    "authInvalidCredentials": "Invalid email or password.",
+    "authRateLimited": "Too many sign-in attempts. Please try again later.",
+    "authInvalidSetupToken": "The setup token is invalid.",
+    "authAlreadyInitialized": "Setup has already been completed.",
+    "unauthorized": "Authentication is required.",
+    "forbidden": "You do not have permission to perform this action.",
+    "invalidInput": "Please check the submitted details.",
+    "notFound": "The requested item was not found.",
+    "conflict": "This change conflicts with the current state.",
+    "duplicateDomain": "A proxy host already uses this domain.",
+    "duplicateEmail": "A user already uses this email address.",
+    "lastAdmin": "At least one active administrator is required.",
+    "selfMutation": "You cannot change your own account this way.",
     "usersPermission": "You do not have permission to manage users.",
     "usersValidation": "Please check the submitted user details.",
     "userNotFound": "The requested user was not found.",
@@ -133,6 +146,12 @@
     "clearScopes": "Clear scopes",
     "add": "Add role",
     "create": "Create role",
+    "deleteConfirm": "Delete this role?",
+    "builtin": {
+      "admin": "Administrator",
+      "operator": "Operator",
+      "viewer": "Viewer"
+    },
     "available": "Available permissions: {{permissions}}"
   },
   "waf": {
@@ -292,6 +311,11 @@
   "dashboard": {
     "realtimeStatus": "Realtime status",
     "realtime": "Realtime: {{status}}",
+    "realtimeStates": {
+      "connecting": "Connecting",
+      "connected": "Connected",
+      "disconnected": "Disconnected"
+    },
     "brand": "Bearust"
   },
   "audit": {

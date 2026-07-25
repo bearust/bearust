@@ -13,6 +13,16 @@ export const LOCALE_STORAGE_KEY = 'bearust.locale.v1';
 
 export const i18n = i18next.createInstance();
 
+function missingTranslationFallback() {
+  return i18n.t('errors.generic', { defaultValue: en.errors.generic });
+}
+
+function reportMissingTranslation(languages: readonly string[], namespace: string, key: string) {
+  if (import.meta.env.DEV || import.meta.env.MODE === 'test') {
+    console.warn(`Missing translation: ${languages.join(',')}:${namespace}:${key}`);
+  }
+}
+
 const LOCALE_TAGS: Record<Locale, string> = {
   en: 'en-US',
   id: 'id-ID',
@@ -94,6 +104,11 @@ export function initI18n(locale = preferredBrowserLocale()) {
     resources: { en: { translation: en }, id: { translation: id }, ja: { translation: ja } },
     lng: language,
     fallbackLng: 'en',
+    returnNull: false,
+    returnEmptyString: false,
+    saveMissing: true,
+    missingKeyHandler: reportMissingTranslation,
+    parseMissingKeyHandler: missingTranslationFallback,
     interpolation: { escapeValue: false },
   });
 }

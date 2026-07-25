@@ -8,6 +8,7 @@ import {
 import {
   api,
   AcmeRequest,
+  ApiError,
   AuditLogItem,
   AuditLogQuery,
   Certificate,
@@ -58,34 +59,78 @@ import { useTranslation } from "react-i18next";
 
 void initI18n();
 
-export const sanitizeError = (message: string) => {
-  if (!message.trim() || /internal stack|database|password\s*[:=]/i.test(message))
-    return i18n.t("errors.generic");
-  return message
-    .replace(
-      /(api[_ -]?token|authorization|bearer)\s*[:=]\s*[^\s,;]+/gi,
-      "$1: [redacted]",
-    )
-    .replace(/\b[A-Za-z0-9_-]{30,}\b/g, "[redacted]");
+const SERVER_ERROR_KEYS: Record<string, string> = {
+  invalid_credentials: "errors.authInvalidCredentials",
+  rate_limited: "errors.authRateLimited",
+  invalid_setup_token: "errors.authInvalidSetupToken",
+  already_initialized: "errors.authAlreadyInitialized",
+  unauthorized: "errors.unauthorized",
+  forbidden: "errors.forbidden",
+  invalid_input: "errors.invalidInput",
+  not_found: "errors.notFound",
+  conflict: "errors.conflict",
+  duplicate_domain: "errors.duplicateDomain",
+  duplicate_email: "errors.duplicateEmail",
+  last_admin: "errors.lastAdmin",
+  self_mutation: "errors.selfMutation",
 };
+
+const SERVER_MESSAGE_KEYS: Record<string, string> = {
+  "Invalid email or password": "errors.authInvalidCredentials",
+  "Too many authentication attempts": "errors.authRateLimited",
+  "Invalid setup token": "errors.authInvalidSetupToken",
+  "Setup has already completed": "errors.authAlreadyInitialized",
+  "Authentication required": "errors.unauthorized",
+  "Invalid locale": "errors.invalidInput",
+};
+
+type ErrorDetails = Pick<Partial<ApiError>, "code" | "status"> & { message?: string };
+
+function errorDetails(error: unknown): ErrorDetails {
+  if (!error || typeof error !== "object") return {};
+  const candidate = error as { code?: unknown; status?: unknown; message?: unknown };
+  return {
+    code: typeof candidate.code === "string" ? candidate.code : undefined,
+    status: typeof candidate.status === "number" ? candidate.status : undefined,
+    message: typeof candidate.message === "string" ? candidate.message : undefined,
+  };
+}
+
+function serverErrorKey(error: unknown): string | undefined {
+  const { code, message } = errorDetails(error);
+  return (code && SERVER_ERROR_KEYS[code]) || (message && SERVER_MESSAGE_KEYS[message]);
+}
+
+export const sanitizeError = (error: unknown) =>
+  i18n.t(serverErrorKey(error) ?? "errors.generic");
+
+const BUILTIN_ROLE_KEYS: Record<string, string> = {
+  admin: "roles.builtin.admin",
+  operator: "roles.builtin.operator",
+  viewer: "roles.builtin.viewer",
+};
+
+function displayRole(t: (key: string) => string, slug: string, fallback = slug) {
+  return BUILTIN_ROLE_KEYS[slug] ? t(BUILTIN_ROLE_KEYS[slug]) : fallback;
+}
 export const userError = (error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  const status = (error as { status?: number })?.status;
+  const { code, status } = errorDetails(error);
   if (
+    code === "unauthorized" ||
+    code === "forbidden" ||
     status === 401 ||
-    status === 403 ||
-    /\b403\b|forbidden|permission/i.test(message)
+    status === 403
   )
     return i18n.t("errors.usersPermission");
   if (
+    code === "invalid_input" ||
     status === 400 ||
-    status === 422 ||
-    /\b400\b|validation|invalid|required/i.test(message)
+    status === 422
   )
     return i18n.t("errors.usersValidation");
-  if (status === 404) return i18n.t("errors.userNotFound");
-  if (status === 409) return i18n.t("errors.userConflict");
-  return i18n.t("errors.generic");
+  if (code === "not_found" || status === 404) return i18n.t("errors.userNotFound");
+  if (code === "conflict" || status === 409) return i18n.t("errors.userConflict");
+  return sanitizeError(error);
 };
 export const validHostname = (
   host: string,
@@ -136,7 +181,7 @@ function Setup({ onDone }: { onDone: (u: User) => void }) {
             try {
               onDone(await api.setup({ email, password, setup_token: token }));
             } catch (x) {
-              setError(sanitizeError((x as Error).message));
+              setError(sanitizeError(x));
             }
           }}
         >
@@ -179,7 +224,7 @@ function Login({ onDone }: { onDone: (u: User) => void }) {
             try {
               onDone(await api.login({ email, password }));
             } catch (x) {
-              setError(sanitizeError((x as Error).message));
+              setError(sanitizeError(x));
             }
           }}
         >
@@ -253,7 +298,7 @@ export function AcmeWizard({
             setToken("");
             onIssued();
           } catch (x) {
-            setError(sanitizeError((x as Error).message));
+            setError(sanitizeError(x));
           } finally {
             setBusy(false);
           }
@@ -343,7 +388,7 @@ export function CertificateTable({
       );
       setItems(updated);
     } catch (e) {
-      setError(sanitizeError((e as Error).message));
+      setError(sanitizeError(e));
     } finally {
       setRefreshing(false);
     }
@@ -360,7 +405,7 @@ export function CertificateTable({
       await refresh();
       onChanged();
     } catch (e) {
-      setError(sanitizeError((e as Error).message));
+      setError(sanitizeError(e));
     } finally {
       setBusy((x) => {
         const next = { ...x };
@@ -493,7 +538,7 @@ export function UsersSection({
     ...roles,
     ...["admin", "operator", "viewer"]
       .filter((slug) => !roles.some((role) => role.slug === slug))
-      .map((slug) => ({ slug, name: slug[0].toUpperCase() + slug.slice(1) })),
+      .map((slug) => ({ slug, name: slug })),
   ];
   return (
     <Card data-testid="users-section">
@@ -544,7 +589,7 @@ export function UsersSection({
                     >
                       {roleOptions.map((role) => (
                         <option value={role.slug} key={role.slug}>
-                          {role.name}
+                          {displayRole(t, role.slug, role.name)}
                         </option>
                       ))}
                     </SelectField>
@@ -648,9 +693,9 @@ export function UsersSection({
           value={role}
           onChange={(e) => setRole(e.target.value as Role)}
         >
-          <option value="admin">{t("users.admin")}</option>
-          <option value="operator">{t("users.operator")}</option>
-          <option value="viewer">{t("users.viewer")}</option>
+          <option value="admin">{displayRole(t, "admin")}</option>
+          <option value="operator">{displayRole(t, "operator")}</option>
+          <option value="viewer">{displayRole(t, "viewer")}</option>
         </SelectField>
         <Button
           type="submit"
@@ -792,8 +837,8 @@ export function RolesSection({
           <tbody>
             {roles.map((role) => (
               <tr key={role.id}>
-                <td>{role.name}</td>
-                <td>{role.slug}</td>
+                <td>{displayRole(t, role.slug, role.name)}</td>
+                <td>{displayRole(t, role.slug)}</td>
                 <td>
                   {role.permissions.join(", ")}
                   <div
@@ -905,7 +950,7 @@ export function RolesSection({
                       variant="danger"
                       disabled={busy}
                       onClick={() =>
-                        window.confirm(t("users.deleteConfirm")) &&
+                        window.confirm(t("roles.deleteConfirm")) &&
                         void run(() => api.deleteRole(role.id))
                       }
                     >
@@ -982,7 +1027,7 @@ export function WafSection({
       setRules(nextRules);
       setError("");
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
     }
   };
   useEffect(() => {
@@ -998,7 +1043,7 @@ export function WafSection({
         }),
       );
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
     } finally {
       setBusy(false);
     }
@@ -1010,7 +1055,7 @@ export function WafSection({
       setToml("");
       await reload();
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
     } finally {
       setBusy(false);
     }
@@ -1019,7 +1064,7 @@ export function WafSection({
     try {
       setToml(await api.exportWafRules());
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
     }
   };
   return (
@@ -1080,9 +1125,7 @@ export function WafSection({
                           .then(reload)
                           .catch((e) =>
                             setError(
-                              sanitizeError(
-                                e instanceof Error ? e.message : String(e),
-                              ),
+                              sanitizeError(e),
                             ),
                           )
                       }
@@ -1187,7 +1230,7 @@ export function BotProtectionSection({
       setCrawlers(nextCrawlers);
       setError("");
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
     }
   };
   useEffect(() => {
@@ -1203,7 +1246,7 @@ export function BotProtectionSection({
       setSaved(true);
       await reload();
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
     } finally {
       setBusy(false);
     }
@@ -1544,7 +1587,7 @@ export function AnalyticsSection({
       setSummary(s);
       setRows(t);
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
       setSummary(null);
       setRows([]);
     } finally {
@@ -1810,7 +1853,7 @@ export function BaselineSection({
       });
       setSnapshot(snap);
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
       setSnapshot(null);
     } finally {
       setLoading(false);
@@ -1972,7 +2015,7 @@ export function AnomalySection({
       });
       setAnomalies(records);
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
       setAnomalies([]);
     } finally {
       setLoading(false);
@@ -2158,7 +2201,7 @@ export function AdaptiveTuningSection({
       setPolicy(p);
       setRecommendations(recs);
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
     } finally {
       setLoading(false);
     }
@@ -2518,7 +2561,7 @@ function Dashboard({
       setHosts(await api.hosts());
       setError("");
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
     }
   };
   const loadCertificates = async () => {
@@ -2526,7 +2569,7 @@ function Dashboard({
       setCerts(await api.certificates());
       setError("");
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
     }
   };
   const loadUsers = async () => {
@@ -2575,7 +2618,7 @@ function Dashboard({
       setCerts(c);
       setError("");
     } catch (e) {
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
       return;
     }
     if (user.role === "admin") {
@@ -2598,7 +2641,7 @@ function Dashboard({
           {t("dashboard.brand")}
         </h1>
         <span className="text-sm text-muted">
-          {user.email} ({user.role})
+          {user.email} ({displayRole(t, user.role)})
         </span>
         <LanguageSelect
           value={locale}
@@ -2612,7 +2655,9 @@ function Dashboard({
           className="text-sm text-muted"
           aria-label={t("dashboard.realtimeStatus")}
         >
-          {t("dashboard.realtime", { status: realtimeStatus })}
+          {t("dashboard.realtime", {
+            status: t(`dashboard.realtimeStates.${realtimeStatus}`),
+          })}
         </span>
       </header>
       <div className="mx-auto grid max-w-7xl gap-6">
@@ -2691,7 +2736,7 @@ function Dashboard({
                   });
                   void refresh();
                 } catch (x) {
-                  setError(sanitizeError((x as Error).message));
+                  setError(sanitizeError(x));
                 }
               }}
             >
@@ -2897,7 +2942,7 @@ export function AuditLogSection({
       setTotal(result.total);
     } catch (e) {
       if (requestId !== requestSeq.current) return;
-      setError(sanitizeError(e instanceof Error ? e.message : String(e)));
+      setError(sanitizeError(e));
       setItems([]);
       setTotal(0);
     } finally {

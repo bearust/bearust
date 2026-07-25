@@ -26,6 +26,20 @@ function render(roles = [role], width = 390) {
 afterEach(() => { vi.restoreAllMocks(); document.body.innerHTML = ''; });
 
 describe('role scope editor', () => {
+  it('uses the role-specific confirmation before deleting a custom role', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const remove = vi.spyOn(api, 'deleteRole').mockResolvedValue(undefined);
+    const view = render();
+
+    await act(async () => {
+      ([...view.element.querySelectorAll('button')].find((button) => button.textContent === 'Delete') as HTMLButtonElement).click();
+    });
+
+    expect(confirm).toHaveBeenCalledWith('Delete this role?');
+    expect(remove).not.toHaveBeenCalled();
+    view.root.unmount();
+  });
+
   it('renders per-permission host controls and selected hosts', () => {
     const view = render();
     expect(view.element.querySelector('[data-testid="role-scope-editor-4"]')).toBeTruthy();

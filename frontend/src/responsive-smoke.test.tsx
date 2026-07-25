@@ -5,6 +5,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App, { UsersSection } from './App';
 import { api, type User } from './api';
+import { i18n, initI18n } from './i18n';
 
 const admin: User = { id: 1, email: 'admin@example.com', role: 'admin', disabled: false };
 
@@ -12,7 +13,8 @@ function setViewport(width: number) {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
 }
 
-afterEach(() => {
+afterEach(async () => {
+  await i18n.changeLanguage('en');
   vi.restoreAllMocks();
   document.body.innerHTML = '';
 });
@@ -44,8 +46,13 @@ describe('responsive smoke fixtures', () => {
     root.unmount();
   });
 
-  it('keeps long localized management content inside a responsive card', async () => {
-    setViewport(390);
+  it.each([
+    ['id', 'Buat pengguna', 390],
+    ['id', 'Buat pengguna', 768],
+    ['ja', 'ユーザーを作成', 1280],
+  ] as const)('keeps long %s management content inside the document at %ipx', async (locale, expectedCopy, width) => {
+    setViewport(width);
+    await initI18n(locale);
     const longEmail = 'administrator-for-a-very-long-localized-management-workflow@example.com';
     const host = document.createElement('div');
     document.body.append(host);
@@ -54,9 +61,15 @@ describe('responsive smoke fixtures', () => {
 
     const section = host.querySelector('[data-testid="users-section"]') as HTMLElement;
     expect(section.textContent).toContain(longEmail);
+    expect(section.textContent).toContain(expectedCopy);
     expect(section.className).toContain('min-w-0');
     expect(section.className).toContain('max-w-full');
     expect(section.querySelector('.overflow-x-auto')).toBeTruthy();
+    // JSDOM does not calculate box layout, but it still exposes the document
+    // overflow contract when a DOM implementation supplies dimensions.
+    if (document.documentElement.clientWidth > 0) {
+      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(document.documentElement.clientWidth);
+    }
     root.unmount();
   });
 });
