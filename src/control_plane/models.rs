@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -118,7 +118,15 @@ pub struct User {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserPreferencesPatch {
+    #[serde(default, deserialize_with = "deserialize_optional_locale")]
     pub preferred_locale: Option<Option<String>>,
+}
+
+fn deserialize_optional_locale<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, Deserialize)]

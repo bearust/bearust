@@ -3236,11 +3236,15 @@ async fn me(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
 async fn update_preferences(
     State(s): State<AppState>,
     h: HeaderMap,
-    Json(input): Json<UserPreferencesPatch>,
+    input: Result<Json<UserPreferencesPatch>, JsonRejection>,
 ) -> impl IntoResponse {
     let user = match current(&s, &h).await {
         Ok(user) => user,
         Err(status) => return user_error(status, "unauthorized", "Authentication required"),
+    };
+    let Json(input) = match input {
+        Ok(input) => input,
+        Err(_) => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid locale"),
     };
     let preferred_locale = match input.preferred_locale {
         Some(Some(value)) => match locale::validate_locale(&value) {

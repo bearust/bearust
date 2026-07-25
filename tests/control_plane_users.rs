@@ -533,17 +533,18 @@ async fn authenticated_users_can_persist_a_preferred_locale() {
         .0,
         StatusCode::CREATED
     );
+    let (status, body, _) = json(
+        app.clone(),
+        "PATCH",
+        "/api/auth/me/preferences",
+        None,
+        r#"{"preferred_locale":"ja""#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(
-        json(
-            app.clone(),
-            "PATCH",
-            "/api/auth/me/preferences",
-            None,
-            r#"{"preferred_locale":"ja"}"#,
-        )
-        .await
-        .0,
-        StatusCode::UNAUTHORIZED
+        body,
+        r#"{"code":"unauthorized","message":"Authentication required"}"#
     );
     let (_, cookie) = login(app.clone(), "admin@example.com", "correct horse battery").await;
     let cookie = cookie.unwrap();
@@ -560,11 +561,43 @@ async fn authenticated_users_can_persist_a_preferred_locale() {
         serde_json::from_str::<serde_json::Value>(&body).unwrap()["preferred_locale"],
         "ja"
     );
+    for payload in [
+        r#"{"preferred_locale":false}"#,
+        r#"{"preferred_locale":"ja","unexpected":true}"#,
+        r#"{"preferred_locale":"fr"}"#,
+    ] {
+        let (status, body, _) = json(
+            app.clone(),
+            "PATCH",
+            "/api/auth/me/preferences",
+            Some(&cookie),
+            payload,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body,
+            r#"{"code":"invalid_input","message":"Invalid locale"}"#
+        );
+    }
+    let (status, body, _) = json(
+        app.clone(),
+        "PATCH",
+        "/api/auth/me/preferences",
+        Some(&cookie),
+        r#"{"preferred_locale":null}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["preferred_locale"],
+        serde_json::Value::Null
+    );
     let (status, body, _) = json(app, "GET", "/api/auth/me", Some(&cookie), "").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&body).unwrap()["preferred_locale"],
-        "ja"
+        serde_json::Value::Null
     );
 }
 

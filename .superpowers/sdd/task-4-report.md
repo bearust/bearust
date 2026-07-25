@@ -1,90 +1,113 @@
-# Phase 10C Task 4 Report
+# Phase 11 Task 4 Report — Persist Account Locale Preference
 
 ## Delivered
 
-- Wired `ClusterEventReceiver` and `ClusterEventFanout` into normal
-  cluster-enabled startup in `src/cli.rs`. The receiver is registered before
-  the cluster listener starts, the fanout subscribes to the committed event
-  stream before API traffic begins, and the retained fanout is shut down before
-  the listener and Raft runtime. Auth-token-only single-node configurations
-  retain their zero-peer behavior.
-- Added a versioned `ClusterEventEnvelope` containing only event ID, command
-  ID, commit index, event type, origin node ID, and timestamp.
-- Enforced the 2 KiB limit over the complete cluster-event RPC envelope.
-  Authenticated dispatch first decodes only the outer RPC kind, so leading
-  whitespace and unknown outer fields cannot be parsed into an unbounded
-  semantic value before rejection. The handler independently enforces the same
-  bound.
-- Added a bounded SQLx applied-state loader. A received event waits until the
-  durable local Raft applied index reaches its commit index before any local SSE
-  invalidation is published. Events remain hints and never mutate replicated
-  state.
-- Added bounded non-blocking per-peer queues. Queue overflow, transport
-  failure, or committed-stream lag marks a peer stale; the next authenticated
-  `cluster_event` RPC requests catch-up.
-- Added bounded deduplication by `(origin_node_id, commit_index, event_id)`.
-  Gap detection now uses one global Raft commit watermark, avoiding false gaps
-  when consecutive commits arrive from alternating origins. Real gaps and
-  reconnect markers trigger both replicated resource invalidations before the
-  accepted event is published.
-- Routed `cluster_event` through the existing BEARUST1 identity handshake and
-  HMAC-authenticated BRRAFT1 frame.
-- Kept public SSE compatibility: remote events become the existing
-  `proxy_hosts.changed` or `rate_limit.changed` shape, with no cluster envelope
-  metadata exposed.
+- Added a nullable `users.preferred_locale` through migration `0014` and the
+  repository's existing backend-neutral, idempotent startup column check.
+- Added the strict shared Rust allowlist validator. Only `en`, `id`, and `ja`
+  are accepted; empty, unsupported, and oversized values are rejected.
+- Included nullable `preferred_locale` in serialized users and `GET /api/auth/me`.
+- Added authenticated `PATCH /api/auth/me/preferences`. It accepts a locale or
+  `null`, returns the updated sanitized profile, and returns a generic
+  `invalid_input`/`Invalid locale` error for invalid input. It does not use or
+  change RBAC authorization paths.
+- Added the typed frontend request and a `LocalePreferenceProvider` hook. It
+  updates the local locale/storage first, then persists to the account without
+  propagating persistence failures.
+- Added regression coverage for validator boundaries, existing-database
+  migration, authenticated account update, API request shape, and fail-soft
+  local persistence.
 
-## Red evidence
+## Red/green evidence
 
-The review regressions failed against Task 4 base `bf8ca515` for the expected
-reasons:
+Before implementation:
 
 ```text
-authenticated_dispatcher_rejects_oversized_event_rpc_before_semantic_parse
-left: Ok(<accepted response>)
-right: Err(PayloadTooLarge)
+tests/control_plane_locale.rs: unresolved import
+  bearust::control_plane::locale
 
-alternating_origins_share_one_commit_watermark_without_false_gaps
-left: "proxy_hosts.changed"
-right: "rate_limit.changed"
+frontend/src/localePreference.test.tsx:
+  api.updateLocalePreference is not a function
+```
 
-error[E0432]: unresolved import `bearust::cluster_events::AppliedStateLoader`
+After implementation, the focused suites passed:
+
+```text
+cargo +stable test --locked --test control_plane_locale --test control_plane_users --test control_plane_repository
+32 passed; 0 failed
+
+npm test --prefix frontend -- --run src/localePreference.test.tsx
+2 passed; 0 failed
 ```
 
 ## Verification
 
 ```text
-cargo +stable test --test cluster_events
-9 passed; 0 failed
-
-cargo +stable test --test cli --test cluster --test cluster_raft \
-  --test cluster_raft_runtime --test cluster_raft_storage \
-  --test cluster_command_gateway --test control_plane_cluster \
-  --test control_plane_realtime --test raft_three_node
-72 passed; 0 failed
-
-cargo +stable test --test shutdown
-3 passed; 0 failed
+cargo +stable test --locked --quiet
+passed (full Rust suite; 0 failures)
 
 cargo +stable fmt --all -- --check
 passed
 
-cargo +stable clippy --all-targets -- -D warnings
+npm test --prefix frontend
+passed
+
+npm run build --prefix frontend
+passed
+
+node frontend/scripts/validate-locales.mjs
 passed
 
 git diff --check
 passed
 ```
 
-The applied-state regression delivers an event before the local durable applied
-index advances and verifies that SSE remains silent until
-`raft_committed_state` reaches the event commit. The alternating-origin
-regression proves contiguous global commits do not create catch-up noise. The
-queue test uses a stalled authenticated peer to prove publisher calls stay
-non-blocking and overflow is accounted for, and the transport test starts the
-real cluster listener for end-to-end authenticated fan-out.
+## Review-fix evidence
 
-## Scope
+The regression test first failed as intended against the review baseline:
 
-The review fix is based on `bf8ca515` and is limited to cluster event startup
-wiring, event receiver/dispatcher correctness, focused tests, and this report.
-The pre-existing `.superpowers/sdd/progress.md` modification remains excluded.
+```text
+cargo +stable test --locked --test control_plane_users authenticated_users_can_persist_a_preferred_locale
+FAILED: unauthenticated malformed JSON returned 400 instead of the generic 401
+```
+
+After authenticating before interpreting the JSON extraction result and
+preserving an explicit `null` field during deserialization:
+
+```text
+cargo +stable test --locked --test control_plane_users authenticated_users_can_persist_a_preferred_locale
+1 passed; 0 failed
+
+cargo +stable test --locked --test control_plane_locale --test control_plane_users --test control_plane_repository
+32 passed; 0 failed
+
+npm test --prefix frontend -- --run src/localePreference.test.tsx
+2 passed; 0 failed
+
+cargo +stable fmt --all -- --check
+passed
+
+cargo +stable clippy --locked --all-targets -- -D warnings
+passed
+
+git diff --check
+passed
+```
+
+The Rust regression covers an unauthenticated malformed JSON request (exact
+generic 401), authenticated wrong-type and unknown-field JSON (exact generic
+400), unsupported `fr` (exact generic 400), and clearing the value with JSON
+`null`.
+
+## Commit
+
+- `c290b18 feat: persist account locale preference`
+
+## Concerns
+
+- The repository's pinned default Cargo is 1.84.1 and cannot parse one locked
+  dependency requiring edition 2024. All Rust verification used the installed
+  stable toolchain (`cargo +stable`, Cargo 1.97.1) and passed.
+- This shared checkout retains unrelated pre-existing edits in
+  `.superpowers/sdd/progress.md` and `.superpowers/sdd/task-5-report.md`; they
+  were neither staged nor committed.
