@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { I18nextProvider, useTranslation } from 'react-i18next';
+import { I18nextProvider } from 'react-i18next';
+import App, { AnalyticsSection, AuditLogSection, BotChallengePage, UsersSection, WafSection } from './App';
+import { api, type User } from './api';
 import { i18n, initI18n, SUPPORTED_LOCALES, type Locale } from './i18n';
 import en from './locales/en.json';
 import id from './locales/id.json';
@@ -28,15 +30,17 @@ function placeholders(value: string): string[] {
 
 const catalogs: Record<Locale, Catalog> = { en, id, ja };
 
-function RepresentativeSurface() {
-  const { t } = useTranslation();
+const admin: User = { id: 1, email: 'admin@example.com', role: 'admin', disabled: false };
+const originalNavigatorLanguages = Object.getOwnPropertyDescriptor(navigator, 'languages');
+
+function RepresentativeSurfaces() {
   return createElement('main', null,
-    createElement('h1', null, t('auth.setupTitle')),
-    createElement('h2', null, t('users.title')),
-    createElement('h2', null, t('audit.title')),
-    createElement('h2', null, t('analytics.title')),
-    createElement('h2', null, t('waf.title')),
-    createElement('p', { role: 'alert' }, t('errors.challengeVerification')),
+    createElement(App),
+    createElement(UsersSection, { user: admin, users: [admin], onChanged: () => undefined }),
+    createElement(AuditLogSection, { user: admin }),
+    createElement(AnalyticsSection, { hosts: [] }),
+    createElement(WafSection, { user: admin }),
+    createElement(BotChallengePage, { fingerprint: '' }),
   );
 }
 
@@ -67,24 +71,41 @@ describe('locale catalogs', () => {
     expect(placeholders('Halaman {{page}} dari {{total}}')).not.toEqual(placeholders('ページ {{page}}'));
   });
 
+  it('renders Indonesian latency values with the milliseconds unit', async () => {
+    await i18n.changeLanguage('id');
+    expect(i18n.t('analytics.milliseconds', { value: 42 })).toBe('42 ms');
+  });
+
   it.each([
-    ['id', ['Penyiapan Bearust', 'Pengguna', 'Log Audit', 'Analitik', 'WAF Dasar', 'Verifikasi tantangan gagal. Silakan coba lagi.']],
-    ['ja', ['Bearust のセットアップ', 'ユーザー', '監査ログ', '分析', '基本 WAF', 'チャレンジの検証に失敗しました。もう一度お試しください。']],
-  ] as const)('renders representative auth, CRUD, audit, analytics, WAF, and security-alert copy in %s', async (locale, expected) => {
+    ['id', ['Penyiapan Bearust', 'Pengguna', 'Log Audit', 'Analitik', 'WAF Dasar', 'Pemeriksaan browser cepat', 'Konteks tantangan tidak tersedia. Kembali ke halaman yang dilindungi lalu coba lagi.']],
+    ['ja', ['Bearust のセットアップ', 'ユーザー', '監査ログ', '分析', '基本 WAF', 'ブラウザーの簡易チェック', 'チャレンジのコンテキストを利用できません。保護されたページに戻って、もう一度お試しください。']],
+  ] as const)('renders auth, CRUD, audit, analytics, WAF, and security-challenge surfaces in %s', async (locale, expected) => {
     await i18n.changeLanguage(locale);
+    Object.defineProperty(navigator, 'languages', { configurable: true, value: [locale] });
+    vi.spyOn(api, 'status').mockResolvedValue({ initialized: false });
+    vi.spyOn(api, 'auditLogs').mockResolvedValue({ items: [], page: 1, page_size: 25, total: 0 });
+    vi.spyOn(api, 'wafConfig').mockResolvedValue({ mode: 'monitor-only', updated_at: 'now' });
+    vi.spyOn(api, 'wafRules').mockResolvedValue([]);
     const container = document.createElement('div');
     const root: Root = createRoot(container);
     await act(async () => {
-      root.render(createElement(I18nextProvider, { i18n }, createElement(RepresentativeSurface)));
+      root.render(createElement(I18nextProvider, { i18n }, createElement(RepresentativeSurfaces)));
+      await Promise.resolve();
     });
     expect(container.textContent).toContain(expected[0]);
     expect(container.textContent).toContain(expected[1]);
     expect(container.textContent).toContain(expected[2]);
     expect(container.textContent).toContain(expected[3]);
     expect(container.textContent).toContain(expected[4]);
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe(expected[5]);
+    expect(container.textContent).toContain(expected[5]);
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(expected[6]);
     root.unmount();
   });
 
-  afterEach(() => { document.body.replaceChildren(); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (originalNavigatorLanguages) Object.defineProperty(navigator, 'languages', originalNavigatorLanguages);
+    else delete (navigator as { languages?: readonly string[] }).languages;
+    document.body.replaceChildren();
+  });
 });
