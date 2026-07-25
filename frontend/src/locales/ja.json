@@ -6,5 +6,13 @@
   "errors": {
     "required": "この項目は必須です。",
     "unexpected": "問題が発生しました。"
+  },
+  "language": {
+    "label": "言語",
+    "options": {
+      "en": "英語",
+      "id": "インドネシア語",
+      "ja": "日本語"
+    }
   }
 }

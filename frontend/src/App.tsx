@@ -1500,7 +1500,7 @@ function AppContent() {
     if (/^[a-f0-9]{16}$/.test(prefix)) sessionStorage.setItem("bearust-bot-fingerprint", prefix);
     return <BotChallengePage />;
   }
-  return user ? (
+  return <LocalePreferenceProvider accountLocale={user?.preferred_locale}>{user ? (
     <Dashboard
       user={user}
       onLogout={() => {
@@ -1510,10 +1510,10 @@ function AppContent() {
     />
   ) : (
     <Login onDone={setUser} />
-  );
+  )}</LocalePreferenceProvider>;
 }
 export default function App() {
-  return <LocalePreferenceProvider><AppContent /></LocalePreferenceProvider>;
+  return <AppContent />;
 }
 export function AuditLogSection({ user, reloadRef }: { user: User; reloadRef?: MutableRefObject<(() => void) | null> }) {
   const [items, setItems] = useState<AuditLogItem[]>([]),

@@ -1,4 +1,4 @@
-import { createContext, createElement, useContext, useMemo, useState, type ReactNode } from 'react';
+import { createContext, createElement, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import i18next from 'i18next';
 import { initReactI18next } from 'react-i18next';
 import { api } from './api';
@@ -79,6 +79,14 @@ export function preferredBrowserLocale(): Locale {
   );
 }
 
+export function preferredLocale(account: unknown): Locale {
+  return localeFromPreferences(
+    account,
+    readStoredLocale(),
+    typeof navigator === 'undefined' ? null : navigator.languages,
+  );
+}
+
 export function initI18n(locale = preferredBrowserLocale()) {
   const language = normalizeLocale(locale);
   if (i18n.isInitialized) return i18n.changeLanguage(language);
@@ -90,15 +98,28 @@ export function initI18n(locale = preferredBrowserLocale()) {
   });
 }
 
+async function changeI18nLocale(locale: Locale) {
+  try {
+    await i18n.changeLanguage(locale);
+  } catch {
+    // The static catalogs can still fall back when initialization is unavailable.
+  }
+}
+
 type LocalePreferenceValue = { locale: Locale; setLocale: (locale: Locale) => Promise<void> };
 const LocalePreferenceContext = createContext<LocalePreferenceValue | null>(null);
 
-export function LocalePreferenceProvider({ children }: { children: ReactNode }) {
-  const [locale, setLocaleState] = useState<Locale>(preferredBrowserLocale);
+export function LocalePreferenceProvider({ accountLocale, children }: { accountLocale?: unknown; children: ReactNode }) {
+  const [locale, setLocaleState] = useState<Locale>(() => preferredLocale(accountLocale));
+  useEffect(() => {
+    const nextLocale = preferredLocale(accountLocale);
+    setLocaleState(nextLocale);
+    void changeI18nLocale(nextLocale);
+  }, [accountLocale]);
   const setLocale = async (next: Locale) => {
     const normalized = normalizeLocale(next);
     setLocaleState(normalized);
-    try { await i18n.changeLanguage(normalized); } catch { /* i18n retains its fallback language */ }
+    await changeI18nLocale(normalized);
     try { window.localStorage.setItem(LOCALE_STORAGE_KEY, normalized); } catch { /* storage is optional */ }
     try { await api.updateLocalePreference(normalized); } catch { /* local preference remains available offline */ }
   };

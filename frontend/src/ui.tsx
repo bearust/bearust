@@ -1,6 +1,7 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react';
 import { useId } from 'react';
-import type { Locale } from './i18n';
+import { useTranslation } from 'react-i18next';
+import { normalizeLocale, type Locale } from './i18n';
 import { useTheme, type ThemeMode } from './theme';
 
 type ButtonVariant = 'primary' | 'secondary' | 'danger';
@@ -94,12 +95,14 @@ export function ThemeSelect({ className = '', ...props }: SelectHTMLAttributes<H
 }
 
 export function LanguageSelect({ value, onChange }: { value: Locale; onChange: (locale: Locale) => void }) {
+  const { t } = useTranslation();
+  const label = t('language.label');
   return <label className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground">
-    <span>Language</span>
-    <select aria-label="Language" value={value} onChange={(event) => onChange(event.target.value as Locale)} className={`min-h-11 rounded-md border border-border bg-surface px-3 py-2 text-foreground ${focusRing}`}>
-      <option value="en">English</option>
-      <option value="id">Bahasa Indonesia</option>
-      <option value="ja">日本語</option>
+    <span>{label}</span>
+    <select aria-label={label} value={value} onChange={(event) => onChange(normalizeLocale(event.currentTarget.value))} className={`min-h-11 rounded-md border border-border bg-surface px-3 py-2 text-foreground ${focusRing}`}>
+      <option value="en">{t('language.options.en')}</option>
+      <option value="id">{t('language.options.id')}</option>
+      <option value="ja">{t('language.options.ja')}</option>
     </select>
   </label>;
 }

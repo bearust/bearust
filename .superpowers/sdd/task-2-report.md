@@ -1,70 +1,51 @@
-# Phase 10C Task 2 Report
+# Phase 11 Task 2 Report — React shell localization
 
 ## Status
 
-Completed authenticated internal configuration-command forwarding.
+Completed in commit `f005e89 feat: integrate frontend localization`.
 
 ## Changed scope
 
-- `src/cluster_raft_runtime.rs`: added authenticated `config_command` dispatch, an internal command-handler boundary, and authenticated leader status for bounded discovery.
-- `src/cluster.rs`: registered the command handler with the cluster listener and routed authenticated command frames alongside existing Raft RPCs.
-- `src/cluster_command.rs`: added bounded typed forwarding envelopes/responses, actor and command revalidation, stable transport error mapping, duplicate-command receipt caching, and bounded follower leader discovery.
-- `tests/cluster_command_gateway.rs`: added envelope/authentication/idempotency coverage and real three-node follower-to-leader forwarding with authenticated listener readiness checks.
+- `frontend/src/main.tsx`: initializes the static i18next resource instance and wraps the React application in `I18nextProvider`.
+- `frontend/src/i18n.ts`: registers the three existing JSON catalogs, derives the initial locale from local storage or browser languages, normalizes invalid stored values to English, and changes the active i18next language before best-effort persistence.
+- `frontend/src/App.tsx`: provides locale state to the standalone application shell and adds the selector to the shared authenticated dashboard header without changing role checks or feature visibility.
+- `frontend/src/ui.tsx`: adds the typed, accessible `LanguageSelect` with English, Indonesian, and Japanese option labels.
+- `frontend/src/i18n.test.ts`: covers invalid stored locale normalization.
+- `frontend/src/localeSelector.test.tsx`: renders an authenticated viewer shell, selects Indonesian without reload, and observes the active i18next translation change from `Save` to `Simpan`.
 
-Forwarded payloads contain only the protocol version, origin node ID, command ID, typed command, and bounded actor context. The receiver compares the envelope origin with the authenticated handshake identity before invoking the leader’s local gateway. Followers never fall back to a local write.
+## TDD evidence
 
-When local Raft metrics have not yet exposed a leader endpoint, the gateway polls only configured peers over the authenticated status RPC. It validates the returned node identity and accepts only a peer reporting itself as leader. Discovery is bounded by the existing two-second write deadline, uses 100 ms per-peer probes and a 25 ms polling interval, and returns `LeaderUnknown` when the deadline expires.
-
-## Red evidence
-
-After narrowing the three-node election wait to the actual live-leader condition, the forwarding test reproduced the missing discovery behavior:
+The selector test was added before implementation and failed because no language selector existed:
 
 ```text
-cargo +stable test --test cluster_command_gateway \
-  follower_gateway_forwards_without_locally_committing \
-  -- --nocapture --test-threads=1
-
-called `Result::unwrap()` on an `Err` value: LeaderUnknown
-test result: FAILED. 0 passed; 1 failed
+AssertionError: expected null to be truthy
 ```
 
-The listener-readiness race was also isolated to setup that observed in-memory status before proving the endpoint accepted the authenticated protocol. The final setup performs a bounded authenticated status round trip to every listener before cluster initialization.
+The invalid-storage regression test also failed before the preference reader was updated:
+
+```text
+AssertionError: expected undefined to be 'en'
+```
+
+Both now pass with the minimal provider and i18next wiring.
 
 ## Verification
 
-Focused forwarding and transport tests:
+Focused locale and shell regression suite:
 
 ```text
-cargo +stable test --test cluster_command_gateway \
-  --test cluster_raft_runtime -- --test-threads=1
+npm test --prefix frontend -- --run src/localeSelector.test.tsx src/i18n.test.ts src/theme.test.tsx src/ui.test.tsx src/responsive-smoke.test.tsx
 ```
 
-Result:
+Result: 5 test files passed; 24 tests passed.
+
+Production build:
 
 ```text
-cluster_command_gateway: 9 passed; 0 failed
-cluster_raft_runtime: 10 passed; 0 failed
+npm run build --prefix frontend
 ```
 
-Formatting:
-
-```text
-cargo +stable fmt --all -- --check
-```
-
-Result: passed with no formatting changes required after applying rustfmt.
-
-Linting:
-
-```text
-cargo +stable clippy --all-targets -- -D warnings
-```
-
-Result:
-
-```text
-Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.39s
-```
+Result: `tsc -b && vite build` completed successfully.
 
 Diff validation:
 
@@ -72,9 +53,38 @@ Diff validation:
 git diff --check
 ```
 
-Result: passed with no whitespace errors.
+Result: passed with no whitespace errors before the commit.
 
-## Scope notes
+## Scope notes and concerns
 
-- `.superpowers/sdd/progress.md` remains modified but is deliberately excluded from the Task 2 commit.
-- No rate-limit or bot-protection files were changed.
+- Existing RBAC conditions remain intact; the selector is in the shared authenticated header and does not expose any management action.
+- Translation extraction of dashboard copy remains Task 3. This task proves live i18next switching with the existing catalog key while preserving all current UI copy.
+- `.superpowers/sdd/progress.md` and `.superpowers/sdd/task-5-report.md` were already modified by other work and were not changed or staged.
+
+## Review remediation — account locale and selector safety
+
+- `LocalePreferenceProvider` now accepts the authenticated account locale and re-applies the documented account → local storage → browser → English precedence when authentication state changes. `AppContent` passes `user?.preferred_locale`, so a returning user receives their saved account language after `api.me()`, while setup, login, storage, i18next, and preference-save failures remain fail-soft.
+- `LanguageSelect` now obtains its accessible label and all option labels from `language.*` translation keys present in the English, Indonesian, and Japanese catalogs. Its DOM change handler normalizes the submitted value before calling consumers, so injected or unsupported values fall back to `en` instead of crossing the typed boundary.
+- Added regression coverage for account-locale precedence over a stored locale, Japanese selector labels, and an invalid injected select value.
+
+Verification after the review fix:
+
+```text
+npm test --prefix frontend -- --run src/localeSelector.test.tsx src/localePreference.test.tsx src/i18n.test.ts src/theme.test.tsx src/ui.test.tsx src/responsive-smoke.test.tsx
+```
+
+Result: 6 test files passed; 29 tests passed.
+
+```text
+npm test --prefix frontend -- --run
+```
+
+Result: 18 test files passed; 64 tests passed.
+
+```text
+npm run build --prefix frontend
+node frontend/scripts/validate-locales.mjs
+git diff --check
+```
+
+Result: production build and locale validation passed; no whitespace errors.

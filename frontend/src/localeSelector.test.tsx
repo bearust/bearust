@@ -2,7 +2,7 @@
 import React from 'react';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nextProvider, useTranslation } from 'react-i18next';
 import App from './App';
 import { api } from './api';
@@ -18,12 +18,25 @@ function TranslationProbe() {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  window.localStorage.clear();
   document.body.replaceChildren();
+});
+
+beforeEach(async () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+    removeItem: (key: string) => { values.delete(key); },
+    clear: () => values.clear(),
+  } as Storage;
+  vi.stubGlobal('localStorage', storage);
+  Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
+  await initI18n('en');
 });
 
 describe('dashboard locale selector', () => {
   it('switches the authenticated dashboard to Indonesian without a reload', async () => {
-    await initI18n('en');
     vi.spyOn(api, 'status').mockResolvedValue({ initialized: true });
     vi.spyOn(api, 'me').mockResolvedValue(viewer);
     vi.spyOn(api, 'hosts').mockResolvedValue([]);
@@ -48,6 +61,28 @@ describe('dashboard locale selector', () => {
 
     expect(select?.selectedOptions[0]?.textContent).toBe('Bahasa Indonesia');
     expect(container.querySelector('output')?.textContent).toBe('Simpan');
+    root.unmount();
+  });
+
+  it('uses the authenticated account locale ahead of a stored browser locale', async () => {
+    window.localStorage.setItem('bearust.locale.v1', 'id');
+    vi.spyOn(api, 'status').mockResolvedValue({ initialized: true });
+    vi.spyOn(api, 'me').mockResolvedValue({ ...viewer, preferred_locale: 'ja' });
+    vi.spyOn(api, 'hosts').mockResolvedValue([]);
+    vi.spyOn(api, 'certificates').mockResolvedValue([]);
+
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<I18nextProvider i18n={i18n}><ThemeProvider><App /><TranslationProbe /></ThemeProvider></I18nextProvider>);
+    });
+
+    const select = container.querySelector<HTMLSelectElement>('header select');
+    expect(select?.value).toBe('ja');
+    expect(select?.getAttribute('aria-label')).toBe('言語');
+    expect(select?.selectedOptions[0]?.textContent).toBe('日本語');
+    expect(container.querySelector('output')?.textContent).toBe('保存');
     root.unmount();
   });
 });

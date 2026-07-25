@@ -3,8 +3,10 @@ import React from 'react';
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it } from 'vitest';
+import { I18nextProvider } from 'react-i18next';
+import { i18n, initI18n, type Locale } from './i18n';
 import { ThemeProvider } from './theme';
-import { Alert, Button, Card, Field, ThemeSelect } from './ui';
+import { Alert, Button, Card, Field, LanguageSelect, ThemeSelect } from './ui';
 
 function render(node: React.ReactNode) {
   const container = document.createElement('div');
@@ -56,6 +58,26 @@ describe('accessible Tailwind UI primitives', () => {
     const select = container.querySelector('select')!;
     act(() => { select.value = 'light'; select.dispatchEvent(new Event('change', { bubbles: true })); });
     expect(called).toBe(true);
+    root.unmount();
+  });
+
+  it('uses translated labels for the language selector', async () => {
+    await initI18n('ja');
+    const { container, root } = render(<I18nextProvider i18n={i18n}><LanguageSelect value="ja" onChange={() => {}} /></I18nextProvider>);
+    const select = container.querySelector('select')!;
+    expect(select.getAttribute('aria-label')).toBe('言語');
+    expect([...select.options].map((option) => option.textContent)).toEqual(['英語', 'インドネシア語', '日本語']);
+    root.unmount();
+  });
+
+  it('normalizes invalid language selector DOM values before notifying callers', async () => {
+    await initI18n('en');
+    let selected: Locale | undefined;
+    const { container, root } = render(<I18nextProvider i18n={i18n}><LanguageSelect value="id" onChange={(locale) => { selected = locale; }} /></I18nextProvider>);
+    const select = container.querySelector('select')!;
+    select.append(new Option('Unsupported', 'fr'));
+    act(() => { select.value = 'fr'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(selected).toBe('en');
     root.unmount();
   });
 

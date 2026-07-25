@@ -6,5 +6,13 @@
   "errors": {
     "required": "Kolom ini wajib diisi.",
     "unexpected": "Terjadi kesalahan."
+  },
+  "language": {
+    "label": "Bahasa",
+    "options": {
+      "en": "Bahasa Inggris",
+      "id": "Bahasa Indonesia",
+      "ja": "Bahasa Jepang"
+    }
   }
 }
