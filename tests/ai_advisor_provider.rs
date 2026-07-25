@@ -126,7 +126,7 @@ async fn adapter_rejects_oversized_stream_before_buffering() {
 }
 
 #[test]
-fn response_type_is_bounded_and_deserializable() {
+fn response_schema_deserializes_expected_completion_shape() {
     let response: ChatCompletionResponse = serde_json::from_value(json!({
         "id":"x", "choices":[{"message":{"content":"ok"}}]
     }))

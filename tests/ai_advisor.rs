@@ -1,9 +1,59 @@
+use async_trait::async_trait;
 use bearust::ai_advisor::{
     AdvisorConfigError, AdvisorStatus, AiAdvisorService, DEFAULT_CIRCUIT_FAILURE_THRESHOLD,
     DEFAULT_QUEUE_CAPACITY, DEFAULT_REQUEST_TIMEOUT, DEFAULT_RESPONSE_LIMIT_BYTES,
     DEFAULT_WORKER_COUNT,
 };
+use bearust::ai_advisor_provider::{
+    ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, LlmProvider,
+    ProviderError,
+};
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+struct TestProvider {
+    calls: Arc<AtomicUsize>,
+    delay: Duration,
+}
+#[async_trait]
+impl LlmProvider for TestProvider {
+    async fn complete(
+        &self,
+        _: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        Ok(ChatCompletionResponse {
+            id: "x".into(),
+            choices: vec![ChatChoice {
+                message: ChatMessage {
+                    content: "ok".into(),
+                },
+            }],
+        })
+    }
+}
+
+fn enabled_service() -> AiAdvisorService {
+    AiAdvisorService::from_env_with(|name| match name {
+        "LLM_API_URL" => Some("https://llm.example.test".into()),
+        "LLM_API_KEY" => Some("key".into()),
+        _ => None,
+    })
+    .unwrap()
+}
+
+fn request() -> bearust::ai_advisor::AdvisorRequest {
+    bearust::ai_advisor::AdvisorRequest {
+        workflow: bearust::ai_advisor::AdvisorWorkflow::IncidentExplanation,
+        host_id: None,
+        from: None,
+        to: None,
+        command: Some("hello".into()),
+    }
+}
 
 #[test]
 fn config_requires_both_provider_environment_variables() {
@@ -79,4 +129,46 @@ fn disabled_status_serializes_without_provider_details() {
         serde_json::to_value(service.status()).unwrap(),
         json!({"enabled": false})
     );
+}
+
+#[tokio::test]
+async fn bounded_queue_reports_terminal_result_once_and_shutdowns() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let service = enabled_service().with_provider(
+        Arc::new(TestProvider {
+            calls: calls.clone(),
+            delay: Duration::from_millis(5),
+        }),
+        1,
+        1,
+    );
+    let job = service.enqueue(request()).unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let result = service.result(&job).unwrap();
+    assert_eq!(
+        result.status,
+        bearust::ai_advisor::AdvisorJobStatus::Completed
+    );
+    assert_eq!(service.result(&job).unwrap().status, result.status);
+    service.shutdown();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn bounded_queue_rejects_when_capacity_is_full() {
+    let service = enabled_service().with_provider(
+        Arc::new(TestProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            delay: Duration::from_secs(1),
+        }),
+        1,
+        1,
+    );
+    let _ = service.enqueue(request()).unwrap();
+    let second = service.enqueue(request());
+    assert!(matches!(
+        second,
+        Err(bearust::ai_advisor::AdvisorErrorCode::Busy)
+    ));
+    service.shutdown();
 }
