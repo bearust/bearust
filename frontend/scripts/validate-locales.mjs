@@ -14,17 +14,41 @@ export function flattenKeys(value, prefix = '') {
   );
 }
 
+function flattenStrings(value, prefix = '') {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return prefix ? { [prefix]: typeof value === 'string' ? value : '' } : {};
+  }
+
+  return Object.entries(value).reduce(
+    (flat, [key, child]) => Object.assign(flat, flattenStrings(child, prefix ? `${prefix}.${key}` : key)),
+    {},
+  );
+}
+
+function interpolationPlaceholders(value) {
+  return [...value.matchAll(/{{\s*([^{}\s]+)\s*}}/g)].map((match) => match[1]).sort();
+}
+
 export function validateLocaleCatalogs(catalogs) {
   const expected = new Set(flattenKeys(catalogs.en));
+  const englishStrings = flattenStrings(catalogs.en);
   const issues = [];
 
   for (const locale of Object.keys(catalogs).filter((name) => name !== 'en').sort()) {
     const actual = new Set(flattenKeys(catalogs[locale]));
+    const translatedStrings = flattenStrings(catalogs[locale]);
     for (const key of [...expected].filter((key) => !actual.has(key)).sort()) {
       issues.push(`${locale}: missing ${key}`);
     }
     for (const key of [...actual].filter((key) => !expected.has(key)).sort()) {
       issues.push(`${locale}: extra ${key}`);
+    }
+    for (const key of [...expected].filter((key) => actual.has(key)).sort()) {
+      const expectedPlaceholders = interpolationPlaceholders(englishStrings[key]);
+      const actualPlaceholders = interpolationPlaceholders(translatedStrings[key]);
+      if (expectedPlaceholders.join('\u0000') !== actualPlaceholders.join('\u0000')) {
+        issues.push(`${locale}: ${key} interpolation placeholders must match English (expected ${expectedPlaceholders.join(', ') || 'none'}; found ${actualPlaceholders.join(', ') || 'none'})`);
+      }
     }
   }
 

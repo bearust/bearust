@@ -45,7 +45,7 @@ Edit `config/bearust.example.toml` (or set `BEARUST_CONFIG`) for backends. Mount
 
 The management API is available at host `127.0.0.1:8081` in Docker Compose (the container binds `0.0.0.0:8081`, while the host port remains localhost-only). Set `BEARUST_SETUP_TOKEN` before startup, or read the generated one-time token from `./data/setup-token` and expose the management UI only through an HTTPS reverse proxy. Keep `./data` private because it contains the SQLite database and certificate material.
 
-Run `cargo test --locked`, `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings`. See [DEVELOPMENT.md](DEVELOPMENT.md), [DEPLOY.md](DEPLOY.md), and the [roadmap](docs/PRD.md). Licensed under MIT OR Apache-2.0.
+Run `cargo test --locked`, `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings`. Frontend localization contributions must also run `npm run validate-locales --prefix frontend`; the supported UI locale codes are `en` (English), `id` (Indonesian), and `ja` (Japanese). See [DEVELOPMENT.md](DEVELOPMENT.md), [localization contribution guidance](docs/localization.md), [DEPLOY.md](DEPLOY.md), and the [roadmap](docs/PRD.md). Licensed under MIT OR Apache-2.0.
 
 Certificate automation is documented in [docs/acme.md](docs/acme.md). Start with Let's Encrypt staging, verify the challenge and reload path, then switch to production.
 
@@ -124,7 +124,12 @@ never changes host interfaces or runs keepalived inside a container; follow
 [the keepalived operations guide](docs/keepalived.md) for the readiness check,
 fencing procedure, and three-node VRRP example.
 
-Phase 11 (localization) is the next planned product phase.
+Phase 11 localization is complete across its three increments: 11A adds the
+English-default i18n foundation and locale selector; 11B supplies complete
+Indonesian and Japanese catalogs; and 11C persists validated account
+preferences, applies locale-aware dashboard formatting, and documents the
+translation contribution workflow. Phase 12 (AI Advisor) is the next planned
+product phase.
 
 ### Phase 4D.2 realtime updates
 

@@ -23,6 +23,35 @@ backup and restore plan before changing a production database URL.
 
 Focused TDD: add a minimal regression test, run it to observe failure, implement the smallest change, then rerun the focused test and the full suite.
 
+## Localization contribution workflow
+
+The supported dashboard locale codes are `en` (English, the source and
+fallback catalog), `id` (Indonesian), and `ja` (Japanese). Translation catalogs
+live in `frontend/src/locales/`; follow [docs/localization.md](docs/localization.md)
+for key naming, interpolation, and review guidance.
+
+For every locale catalog change, run the key and interpolation-placeholder
+validator before requesting review:
+
+```bash
+npm run validate-locales --prefix frontend
+npm test --prefix frontend
+npm run build --prefix frontend
+```
+
+For a release or cross-stack change, use the complete acceptance gate from the
+repository root:
+
+```bash
+npm run validate-locales --prefix frontend
+npm test --prefix frontend
+npm run build --prefix frontend
+cargo +stable test --all-targets -- --test-threads=1
+cargo +stable fmt --all -- --check
+cargo +stable clippy --all-targets -- -D warnings
+git diff --check
+```
+
 ## Phase 8 analytics checks
 
 Analytics is deliberately process-local: the one-minute ring buffer is bounded

@@ -594,7 +594,7 @@ An **incremental** approach, not a big-bang release. Each phase should be stable
 | **Phase 8 — Analytics Dashboard** | Metrics collector, rollups, realtime dashboard, Prometheus endpoint |
 | **Phase 9 — Self-Learning** | Baselining, anomaly detection, adaptive tuning |
 | **Phase 10 — Multi-Node** | Raft config sync, keepalived integration documentation |
-| **Phase 11 — Localization** | i18n framework, English default, Indonesian and Japanese as initial additional languages, community translation contribution process |
+| **Phase 11 — Localization (complete)** | i18n framework, English default, Indonesian and Japanese as initial additional languages, community translation contribution process |
 | **Phase 12 — AI Advisor** | Optional module based on external LLM |
 | **Phase 13 — Plugin System** | WASM runtime, SDK, initial hook points |
 | **Phase 14 — Plugin Ecosystem** | Community registry, signature verification, public contribution documentation |
@@ -809,4 +809,22 @@ readiness check, three-node priorities and `nopreempt` example, split-brain
 fencing warnings, and rollback steps. The readiness check is fail-closed on
 proxy/control listener failure, unknown leader, stale quorum, unhealthy peer
 set, timeout, or malformed status; it never changes a container or host
-interface. Phase 11 (localization) is next.
+interface.
+
+### Phase 11 status: localization
+
+Phase 11 is complete across three increments:
+
+- **Phase 11A — i18n foundation:** the dashboard uses externalized i18next
+  resources with English as the default and fallback, plus an accessible locale
+  selector.
+- **Phase 11B — translated surfaces:** Indonesian (`id`) and Japanese (`ja`)
+  catalogs cover the authenticated dashboard surfaces and are checked for key
+  and interpolation-placeholder parity with English (`en`).
+- **Phase 11C — preference, formatting, and contribution workflow:** a
+  validated account locale preference persists through the existing profile
+  API; dates and numbers use the selected locale; responsive translation
+  layouts are covered by frontend tests; and the documented JSON catalog review
+  flow is enforced by `npm run validate-locales --prefix frontend`.
+
+Phase 12 (AI Advisor) is next.
