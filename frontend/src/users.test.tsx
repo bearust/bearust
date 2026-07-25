@@ -101,7 +101,7 @@ describe('Dashboard Users UI',()=>{
     const refresh=view.element.querySelector('[data-testid="users-refresh"]') as HTMLButtonElement;
     await act(async()=>{refresh.click();});
     expect(view.element.textContent).not.toContain('internal stack');
-    expect(view.element.textContent).toContain('Unable to complete the user request. Please try again.');
+    expect(view.element.textContent).toContain('Unable to complete the request. Please try again.');
     expect(view.element.textContent).not.toContain('internal stack');
     usersLoad.mockResolvedValue([admin,operator]);
     await act(async()=>{refresh.click();});
@@ -109,7 +109,7 @@ describe('Dashboard Users UI',()=>{
     const select=view.element.querySelectorAll('tbody select')[1] as HTMLSelectElement;
     await act(async()=>{select.value='viewer';select.dispatchEvent(new Event('change',{bubbles:true}));});
     expect(update).toHaveBeenCalledWith(2,{role:'viewer'});
-    expect(view.element.textContent).toContain('Unable to complete the user request. Please try again.');
+    expect(view.element.textContent).toContain('Unable to complete the request. Please try again.');
     expect(view.element.textContent).not.toContain('super-secret');
     view.root.unmount();
   });

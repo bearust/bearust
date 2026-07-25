@@ -31,12 +31,15 @@ import {
   PolicyRecommendation,
 } from "./api";
 import { useRealtimeUpdates, RealtimeStatus } from "./realtime";
-import { LocalePreferenceProvider, useLocalePreference } from "./i18n";
+import { i18n, initI18n, LocalePreferenceProvider, useLocalePreference } from "./i18n";
 import { Alert, Button, Card, Field, LanguageSelect, SelectField, TextareaField, ThemeSelect } from "./ui";
+import { useTranslation } from "react-i18next";
+
+void initI18n();
 
 export const sanitizeError = (message: string) => {
   if (/internal stack|database|password\s*[:=]/i.test(message))
-    return "Unable to complete the request. Please try again.";
+    return i18n.t("errors.generic");
   return message
     .replace(
       /(api[_ -]?token|authorization|bearer)\s*[:=]\s*[^\s,;]+/gi,
@@ -52,17 +55,17 @@ export const userError = (error: unknown) => {
     status === 403 ||
     /\b403\b|forbidden|permission/i.test(message)
   )
-    return "You do not have permission to manage users.";
+     return i18n.t("errors.usersPermission");
   if (
     status === 400 ||
     status === 422 ||
     /\b400\b|validation|invalid|required/i.test(message)
   )
-    return "Please check the submitted user details.";
-  if (status === 404) return "The requested user was not found.";
+     return i18n.t("errors.usersValidation");
+  if (status === 404) return i18n.t("errors.userNotFound");
   if (status === 409)
-    return "This user change conflicts with the current account state.";
-  return "Unable to complete the user request. Please try again.";
+    return i18n.t("errors.userConflict");
+  return i18n.t("errors.generic");
 };
 export const validHostname = (
   host: string,
@@ -97,6 +100,7 @@ export const acmeSubmissionReady = (
   hosts.every((host) => validHostname(host, challenge)) &&
   (challenge !== "cloudflare_dns01" || token.trim().length > 0);
 function Setup({ onDone }: { onDone: (u: User) => void }) {
+  const { t } = useTranslation();
   const [email, setEmail] = useState(""),
     [password, setPassword] = useState(""),
     [token, setToken] = useState(""),
@@ -104,8 +108,8 @@ function Setup({ onDone }: { onDone: (u: User) => void }) {
   return (
     <main className="min-h-screen bg-page px-4 py-8 text-foreground sm:px-6 lg:px-8">
       <Card className="mx-auto max-w-lg">
-      <h1 className="mb-2 text-2xl font-semibold">Bearust Setup</h1>
-      <p className="mb-6 text-muted">Create the first administrator account.</p>
+      <h1 className="mb-2 text-2xl font-semibold">{t("auth.setupTitle")}</h1>
+      <p className="mb-6 text-muted">{t("auth.setupDescription")}</p>
       <form
         onSubmit={async (e) => {
           e.preventDefault();
@@ -117,37 +121,38 @@ function Setup({ onDone }: { onDone: (u: User) => void }) {
         }}
       >
         <Field
-          label="Email"
+          label={t("common.email")}
           type="email"
           value={email}
           onChange={(e: any) => setEmail(e.target.value)}
         />
         <Field
-          label="Password (12+ characters)"
+          label={t("auth.passwordHint")}
           type="password"
           value={password}
           onChange={(e: any) => setPassword(e.target.value)}
         />
         <Field
-          label="Setup token"
+          label={t("auth.setupToken")}
           value={token}
           onChange={(e: any) => setToken(e.target.value)}
         />
         {error && <Alert variant="danger">{error}</Alert>}
-        <Button type="submit">Create account</Button>
+        <Button type="submit">{t("auth.createAccount")}</Button>
       </form>
       </Card>
     </main>
   );
 }
 function Login({ onDone }: { onDone: (u: User) => void }) {
+  const { t } = useTranslation();
   const [email, setEmail] = useState(""),
     [password, setPassword] = useState(""),
     [error, setError] = useState("");
   return (
     <main className="min-h-screen bg-page px-4 py-8 text-foreground sm:px-6 lg:px-8">
       <Card className="mx-auto max-w-lg">
-      <h1 className="mb-6 text-2xl font-semibold">Bearust Login</h1>
+      <h1 className="mb-6 text-2xl font-semibold">{t("auth.loginTitle")}</h1>
       <form
         onSubmit={async (e) => {
           e.preventDefault();
@@ -159,19 +164,19 @@ function Login({ onDone }: { onDone: (u: User) => void }) {
         }}
       >
         <Field
-          label="Email"
+          label={t("common.email")}
           type="email"
           value={email}
           onChange={(e: any) => setEmail(e.target.value)}
         />
         <Field
-          label="Password"
+          label={t("common.password")}
           type="password"
           value={password}
           onChange={(e: any) => setPassword(e.target.value)}
         />
         {error && <Alert variant="danger">{error}</Alert>}
-        <Button type="submit">Sign in</Button>
+        <Button type="submit">{t("auth.signIn")}</Button>
       </form>
       </Card>
     </main>
@@ -185,6 +190,7 @@ export function AcmeWizard({
   onIssued: () => void;
   canWrite?: boolean;
 }) {
+  const { t } = useTranslation();
   const [challenge, setChallenge] =
       useState<AcmeRequest["challenge"]>("http01"),
     [environment, setEnvironment] =
@@ -202,7 +208,7 @@ export function AcmeWizard({
   const missingToken = challenge === "cloudflare_dns01" && !token.trim();
   return (
     <Card>
-      <h2 className="mb-4 text-xl font-semibold">Issue Let's Encrypt certificate</h2>
+      <h2 className="mb-4 text-xl font-semibold">{t("acme.title")}</h2>
       <form
         onSubmit={async (e) => {
           e.preventDefault();
@@ -210,7 +216,7 @@ export function AcmeWizard({
           if (
             environment === "production" &&
             !window.confirm(
-              "Production certificates are rate-limited. Continue?",
+              t("acme.productionConfirm"),
             )
           )
             return;
@@ -235,16 +241,16 @@ export function AcmeWizard({
           }
         }}
       >
-        <SelectField label="Environment"
+        <SelectField label={t("acme.environment")}
             value={environment}
             onChange={(e) =>
               setEnvironment(e.target.value as AcmeRequest["environment"])
             }
           >
-            <option value="staging">Staging (safe default)</option>
-            <option value="production">Production</option>
+            <option value="staging">{t("acme.staging")}</option>
+            <option value="production">{t("acme.production")}</option>
           </SelectField>
-        <SelectField label="Challenge"
+        <SelectField label={t("acme.challenge")}
             value={challenge}
             onChange={(e) =>
               setChallenge(e.target.value as AcmeRequest["challenge"])
@@ -253,35 +259,35 @@ export function AcmeWizard({
             <option value="http01">HTTP-01</option>
             <option value="cloudflare_dns01">Cloudflare DNS-01</option>
           </SelectField>
-        <TextareaField label="Domains (one per line or comma separated)"
+        <TextareaField label={t("acme.domains")}
             value={domains}
             onChange={(e) => setDomains(e.target.value)}
             required
             rows={3}
-            placeholder="example.com\nwww.example.com"
+            placeholder={t("acme.domainsPlaceholder")}
           />
         {invalid && (
           <Alert variant="warning">
-            Enter valid hostnames. Wildcards require Cloudflare DNS-01.
+            {t("acme.invalidHosts")}
           </Alert>
         )}
         {challenge === "cloudflare_dns01" && (
           <Field
-            label="Cloudflare API token"
+            label={t("acme.cloudflareToken")}
               type="password"
               value={token}
               onChange={(e) => setToken(e.target.value)}
               autoComplete="off"
-              placeholder="Required for DNS-01"
+              placeholder={t("acme.tokenRequired")}
               required
-            error={missingToken ? "Cloudflare API token is required." : undefined}
+            error={missingToken ? t("acme.tokenError") : undefined}
           />
         )}
         {error && <Alert variant="danger">{error}</Alert>}
         <Button type="submit"
           disabled={busy || invalid || missingToken || hosts.length === 0}
         >
-          {busy ? "Issuing…" : "Issue certificate"}
+          {busy ? t("acme.issuing") : t("acme.issue")}
         </Button>
       </form>
     </Card>
@@ -295,6 +301,7 @@ export function CertificateTable({
   user: User;
   onChanged: () => void;
 }) {
+  const { t } = useTranslation();
   const [items, setItems] = useState<Certificate[]>([]),
     [error, setError] = useState(""),
     [refreshing, setRefreshing] = useState(false),
@@ -349,9 +356,9 @@ export function CertificateTable({
   return (
     <Card>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold">Certificates</h2>
+        <h2 className="text-xl font-semibold">{t("certificates.title")}</h2>
         <Button variant="secondary" onClick={() => void refresh()} disabled={refreshing}>
-          {refreshing ? "Refreshing…" : "Refresh"}
+          {refreshing ? t("common.refreshing") : t("common.refresh")}
         </Button>
       </div>
       {error && <Alert variant="danger">{error}</Alert>}
@@ -362,14 +369,14 @@ export function CertificateTable({
             <span className="text-sm text-muted">
               {c.source} · {c.covered_hostnames.join(", ")}
             </span>
-            <span className="text-sm text-muted">Expires: {c.expiry}</span>
+            <span className="text-sm text-muted">{t("certificates.expires", { expiry: c.expiry })}</span>
             <span className="text-sm">
-              Status: {c.active ? "Active" : "Inactive"}
-              {c.acme && ` · Renewal: ${c.acme.renewal_state}`}
+              {t("certificates.status", { status: c.active ? t("common.active") : t("certificates.inactive") })}
+              {c.acme && ` · ${t("certificates.renewal", { state: c.acme.renewal_state })}`}
             </span>
             {c.acme?.last_error_code && (
               <span className="text-sm text-danger-foreground">
-                Last error: {sanitizeError(c.acme.last_error_code)}
+                {t("certificates.lastError", { error: sanitizeError(c.acme.last_error_code) })}
               </span>
             )}
             <div>
@@ -383,7 +390,7 @@ export function CertificateTable({
                       )
                     }
                   >
-                    {busy[c.id] === "renew" ? "Renewing…" : "Renew"}
+                    {busy[c.id] === "renew" ? t("certificates.renewing") : t("certificates.renew")}
                   </Button>
                   {!c.active && (
                     <Button variant="secondary"
@@ -394,7 +401,7 @@ export function CertificateTable({
                         )
                       }
                     >
-                      {busy[c.id] === "activate" ? "Activating…" : "Activate"}
+                      {busy[c.id] === "activate" ? t("certificates.activating") : t("certificates.activate")}
                     </Button>
                   )}
                 </>
@@ -403,7 +410,7 @@ export function CertificateTable({
           </article>
         ))}
       </div>
-      {items.length === 0 && <p>No certificates yet.</p>}
+      {items.length === 0 && <p>{t("certificates.empty")}</p>}
     </Card>
   );
 }
@@ -421,6 +428,7 @@ export function UsersSection({
   onChanged: () => void | Promise<void>;
   userErrorMessage?: string;
 }) {
+  const { t } = useTranslation();
   const [error, setError] = useState(""),
     [busy, setBusy] = useState<number | null>(null);
   const [email, setEmail] = useState(""),
@@ -443,9 +451,9 @@ export function UsersSection({
   return (
     <Card data-testid="users-section">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold">Users</h2>
+        <h2 className="text-xl font-semibold">{t("users.title")}</h2>
         <Button data-testid="users-refresh" variant="secondary" onClick={() => void run(-2, () => Promise.resolve())}>
-          Refresh
+          {t("common.refresh")}
         </Button>
       </div>
       {(error || userErrorMessage) && (
@@ -454,9 +462,9 @@ export function UsersSection({
       <div className="overflow-x-auto"><table className="min-w-full text-left text-sm">
         <thead>
           <tr>
-            <th>Email</th>
-            <th>Role</th>
-            <th>Status</th>
+            <th>{t("common.email")}</th>
+            <th>{t("common.role")}</th>
+            <th>{t("common.status")}</th>
             <th />
           </tr>
         </thead>
@@ -467,10 +475,10 @@ export function UsersSection({
               <tr key={item.id}>
                 <td>
                   {item.email}
-                  {self ? " (you)" : ""}
+                  {self ? ` ${t("users.self")}` : ""}
                 </td>
                 <td>
-                  <SelectField label="Role"
+                  <SelectField label={t("common.role")}
                     value={item.role}
                     disabled={self || busy === item.id}
                     onChange={(e) =>
@@ -484,7 +492,7 @@ export function UsersSection({
                     {roleOptions.map((role) => <option value={role.slug} key={role.slug}>{role.name}</option>)}
                   </SelectField>
                 </td>
-                <td>{item.disabled ? "Disabled" : "Active"}</td>
+                <td>{item.disabled ? t("common.disabled") : t("common.active")}</td>
                 <td>
                   {!self && (
                     <>
@@ -494,8 +502,8 @@ export function UsersSection({
                           if (
                             window.confirm(
                               item.disabled
-                                ? "Enable this account?"
-                                : "Disable this account?",
+                                ? t("users.enableConfirm")
+                                : t("users.disableConfirm"),
                             )
                           )
                             void run(item.id, () =>
@@ -505,23 +513,23 @@ export function UsersSection({
                             );
                         }}
                       >
-                        {item.disabled ? "Enable" : "Disable"}
+                        {item.disabled ? t("common.enable") : t("common.disable")}
                       </Button>{" "}
                       <Button variant="secondary"
                         disabled={busy === item.id}
                         onClick={() => void run(item.id, async () => {
                           const result = await api.revokeUserSessions(item.id);
-                          window.alert(`Revoked ${result.revoked} session(s).`);
+                          window.alert(t("users.revokedSessions", { count: result.revoked }));
                         })}
-                      >Revoke sessions</Button>{" "}
+                      >{t("users.revokeSessions")}</Button>{" "}
                       <Button variant="danger"
                         disabled={busy === item.id}
                         onClick={() => {
-                          if (window.confirm("Delete this account?"))
+                          if (window.confirm(t("users.deleteConfirm")))
                             void run(item.id, () => api.deleteUser(item.id));
                         }}
                       >
-                        Delete
+                        {t("common.delete")}
                       </Button>
                     </>
                   )}
@@ -545,29 +553,29 @@ export function UsersSection({
           });
         }}
       >
-        <h3>Add user</h3>
+        <h3>{t("users.add")}</h3>
         <Field
-          label="Email"
+          label={t("common.email")}
           type="email"
           value={email}
           onChange={(e: any) => setEmail(e.target.value)}
         />
         <Field
-          label="Password (12+ characters)"
+          label={t("auth.passwordHint")}
           type="password"
           value={password}
           onChange={(e: any) => setPassword(e.target.value)}
         />
-        <SelectField label="Role"
+        <SelectField label={t("common.role")}
             value={role}
             onChange={(e) => setRole(e.target.value as Role)}
           >
-            <option value="admin">Admin</option>
-            <option value="operator">Operator</option>
-            <option value="viewer">Viewer</option>
+            <option value="admin">{t("users.admin")}</option>
+            <option value="operator">{t("users.operator")}</option>
+            <option value="viewer">{t("users.viewer")}</option>
           </SelectField>
         <Button type="submit" disabled={busy === -1 || !email.trim() || password.length < 12}>
-          Create user
+          {t("users.create")}
         </Button>
       </form>
     </Card>
@@ -577,6 +585,7 @@ export function UsersSection({
 const PERMISSIONS: PermissionKey[] = ["proxy_hosts.read","proxy_hosts.write","certificates.read","certificates.write","users.manage","roles.manage","audit_logs.read","audit_logs.export","system.settings.manage","sessions.revoke"];
 type ScopeDraft = Record<number, Record<"proxy_hosts.read" | "proxy_hosts.write", number[]>>;
 export function RolesSection({ user, roles, hosts = [], onChanged }: { user: User; roles: RoleRecord[]; hosts?: Host[]; onChanged: () => void | Promise<void> }) {
+  const { t } = useTranslation();
   const [slug,setSlug]=useState(""), [name,setName]=useState(""), [error,setError]=useState(""), [busy,setBusy]=useState(false);
   const [drafts, setDrafts] = useState<ScopeDraft>(() => Object.fromEntries(roles.map((role) => [role.id, {
     "proxy_hosts.read": role.scopes?.find((s) => s.permission === "proxy_hosts.read")?.proxy_host_ids ?? [],
@@ -595,7 +604,7 @@ export function RolesSection({ user, roles, hosts = [], onChanged }: { user: Use
     });
   }, [roles]);
   if (user.role !== "admin") return null;
-  const run=async (action:()=>Promise<unknown>)=>{setBusy(true);setError("");try{await action();await onChanged()}catch(e){setError((e as {status?:number})?.status === 400 || (e as {status?:number})?.status === 422 ? "Please check the submitted role details." : userError(e))}finally{setBusy(false)}};
+  const run=async (action:()=>Promise<unknown>)=>{setBusy(true);setError("");try{await action();await onChanged()}catch(e){setError((e as {status?:number})?.status === 400 || (e as {status?:number})?.status === 422 ? t("errors.rolesValidation") : userError(e))}finally{setBusy(false)}};
   const updateScope = (roleId: number, permission: "proxy_hosts.read" | "proxy_hosts.write", hostId: number, checked: boolean) => {
     setDrafts((all) => {
       const current = all[roleId] ?? { "proxy_hosts.read": [], "proxy_hosts.write": [] };
@@ -606,10 +615,11 @@ export function RolesSection({ user, roles, hosts = [], onChanged }: { user: Use
     });
   };
   const scopePayload = (roleId: number) => (["proxy_hosts.read", "proxy_hosts.write"] as const).map((permission) => ({ permission, proxy_host_ids: [...new Set(drafts[roleId]?.[permission] ?? [])].sort((a,b)=>a-b) })).filter((scope) => scope.proxy_host_ids.length);
-  return <Card><h2 className="mb-4 text-xl font-semibold">Roles</h2>{error&&<Alert variant="danger">{error}</Alert>}<div className="overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>Name</th><th>Slug</th><th>Permissions</th><th /></tr></thead><tbody>{roles.map(role=><tr key={role.id}><td>{role.name}</td><td>{role.slug}</td><td>{role.permissions.join(", ")}<div data-testid={`role-scope-editor-${role.id}`} className="mt-3 grid gap-3 sm:grid-cols-2"><fieldset className="min-w-0"><legend className="font-medium">Proxy host read access</legend>{hosts.map((host)=><label className="flex items-center gap-2 text-sm" key={`read-${host.id}`}><input data-testid={`scope-read-host-${host.id}`} type="checkbox" disabled={role.system_managed || busy} checked={drafts[role.id]?.["proxy_hosts.read"]?.includes(host.id) ?? false} onChange={(e)=>updateScope(role.id,"proxy_hosts.read",host.id,e.target.checked)} /><span className="truncate">{host.domain}</span></label>)}</fieldset><fieldset className="min-w-0"><legend className="font-medium">Proxy host write access</legend>{hosts.map((host)=><label className="flex items-center gap-2 text-sm" key={`write-${host.id}`}><input data-testid={`scope-write-host-${host.id}`} type="checkbox" disabled={role.system_managed || busy} checked={drafts[role.id]?.["proxy_hosts.write"]?.includes(host.id) ?? false} onChange={(e)=>updateScope(role.id,"proxy_hosts.write",host.id,e.target.checked)} /><span className="truncate">{host.domain}</span></label>)}</fieldset>{!role.system_managed&&<div className="flex flex-wrap gap-2 sm:col-span-2"><Button data-testid={`role-scope-save-${role.id}`} variant="secondary" disabled={busy} onClick={()=>void run(()=>api.updateRole(role.id,{description:role.description,scopes:scopePayload(role.id)}))}>Save scopes</Button><Button data-testid={`role-scope-clear-${role.id}`} variant="secondary" disabled={busy} onClick={()=>setDrafts((all)=>({...all,[role.id]:{"proxy_hosts.read":[],"proxy_hosts.write":[]}}))}>Clear scopes</Button></div>}</div></td><td>{!role.system_managed&&<Button variant="danger" disabled={busy} onClick={()=>window.confirm("Delete this role?")&&void run(()=>api.deleteRole(role.id))}>Delete</Button>}</td></tr>)}</tbody></table></div><form className="mt-6 grid gap-4 sm:grid-cols-2" onSubmit={e=>{e.preventDefault();if(!slug.trim()||!name.trim())return;void run(async()=>{await api.createRole({slug:slug.trim(),name:name.trim(),description:"",permissions:["audit_logs.read"],scopes:[]});setSlug("");setName("")})}}><h3 className="sm:col-span-2 font-semibold">Add role</h3><Field label="Slug" value={slug} onChange={(e:any)=>setSlug(e.target.value)}/><Field label="Name" value={name} onChange={(e:any)=>setName(e.target.value)}/><Button type="submit" disabled={busy||!slug.trim()||!name.trim()}>Create role</Button></form><p className="mt-4 text-sm text-muted">Available permissions: {PERMISSIONS.join(", ")}</p></Card>;
+  return <Card><h2 className="mb-4 text-xl font-semibold">{t("roles.title")}</h2>{error&&<Alert variant="danger">{error}</Alert>}<div className="overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>{t("common.name")}</th><th>{t("roles.slug")}</th><th>{t("roles.permissions")}</th><th /></tr></thead><tbody>{roles.map(role=><tr key={role.id}><td>{role.name}</td><td>{role.slug}</td><td>{role.permissions.join(", ")}<div data-testid={`role-scope-editor-${role.id}`} className="mt-3 grid gap-3 sm:grid-cols-2"><fieldset className="min-w-0"><legend className="font-medium">{t("roles.proxyRead")}</legend>{hosts.map((host)=><label className="flex items-center gap-2 text-sm" key={`read-${host.id}`}><input data-testid={`scope-read-host-${host.id}`} type="checkbox" disabled={role.system_managed || busy} checked={drafts[role.id]?.["proxy_hosts.read"]?.includes(host.id) ?? false} onChange={(e)=>updateScope(role.id,"proxy_hosts.read",host.id,e.target.checked)} /><span className="truncate">{host.domain}</span></label>)}</fieldset><fieldset className="min-w-0"><legend className="font-medium">{t("roles.proxyWrite")}</legend>{hosts.map((host)=><label className="flex items-center gap-2 text-sm" key={`write-${host.id}`}><input data-testid={`scope-write-host-${host.id}`} type="checkbox" disabled={role.system_managed || busy} checked={drafts[role.id]?.["proxy_hosts.write"]?.includes(host.id) ?? false} onChange={(e)=>updateScope(role.id,"proxy_hosts.write",host.id,e.target.checked)} /><span className="truncate">{host.domain}</span></label>)}</fieldset>{!role.system_managed&&<div className="flex flex-wrap gap-2 sm:col-span-2"><Button data-testid={`role-scope-save-${role.id}`} variant="secondary" disabled={busy} onClick={()=>void run(()=>api.updateRole(role.id,{description:role.description,scopes:scopePayload(role.id)}))}>{t("roles.saveScopes")}</Button><Button data-testid={`role-scope-clear-${role.id}`} variant="secondary" disabled={busy} onClick={()=>setDrafts((all)=>({...all,[role.id]:{"proxy_hosts.read":[],"proxy_hosts.write":[]}}))}>{t("roles.clearScopes")}</Button></div>}</div></td><td>{!role.system_managed&&<Button variant="danger" disabled={busy} onClick={()=>window.confirm(t("users.deleteConfirm"))&&void run(()=>api.deleteRole(role.id))}>{t("common.delete")}</Button>}</td></tr>)}</tbody></table></div><form className="mt-6 grid gap-4 sm:grid-cols-2" onSubmit={e=>{e.preventDefault();if(!slug.trim()||!name.trim())return;void run(async()=>{await api.createRole({slug:slug.trim(),name:name.trim(),description:"",permissions:["audit_logs.read"],scopes:[]});setSlug("");setName("")})}}><h3 className="sm:col-span-2 font-semibold">{t("roles.add")}</h3><Field label={t("roles.slug")} value={slug} onChange={(e:any)=>setSlug(e.target.value)}/><Field label={t("common.name")} value={name} onChange={(e:any)=>setName(e.target.value)}/><Button type="submit" disabled={busy||!slug.trim()||!name.trim()}>{t("roles.create")}</Button></form><p className="mt-4 text-sm text-muted">{t("roles.available", { permissions: PERMISSIONS.join(", ") })}</p></Card>;
 }
 
 export function WafSection({ user, refreshToken = 0 }: { user: User; refreshToken?: number }) {
+  const { t } = useTranslation();
   const [config, setConfig] = useState<WafConfig | null>(null), [rules, setRules] = useState<WafRule[]>([]), [error, setError] = useState(""), [busy, setBusy] = useState(false), [toml, setToml] = useState("");
   const admin = user.role === "admin";
   const reload = async () => { try { const [nextConfig, nextRules] = await Promise.all([api.wafConfig(), api.wafRules()]); setConfig(nextConfig); setRules(nextRules); setError(""); } catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); } };
@@ -617,7 +627,7 @@ export function WafSection({ user, refreshToken = 0 }: { user: User; refreshToke
   const changeMode = async () => { if (!config || !admin) return; setBusy(true); try { setConfig(await api.updateWafConfig({ mode: config.mode === "block" ? "monitor-only" : "block" })); } catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); } finally { setBusy(false); } };
   const importToml = async () => { setBusy(true); try { await api.importWafRules(toml); setToml(""); await reload(); } catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); } finally { setBusy(false); } };
   const exportToml = async () => { try { setToml(await api.exportWafRules()); } catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); } };
-  return <Card data-testid="waf-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">Basic WAF</h2><span className="rounded-full border border-border px-3 py-1 text-sm" data-testid="waf-mode">{config?.mode === "block" ? "Block" : "Monitor-only"}</span>{admin && <Button variant="secondary" disabled={busy || !config} onClick={() => void changeMode()}>{config?.mode === "block" ? "Monitor-only" : "Block"}</Button>}</div>{error && <Alert variant="danger">{error}</Alert>}<div className="mt-4 overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>Name</th><th>Category</th><th>Severity</th><th>Action</th><th>Status</th><th /></tr></thead><tbody>{rules.map(rule => <tr key={rule.id}><td>{rule.name}</td><td>{rule.category}</td><td>{rule.severity}</td><td>{rule.action}</td><td>{rule.enabled ? "Enabled" : "Disabled"}</td><td>{admin && rule.source === "custom" && <Button variant="danger" disabled={busy} onClick={() => void api.deleteWafRule(rule.id).then(reload).catch(e => setError(sanitizeError(e instanceof Error ? e.message : String(e))))}>Delete</Button>}</td></tr>)}</tbody></table></div>{admin && <div className="mt-5 grid gap-3"><TextareaField label="WAF TOML import/export" value={toml} onChange={e => setToml(e.target.value)} rows={8} placeholder="version = 1" /><div className="flex flex-wrap gap-2"><Button variant="secondary" disabled={busy || !toml.trim()} onClick={() => void importToml()}>Import TOML</Button><Button variant="secondary" disabled={busy} onClick={() => void exportToml()}>Export TOML</Button></div></div>}</Card>;
+  return <Card data-testid="waf-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">{t("waf.title")}</h2><span className="rounded-full border border-border px-3 py-1 text-sm" data-testid="waf-mode">{config?.mode === "block" ? t("common.block") : t("common.monitorOnly")}</span>{admin && <Button variant="secondary" disabled={busy || !config} onClick={() => void changeMode()}>{config?.mode === "block" ? t("common.monitorOnly") : t("common.block")}</Button>}</div>{error && <Alert variant="danger">{error}</Alert>}<div className="mt-4 overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>{t("common.name")}</th><th>{t("waf.category")}</th><th>{t("waf.severity")}</th><th>{t("common.action")}</th><th>{t("common.status")}</th><th /></tr></thead><tbody>{rules.map(rule => <tr key={rule.id}><td>{rule.name}</td><td>{rule.category}</td><td>{rule.severity}</td><td>{rule.action}</td><td>{rule.enabled ? t("common.enabled") : t("common.disabled")}</td><td>{admin && rule.source === "custom" && <Button variant="danger" disabled={busy} onClick={() => void api.deleteWafRule(rule.id).then(reload).catch(e => setError(sanitizeError(e instanceof Error ? e.message : String(e))))}>{t("common.delete")}</Button>}</td></tr>)}</tbody></table></div>{admin && <div className="mt-5 grid gap-3"><TextareaField label={t("waf.toml")} value={toml} onChange={e => setToml(e.target.value)} rows={8} placeholder={t("waf.tomlPlaceholder")} /><div className="flex flex-wrap gap-2"><Button variant="secondary" disabled={busy || !toml.trim()} onClick={() => void importToml()}>{t("waf.import")}</Button><Button variant="secondary" disabled={busy} onClick={() => void exportToml()}>{t("waf.export")}</Button></div></div>}</Card>;
 }
 
 /** The proxy fingerprint is keyed and must be supplied by the server. Never
@@ -641,6 +651,7 @@ export async function solveBotChallenge(challenge: BotChallenge, fingerprint: st
 }
 
 export function BotProtectionSection({ user, refreshToken = 0 }: { user: User; refreshToken?: number }) {
+  const { t } = useTranslation();
   const [config, setConfig] = useState<BotConfig | null>(null), [crawlers, setCrawlers] = useState<TrustedCrawler[]>([]);
   const [mode, setMode] = useState<BotMode>("monitor"), [threshold, setThreshold] = useState(""), [ttl, setTtl] = useState(""), [ua, setUa] = useState(""), [domain, setDomain] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [saved, setSaved] = useState(false);
@@ -649,21 +660,23 @@ export function BotProtectionSection({ user, refreshToken = 0 }: { user: User; r
   if (user.role !== "admin") return null;
   const run = async (action: () => Promise<unknown>) => { setBusy(true); setError(""); setSaved(false); try { await action(); setSaved(true); await reload(); } catch (e) { setError(sanitizeError(e instanceof Error ? e.message : String(e))); } finally { setBusy(false); } };
   const validCrawler = ua.trim().length > 0 && ua.trim().length <= 256 && domain.trim().length > 0 && domain.trim().length <= 253 && !/\s/.test(domain);
-  return <Card data-testid="bot-protection-section"><h2 className="mb-2 text-xl font-semibold">Bot protection</h2><p className="mb-4 text-sm text-muted">Monitor-only is the safe default. No keys or challenge tokens are displayed here.</p>{error && <Alert variant="danger">{error}</Alert>}{saved && <Alert variant="success">Bot protection policy saved.</Alert>}<form className="grid gap-4 sm:grid-cols-3" onSubmit={(e) => { e.preventDefault(); if (!config || !threshold || !ttl) return; void run(() => api.updateBotConfig({ mode, threshold: Number(threshold), ttl_seconds: Number(ttl) })); }}><SelectField label="Mode" value={mode} onChange={(e) => setMode(e.target.value as BotMode)} disabled={busy}><option value="monitor">Monitor-only</option><option value="challenge">Challenge</option><option value="block">Block</option></SelectField><Field label="Risk threshold" type="number" min="0" max="100" value={threshold} onChange={(e) => setThreshold(e.target.value)} disabled={busy} required /><Field label="Challenge TTL (seconds)" type="number" min="30" max="86400" value={ttl} onChange={(e) => setTtl(e.target.value)} disabled={busy} required /><Button type="submit" disabled={busy || !threshold || !ttl}>Save policy</Button></form><div className="mt-6"><h3 className="mb-3 font-semibold">Trusted crawlers</h3><div className="overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>User agent</th><th>Domain</th><th>Status</th><th /></tr></thead><tbody>{crawlers.map((crawler) => <tr key={crawler.id}><td>{crawler.trusted_user_agent ?? "—"}</td><td>{crawler.trusted_domain ?? "—"}</td><td>{crawler.enabled ? "Enabled" : "Disabled"}</td><td><Button variant="secondary" disabled={busy} onClick={() => void run(() => api.updateTrustedCrawler(crawler.id, { user_agent: crawler.trusted_user_agent ?? "", domain: crawler.trusted_domain ?? "", enabled: !crawler.enabled }))}>{crawler.enabled ? "Disable" : "Enable"}</Button> <Button variant="danger" disabled={busy} onClick={() => void run(() => api.deleteTrustedCrawler(crawler.id))}>Delete</Button></td></tr>)}</tbody></table></div><form className="mt-4 grid gap-4 sm:grid-cols-2" onSubmit={(e) => { e.preventDefault(); if (!validCrawler) return; void run(async () => { await api.createTrustedCrawler({ user_agent: ua.trim(), domain: domain.trim(), enabled: true }); setUa(""); setDomain(""); }); }}><Field label="Crawler user agent" value={ua} onChange={(e) => setUa(e.target.value)} maxLength={256} required /><Field label="Crawler domain" value={domain} onChange={(e) => setDomain(e.target.value)} maxLength={253} placeholder="example.com" required /><Button type="submit" disabled={busy || !validCrawler}>Add trusted crawler</Button></form></div></Card>;
+  return <Card data-testid="bot-protection-section"><h2 className="mb-2 text-xl font-semibold">{t("bot.title")}</h2><p className="mb-4 text-sm text-muted">{t("bot.description")}</p>{error && <Alert variant="danger">{error}</Alert>}{saved && <Alert variant="success">{t("bot.saved")}</Alert>}<form className="grid gap-4 sm:grid-cols-3" onSubmit={(e) => { e.preventDefault(); if (!config || !threshold || !ttl) return; void run(() => api.updateBotConfig({ mode, threshold: Number(threshold), ttl_seconds: Number(ttl) })); }}><SelectField label={t("common.mode")} value={mode} onChange={(e) => setMode(e.target.value as BotMode)} disabled={busy}><option value="monitor">{t("common.monitorOnly")}</option><option value="challenge">{t("bot.challenge")}</option><option value="block">{t("common.block")}</option></SelectField><Field label={t("bot.riskThreshold")} type="number" min="0" max="100" value={threshold} onChange={(e) => setThreshold(e.target.value)} disabled={busy} required /><Field label={t("bot.challengeTtl")} type="number" min="30" max="86400" value={ttl} onChange={(e) => setTtl(e.target.value)} disabled={busy} required /><Button type="submit" disabled={busy || !threshold || !ttl}>{t("bot.savePolicy")}</Button></form><div className="mt-6"><h3 className="mb-3 font-semibold">{t("bot.trustedCrawlers")}</h3><div className="overflow-x-auto"><table className="min-w-full text-left text-sm"><thead><tr><th>{t("bot.userAgent")}</th><th>{t("common.domain")}</th><th>{t("common.status")}</th><th /></tr></thead><tbody>{crawlers.map((crawler) => <tr key={crawler.id}><td>{crawler.trusted_user_agent ?? t("common.notAvailable")}</td><td>{crawler.trusted_domain ?? t("common.notAvailable")}</td><td>{crawler.enabled ? t("common.enabled") : t("common.disabled")}</td><td><Button variant="secondary" disabled={busy} onClick={() => void run(() => api.updateTrustedCrawler(crawler.id, { user_agent: crawler.trusted_user_agent ?? "", domain: crawler.trusted_domain ?? "", enabled: !crawler.enabled }))}>{crawler.enabled ? t("common.disable") : t("common.enable")}</Button> <Button variant="danger" disabled={busy} onClick={() => void run(() => api.deleteTrustedCrawler(crawler.id))}>{t("common.delete")}</Button></td></tr>)}</tbody></table></div><form className="mt-4 grid gap-4 sm:grid-cols-2" onSubmit={(e) => { e.preventDefault(); if (!validCrawler) return; void run(async () => { await api.createTrustedCrawler({ user_agent: ua.trim(), domain: domain.trim(), enabled: true }); setUa(""); setDomain(""); }); }}><Field label={t("bot.crawlerUserAgent")} value={ua} onChange={(e) => setUa(e.target.value)} maxLength={256} required /><Field label={t("bot.crawlerDomain")} value={domain} onChange={(e) => setDomain(e.target.value)} maxLength={253} placeholder="example.com" required /><Button type="submit" disabled={busy || !validCrawler}>{t("bot.addCrawler")}</Button></form></div></Card>;
 }
 
 export function RateLimitSection({ user, refreshToken = 0 }: { user: User; refreshToken?: number }) {
+  const { t } = useTranslation();
   const [config, setConfig] = useState<RateLimitConfig | null>(null);
   const [error, setError] = useState(""), [busy, setBusy] = useState(false), [saved, setSaved] = useState(false);
   const [enabled, setEnabled] = useState(false), [action, setAction] = useState<RateLimitAction>("monitor"), [capacity, setCapacity] = useState("100"), [refill, setRefill] = useState("10");
   const admin = user.role === "admin";
-  const reload = async () => { try { const next = await api.rateLimitConfig(); setConfig(next); setEnabled(next.enabled); setAction(next.action); setCapacity(String(next.capacity)); setRefill(String(next.refill_per_second)); setError(""); } catch (e) { setError("Unable to load rate-limit policy."); } };
+  const reload = async () => { try { const next = await api.rateLimitConfig(); setConfig(next); setEnabled(next.enabled); setAction(next.action); setCapacity(String(next.capacity)); setRefill(String(next.refill_per_second)); setError(""); } catch (e) { setError(t("errors.rateLimitLoad")); } };
   useEffect(() => { void reload(); }, [refreshToken]);
-  const save = async (event: FormEvent) => { event.preventDefault(); if (!admin) return; const c = Number(capacity), r = Number(refill); if (!Number.isInteger(c) || c < 1 || c > 1_000_000 || !Number.isFinite(r) || r < 0.001 || r > 100_000) { setError("Capacity must be 1–1,000,000 and refill 0.001–100,000 per second."); return; } setBusy(true); setError(""); setSaved(false); try { const next = await api.updateRateLimitConfig({ enabled, action, capacity: c, refill_per_second: r, key_scope: "proxy_host_ip" }); setConfig(next); setSaved(true); } catch { setError("Unable to save rate-limit policy."); } finally { setBusy(false); } };
-  return <Card data-testid="rate-limit-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">Rate limiting</h2><span className="rounded-full border border-border px-3 py-1 text-sm">{config?.action === "block" ? "Block" : "Monitor-only"}</span></div><p className="mt-2 text-sm text-muted">Limits each proxy host by client IP. Monitor-only is the safe default; no raw client identifiers are shown.</p>{error && <Alert variant="danger">{error}</Alert>}{saved && <Alert variant="success">Rate-limit policy saved.</Alert>}<form className="mt-4 grid gap-4 sm:grid-cols-2" onSubmit={(e) => void save(e)}><label className="flex min-h-11 items-center gap-3 text-sm font-medium"><input aria-label="Enable rate limiting" type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} disabled={!admin || busy} />Enable rate limiting</label><SelectField label="Action" value={action} onChange={(e) => setAction(e.target.value as RateLimitAction)} disabled={!admin || busy}><option value="monitor">Monitor-only</option><option value="block">Block limited requests</option></SelectField><Field label="Burst capacity" type="number" min="1" max="1000000" value={capacity} onChange={(e) => setCapacity(e.target.value)} disabled={!admin || busy} required /><Field label="Refill per second" type="number" min="0.001" max="100000" step="0.001" value={refill} onChange={(e) => setRefill(e.target.value)} disabled={!admin || busy} required /><SelectField label="Key scope" value="proxy_host_ip" disabled><option value="proxy_host_ip">Proxy host + client IP</option></SelectField>{admin && <Button type="submit" disabled={busy}>{busy ? "Saving…" : "Save policy"}</Button>}</form></Card>;
+  const save = async (event: FormEvent) => { event.preventDefault(); if (!admin) return; const c = Number(capacity), r = Number(refill); if (!Number.isInteger(c) || c < 1 || c > 1_000_000 || !Number.isFinite(r) || r < 0.001 || r > 100_000) { setError(t("errors.rateLimitValidation")); return; } setBusy(true); setError(""); setSaved(false); try { const next = await api.updateRateLimitConfig({ enabled, action, capacity: c, refill_per_second: r, key_scope: "proxy_host_ip" }); setConfig(next); setSaved(true); } catch { setError(t("errors.rateLimitSave")); } finally { setBusy(false); } };
+  return <Card data-testid="rate-limit-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">{t("rateLimit.title")}</h2><span className="rounded-full border border-border px-3 py-1 text-sm">{config?.action === "block" ? t("common.block") : t("common.monitorOnly")}</span></div><p className="mt-2 text-sm text-muted">{t("rateLimit.description")}</p>{error && <Alert variant="danger">{error}</Alert>}{saved && <Alert variant="success">{t("rateLimit.saved")}</Alert>}<form className="mt-4 grid gap-4 sm:grid-cols-2" onSubmit={(e) => void save(e)}><label className="flex min-h-11 items-center gap-3 text-sm font-medium"><input aria-label={t("rateLimit.enable")} type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} disabled={!admin || busy} />{t("rateLimit.enable")}</label><SelectField label={t("common.action")} value={action} onChange={(e) => setAction(e.target.value as RateLimitAction)} disabled={!admin || busy}><option value="monitor">{t("common.monitorOnly")}</option><option value="block">{t("rateLimit.blockLimited")}</option></SelectField><Field label={t("rateLimit.burstCapacity")} type="number" min="1" max="1000000" value={capacity} onChange={(e) => setCapacity(e.target.value)} disabled={!admin || busy} required /><Field label={t("rateLimit.refill")} type="number" min="0.001" max="100000" step="0.001" value={refill} onChange={(e) => setRefill(e.target.value)} disabled={!admin || busy} required /><SelectField label={t("rateLimit.keyScope")} value="proxy_host_ip" disabled><option value="proxy_host_ip">{t("rateLimit.scopeValue")}</option></SelectField>{admin && <Button type="submit" disabled={busy}>{busy ? t("rateLimit.saving") : t("rateLimit.savePolicy")}</Button>}</form></Card>;
 }
 
 export function AnalyticsSection({ hosts, refreshToken = 0 }: { hosts: Host[]; refreshToken?: number }) {
+  const { t } = useTranslation();
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
   const [rows, setRows] = useState<AnalyticsBucket[]>([]);
   const [host, setHost] = useState("");
@@ -692,7 +705,7 @@ export function AnalyticsSection({ hosts, refreshToken = 0 }: { hosts: Host[]; r
   const cards = summary ? [["Requests", summary.requests], ["2xx", summary.status_2xx], ["4xx", summary.status_4xx], ["5xx", summary.status_5xx], ["p95 latency", summary.p95_ms == null ? "—" : `${summary.p95_ms} ms`], ["Security events", summary.waf_blocks + summary.bot_blocks + summary.bot_challenges + summary.rate_limited]] : [];
   const latency = summary ? [["p50", summary.p50_ms], ["p95", summary.p95_ms], ["p99", summary.p99_ms]] as const : [];
   const latencyMax = Math.max(...latency.map(([, value]) => value ?? 0), 1);
-  return <Card data-testid="analytics-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">Analytics</h2><span className="text-sm text-muted">Process-local · last 24 hours</span></div>
+  return <Card data-testid="analytics-section"><div className="flex flex-wrap items-center gap-3"><h2 className="mr-auto text-xl font-semibold">{t("analytics.title")}</h2><span className="text-sm text-muted">{t("analytics.description")}</span></div>
     <div className="mt-4 grid gap-4 sm:grid-cols-3" role="group" aria-label="Analytics filters"><SelectField id="analytics-proxy-host" label="Proxy host" value={host} onChange={e => setHost(e.target.value)}><option value="">All hosts</option>{hosts.slice(0, 100).map(h => <option key={h.id} value={h.id}>{h.name} ({h.domain})</option>)}</SelectField><Field label="From" type="datetime-local" value={from} onChange={e => setFrom(e.target.value)} /><Field label="To" type="datetime-local" value={to} onChange={e => setTo(e.target.value)} /></div>
     {loading && <p role="status" className="mt-4 text-muted">Loading analytics…</p>}
     {!loading && error && <Alert variant="danger">{error}</Alert>}
@@ -720,6 +733,7 @@ export function AnalyticsSection({ hosts, refreshToken = 0 }: { hosts: Host[]; r
 }
 
 export function BaselineSection({ hosts, refreshToken = 0 }: { hosts: Host[]; refreshToken?: number }) {
+  const { t } = useTranslation();
   const [snapshot, setSnapshot] = useState<BaselineSnapshot | null>(null);
   const [host, setHost] = useState("");
   const [window, setWindow] = useState<BaselineWindow>("5m");
@@ -761,7 +775,7 @@ export function BaselineSection({ hosts, refreshToken = 0 }: { hosts: Host[]; re
   return (
     <Card data-testid="baseline-section">
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="mr-auto text-xl font-semibold">Traffic Baseline</h2>
+        <h2 className="mr-auto text-xl font-semibold">{t("baseline.title")}</h2>
         {snapshot?.status === "warming_up" ? (
           <span className="rounded-full bg-amber-500/20 px-3 py-1 text-xs text-amber-500 font-medium">Warming up</span>
         ) : (
@@ -817,6 +831,7 @@ export function BaselineSection({ hosts, refreshToken = 0 }: { hosts: Host[]; re
 }
 
 export function AnomalySection({ user, hosts, refreshToken = 0 }: { user: User; hosts: Host[]; refreshToken?: number }) {
+  const { t } = useTranslation();
   const [anomalies, setAnomalies] = useState<AnomalyRecord[]>([]);
   const [host, setHost] = useState("");
   const [severity, setSeverity] = useState("");
@@ -868,7 +883,7 @@ export function AnomalySection({ user, hosts, refreshToken = 0 }: { user: User; 
   return (
     <Card data-testid="anomaly-section">
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="mr-auto text-xl font-semibold">Anomaly Detection</h2>
+        <h2 className="mr-auto text-xl font-semibold">{t("anomaly.title")}</h2>
         <span className="rounded-full border border-border px-3 py-1 text-xs text-muted">Monitor-only</span>
       </div>
       <p className="mt-2 text-sm text-muted">Deterministic traffic deviation detector with severity scoring and deduplication.</p>
@@ -948,6 +963,7 @@ export function AnomalySection({ user, hosts, refreshToken = 0 }: { user: User; 
 }
 
 export function AdaptiveTuningSection({ user, hosts, refreshToken = 0 }: { user: User; hosts: Host[]; refreshToken?: number }) {
+  const { t } = useTranslation();
   const [selectedHost, setSelectedHost] = useState("");
   const [policy, setPolicy] = useState<TuningPolicy>({
     mode: "monitor",
@@ -1043,7 +1059,7 @@ export function AdaptiveTuningSection({ user, hosts, refreshToken = 0 }: { user:
   return (
     <Card data-testid="adaptive-tuning-section">
       <div className="flex flex-wrap items-center gap-3">
-        <h2 className="mr-auto text-xl font-semibold">Adaptive Tuning</h2>
+        <h2 className="mr-auto text-xl font-semibold">{t("tuning.title")}</h2>
         <span
           className={`rounded-full px-3 py-1 text-xs font-medium ${
             emergencyDisabled
@@ -1193,15 +1209,17 @@ export function AdaptiveTuningSection({ user, hosts, refreshToken = 0 }: { user:
 }
 
 export function BotChallengePage({ fingerprint = serverChallengeFingerprint(), onComplete }: { fingerprint?: string; onComplete?: () => void }) {
+  const { t } = useTranslation();
   const [challenge, setChallenge] = useState<BotChallenge | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState(""), [complete, setComplete] = useState(false);
   const requestChallenge = async () => { if (!fingerprint) { setError("Challenge context unavailable. Please return to the protected page and try again."); return; } setBusy(true); setError(""); setComplete(false); try { setChallenge(await api.botChallenge(fingerprint)); } catch { setError("Challenge unavailable. Please try again."); } finally { setBusy(false); } };
   useEffect(() => { void requestChallenge(); }, [fingerprint]);
   const verify = async () => { if (!challenge) return; setBusy(true); setError(""); try { const solution = await solveBotChallenge(challenge, fingerprint); await api.verifyBotChallenge({ token: challenge.token, fingerprint, solution }); setComplete(true); onComplete?.(); } catch { setError("Challenge verification failed. Please try again."); } finally { setBusy(false); } };
-  return <main className="min-h-screen bg-page px-4 py-8 text-foreground"><Card className="mx-auto max-w-lg"><h1 className="mb-2 text-2xl font-semibold">Quick browser check</h1><p className="mb-6 text-muted">Complete a small proof-of-work check to continue. Your challenge token stays in this browser and is never shown.</p>{error && <Alert variant="danger">{error}</Alert>}{complete ? <Alert variant="success">Verification complete. You may continue.</Alert> : <Button disabled={busy || !challenge} onClick={() => void verify()}>{busy ? "Verifying…" : "Verify browser"}</Button>}<Button className="ml-2" variant="secondary" disabled={busy} onClick={() => void requestChallenge()}>Try another challenge</Button></Card></main>;
+  return <main className="min-h-screen bg-page px-4 py-8 text-foreground"><Card className="mx-auto max-w-lg"><h1 className="mb-2 text-2xl font-semibold">{t("bot.quickCheck")}</h1><p className="mb-6 text-muted">{t("bot.quickCheckDescription")}</p>{error && <Alert variant="danger">{error}</Alert>}{complete ? <Alert variant="success">{t("bot.verificationComplete")}</Alert> : <Button disabled={busy || !challenge} onClick={() => void verify()}>{busy ? t("bot.verifying") : t("bot.verifyBrowser")}</Button>}<Button className="ml-2" variant="secondary" disabled={busy} onClick={() => void requestChallenge()}>{t("bot.anotherChallenge")}</Button></Card></main>;
 }
 
 function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: () => void; onUserRefresh: (user: User) => void }) {
   const { locale, setLocale } = useLocalePreference();
+  const { t } = useTranslation();
   const [hosts, setHosts] = useState<Host[]>([]),
     [certs, setCerts] = useState<Certificate[]>([]),
     [users, setUsers] = useState<User[]>([]),
@@ -1310,9 +1328,9 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
         </span>
         <LanguageSelect value={locale} onChange={(nextLocale) => void setLocale(nextLocale)} />
         <ThemeSelect />
-        <Button variant="secondary" onClick={onLogout}>Sign out</Button>
-        <span className="text-sm text-muted" aria-label="Realtime status">
-          Realtime: {realtimeStatus}
+        <Button variant="secondary" onClick={onLogout}>{t("auth.signOut")}</Button>
+        <span className="text-sm text-muted" aria-label={t("dashboard.realtimeStatus")}>
+          {t("dashboard.realtime", { status: realtimeStatus })}
         </span>
       </header>
       <div className="mx-auto grid max-w-7xl gap-6">{error && <Alert variant="danger">{error}</Alert>}
@@ -1328,7 +1346,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
         <AcmeWizard canWrite={canWrite} onIssued={() => void refresh()} />
       )}
       <Card>
-        <h2 className="mb-4 text-xl font-semibold">Proxy Hosts</h2>
+        <h2 className="mb-4 text-xl font-semibold">{t("proxyHosts.title")}</h2>
         <div className="overflow-x-auto"><table className="min-w-full text-left text-sm">
           <thead>
             <tr>
@@ -1465,6 +1483,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
   );
 }
 function AppContent() {
+  const { t } = useTranslation();
   const [user, setUser] = useState<User | null>(null),
     [initialized, setInitialized] = useState<boolean | null>(null);
   useEffect(() => {
@@ -1483,7 +1502,7 @@ function AppContent() {
   if (initialized === null)
     return (
       <main className="flex min-h-screen items-center justify-center bg-page px-4 py-8 text-foreground">
-        <Alert variant="info">Loading Bearust…</Alert>
+        <Alert variant="info">{t("auth.loading")}</Alert>
       </main>
     );
   if (!initialized)
@@ -1516,6 +1535,7 @@ export default function App() {
   return <AppContent />;
 }
 export function AuditLogSection({ user, reloadRef }: { user: User; reloadRef?: MutableRefObject<(() => void) | null> }) {
+  const { t } = useTranslation();
   const [items, setItems] = useState<AuditLogItem[]>([]),
     [total, setTotal] = useState(0),
     [page, setPage] = useState(1),
@@ -1572,7 +1592,7 @@ export function AuditLogSection({ user, reloadRef }: { user: User; reloadRef?: M
   return (
     <Card>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold">Audit Log</h2>
+        <h2 className="text-xl font-semibold">{t("audit.title")}</h2>
         <Button variant="secondary" onClick={() => void load()} disabled={loading}>
           {loading ? "Refreshing…" : "Refresh"}
         </Button>
