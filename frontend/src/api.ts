@@ -33,8 +33,10 @@ export type BaselineStatus = 'warming_up' | 'ready';
 export type BaselineMetrics = { req_per_sec: number; total_requests: number; status_2xx: number; status_3xx: number; status_4xx: number; status_5xx: number; error_rate_percent: number; p50_ms: number | null; p95_ms: number | null; p99_ms: number | null; waf_blocks: number; bot_blocks: number; bot_challenges: number; rate_limited: number; };
 export type BaselineSnapshot = { host_id: number | null; status: BaselineStatus; window: BaselineWindow; sample_count: number; metrics: BaselineMetrics; calculated_at: string; };
 
-export type AnomalyRule = 'request_rate' | 'error_rate' | 'latency' | 'security_events';
-export type AnomalySeverity = 'info' | 'warning' | 'critical';
+export const ANOMALY_RULES = ['request_rate', 'error_rate', 'latency', 'security_events'] as const;
+export const ANOMALY_SEVERITIES = ['info', 'warning', 'critical'] as const;
+export type AnomalyRule = (typeof ANOMALY_RULES)[number];
+export type AnomalySeverity = (typeof ANOMALY_SEVERITIES)[number];
 export type AnomalyRecord = { id: number; host_id: number; rule: AnomalyRule; severity: AnomalySeverity; score: number; summary: string; observed_at: string; acknowledged: boolean };
 
 export type TuningMode = 'monitor' | 'recommend' | 'enforce';

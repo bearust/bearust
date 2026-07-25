@@ -39,6 +39,19 @@ npm test --prefix frontend
 npm run build --prefix frontend
 ```
 
+Browser-backed responsive coverage uses Playwright with Chromium. After
+installing frontend dependencies, install its browser binary once on each
+development or CI host, then run the browser suite:
+
+```bash
+cd frontend
+npx playwright install chromium
+npm run test:e2e
+```
+
+The JSDOM tests retain structural responsive assertions; only the Playwright
+suite measures real document layout and horizontal overflow.
+
 For a release or cross-stack change, use the complete acceptance gate from the
 repository root:
 

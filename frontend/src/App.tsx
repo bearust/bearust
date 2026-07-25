@@ -30,6 +30,8 @@ import {
   BaselineSnapshot,
   BaselineWindow,
   BaselineStatus,
+  ANOMALY_RULES,
+  ANOMALY_SEVERITIES,
   AnomalyRecord,
   AnomalyRule,
   AnomalySeverity,
@@ -58,9 +60,6 @@ import {
 import { useTranslation } from "react-i18next";
 
 void initI18n();
-
-export const ANOMALY_RULE_KEYS = ["request_rate", "error_rate", "latency", "security_events"] as const;
-export const ANOMALY_SEVERITY_KEYS = ["info", "warning", "critical"] as const;
 
 export const SERVER_ERROR_KEYS: Record<string, string> = {
   invalid_credentials: "errors.authInvalidCredentials",
@@ -116,6 +115,19 @@ export const BUILTIN_ROLE_KEYS: Record<string, string> = {
 function displayRole(t: (key: string) => string, slug: string, fallback = slug) {
   return BUILTIN_ROLE_KEYS[slug] ? t(BUILTIN_ROLE_KEYS[slug]) : fallback;
 }
+
+function anomalyRuleKey(rule: AnomalyRule) {
+  return ANOMALY_RULES.includes(rule)
+    ? `anomaly.rules.${rule}`
+    : "errors.generic";
+}
+
+function anomalySeverityKey(severity: AnomalySeverity) {
+  return ANOMALY_SEVERITIES.includes(severity)
+    ? `anomaly.${severity}`
+    : "errors.generic";
+}
+
 export const userError = (error: unknown) => {
   const { code, status } = errorDetails(error);
   const directKey = serverErrorKey(error);
@@ -2078,9 +2090,11 @@ export function AnomalySection({
           onChange={(e) => setSeverity(e.target.value)}
         >
           <option value="">{t("anomaly.allSeverities")}</option>
-          <option value="info">{t("anomaly.info")}</option>
-          <option value="warning">{t("anomaly.warning")}</option>
-          <option value="critical">{t("anomaly.critical")}</option>
+          {ANOMALY_SEVERITIES.map((value) => (
+            <option value={value} key={value}>
+              {t(`anomaly.${value}`)}
+            </option>
+          ))}
         </SelectField>
       </div>
       {loading && (
@@ -2116,7 +2130,7 @@ export function AnomalySection({
                       formatNumber(item.host_id, { maximumFractionDigits: 0 })}
                   </td>
                   <td className="capitalize">
-                    {t(`anomaly.rules.${item.rule}`)}
+                    {t(anomalyRuleKey(item.rule))}
                   </td>
                   <td>
                     <span
@@ -2128,7 +2142,7 @@ export function AnomalySection({
                             : "bg-blue-500/20 text-blue-500"
                       }`}
                     >
-                      {t(`anomaly.${item.severity}`)}
+                      {t(anomalySeverityKey(item.severity))}
                     </span>
                   </td>
                   <td>

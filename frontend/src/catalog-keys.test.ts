@@ -3,8 +3,10 @@ import componentSource from "./App.tsx?raw";
 import uiSource from "./ui.tsx?raw";
 import en from "./locales/en.json";
 import {
-  ANOMALY_RULE_KEYS,
-  ANOMALY_SEVERITY_KEYS,
+  ANOMALY_RULES,
+  ANOMALY_SEVERITIES,
+} from "./api";
+import {
   BUILTIN_ROLE_KEYS,
   SERVER_ERROR_KEYS,
   SERVER_MESSAGE_KEYS,
@@ -93,10 +95,14 @@ describe("dashboard catalog keys", () => {
     }
   });
 
-  it("keeps dynamic translation families bounded by runtime enums", () => {
+  it("maps every anomaly runtime enum to a catalog key", () => {
     const catalogKeys = new Set(flatten(en));
-    for (const value of ANOMALY_RULE_KEYS) expect(catalogKeys, `anomaly.rules.${value}`).toContain(`anomaly.rules.${value}`);
-    for (const value of ANOMALY_SEVERITY_KEYS) expect(catalogKeys, `anomaly.${value}`).toContain(`anomaly.${value}`);
+    for (const value of ANOMALY_RULES) expect(catalogKeys, `anomaly.rules.${value}`).toContain(`anomaly.rules.${value}`);
+    for (const value of ANOMALY_SEVERITIES) expect(catalogKeys, `anomaly.${value}`).toContain(`anomaly.${value}`);
+  });
+
+  it("keeps other dynamic translation families bounded by runtime enums", () => {
+    const catalogKeys = new Set(flatten(en));
     for (const value of REALTIME_STATUSES) expect(catalogKeys, `dashboard.realtimeStates.${value}`).toContain(`dashboard.realtimeStates.${value}`);
     for (const key of Object.values(BUILTIN_ROLE_KEYS)) expect(catalogKeys, key).toContain(key);
   });
