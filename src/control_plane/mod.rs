@@ -5,6 +5,7 @@
 )]
 pub mod audit;
 pub mod auth;
+pub mod locale;
 pub mod models;
 pub mod rbac;
 pub mod realtime;
@@ -445,6 +446,10 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(me))
+        .route(
+            "/api/auth/me/preferences",
+            axum::routing::patch(update_preferences),
+        )
         .route(
             "/api/bot/challenge",
             post(issue_bot_challenge).layer(DefaultBodyLimit::max(16 * 1024)),
@@ -3225,6 +3230,40 @@ async fn me(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
     match current(&s, &h).await {
         Ok(u) => Json(u).into_response(),
         Err(c) => c.into_response(),
+    }
+}
+
+async fn update_preferences(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Json(input): Json<UserPreferencesPatch>,
+) -> impl IntoResponse {
+    let user = match current(&s, &h).await {
+        Ok(user) => user,
+        Err(status) => return user_error(status, "unauthorized", "Authentication required"),
+    };
+    let preferred_locale = match input.preferred_locale {
+        Some(Some(value)) => match locale::validate_locale(&value) {
+            Ok(locale) => Some(locale),
+            Err(_) => {
+                return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid locale")
+            }
+        },
+        Some(None) => None,
+        None => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid locale"),
+    };
+    match repository::update_user_preferred_locale(&s.db, user.id, preferred_locale).await {
+        Ok(Some(updated)) => Json(updated).into_response(),
+        Ok(None) => user_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Authentication required",
+        ),
+        Err(_) => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
     }
 }
 

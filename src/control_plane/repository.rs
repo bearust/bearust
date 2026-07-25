@@ -227,6 +227,7 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
     // ignored; all other failures abort startup.
     for statement in [
         "ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN preferred_locale VARCHAR(8)",
         "ALTER TABLE acme_certificates ADD COLUMN secret_ref TEXT",
     ] {
         match sqlx::query(statement).execute(pool).await {
@@ -1443,6 +1444,7 @@ pub async fn insert_user(
         role: role_name.into(),
         created_at: now,
         disabled: false,
+        preferred_locale: None,
     })
 }
 
@@ -1495,10 +1497,11 @@ pub async fn insert_initial_admin(
         role: role.into(),
         created_at: now,
         disabled: false,
+        preferred_locale: None,
     }))
 }
 pub async fn find_user(pool: &DbPool, email: &str) -> Result<Option<(User, String)>, sqlx::Error> {
-    let r = sqlx::query("SELECT id,email,password_hash,role,created_at,disabled FROM users WHERE email=? AND disabled=0")
+    let r = sqlx::query("SELECT id,email,password_hash,role,created_at,disabled,preferred_locale FROM users WHERE email=? AND disabled=0")
         .bind(email)
         .fetch_optional(pool)
         .await?;
@@ -1510,26 +1513,30 @@ pub async fn find_user(pool: &DbPool, email: &str) -> Result<Option<(User, Strin
                 role: x.get("role"),
                 created_at: x.get("created_at"),
                 disabled: x.get::<i64, _>("disabled") != 0,
+                preferred_locale: x.get("preferred_locale"),
             },
             x.get("password_hash"),
         )
     }))
 }
 pub async fn find_user_by_session(pool: &DbPool, hash: &str) -> Result<Option<User>, sqlx::Error> {
-    let r=sqlx::query("SELECT u.id,u.email,u.role,u.created_at,u.disabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>? AND u.disabled=0").bind(hash).bind(chrono::Utc::now().to_rfc3339()).fetch_optional(pool).await?;
+    let r=sqlx::query("SELECT u.id,u.email,u.role,u.created_at,u.disabled,u.preferred_locale FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.revoked_at IS NULL AND s.expires_at>? AND u.disabled=0").bind(hash).bind(chrono::Utc::now().to_rfc3339()).fetch_optional(pool).await?;
     Ok(r.map(|x| User {
         id: x.get("id"),
         email: x.get("email"),
         role: x.get("role"),
         created_at: x.get("created_at"),
         disabled: x.get::<i64, _>("disabled") != 0,
+        preferred_locale: x.get("preferred_locale"),
     }))
 }
 
 pub async fn list_users(pool: &DbPool) -> Result<Vec<User>, sqlx::Error> {
-    let rows = sqlx::query("SELECT id,email,role,created_at,disabled FROM users ORDER BY id")
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query(
+        "SELECT id,email,role,created_at,disabled,preferred_locale FROM users ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
     Ok(rows
         .into_iter()
         .map(|x| User {
@@ -1538,6 +1545,7 @@ pub async fn list_users(pool: &DbPool) -> Result<Vec<User>, sqlx::Error> {
             role: x.get("role"),
             created_at: x.get("created_at"),
             disabled: x.get::<i64, _>("disabled") != 0,
+            preferred_locale: x.get("preferred_locale"),
         })
         .collect())
 }
@@ -2228,10 +2236,12 @@ pub async fn update_user(
     }
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN").execute(&mut *conn).await?;
-    let current = sqlx::query("SELECT id,email,role,created_at,disabled FROM users WHERE id=?")
-        .bind(id)
-        .fetch_optional(&mut *conn)
-        .await?;
+    let current = sqlx::query(
+        "SELECT id,email,role,created_at,disabled,preferred_locale FROM users WHERE id=?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
     let Some(current) = current else {
         let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
         return Ok(None);
@@ -2264,10 +2274,12 @@ pub async fn update_user(
             .execute(&mut *conn)
             .await?;
     }
-    let updated = sqlx::query("SELECT id,email,role,created_at,disabled FROM users WHERE id=?")
-        .bind(id)
-        .fetch_one(&mut *conn)
-        .await?;
+    let updated = sqlx::query(
+        "SELECT id,email,role,created_at,disabled,preferred_locale FROM users WHERE id=?",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
     sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(Some(User {
         id: updated.get("id"),
@@ -2275,6 +2287,33 @@ pub async fn update_user(
         role: updated.get("role"),
         created_at: updated.get("created_at"),
         disabled: updated.get::<i64, _>("disabled") != 0,
+        preferred_locale: updated.get("preferred_locale"),
+    }))
+}
+
+pub async fn update_user_preferred_locale(
+    pool: &DbPool,
+    id: i64,
+    preferred_locale: Option<crate::control_plane::locale::Locale>,
+) -> Result<Option<User>, sqlx::Error> {
+    sqlx::query("UPDATE users SET preferred_locale=? WHERE id=?")
+        .bind(preferred_locale.map(crate::control_plane::locale::Locale::as_str))
+        .bind(id)
+        .execute(pool)
+        .await?;
+    let updated = sqlx::query(
+        "SELECT id,email,role,created_at,disabled,preferred_locale FROM users WHERE id=?",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    Ok(Some(User {
+        id: updated.get("id"),
+        email: updated.get("email"),
+        role: updated.get("role"),
+        created_at: updated.get("created_at"),
+        disabled: updated.get::<i64, _>("disabled") != 0,
+        preferred_locale: updated.get("preferred_locale"),
     }))
 }
 

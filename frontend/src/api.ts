@@ -1,5 +1,7 @@
+import type { Locale } from './i18n';
+
 export type Role=string;
-export type User={id:number;email:string;role:Role;disabled:boolean};
+export type User={id:number;email:string;role:Role;disabled:boolean;preferred_locale?:Locale|null};
 export type PermissionKey='proxy_hosts.read'|'proxy_hosts.write'|'certificates.read'|'certificates.write'|'users.manage'|'roles.manage'|'audit_logs.read'|'audit_logs.export'|'system.settings.manage'|'sessions.revoke'|'bot_protection.manage';
 export type RolePermissionScope={permission:'proxy_hosts.read'|'proxy_hosts.write';proxy_host_ids:number[]};
 export type RoleRecord={id:number;slug:string;name:string;description:string;system_managed:boolean;permissions:PermissionKey[];scopes?:RolePermissionScope[]};
@@ -42,7 +44,7 @@ export type PolicyRecommendation = { id: number; host_id: number; patch: { capac
 async function request<T>(path:string,init:RequestInit={}):Promise<T>{const r=await fetch(path,{...init,credentials:'include',headers:{'Content-Type':'application/json',...(init.headers||{})}});if(!r.ok){const e=await r.json().catch(()=>({message:r.statusText}));const error=new Error(typeof e.message==='string'?e.message:'Request failed') as Error & {status?:number};error.status=r.status;throw error}return r.status===204?undefined as T:r.json()}
 async function requestText(path:string):Promise<string>{const r=await fetch(path,{credentials:'include'});if(!r.ok)throw Object.assign(new Error('Request failed'),{status:r.status});return r.text()}
 export const api={
- status:()=>request<{initialized:boolean}>('/api/setup/status'),setup:(x:object)=>request<User>('/api/setup/initialize',{method:'POST',body:JSON.stringify(x)}),login:(x:object)=>request<User>('/api/auth/login',{method:'POST',body:JSON.stringify(x)}),me:()=>request<User>('/api/auth/me'),logout:()=>request<void>('/api/auth/logout',{method:'POST'}),
+ status:()=>request<{initialized:boolean}>('/api/setup/status'),setup:(x:object)=>request<User>('/api/setup/initialize',{method:'POST',body:JSON.stringify(x)}),login:(x:object)=>request<User>('/api/auth/login',{method:'POST',body:JSON.stringify(x)}),me:()=>request<User>('/api/auth/me'),updateLocalePreference:(preferred_locale:Locale|null)=>request<User>('/api/auth/me/preferences',{method:'PATCH',body:JSON.stringify({preferred_locale})}),logout:()=>request<void>('/api/auth/logout',{method:'POST'}),
  hosts:()=>request<Host[]>('/api/proxy-hosts'),createHost:(x:object)=>request<Host>('/api/proxy-hosts',{method:'POST',body:JSON.stringify(x)}),updateHost:(id:number,x:object)=>request<Host>(`/api/proxy-hosts/${id}`,{method:'PATCH',body:JSON.stringify(x)}),deleteHost:(id:number)=>request<void>(`/api/proxy-hosts/${id}`,{method:'DELETE'}),
  certificates:()=>request<Certificate[]>('/api/certificates'),issueAcme:(x:AcmeRequest)=>request<AcmeJob>('/api/certificates/acme',{method:'POST',body:JSON.stringify(x)}),renewCertificate:(id:number)=>request<AcmeJob>(`/api/certificates/${id}/renew`,{method:'POST'}),certificateStatus:(id:number)=>request<AcmeStatus>(`/api/certificates/${id}/status`),activateCertificate:(id:number)=>request<void>(`/api/certificates/${id}/activate`,{method:'POST'}),
  users:()=>request<User[]>('/api/users'),createUser:(x:{email:string;password:string;role:Role})=>request<User>('/api/users',{method:'POST',body:JSON.stringify(x)}),updateUser:(id:number,x:{role?:Role;disabled?:boolean})=>request<User>(`/api/users/${id}`,{method:'PATCH',body:JSON.stringify(x)}),deleteUser:(id:number)=>request<void>(`/api/users/${id}`,{method:'DELETE'}),revokeUserSessions:(id:number)=>request<{revoked:number}>(`/api/users/${id}/sessions/revoke`,{method:'POST'}),
@@ -63,4 +65,3 @@ export const api={
  rollbackRecommendation:(id:number)=>request<void>(`/api/adaptive-tuning/recommendations/${id}/rollback`,{method:'POST'}),
  emergencyDisableTuning:()=>request<{emergency_disabled:boolean}>('/api/adaptive-tuning/emergency-disable',{method:'POST'})
 };
-

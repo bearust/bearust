@@ -519,6 +519,56 @@ async fn initial_setup_normalizes_email_like_admin_user_creation() {
 }
 
 #[tokio::test]
+async fn authenticated_users_can_persist_a_preferred_locale() {
+    let (app, _) = app().await;
+    assert_eq!(
+        json(
+            app.clone(),
+            "POST",
+            "/api/setup/initialize",
+            None,
+            r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#,
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        json(
+            app.clone(),
+            "PATCH",
+            "/api/auth/me/preferences",
+            None,
+            r#"{"preferred_locale":"ja"}"#,
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, cookie) = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    let cookie = cookie.unwrap();
+    let (status, body, _) = json(
+        app.clone(),
+        "PATCH",
+        "/api/auth/me/preferences",
+        Some(&cookie),
+        r#"{"preferred_locale":"ja"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["preferred_locale"],
+        "ja"
+    );
+    let (status, body, _) = json(app, "GET", "/api/auth/me", Some(&cookie), "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["preferred_locale"],
+        "ja"
+    );
+}
+
+#[tokio::test]
 async fn concurrent_initial_setup_creates_exactly_one_admin() {
     let (app, db) = app().await;
     let request = |email: &'static str| {

@@ -244,6 +244,9 @@ async fn existing_users_migrate_to_default_enabled_and_list_without_hashes() {
     assert!(columns
         .iter()
         .any(|r| r.get::<String, _>("name") == "disabled"));
+    assert!(columns
+        .iter()
+        .any(|r| r.get::<String, _>("name") == "preferred_locale"));
 }
 
 #[tokio::test]
@@ -402,7 +405,10 @@ async fn migrations_record_order_and_seed_exact_permissions() {
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    assert_eq!(
+        versions,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    );
     let lock_row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM setup_lock WHERE id=1")
         .fetch_one(&pool)
         .await

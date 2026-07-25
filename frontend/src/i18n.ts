@@ -1,6 +1,10 @@
+import { createContext, createElement, useContext, useMemo, useState, type ReactNode } from 'react';
+import { api } from './api';
+
 export type Locale = 'en' | 'id' | 'ja';
 
 export const SUPPORTED_LOCALES: readonly Locale[] = ['en', 'id', 'ja'];
+export const LOCALE_STORAGE_KEY = 'bearust.locale.v1';
 
 const LOCALE_TAGS: Record<Locale, string> = {
   en: 'en-US',
@@ -49,6 +53,36 @@ export function normalizeLocale(value: unknown): Locale {
 
 export function localeFromPreferences(account: unknown, stored: unknown, browser: unknown): Locale {
   return preferenceLocale(account) ?? preferenceLocale(stored) ?? preferenceLocale(browser) ?? 'en';
+}
+
+export function readStoredLocale(): Locale | undefined {
+  try {
+    return supportedLocale(window.localStorage.getItem(LOCALE_STORAGE_KEY));
+  } catch {
+    return undefined;
+  }
+}
+
+type LocalePreferenceValue = { locale: Locale; setLocale: (locale: Locale) => Promise<void> };
+const LocalePreferenceContext = createContext<LocalePreferenceValue | null>(null);
+
+export function LocalePreferenceProvider({ children }: { children: ReactNode }) {
+  const [locale, setLocaleState] = useState<Locale>(() =>
+    localeFromPreferences(null, readStoredLocale(), typeof navigator === 'undefined' ? null : navigator.languages),
+  );
+  const setLocale = async (next: Locale) => {
+    setLocaleState(next);
+    try { window.localStorage.setItem(LOCALE_STORAGE_KEY, next); } catch { /* storage is optional */ }
+    try { await api.updateLocalePreference(next); } catch { /* local preference remains available offline */ }
+  };
+  const value = useMemo(() => ({ locale, setLocale }), [locale]);
+  return createElement(LocalePreferenceContext.Provider, { value }, children);
+}
+
+export function useLocalePreference(): LocalePreferenceValue {
+  const value = useContext(LocalePreferenceContext);
+  if (!value) throw new Error('useLocalePreference must be used within LocalePreferenceProvider');
+  return value;
 }
 
 export function formatLocaleDate(

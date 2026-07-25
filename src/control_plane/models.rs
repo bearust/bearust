@@ -112,6 +112,13 @@ pub struct User {
     pub role: String,
     pub created_at: String,
     pub disabled: bool,
+    pub preferred_locale: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserPreferencesPatch {
+    pub preferred_locale: Option<Option<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
