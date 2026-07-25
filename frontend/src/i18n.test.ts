@@ -1,11 +1,17 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SUPPORTED_LOCALES,
   formatLocaleDate,
   formatLocaleNumber,
   localeFromPreferences,
   normalizeLocale,
+  readStoredLocale,
 } from './i18n';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('locale primitives', () => {
   it('recognizes supported locale values and locale tags', () => {
@@ -27,6 +33,11 @@ describe('locale primitives', () => {
     expect(localeFromPreferences({}, 'id-ID', 'ja-JP')).toBe('id');
     expect(localeFromPreferences(null, null, ['fr-FR', 'ja-JP'])).toBe('ja');
     expect(localeFromPreferences({ locale: 'fr' }, 'xx', 'de-DE')).toBe('en');
+  });
+
+  it('normalizes an invalid stored locale to English', () => {
+    vi.stubGlobal('localStorage', { getItem: () => 'fr-FR' });
+    expect(readStoredLocale()).toBe('en');
   });
 
   it('formats dates and numbers using the requested locale', () => {

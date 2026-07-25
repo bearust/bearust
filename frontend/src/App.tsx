@@ -31,7 +31,8 @@ import {
   PolicyRecommendation,
 } from "./api";
 import { useRealtimeUpdates, RealtimeStatus } from "./realtime";
-import { Alert, Button, Card, Field, SelectField, TextareaField, ThemeSelect } from "./ui";
+import { LocalePreferenceProvider, useLocalePreference } from "./i18n";
+import { Alert, Button, Card, Field, LanguageSelect, SelectField, TextareaField, ThemeSelect } from "./ui";
 
 export const sanitizeError = (message: string) => {
   if (/internal stack|database|password\s*[:=]/i.test(message))
@@ -1200,6 +1201,7 @@ export function BotChallengePage({ fingerprint = serverChallengeFingerprint(), o
 }
 
 function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: () => void; onUserRefresh: (user: User) => void }) {
+  const { locale, setLocale } = useLocalePreference();
   const [hosts, setHosts] = useState<Host[]>([]),
     [certs, setCerts] = useState<Certificate[]>([]),
     [users, setUsers] = useState<User[]>([]),
@@ -1306,6 +1308,7 @@ function Dashboard({ user, onLogout, onUserRefresh }: { user: User; onLogout: ()
         <span className="text-sm text-muted">
           {user.email} ({user.role})
         </span>
+        <LanguageSelect value={locale} onChange={(nextLocale) => void setLocale(nextLocale)} />
         <ThemeSelect />
         <Button variant="secondary" onClick={onLogout}>Sign out</Button>
         <span className="text-sm text-muted" aria-label="Realtime status">
@@ -1510,7 +1513,7 @@ function AppContent() {
   );
 }
 export default function App() {
-  return <AppContent />;
+  return <LocalePreferenceProvider><AppContent /></LocalePreferenceProvider>;
 }
 export function AuditLogSection({ user, reloadRef }: { user: User; reloadRef?: MutableRefObject<(() => void) | null> }) {
   const [items, setItems] = useState<AuditLogItem[]>([]),

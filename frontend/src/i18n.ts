@@ -1,10 +1,17 @@
 import { createContext, createElement, useContext, useMemo, useState, type ReactNode } from 'react';
+import i18next from 'i18next';
+import { initReactI18next } from 'react-i18next';
 import { api } from './api';
+import en from './locales/en.json';
+import id from './locales/id.json';
+import ja from './locales/ja.json';
 
 export type Locale = 'en' | 'id' | 'ja';
 
 export const SUPPORTED_LOCALES: readonly Locale[] = ['en', 'id', 'ja'];
 export const LOCALE_STORAGE_KEY = 'bearust.locale.v1';
+
+export const i18n = i18next.createInstance();
 
 const LOCALE_TAGS: Record<Locale, string> = {
   en: 'en-US',
@@ -57,23 +64,43 @@ export function localeFromPreferences(account: unknown, stored: unknown, browser
 
 export function readStoredLocale(): Locale | undefined {
   try {
-    return supportedLocale(window.localStorage.getItem(LOCALE_STORAGE_KEY));
+    const value = window.localStorage.getItem(LOCALE_STORAGE_KEY);
+    return value === null ? undefined : normalizeLocale(value);
   } catch {
     return undefined;
   }
+}
+
+export function preferredBrowserLocale(): Locale {
+  return localeFromPreferences(
+    null,
+    readStoredLocale(),
+    typeof navigator === 'undefined' ? null : navigator.languages,
+  );
+}
+
+export function initI18n(locale = preferredBrowserLocale()) {
+  const language = normalizeLocale(locale);
+  if (i18n.isInitialized) return i18n.changeLanguage(language);
+  return i18n.use(initReactI18next).init({
+    resources: { en: { translation: en }, id: { translation: id }, ja: { translation: ja } },
+    lng: language,
+    fallbackLng: 'en',
+    interpolation: { escapeValue: false },
+  });
 }
 
 type LocalePreferenceValue = { locale: Locale; setLocale: (locale: Locale) => Promise<void> };
 const LocalePreferenceContext = createContext<LocalePreferenceValue | null>(null);
 
 export function LocalePreferenceProvider({ children }: { children: ReactNode }) {
-  const [locale, setLocaleState] = useState<Locale>(() =>
-    localeFromPreferences(null, readStoredLocale(), typeof navigator === 'undefined' ? null : navigator.languages),
-  );
+  const [locale, setLocaleState] = useState<Locale>(preferredBrowserLocale);
   const setLocale = async (next: Locale) => {
-    setLocaleState(next);
-    try { window.localStorage.setItem(LOCALE_STORAGE_KEY, next); } catch { /* storage is optional */ }
-    try { await api.updateLocalePreference(next); } catch { /* local preference remains available offline */ }
+    const normalized = normalizeLocale(next);
+    setLocaleState(normalized);
+    try { await i18n.changeLanguage(normalized); } catch { /* i18n retains its fallback language */ }
+    try { window.localStorage.setItem(LOCALE_STORAGE_KEY, normalized); } catch { /* storage is optional */ }
+    try { await api.updateLocalePreference(normalized); } catch { /* local preference remains available offline */ }
   };
   const value = useMemo(() => ({ locale, setLocale }), [locale]);
   return createElement(LocalePreferenceContext.Provider, { value }, children);

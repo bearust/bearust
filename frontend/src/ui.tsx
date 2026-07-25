@@ -1,5 +1,6 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react';
 import { useId } from 'react';
+import type { Locale } from './i18n';
 import { useTheme, type ThemeMode } from './theme';
 
 type ButtonVariant = 'primary' | 'secondary' | 'danger';
@@ -88,6 +89,17 @@ export function ThemeSelect({ className = '', ...props }: SelectHTMLAttributes<H
       <option value="system">System</option>
       <option value="light">Light</option>
       <option value="dark">Dark</option>
+    </select>
+  </label>;
+}
+
+export function LanguageSelect({ value, onChange }: { value: Locale; onChange: (locale: Locale) => void }) {
+  return <label className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground">
+    <span>Language</span>
+    <select aria-label="Language" value={value} onChange={(event) => onChange(event.target.value as Locale)} className={`min-h-11 rounded-md border border-border bg-surface px-3 py-2 text-foreground ${focusRing}`}>
+      <option value="en">English</option>
+      <option value="id">Bahasa Indonesia</option>
+      <option value="ja">日本語</option>
     </select>
   </label>;
 }
