@@ -55,11 +55,48 @@ For a full release gate, use the complete command sequence in
 
 ## Adding or updating a locale
 
-Updating an existing locale requires no application-logic change: edit only
-the matching JSON catalog and retain key and placeholder parity with English.
-To propose a newly supported locale, copy `en.json` to a new locale-code JSON
-file and translate every value; no React component or business/API semantic
-change is needed. The same pull request must deliberately update the frontend
-locale registration and the backend locale allowlist, then add parity and
-formatting coverage for the new code. This keeps unsupported account
-preferences rejected and preserves the frontend's English fallback.
+Updating an existing supported locale requires no application-logic change:
+edit only its JSON catalog and retain key and placeholder parity with English.
+
+Adding a newly supported locale does not require new component behavior or API
+semantics, but it is not a catalog-only or configuration-only change. The
+frontend and control plane each have an explicit supported-locale registry, so
+make these synchronized changes in one pull request (replace `<code>` with the
+new lowercase locale code):
+
+1. Copy `frontend/src/locales/en.json` to
+   `frontend/src/locales/<code>.json`, translate every value, and preserve the
+   complete key and i18next placeholder set. Add `language.options.<code>` to
+   every catalog, including English.
+2. In `frontend/src/i18n.ts`, import the new catalog; add `<code>` to the
+   `Locale` type, `SUPPORTED_LOCALES`, `LOCALE_TAGS`, and the i18next
+   `resources` object.
+3. In `frontend/src/ui.tsx`, add the corresponding `LanguageSelect` option
+   using `language.options.<code>`; this exposes the registered locale without
+   changing selector behavior.
+4. In `frontend/scripts/validate-locales.mjs`, add `<code>` to `localeNames`.
+   Otherwise the validator rejects the new JSON file as an unsupported locale
+   catalog.
+5. In `src/control_plane/locale.rs`, add the `Locale` enum variant and extend
+   both `Locale::as_str` and `validate_locale`. This keeps the account
+   preference API's allowlist synchronized with the frontend.
+6. Update the affected frontend registry, catalog, selector, and formatting
+   tests (including `frontend/src/i18n.test.ts`, `locales.test.ts`,
+   `ui.test.tsx`, `localeSelector.test.tsx`, and `formatting.test.tsx`), plus
+   Rust allowlist and preference tests in `tests/control_plane_locale.rs` and
+   `tests/control_plane_users.rs`.
+
+Run these commands from the repository root before requesting review:
+
+```bash
+npm run validate-locales --prefix frontend
+npm test --prefix frontend
+npm run build --prefix frontend
+cargo +stable test --test control_plane_locale --test control_plane_users
+git diff --check
+```
+
+The locale validator only passes after its catalog allowlist and every
+registered catalog agree. The frontend tests and Rust tests then verify that
+the selector, locale-aware formatting, and persisted account preference accept
+the new code while unsupported values remain rejected.
