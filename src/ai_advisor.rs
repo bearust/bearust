@@ -6,9 +6,11 @@
 #[path = "ai_advisor_redaction.rs"]
 mod redaction;
 
+use crate::ai_advisor_provider::{ChatCompletionRequest, LlmProvider};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc, time::Duration};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub use redaction::{
@@ -202,6 +204,11 @@ impl fmt::Debug for Secret {
 #[derive(Clone, Default)]
 pub struct AiAdvisorService {
     config: Option<Arc<AdvisorConfig>>,
+    runtime: Option<Arc<AdvisorRuntime>>,
+}
+
+struct AdvisorRuntime {
+    sender: mpsc::Sender<(AdvisorJobId, AdvisorRequest)>,
 }
 
 impl fmt::Debug for AiAdvisorService {
@@ -220,6 +227,32 @@ impl AiAdvisorService {
 
     pub fn from_env() -> Result<Self, AdvisorConfigError> {
         Self::from_env_with(|name| std::env::var(name).ok())
+    }
+
+    pub fn with_provider(
+        mut self,
+        provider: Arc<dyn LlmProvider>,
+        capacity: usize,
+        worker_count: usize,
+    ) -> Self {
+        let (sender, mut receiver) = mpsc::channel(capacity.max(1));
+        let concurrency = Arc::new(tokio::sync::Semaphore::new(worker_count.max(1)));
+        tokio::spawn(async move {
+            while let Some((_job_id, request)) = receiver.recv().await {
+                let permit = concurrency.clone().acquire_owned().await;
+                let Ok(_permit) = permit else { break };
+                let provider = provider.clone();
+                tokio::spawn(async move {
+                    let _ = provider
+                        .complete(ChatCompletionRequest {
+                            messages: vec![serde_json::to_value(request).unwrap_or_default()],
+                        })
+                        .await;
+                });
+            }
+        });
+        self.runtime = Some(Arc::new(AdvisorRuntime { sender }));
+        self
     }
 
     /// Parses configuration through an injected lookup function so callers
@@ -272,6 +305,7 @@ impl AiAdvisorService {
 
         Ok(Self {
             config: Some(Arc::new(config)),
+            runtime: None,
         })
     }
 
@@ -283,6 +317,17 @@ impl AiAdvisorService {
 
     pub fn config(&self) -> Option<&AdvisorConfig> {
         self.config.as_deref()
+    }
+
+    pub fn enqueue(&self, request: AdvisorRequest) -> Result<AdvisorJobId, AdvisorErrorCode> {
+        request.validate()?;
+        let runtime = self.runtime.as_ref().ok_or(AdvisorErrorCode::Disabled)?;
+        let id = AdvisorJobId::new();
+        runtime
+            .sender
+            .try_send((id.clone(), request))
+            .map_err(|_| AdvisorErrorCode::Busy)?;
+        Ok(id)
     }
 }
 
