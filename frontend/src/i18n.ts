@@ -11,8 +11,13 @@ const LOCALE_TAGS: Record<Locale, string> = {
 function supportedLocale(value: unknown): Locale | undefined {
   if (typeof value !== 'string') return undefined;
 
-  const language = value.trim().toLowerCase().split(/[-_]/, 1)[0];
-  return SUPPORTED_LOCALES.find((locale) => locale === language);
+  try {
+    const [tag] = Intl.getCanonicalLocales(value.trim().replaceAll('_', '-'));
+    const language = tag.split('-', 1)[0].toLowerCase();
+    return SUPPORTED_LOCALES.find((locale) => locale === language);
+  } catch {
+    return undefined;
+  }
 }
 
 function preferenceLocale(value: unknown): Locale | undefined {

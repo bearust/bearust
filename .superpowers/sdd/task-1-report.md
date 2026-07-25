@@ -1,189 +1,109 @@
-# Phase 10C Task 1 Report
+# Phase 11 Task 1 Implementation Report
 
 ## Status
 
-Completed and committed the typed replicated configuration command gateway.
+Completed and committed.
 
-Commit: `9df09204e93ad05533b79dd189b2e39464f18365`
+Commit: `2dddaabc131b9b5eed5fd346b058718f34ea208b` (`feat: add localization primitives`)
 
-## Changed scope
+## Scope
 
-- `src/cluster_command.rs`: added `CommandActor`, `CommitReceipt`, stable `ClusterWriteError`, and leader/quorum-gated `ConfigCommandGateway::submit`.
-- `src/lib.rs`: registered `cluster_command`.
-- `src/cluster.rs`: added `ClusterService::raft_write_state()`.
-- `tests/cluster_command_gateway.rs`: role/quorum/single-node gateway tests.
+- Added typed locale primitives in `frontend/src/i18n.ts`:
+  `Locale`, `SUPPORTED_LOCALES`, normalization, preference precedence, and locale-aware date/number formatting.
+- Added the initial matching English, Indonesian, and Japanese `common` and `errors` catalogs.
+- Added `frontend/scripts/validate-locales.mjs`, which compares flattened catalog key sets to English and exits non-zero for missing or extra keys.
+- Added focused unit coverage, including the validator's missing-key failure path.
+- Added `i18next` and `react-i18next` dependencies and lockfile entries.
 
-The gateway validates non-internal configuration commands, checks local Raft role and quorum before calling `Raft::client_write`, and maps OpenRaft write errors into `ClusterWriteError`. It does not call repository mutation helpers.
+## TDD evidence
 
-## Commands and output
-
-### Required red check
-
-Command:
+The initial required focused run was performed before the implementation:
 
 ```text
-cargo +stable test --test cluster_command_gateway follower_gateway_does_not_mutate_local_database
+npm test --prefix frontend -- --run src/i18n.test.ts
 ```
 
-Output (exit 101):
+It failed as expected because `./i18n` did not yet exist:
 
 ```text
-error[E0432]: unresolved import `bearust::cluster_command`
- --> tests/cluster_command_gateway.rs:2:14
-  |
-2 | use bearust::cluster_command::{
-  |              ^^^^^^^^^^^^^^^ could not find `cluster_command` in `bearust`
-
-error: could not compile `bearust` (test "cluster_command_gateway") due to 1 previous error
+Error: Cannot find module './i18n' imported from .../frontend/src/i18n.test.ts
 ```
 
-### Focused tests after implementation
-
-Command:
+The validator test was then extended to exercise a temporary catalog with a missing nested key. Its red run failed as expected because the validator did not yet honor the test catalog directory:
 
 ```text
-cargo +stable test --test cluster_command_gateway
+AssertionError: expected +0 to be 1
+- Expected: 1
++ Received: 0
 ```
 
-Output (exit 0):
+The minimal `LOCALES_DIR` override was added for that test path; production validation continues to use `frontend/src/locales` by default.
+
+## Verification
+
+All commands exited 0:
 
 ```text
-running 4 tests
-test gateway_rejects_writes_when_quorum_is_unavailable ... ok
-test follower_gateway_does_not_mutate_local_database ... ok
-test leader_gateway_submits_only_after_quorum_is_available ... ok
-test single_node_gateway_keeps_local_command_submission ... ok
-
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+npm test --prefix frontend -- --run src/i18n.test.ts
 ```
-
-### Formatting and linting
-
-Command:
 
 ```text
-cargo +stable fmt --all -- --check
+Test Files  1 passed (1)
+Tests       5 passed (5)
 ```
-
-Initial output found rustfmt changes required in the new gateway and test. I ran the prescribed formatter, then verified with:
 
 ```text
-cargo +stable fmt --all && cargo +stable fmt --all -- --check && cargo +stable clippy --all-targets -- -D warnings
+node frontend/scripts/validate-locales.mjs
 ```
-
-Output (exit 0):
 
 ```text
-Checking bearust v0.1.0 (/home/rizalord/Projects/personal/bearust)
-Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.05s
+npm run --prefix frontend build
 ```
 
-### Diff and commit checks
-
-Command:
+```text
+vite v8.1.5 building client environment for production...
+✓ built in 219ms
+```
 
 ```text
 git diff --check
+git diff --cached --check
 ```
 
-Output: exit 0 (no whitespace errors).
-
-Command:
-
-```text
-git add src/cluster_command.rs src/lib.rs src/cluster.rs tests/cluster_command_gateway.rs
-git commit -m "feat: add replicated configuration command gateway"
-git rev-parse HEAD
-git status --short
-```
-
-Output (exit 0):
-
-```text
-[main 9df0920] feat: add replicated configuration command gateway
- 4 files changed, 256 insertions(+)
- create mode 100644 src/cluster_command.rs
- create mode 100644 tests/cluster_command_gateway.rs
-9df09204e93ad05533b79dd189b2e39464f18365
- M .superpowers/sdd/progress.md
-```
+Both whitespace checks completed with no output and exit 0. The staged commit was reviewed to confirm it contained only the eight Task 1 frontend files.
 
 ## Concerns
 
-- Authenticated follower-to-leader command forwarding is intentionally not implemented in this task; followers reject locally and Task 2 owns the transport boundary.
-- The existing `.superpowers/sdd/progress.md` modification was present before this task and was deliberately not staged or committed.
+- None. Existing unrelated changes in `.superpowers/sdd/progress.md` and `.superpowers/sdd/task-5-report.md` were preserved and not staged.
 
-## Review-fix evidence
+## Review Fix (Phase 11 Task 1)
 
-The review hardening replaces caller-controlled `ClusterService::raft_write_state()` decisions with OpenRaft's live metrics. Multi-node writes now require local leader state, a self-matching current leader, and a quorum acknowledgement no older than one second. A bounded two-second `client_write` timeout prevents a lost quorum from leaving a command pending indefinitely. Single-node compatibility requires both single-node application configuration and a one-voter Raft membership.
+- `normalizeLocale` now canonicalizes the complete tag through `Intl.getCanonicalLocales` after converting accepted underscore separators to hyphens. Invalid tags therefore fall back to English instead of accepting only their first language segment.
+- Added regression assertions for `ja---` and `id_____`, both of which now resolve to `en`.
+- The locale validator now enumerates `.json` files in the catalog directory and reports unsupported locale catalogs. Its temporary-catalog test verifies that a matching but unsupported `fr.json` is detected alongside missing flattened keys.
 
-The gateway tests now construct a real authenticated three-node transport, elect a live leader, verify follower rejection without local application, commit through an actual quorum, stop both followers and verify rejection after quorum loss, and retain the real single-node write path. During finalization, the focused suite exposed polling loops that held an OpenRaft `watch::Ref` across `await`, deadlocking metrics publication on Tokio's single-thread test runtime. Releasing each metrics guard before sleeping fixed the hang. Quorum-loss cleanup was also made tolerant of an already-closed listener receiver.
+### Fix verification
 
-### Focused review tests
-
-Command:
+The new tests were run before the implementation and failed as expected:
 
 ```text
-cargo +stable test --test cluster_command_gateway -- --test-threads=1
+FAIL: normalizeLocale('ja---') expected 'en', received 'ja'
+FAIL: expected validator output to contain 'fr: unsupported locale catalog'
 ```
 
-Output (exit 0):
+After the fix, all requested checks exited 0:
 
 ```text
-running 4 tests
-test follower_gateway_does_not_mutate_local_database ... ok
-test gateway_rejects_writes_after_actual_quorum_loss ... ok
-test leader_gateway_commits_through_actual_three_node_quorum ... ok
-test single_node_gateway_keeps_local_command_submission ... ok
-
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.56s
+npm test --prefix frontend -- --run src/i18n.test.ts
+Test Files  1 passed (1)
+Tests       5 passed (5)
 ```
 
-### Final formatting and linting
-
-Command:
-
 ```text
-cargo +stable fmt --all -- --check
+node frontend/scripts/validate-locales.mjs
 ```
 
-Output: exit 0 (no formatting changes required).
-
-Command:
-
 ```text
-cargo +stable clippy --all-targets -- -D warnings
-```
-
-Output (exit 0):
-
-```text
-Checking bearust v0.1.0 (/home/rizalord/Projects/personal/bearust)
-Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.35s
-```
-
-## Timeout-outcome contract hardening
-
-`ConfigCommandGateway::submit` now maps an elapsed local
-`Raft::client_write` deadline to the stable
-`ClusterWriteError::CommitOutcomeUnknown` error, rather than reporting a
-quorum failure. A local timeout occurs after submission and cannot prove that
-the command was not or will not be committed. The public error and `submit`
-documentation therefore require callers to retry the same command with its
-original `command_id`; replicated command application is idempotent by that
-identifier.
-
-The existing real three-node tests are retained. The live write-quorum gate
-continues to use `RaftMetrics::millis_since_quorum_ack`: OpenRaft 0.9.21 does
-not expose a public `last_quorum_acked` API, so no unavailable metric is
-invented. A focused deterministic unit test covers the timeout-to-unknown
-outcome mapping.
-
-Validation (all exit 0):
-
-```text
-cargo +stable fmt --all -- --check
-cargo +stable test --lib client_write_timeout_reports_unknown_commit_outcome -- --test-threads=1
-cargo +stable test --test cluster_command_gateway -- --test-threads=1
-cargo +stable clippy --all-targets -- -D warnings
+npm run --prefix frontend build
+✓ built in 170ms
 ```

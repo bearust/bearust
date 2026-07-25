@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { basename, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const localeNames = ['en', 'id', 'ja'];
@@ -33,16 +33,25 @@ export function validateLocaleCatalogs(catalogs) {
 
 function loadCatalogs() {
   const localeDirectory = process.env.LOCALES_DIR ?? fileURLToPath(new URL('../src/locales/', import.meta.url));
-  return Object.fromEntries(
-    localeNames.map((locale) => [
+  const catalogNames = readdirSync(localeDirectory, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && extname(entry.name) === '.json')
+    .map((entry) => basename(entry.name, '.json'));
+  const issues = [
+    ...localeNames.filter((locale) => !catalogNames.includes(locale)).map((locale) => `${locale}: missing catalog`),
+    ...catalogNames.filter((locale) => !localeNames.includes(locale)).sort().map((locale) => `${locale}: unsupported locale catalog`),
+  ];
+  const catalogs = Object.fromEntries(
+    catalogNames.filter((locale) => localeNames.includes(locale)).map((locale) => [
       locale,
       JSON.parse(readFileSync(join(localeDirectory, `${locale}.json`), 'utf8')),
     ]),
   );
+  return { catalogs, issues };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const issues = validateLocaleCatalogs(loadCatalogs());
+  const { catalogs, issues: catalogIssues } = loadCatalogs();
+  const issues = [...catalogIssues, ...validateLocaleCatalogs(catalogs)];
   if (issues.length > 0) {
     console.error(issues.join('\n'));
     process.exitCode = 1;

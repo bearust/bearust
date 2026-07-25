@@ -18,6 +18,8 @@ describe('locale primitives', () => {
     expect(normalizeLocale(undefined)).toBe('en');
     expect(normalizeLocale({ locale: 'ja' })).toBe('en');
     expect(normalizeLocale('fr-FR')).toBe('en');
+    expect(normalizeLocale('ja---')).toBe('en');
+    expect(normalizeLocale('id_____')).toBe('en');
   });
 
   it('uses account, stored, browser, then English locale preferences', () => {
@@ -52,6 +54,7 @@ describe('locale catalog validation', () => {
       writeFileSync(join(localeDir, 'en.json'), JSON.stringify({ common: { save: 'Save' }, errors: { required: 'Required' } }));
       writeFileSync(join(localeDir, 'id.json'), JSON.stringify({ common: { save: 'Simpan' }, errors: {} }));
       writeFileSync(join(localeDir, 'ja.json'), JSON.stringify({ common: { save: '保存' }, errors: { required: '必須です' } }));
+      writeFileSync(join(localeDir, 'fr.json'), JSON.stringify({ common: { save: 'Enregistrer' }, errors: { required: 'Obligatoire' } }));
 
       const result = spawnSync('node', ['scripts/validate-locales.mjs'], {
         cwd: runtimeProcess.cwd(),
@@ -61,6 +64,7 @@ describe('locale catalog validation', () => {
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('id: missing errors.required');
+      expect(result.stderr).toContain('fr: unsupported locale catalog');
     } finally {
       rmSync(localeDir, { recursive: true, force: true });
     }
