@@ -1,0 +1,10 @@
+{
+  "common": {
+    "cancel": "キャンセル",
+    "save": "保存"
+  },
+  "errors": {
+    "required": "この項目は必須です。",
+    "unexpected": "問題が発生しました。"
+  }
+}

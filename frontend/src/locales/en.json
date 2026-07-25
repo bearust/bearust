@@ -1,0 +1,10 @@
+{
+  "common": {
+    "cancel": "Cancel",
+    "save": "Save"
+  },
+  "errors": {
+    "required": "This field is required.",
+    "unexpected": "Something went wrong."
+  }
+}

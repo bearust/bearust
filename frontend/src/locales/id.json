@@ -1,0 +1,10 @@
+{
+  "common": {
+    "cancel": "Batal",
+    "save": "Simpan"
+  },
+  "errors": {
+    "required": "Kolom ini wajib diisi.",
+    "unexpected": "Terjadi kesalahan."
+  }
+}
