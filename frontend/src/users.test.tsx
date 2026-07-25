@@ -29,6 +29,10 @@ async function renderDashboard(user:User,users:User[]=[admin,operator,viewer]) {
 
 describe('Users API contracts',()=>{
   afterEach(()=>{vi.restoreAllMocks();document.body.innerHTML='';});
+  it.each([api.users,api.exportWafRules])('uses a neutral error message when a failed response has no JSON message',async request=>{
+    vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response('upstream unavailable',{status:502,statusText:'Bad Gateway'}));
+    await expect(request()).rejects.toMatchObject({message:'',status:502});
+  });
   it('lists, creates, updates and deletes users',async()=>{
     const fetchMock=vi.spyOn(globalThis,'fetch').mockImplementation(async(input,init)=>{
       const path=String(input);

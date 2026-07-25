@@ -38,3 +38,25 @@ Passed with no output.
 ```
 
 The test command emits Node's existing localStorage experimental warnings only; it has no test failures.
+
+## API error follow-up
+
+- Replaced API transport fallbacks that exposed `Response.statusText` or the hardcoded `Request failed` string with a neutral empty error message while retaining the HTTP status.
+- `sanitizeError` now maps neutral empty messages to the catalog-backed `errors.generic` value, avoiding an i18n import in `api.ts` and therefore avoiding the existing `i18n.ts` -> `api.ts` import cycle.
+- Added regression coverage for both JSON and text API request wrappers using a plain-text 502 response with `Bad Gateway` status text.
+
+Verification (2026-07-25):
+
+```text
+npm test --prefix frontend -- --run
+19 test files passed; 113 tests passed.
+
+npm run build --prefix frontend
+tsc -b && vite build passed.
+
+node frontend/scripts/validate-locales.mjs
+Passed with no catalog-parity output.
+
+git diff --check
+Passed with no output.
+```

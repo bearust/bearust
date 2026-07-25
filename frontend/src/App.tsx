@@ -58,7 +58,7 @@ import { useTranslation } from "react-i18next";
 void initI18n();
 
 export const sanitizeError = (message: string) => {
-  if (/internal stack|database|password\s*[:=]/i.test(message))
+  if (!message.trim() || /internal stack|database|password\s*[:=]/i.test(message))
     return i18n.t("errors.generic");
   return message
     .replace(
