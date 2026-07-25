@@ -11,6 +11,7 @@ pub mod rbac;
 pub mod realtime;
 pub mod repository;
 use crate::acme::{AcmeEnvironment, AcmeManager, LetsEncryptClient};
+use crate::ai_advisor::AiAdvisorService;
 use crate::analytics::{AnalyticsCollector, AnalyticsFilter};
 use crate::analytics_prometheus::PrometheusConfig;
 use crate::bot_challenge::{unix_now, ChallengeService};
@@ -83,6 +84,10 @@ pub struct AppState {
     pub cluster: Arc<crate::cluster::ClusterService>,
     pub config_gateway: Option<ConfigCommandGateway>,
     pub prometheus: PrometheusConfig,
+    /// Optional AI advisor state. The default service is disabled and has no
+    /// worker, keeping the proxy and ordinary control-plane startup isolated
+    /// from provider availability.
+    pub ai_advisor: Arc<AiAdvisorService>,
 }
 
 impl AppState {
@@ -402,6 +407,7 @@ pub async fn build_state(
         )),
         config_gateway: None,
         prometheus: PrometheusConfig::default(),
+        ai_advisor: Arc::new(AiAdvisorService::disabled()),
     })
 }
 

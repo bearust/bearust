@@ -1,5 +1,6 @@
 pub mod acme;
 pub mod adaptive_tuning;
+pub mod ai_advisor;
 pub mod analytics;
 pub mod analytics_prometheus;
 pub mod anomaly;
