@@ -3,10 +3,17 @@
 //! This module deliberately has no provider client or worker in the initial
 //! increment.  A disabled service is therefore allocation-light and cannot
 //! affect the proxy request path.
+#[path = "ai_advisor_redaction.rs"]
+mod redaction;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc, time::Duration};
 use uuid::Uuid;
+
+pub use redaction::{
+    ProviderGuard, RedactedValue, Redactor, MAX_REDACTED_JSON_BYTES, MAX_REDACTION_INPUT_BYTES,
+};
 
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_RESPONSE_LIMIT_BYTES: usize = 2 * 1024 * 1024;
