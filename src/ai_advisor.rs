@@ -6,11 +6,13 @@
 #[path = "ai_advisor_redaction.rs"]
 mod redaction;
 
-use crate::ai_advisor_provider::{ChatCompletionRequest, LlmProvider};
+use crate::ai_advisor_provider::{ChatCompletionMessage, ChatCompletionRequest, LlmProvider};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::{fmt, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 pub use redaction::{
@@ -209,6 +211,8 @@ pub struct AiAdvisorService {
 
 struct AdvisorRuntime {
     sender: mpsc::Sender<(AdvisorJobId, AdvisorRequest)>,
+    results: Arc<std::sync::Mutex<HashMap<String, AdvisorResponse>>>,
+    shutdown: Arc<Notify>,
 }
 
 impl fmt::Debug for AiAdvisorService {
@@ -235,23 +239,63 @@ impl AiAdvisorService {
         capacity: usize,
         worker_count: usize,
     ) -> Self {
-        let (sender, mut receiver) = mpsc::channel(capacity.max(1));
+        let (sender, mut receiver) =
+            mpsc::channel::<(AdvisorJobId, AdvisorRequest)>(capacity.max(1));
+        let results = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let shutdown = Arc::new(Notify::new());
+        let worker_shutdown = shutdown.clone();
+        let worker_results = results.clone();
         let concurrency = Arc::new(tokio::sync::Semaphore::new(worker_count.max(1)));
         tokio::spawn(async move {
-            while let Some((_job_id, request)) = receiver.recv().await {
+            loop {
+                let next = tokio::select! {
+                    value = receiver.recv() => value,
+                    _ = worker_shutdown.notified() => None,
+                };
+                let Some((job_id, request)) = next else { break };
+                worker_results.lock().unwrap().insert(
+                    job_id.0.clone(),
+                    AdvisorResponse {
+                        job_id: job_id.clone(),
+                        status: AdvisorJobStatus::Running,
+                        error_code: None,
+                    },
+                );
                 let permit = concurrency.clone().acquire_owned().await;
                 let Ok(_permit) = permit else { break };
                 let provider = provider.clone();
-                tokio::spawn(async move {
-                    let _ = provider
+                let result = tokio::select! {
+                    result = provider
                         .complete(ChatCompletionRequest {
-                            messages: vec![serde_json::to_value(request).unwrap_or_default()],
-                        })
-                        .await;
-                });
+                            messages: vec![ChatCompletionMessage {
+                                role: "user".into(),
+                                content: request.command.unwrap_or_default(),
+                            }],
+                        }) => result,
+                    _ = worker_shutdown.notified() => return,
+                };
+                let (status, error_code) = match result {
+                    Ok(_) => (AdvisorJobStatus::Completed, None),
+                    Err(_) => (
+                        AdvisorJobStatus::Failed,
+                        Some(AdvisorErrorCode::ProviderUnavailable),
+                    ),
+                };
+                worker_results.lock().unwrap().insert(
+                    job_id.0.clone(),
+                    AdvisorResponse {
+                        job_id,
+                        status,
+                        error_code,
+                    },
+                );
             }
         });
-        self.runtime = Some(Arc::new(AdvisorRuntime { sender }));
+        self.runtime = Some(Arc::new(AdvisorRuntime {
+            sender,
+            results,
+            shutdown,
+        }));
         self
     }
 
@@ -323,11 +367,35 @@ impl AiAdvisorService {
         request.validate()?;
         let runtime = self.runtime.as_ref().ok_or(AdvisorErrorCode::Disabled)?;
         let id = AdvisorJobId::new();
+        runtime.results.lock().unwrap().insert(
+            id.0.clone(),
+            AdvisorResponse {
+                job_id: id.clone(),
+                status: AdvisorJobStatus::Queued,
+                error_code: None,
+            },
+        );
         runtime
             .sender
             .try_send((id.clone(), request))
             .map_err(|_| AdvisorErrorCode::Busy)?;
         Ok(id)
+    }
+
+    pub fn result(&self, job_id: &AdvisorJobId) -> Option<AdvisorResponse> {
+        self.runtime
+            .as_ref()?
+            .results
+            .lock()
+            .ok()?
+            .get(&job_id.0)
+            .cloned()
+    }
+
+    pub fn shutdown(&self) {
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown.notify_waiters();
+        }
     }
 }
 

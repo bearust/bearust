@@ -1,7 +1,7 @@
 use bearust::ai_advisor::ProviderGuard;
 use bearust::ai_advisor_provider::{
-    ChatCompletionRequest, ChatCompletionResponse, LlmProvider, OpenAiCompatibleProvider,
-    ProviderConfig, ProviderError,
+    ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse, LlmProvider,
+    OpenAiCompatibleProvider, ProviderConfig, ProviderError,
 };
 use reqwest::Client;
 use serde_json::json;
@@ -40,7 +40,10 @@ async fn adapter_posts_openai_payload_with_bearer_auth() {
     let provider = OpenAiCompatibleProvider::new(Client::new(), config(base_url));
     let result = provider
         .complete(ChatCompletionRequest {
-            messages: vec![json!({"role":"user","content":"hello"})],
+            messages: vec![ChatCompletionMessage {
+                role: "user".into(),
+                content: "hello password=hunter2".into(),
+            }],
         })
         .await
         .unwrap();
@@ -49,6 +52,7 @@ async fn adapter_posts_openai_payload_with_bearer_auth() {
     assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1"));
     assert!(request.contains("authorization: Bearer secret-key"));
     assert!(request.contains("\"model\":\"test-model\""));
+    assert!(!request.contains("hunter2"));
 }
 
 #[tokio::test]
@@ -74,6 +78,53 @@ async fn adapter_maps_non_success_and_malformed_responses_without_body_leakage()
     server.await.unwrap();
 }
 
+#[tokio::test]
+async fn adapter_enforces_body_limit_and_deadline() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 1024];
+        let _ = stream.read(&mut request).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _ = stream
+            .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{}")
+            .await;
+    });
+    let mut provider_config = config(format!("http://{address}"));
+    provider_config.request_timeout = Duration::from_millis(10);
+    let provider = OpenAiCompatibleProvider::new(Client::new(), provider_config);
+    assert!(matches!(
+        provider
+            .complete(ChatCompletionRequest { messages: vec![] })
+            .await,
+        Err(ProviderError::Timeout)
+    ));
+}
+
+#[tokio::test]
+async fn adapter_rejects_oversized_stream_before_buffering() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 1024];
+        let _ = stream.read(&mut request).await;
+        let body = vec![b'x'; 5000];
+        let mut response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        response.extend_from_slice(&body);
+        let _ = stream.write_all(&response).await;
+    });
+    let provider =
+        OpenAiCompatibleProvider::new(Client::new(), config(format!("http://{address}")));
+    assert!(matches!(
+        provider
+            .complete(ChatCompletionRequest { messages: vec![] })
+            .await,
+        Err(ProviderError::ResponseTooLarge)
+    ));
+}
+
 #[test]
 fn response_type_is_bounded_and_deserializable() {
     let response: ChatCompletionResponse = serde_json::from_value(json!({
@@ -81,4 +132,11 @@ fn response_type_is_bounded_and_deserializable() {
     }))
     .unwrap();
     assert_eq!(response.choices[0].message.content, "ok");
+}
+
+#[test]
+fn provider_debug_never_formats_api_key() {
+    let value = format!("{:?}", config("http://127.0.0.1".into()));
+    assert!(!value.contains("secret-key"));
+    assert!(value.contains("REDACTED"));
 }
