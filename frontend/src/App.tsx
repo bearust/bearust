@@ -41,6 +41,7 @@ import {
   i18n,
   initI18n,
   LocalePreferenceProvider,
+  useLocaleFormatters,
   useLocalePreference,
 } from "./i18n";
 import {
@@ -319,6 +320,7 @@ export function CertificateTable({
   onChanged: () => void;
 }) {
   const { t } = useTranslation();
+  const { formatDate } = useLocaleFormatters();
   const [items, setItems] = useState<Certificate[]>([]),
     [error, setError] = useState(""),
     [refreshing, setRefreshing] = useState(false),
@@ -394,7 +396,7 @@ export function CertificateTable({
               {c.source} · {c.covered_hostnames.join(", ")}
             </span>
             <span className="text-sm text-muted">
-              {t("certificates.expires", { expiry: c.expiry })}
+              {t("certificates.expires", { expiry: formatDate(c.expiry) })}
             </span>
             <span className="text-sm">
               {t("certificates.status", {
@@ -468,6 +470,7 @@ export function UsersSection({
   userErrorMessage?: string;
 }) {
   const { t } = useTranslation();
+  const { formatNumber } = useLocaleFormatters();
   const [error, setError] = useState(""),
     [busy, setBusy] = useState<number | null>(null);
   const [email, setEmail] = useState(""),
@@ -584,7 +587,9 @@ export function UsersSection({
                               );
                               window.alert(
                                 t("users.revokedSessions", {
-                                  count: result.revoked,
+                                  count: formatNumber(result.revoked, {
+                                    maximumFractionDigits: 0,
+                                  }),
                                 }),
                               );
                             })
@@ -1512,6 +1517,7 @@ export function AnalyticsSection({
   refreshToken?: number;
 }) {
   const { t } = useTranslation();
+  const { formatDate, formatNumber } = useLocaleFormatters();
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
   const [rows, setRows] = useState<AnalyticsBucket[]>([]);
   const [host, setHost] = useState("");
@@ -1561,22 +1567,27 @@ export function AnalyticsSection({
   }, [refreshToken, host, from, to]);
   const cards = summary
     ? [
-        [t("analytics.requests"), summary.requests],
-        [t("analytics.status2xx"), summary.status_2xx],
-        [t("analytics.status4xx"), summary.status_4xx],
-        [t("analytics.status5xx"), summary.status_5xx],
+        [t("analytics.requests"), formatNumber(summary.requests, { maximumFractionDigits: 0 })],
+        [t("analytics.status2xx"), formatNumber(summary.status_2xx, { maximumFractionDigits: 0 })],
+        [t("analytics.status4xx"), formatNumber(summary.status_4xx, { maximumFractionDigits: 0 })],
+        [t("analytics.status5xx"), formatNumber(summary.status_5xx, { maximumFractionDigits: 0 })],
         [
           t("analytics.p95Latency"),
           summary.p95_ms == null
             ? t("common.notAvailable")
-            : t("analytics.milliseconds", { value: summary.p95_ms }),
+            : t("analytics.milliseconds", {
+                value: formatNumber(summary.p95_ms, { maximumFractionDigits: 2 }),
+              }),
         ],
         [
           t("analytics.securityEvents"),
-          summary.waf_blocks +
-            summary.bot_blocks +
-            summary.bot_challenges +
-            summary.rate_limited,
+          formatNumber(
+            summary.waf_blocks +
+              summary.bot_blocks +
+              summary.bot_challenges +
+              summary.rate_limited,
+            { maximumFractionDigits: 0 },
+          ),
         ],
       ]
     : [];
@@ -1671,7 +1682,9 @@ export function AnalyticsSection({
                         <span>
                           {value == null
                             ? t("common.notAvailable")
-                            : t("analytics.milliseconds", { value })}
+                            : t("analytics.milliseconds", {
+                                value: formatNumber(value, { maximumFractionDigits: 2 }),
+                              })}
                         </span>
                       </div>
                       <div
@@ -1711,7 +1724,9 @@ export function AnalyticsSection({
                 ].map(([label, value]) => (
                   <div key={label} className="rounded border border-border p-3">
                     <dt className="text-xs text-muted">{label}</dt>
-                    <dd className="text-xl font-semibold">{value}</dd>
+                    <dd className="text-xl font-semibold">
+                      {formatNumber(value as number, { maximumFractionDigits: 0 })}
+                    </dd>
                   </div>
                 ))}
               </dl>
@@ -1733,23 +1748,31 @@ export function AnalyticsSection({
               <tbody>
                 {rows.map((row) => (
                   <tr key={`${row.timestamp}-${row.proxy_host_id}`}>
-                    <td>{new Date(row.timestamp).toLocaleString()}</td>
+                    <td className="whitespace-nowrap">{formatDate(row.timestamp)}</td>
                     <td>
                       {hosts.find((h) => h.id === row.proxy_host_id)?.name ??
-                        row.proxy_host_id}
+                        formatNumber(row.proxy_host_id, { maximumFractionDigits: 0 })}
                     </td>
-                    <td>{row.requests}</td>
+                    <td>{formatNumber(row.requests, { maximumFractionDigits: 0 })}</td>
                     <td>
                       {row.p50_ms == null
                         ? t("common.notAvailable")
-                        : t("analytics.milliseconds", { value: row.p50_ms })}
+                        : t("analytics.milliseconds", {
+                            value: formatNumber(row.p50_ms, { maximumFractionDigits: 2 }),
+                          })}
                     </td>
                     <td>
                       {row.p95_ms == null
                         ? t("common.notAvailable")
-                        : t("analytics.milliseconds", { value: row.p95_ms })}
+                        : t("analytics.milliseconds", {
+                            value: formatNumber(row.p95_ms, { maximumFractionDigits: 2 }),
+                          })}
                     </td>
-                    <td>{row.status_4xx + row.status_5xx}</td>
+                    <td>
+                      {formatNumber(row.status_4xx + row.status_5xx, {
+                        maximumFractionDigits: 0,
+                      })}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1769,6 +1792,7 @@ export function BaselineSection({
   refreshToken?: number;
 }) {
   const { t } = useTranslation();
+  const { formatNumber } = useLocaleFormatters();
   const [snapshot, setSnapshot] = useState<BaselineSnapshot | null>(null);
   const [host, setHost] = useState("");
   const [window, setWindow] = useState<BaselineWindow>("5m");
@@ -1859,13 +1883,20 @@ export function BaselineSection({
           <div className="rounded border border-border p-3">
             <div className="text-xs text-muted">{t("baseline.reqPerSec")}</div>
             <div className="text-xl font-semibold">
-              {snapshot.metrics.req_per_sec.toFixed(2)}
+              {formatNumber(snapshot.metrics.req_per_sec, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
             </div>
           </div>
           <div className="rounded border border-border p-3">
             <div className="text-xs text-muted">{t("baseline.errorRate")}</div>
             <div className="text-xl font-semibold">
-              {snapshot.metrics.error_rate_percent.toFixed(1)}%
+              {formatNumber(snapshot.metrics.error_rate_percent / 100, {
+                style: "percent",
+                minimumFractionDigits: 1,
+                maximumFractionDigits: 1,
+              })}
             </div>
           </div>
           <div className="rounded border border-border p-3">
@@ -1874,7 +1905,9 @@ export function BaselineSection({
               {snapshot.metrics.p50_ms == null
                 ? t("common.notAvailable")
                 : t("analytics.milliseconds", {
-                    value: snapshot.metrics.p50_ms,
+                    value: formatNumber(snapshot.metrics.p50_ms, {
+                      maximumFractionDigits: 2,
+                    }),
                   })}
             </div>
           </div>
@@ -1884,7 +1917,9 @@ export function BaselineSection({
               {snapshot.metrics.p95_ms == null
                 ? t("common.notAvailable")
                 : t("analytics.milliseconds", {
-                    value: snapshot.metrics.p95_ms,
+                    value: formatNumber(snapshot.metrics.p95_ms, {
+                      maximumFractionDigits: 2,
+                    }),
                   })}
             </div>
           </div>
@@ -1893,10 +1928,13 @@ export function BaselineSection({
               {t("baseline.securityBlocks")}
             </div>
             <div className="text-xl font-semibold">
-              {snapshot.metrics.waf_blocks +
-                snapshot.metrics.bot_blocks +
-                snapshot.metrics.bot_challenges +
-                snapshot.metrics.rate_limited}
+              {formatNumber(
+                snapshot.metrics.waf_blocks +
+                  snapshot.metrics.bot_blocks +
+                  snapshot.metrics.bot_challenges +
+                  snapshot.metrics.rate_limited,
+                { maximumFractionDigits: 0 },
+              )}
             </div>
           </div>
         </div>
@@ -1915,6 +1953,7 @@ export function AnomalySection({
   refreshToken?: number;
 }) {
   const { t } = useTranslation();
+  const { formatDate, formatNumber } = useLocaleFormatters();
   const [anomalies, setAnomalies] = useState<AnomalyRecord[]>([]);
   const [host, setHost] = useState("");
   const [severity, setSeverity] = useState("");
@@ -2026,10 +2065,10 @@ export function AnomalySection({
             <tbody>
               {anomalies.map((item) => (
                 <tr key={item.id}>
-                  <td>{new Date(item.observed_at).toLocaleString()}</td>
+                  <td className="whitespace-nowrap">{formatDate(item.observed_at)}</td>
                   <td>
                     {hosts.find((h) => h.id === item.host_id)?.name ??
-                      item.host_id}
+                      formatNumber(item.host_id, { maximumFractionDigits: 0 })}
                   </td>
                   <td className="capitalize">
                     {t(`anomaly.rules.${item.rule}`)}
@@ -2047,7 +2086,12 @@ export function AnomalySection({
                       {t(`anomaly.${item.severity}`)}
                     </span>
                   </td>
-                  <td>{item.score.toFixed(2)}</td>
+                  <td>
+                    {formatNumber(item.score, {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </td>
                   <td>{item.summary}</td>
                   <td>
                     {canAck && !item.acknowledged && (
@@ -2084,6 +2128,7 @@ export function AdaptiveTuningSection({
   refreshToken?: number;
 }) {
   const { t } = useTranslation();
+  const { formatDate, formatNumber } = useLocaleFormatters();
   const [selectedHost, setSelectedHost] = useState("");
   const [policy, setPolicy] = useState<TuningPolicy>({
     mode: "monitor",
@@ -2311,9 +2356,14 @@ export function AdaptiveTuningSection({
               <tbody>
                 {recommendations.map((rec) => (
                   <tr key={rec.id}>
-                    <td>{new Date(rec.created_at).toLocaleString()}</td>
-                    <td>{rec.host_id}</td>
-                    <td>{(rec.confidence * 100).toFixed(0)}%</td>
+                    <td className="whitespace-nowrap">{formatDate(rec.created_at)}</td>
+                    <td>{formatNumber(rec.host_id, { maximumFractionDigits: 0 })}</td>
+                    <td>
+                      {formatNumber(rec.confidence, {
+                        style: "percent",
+                        maximumFractionDigits: 0,
+                      })}
+                    </td>
                     <td>{rec.reason}</td>
                     <td>
                       {rec.applied ? (
@@ -2812,6 +2862,7 @@ export function AuditLogSection({
   reloadRef?: MutableRefObject<(() => void) | null>;
 }) {
   const { t } = useTranslation();
+  const { formatDate, formatNumber } = useLocaleFormatters();
   const [items, setItems] = useState<AuditLogItem[]>([]),
     [total, setTotal] = useState(0),
     [page, setPage] = useState(1),
@@ -2931,7 +2982,7 @@ export function AuditLogSection({
                 <td>{item.actor}</td>
                 <td>{item.event}</td>
                 <td>{item.details}</td>
-                <td>{item.created_at}</td>
+                <td className="whitespace-nowrap">{formatDate(item.created_at)}</td>
               </tr>
             ))}
           </tbody>
@@ -2946,7 +2997,12 @@ export function AuditLogSection({
         >
           {t("common.previous")}
         </Button>
-        <span>{t("audit.pageOf", { page, total })}</span>
+        <span>
+          {t("audit.pageOf", {
+            page: formatNumber(page, { maximumFractionDigits: 0 }),
+            total: formatNumber(total, { maximumFractionDigits: 0 }),
+          })}
+        </span>
         <Button
           variant="secondary"
           onClick={() => setPage((value) => value + 1)}

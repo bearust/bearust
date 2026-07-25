@@ -45,7 +45,7 @@ export function Card({
 }: React.HTMLAttributes<HTMLElement> & { children: ReactNode }) {
   return (
     <section
-      className={`rounded-lg border border-border bg-surface p-6 text-foreground shadow-sm ${className}`}
+      className={`min-w-0 max-w-full rounded-lg border border-border bg-surface p-6 text-foreground shadow-sm ${className}`}
       {...props}
     >
       {children}

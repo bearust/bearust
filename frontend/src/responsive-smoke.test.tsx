@@ -43,4 +43,20 @@ describe('responsive smoke fixtures', () => {
     expect(host.textContent).toContain('Create user');
     root.unmount();
   });
+
+  it('keeps long localized management content inside a responsive card', async () => {
+    setViewport(390);
+    const longEmail = 'administrator-for-a-very-long-localized-management-workflow@example.com';
+    const host = document.createElement('div');
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => root.render(<UsersSection user={admin} users={[admin, { ...admin, id: 2, email: longEmail, role: 'operator' }]} roles={[]} onChanged={vi.fn()} />));
+
+    const section = host.querySelector('[data-testid="users-section"]') as HTMLElement;
+    expect(section.textContent).toContain(longEmail);
+    expect(section.className).toContain('min-w-0');
+    expect(section.className).toContain('max-w-full');
+    expect(section.querySelector('.overflow-x-auto')).toBeTruthy();
+    root.unmount();
+  });
 });

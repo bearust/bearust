@@ -133,6 +133,11 @@ export function useLocalePreference(): LocalePreferenceValue {
   return value;
 }
 
+export const displayDateTimeOptions = {
+  dateStyle: 'medium',
+  timeStyle: 'short',
+} satisfies Intl.DateTimeFormatOptions;
+
 export function formatLocaleDate(
   value: string | number | Date,
   locale: Locale,
@@ -147,4 +152,16 @@ export function formatLocaleNumber(
   options?: Intl.NumberFormatOptions,
 ): string {
   return new Intl.NumberFormat(LOCALE_TAGS[locale], options).format(value);
+}
+
+export function useLocaleFormatters() {
+  const preference = useContext(LocalePreferenceContext);
+  const locale = preference?.locale ?? normalizeLocale(i18n.resolvedLanguage ?? i18n.language);
+  return useMemo(() => ({
+    locale,
+    formatDate: (value: string | number | Date, options = displayDateTimeOptions) =>
+      formatLocaleDate(value, locale, options),
+    formatNumber: (value: number, options?: Intl.NumberFormatOptions) =>
+      formatLocaleNumber(value, locale, options),
+  }), [locale]);
 }

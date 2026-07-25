@@ -1,35 +1,21 @@
-# Task 6 report — keepalived/VIP operations
-
-## Commit
-
-- `ea03abe` — `docs: document keepalived integration for phase 10c`
+# Task 6 Report: Locale-aware formatting and responsive QA
 
 ## Delivered
 
-- Added `docs/keepalived.md` with an operator-runnable, bounded readiness
-  check. It checks the local control health endpoint, proxy listener, and an
-  authenticated `/api/cluster/status` snapshot; it fails closed unless the
-  node is a leader with a current quorum lease and a healthy peer set.
-- Documented root-owned session-cookie handling, finite curl deadlines, and
-  the fact that keepalived remains host-level and never mutates container or
-  host interfaces through BeaRust.
-- Added a three-node VRRP configuration with priorities, `nopreempt`, bounded
-  `interval`/`timeout`/`fall`/`rise`, authentication guidance, split-brain
-  fencing, and rollback procedure.
-- Updated `README.md` and `docs/PRD.md` to mark Phases 10B/10C delivered and
-  Phase 11 (localization) next.
-- Added a Rust documentation acceptance test covering bounded commands,
-  leader/quorum eligibility, fencing warnings, and no-interface-mutation
-  guidance.
+- Added `useLocaleFormatters` in `frontend/src/i18n.ts`, backed by the existing shared `Intl` helpers and the active account or i18n locale.
+- Localized displayed certificate, audit, analytics, baseline, anomaly, and adaptive-tuning timestamps and numeric values. Counts, rates, milliseconds, scores, and percentages now provide explicit `Intl` options.
+- Kept ISO timestamps and editable numeric policy inputs raw for API queries and mutation payloads.
+- Added locale integration coverage for English, Indonesian, and Japanese plus a long-string responsive card/table smoke case.
+- Added responsive card bounds while retaining table scroll containers for long content.
 
 ## Verification
 
-```text
-cargo +stable fmt --all -- --check                         # passed
-cargo +stable clippy --all-targets -- -D warnings          # passed
-cargo +stable test --test control_plane_cluster -- --test-threads=1  # 11 passed
-git diff --check                                           # passed
-```
+- `npm test --prefix frontend -- --run src/formatting.test.tsx src/responsive-smoke.test.tsx` — 10 passing tests.
+- `npm run build --prefix frontend` — completed successfully.
+- `npm test --prefix frontend -- --run` — 21 files, 123 tests passed.
+- `node frontend/scripts/validate-locales.mjs` — completed successfully.
+- `git diff --check` — no whitespace errors.
 
-The full all-targets gate remains owned by the parent Phase 10C integration
-review; this task does not change transport or runtime behavior.
+## Notes
+
+- The pre-existing `.superpowers/sdd/progress.md` modification was intentionally left untouched.
