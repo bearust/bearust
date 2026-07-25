@@ -222,48 +222,55 @@ fn store_result(
     results: &std::sync::Mutex<HashMap<String, AdvisorResponse>>,
     terminal_order: &std::sync::Mutex<VecDeque<String>>,
     response: AdvisorResponse,
-) {
+) -> bool {
     let mut results = results.lock().unwrap();
-    let terminal = matches!(
-        response.status,
-        AdvisorJobStatus::Completed
-            | AdvisorJobStatus::Failed
-            | AdvisorJobStatus::Approved
-            | AdvisorJobStatus::Rejected
-            | AdvisorJobStatus::Expired
-    );
-    if terminal
-        && !matches!(
-            results.get(&response.job_id.0).map(|r| r.status),
-            Some(
-                AdvisorJobStatus::Completed
-                    | AdvisorJobStatus::Failed
-                    | AdvisorJobStatus::Approved
-                    | AdvisorJobStatus::Rejected
-                    | AdvisorJobStatus::Expired
-            )
+    let is_terminal = |status| {
+        matches!(
+            status,
+            AdvisorJobStatus::Completed
+                | AdvisorJobStatus::Failed
+                | AdvisorJobStatus::Approved
+                | AdvisorJobStatus::Rejected
+                | AdvisorJobStatus::Expired
         )
+    };
+    if results
+        .get(&response.job_id.0)
+        .is_some_and(|existing| is_terminal(existing.status))
     {
+        return false;
+    }
+
+    let terminal = is_terminal(response.status);
+    if terminal {
         let mut order = terminal_order.lock().unwrap();
         order.push_back(response.job_id.0.clone());
         while order.len() > MAX_RETAINED_ADVISOR_RESULTS {
             if let Some(old) = order.pop_front() {
-                if matches!(
-                    results.get(&old).map(|r| r.status),
-                    Some(
-                        AdvisorJobStatus::Completed
-                            | AdvisorJobStatus::Failed
-                            | AdvisorJobStatus::Approved
-                            | AdvisorJobStatus::Rejected
-                            | AdvisorJobStatus::Expired
-                    )
-                ) {
+                if results
+                    .get(&old)
+                    .is_some_and(|existing| is_terminal(existing.status))
+                {
                     results.remove(&old);
                 }
             }
         }
     }
     results.insert(response.job_id.0.clone(), response);
+    true
+}
+
+fn remove_queued_result(
+    results: &std::sync::Mutex<HashMap<String, AdvisorResponse>>,
+    job_id: &AdvisorJobId,
+) {
+    let mut results = results.lock().unwrap();
+    if matches!(
+        results.get(&job_id.0).map(|response| response.status),
+        Some(AdvisorJobStatus::Queued)
+    ) {
+        results.remove(&job_id.0);
+    }
 }
 
 impl fmt::Debug for AiAdvisorService {
@@ -464,11 +471,13 @@ impl AiAdvisorService {
                 error_code: None,
             },
         );
-        runtime
-            .sender
-            .try_send((id.clone(), request))
-            .map_err(|_| AdvisorErrorCode::Busy)?;
-        Ok(id)
+        match runtime.sender.try_send((id.clone(), request)) {
+            Ok(()) => Ok(id),
+            Err(_) => {
+                remove_queued_result(&runtime.results, &id);
+                Err(AdvisorErrorCode::Busy)
+            }
+        }
     }
 
     pub fn result(&self, job_id: &AdvisorJobId) -> Option<AdvisorResponse> {
@@ -541,5 +550,172 @@ fn normalize_chat_completions_url(value: &str) -> Result<String, AdvisorConfigEr
         Ok(format!("{base}/chat/completions"))
     } else {
         Ok(format!("{base}/v1/chat/completions"))
+    }
+}
+
+#[cfg(test)]
+mod worker_state_tests {
+    use super::*;
+    use crate::ai_advisor_provider::{ChatCompletionResponse, ProviderError};
+    use async_trait::async_trait;
+
+    struct PendingProvider {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for PendingProvider {
+        async fn complete(
+            &self,
+            _: ChatCompletionRequest,
+        ) -> Result<ChatCompletionResponse, ProviderError> {
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    fn enabled_service() -> AiAdvisorService {
+        AiAdvisorService::from_env_with(|name| match name {
+            "LLM_API_URL" => Some("https://llm.example.test".into()),
+            "LLM_API_KEY" => Some("key".into()),
+            _ => None,
+        })
+        .unwrap()
+    }
+
+    fn request() -> AdvisorRequest {
+        AdvisorRequest {
+            workflow: AdvisorWorkflow::IncidentExplanation,
+            host_id: None,
+            from: None,
+            to: None,
+            command: Some("hello".into()),
+        }
+    }
+
+    fn response(id: impl Into<String>, status: AdvisorJobStatus) -> AdvisorResponse {
+        AdvisorResponse {
+            job_id: AdvisorJobId(id.into()),
+            status,
+            error_code: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_rejected_enqueue_rolls_back_every_queued_state() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let service = enabled_service().with_provider(
+            Arc::new(PendingProvider {
+                started: Arc::clone(&started),
+            }),
+            1,
+            1,
+        );
+        let running = service.enqueue(request()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .unwrap();
+        let queued = service.enqueue(request()).unwrap();
+
+        for _ in 0..2048 {
+            assert_eq!(service.enqueue(request()), Err(AdvisorErrorCode::Busy));
+        }
+
+        let runtime = service.runtime.as_ref().unwrap();
+        let results = runtime.results.lock().unwrap();
+        assert_eq!(
+            results.len(),
+            2,
+            "rejected enqueue attempts must not retain queued job state"
+        );
+        assert_eq!(
+            results.get(&running.0).unwrap().status,
+            AdvisorJobStatus::Running
+        );
+        assert_eq!(
+            results.get(&queued.0).unwrap().status,
+            AdvisorJobStatus::Queued
+        );
+        drop(results);
+        service.shutdown();
+    }
+
+    #[test]
+    fn second_terminal_transition_is_rejected_and_cannot_overwrite_the_first() {
+        let results = std::sync::Mutex::new(HashMap::new());
+        let terminal_order = std::sync::Mutex::new(VecDeque::new());
+        let id = "terminal-once";
+
+        assert!(store_result(
+            &results,
+            &terminal_order,
+            response(id, AdvisorJobStatus::Running),
+        ));
+        assert!(store_result(
+            &results,
+            &terminal_order,
+            response(id, AdvisorJobStatus::Completed),
+        ));
+        assert!(!store_result(
+            &results,
+            &terminal_order,
+            AdvisorResponse {
+                job_id: AdvisorJobId(id.into()),
+                status: AdvisorJobStatus::Failed,
+                error_code: Some(AdvisorErrorCode::Timeout),
+            },
+        ));
+
+        let result = results.lock().unwrap().get(id).cloned().unwrap();
+        assert_eq!(result.status, AdvisorJobStatus::Completed);
+        assert_eq!(result.error_code, None);
+        assert_eq!(
+            terminal_order.lock().unwrap().iter().collect::<Vec<_>>(),
+            vec![id]
+        );
+    }
+
+    #[test]
+    fn retention_evicts_oldest_terminal_only_and_preserves_active_jobs() {
+        let results = std::sync::Mutex::new(HashMap::new());
+        let terminal_order = std::sync::Mutex::new(VecDeque::new());
+        store_result(
+            &results,
+            &terminal_order,
+            response("active-queued", AdvisorJobStatus::Queued),
+        );
+        store_result(
+            &results,
+            &terminal_order,
+            response("active-running", AdvisorJobStatus::Running),
+        );
+
+        for index in 0..=MAX_RETAINED_ADVISOR_RESULTS {
+            store_result(
+                &results,
+                &terminal_order,
+                response(format!("terminal-{index:04}"), AdvisorJobStatus::Completed),
+            );
+        }
+
+        let results = results.lock().unwrap();
+        assert_eq!(results.len(), MAX_RETAINED_ADVISOR_RESULTS + 2);
+        assert_eq!(
+            results.get("active-queued").unwrap().status,
+            AdvisorJobStatus::Queued
+        );
+        assert_eq!(
+            results.get("active-running").unwrap().status,
+            AdvisorJobStatus::Running
+        );
+        assert!(!results.contains_key("terminal-0000"));
+        assert!(results.contains_key("terminal-0001"));
+        assert!(results.contains_key("terminal-1024"));
+        drop(results);
+
+        let terminal_order = terminal_order.lock().unwrap();
+        assert_eq!(terminal_order.len(), MAX_RETAINED_ADVISOR_RESULTS);
+        assert_eq!(terminal_order.front().unwrap(), "terminal-0001");
+        assert_eq!(terminal_order.back().unwrap(), "terminal-1024");
     }
 }

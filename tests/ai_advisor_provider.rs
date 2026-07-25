@@ -5,7 +5,13 @@ use bearust::ai_advisor_provider::{
 };
 use reqwest::Client;
 use serde_json::json;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn mock_server(response: &'static str) -> (String, tokio::task::JoinHandle<Vec<u8>>) {
@@ -20,6 +26,25 @@ async fn mock_server(response: &'static str) -> (String, tokio::task::JoinHandle
         request
     });
     (format!("http://{address}"), task)
+}
+
+async fn scripted_server(
+    responses: Vec<&'static str>,
+) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let server_requests = Arc::clone(&requests);
+    let task = tokio::spawn(async move {
+        for response in responses {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            server_requests.fetch_add(1, Ordering::SeqCst);
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    (format!("http://{address}"), requests, task)
 }
 
 fn config(base_url: String) -> ProviderConfig {
@@ -141,11 +166,72 @@ fn provider_debug_never_formats_api_key() {
     assert!(value.contains("REDACTED"));
 }
 
-#[test]
-fn breaker_open_short_circuits_and_success_resets_failures() {
-    let guard = ProviderGuard::new(1, Duration::from_secs(60));
-    guard.record_failure(std::time::Instant::now());
-    assert!(!guard.allow_request());
-    guard.record_success();
-    assert!(guard.allow_request());
+#[tokio::test]
+async fn adapter_short_circuits_open_breaker_until_real_success_resets_failures() {
+    const FAILURE: &str =
+        "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const SUCCESS: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"id\":\"x\",\"choices\":[{\"message\":{\"content\":\"done\"}}]}";
+    let (base_url, requests, server) =
+        scripted_server(vec![FAILURE, FAILURE, FAILURE, SUCCESS, FAILURE, SUCCESS]).await;
+    let cooldown = Duration::from_millis(100);
+    let guard = Arc::new(ProviderGuard::new(2, cooldown));
+    let provider = OpenAiCompatibleProvider::new(
+        Client::new(),
+        ProviderConfig {
+            base_url,
+            api_key: "secret-key".into(),
+            model: "test-model".into(),
+            request_timeout: Duration::from_secs(2),
+            response_limit_bytes: 4096,
+            guard,
+        },
+    );
+    let request = || ChatCompletionRequest { messages: vec![] };
+
+    assert!(matches!(
+        provider.complete(request()).await,
+        Err(ProviderError::HttpStatus(502))
+    ));
+    assert!(matches!(
+        provider.complete(request()).await,
+        Err(ProviderError::HttpStatus(502))
+    ));
+    assert!(matches!(
+        provider.complete(request()).await,
+        Err(ProviderError::CircuitOpen)
+    ));
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        2,
+        "an open circuit must not reach the mock server"
+    );
+
+    tokio::time::sleep(cooldown + Duration::from_millis(10)).await;
+    assert!(matches!(
+        provider.complete(request()).await,
+        Err(ProviderError::HttpStatus(502))
+    ));
+    assert!(matches!(
+        provider.complete(request()).await,
+        Err(ProviderError::CircuitOpen)
+    ));
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        3,
+        "a short-circuit must not reset the failure count"
+    );
+
+    tokio::time::sleep(cooldown + Duration::from_millis(10)).await;
+    provider.complete(request()).await.unwrap();
+    assert!(matches!(
+        provider.complete(request()).await,
+        Err(ProviderError::HttpStatus(502))
+    ));
+    provider.complete(request()).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(requests.load(Ordering::SeqCst), 6);
 }
