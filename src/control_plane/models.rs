@@ -1,3 +1,4 @@
+use crate::ai_advisor::{AdvisorErrorCode, AdvisorJobId, AdvisorJobStatus, AdvisorWorkflow};
 use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -184,6 +185,31 @@ pub struct AuditLogItem {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditLogPage {
     pub items: Vec<AuditLogItem>,
+    pub page: u32,
+    pub page_size: u32,
+    pub total: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvisorJobRecord {
+    pub job_id: AdvisorJobId,
+    pub owner_id: i64,
+    pub workflow: AdvisorWorkflow,
+    pub status: AdvisorJobStatus,
+    pub redacted_input: String,
+    pub redacted_result: Option<String>,
+    pub error_code: Option<AdvisorErrorCode>,
+    pub provider_model: String,
+    pub config_version: String,
+    pub config_hash: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub expires_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvisorJobPage {
+    pub items: Vec<AdvisorJobRecord>,
     pub page: u32,
     pub page_size: u32,
     pub total: i64,

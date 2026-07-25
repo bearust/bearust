@@ -3,9 +3,9 @@ use crate::bot_protection::{
 };
 use crate::cluster_raft::{CommandResult, ConfigCommand};
 use crate::control_plane::models::{
-    AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AuditLogItem, AuditLogPage,
-    AuditLogQuery, CertificateMetadata, ProxyHost, RateLimitConfig, RoleDetail,
-    RolePermissionScope, User, WafAction, WafConfig, WafMode, WafRule,
+    AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AdvisorJobPage, AdvisorJobRecord,
+    AuditLogItem, AuditLogPage, AuditLogQuery, CertificateMetadata, ProxyHost, RateLimitConfig,
+    RoleDetail, RolePermissionScope, User, WafAction, WafConfig, WafMode, WafRule,
 };
 use crate::control_plane::rbac::Role;
 use crate::rate_limit::{RateLimitAction, RateLimitKeyScope, RateLimitPolicy};
@@ -15,6 +15,21 @@ use sqlx::{any::AnyPoolOptions, Row};
 use std::hash::{Hash, Hasher};
 use std::sync::Once;
 use uuid::Uuid;
+
+pub const MAX_ADVISOR_PERSISTED_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug)]
+pub struct NewAdvisorJob {
+    pub job_id: crate::ai_advisor::AdvisorJobId,
+    pub owner_id: i64,
+    pub workflow: crate::ai_advisor::AdvisorWorkflow,
+    pub redacted_input: String,
+    pub provider_model: String,
+    pub config_version: String,
+    pub config_hash: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
 
 /// Database pool type used by the control plane once all repositories have
 /// been migrated to SQLx's backend-agnostic driver.
@@ -259,6 +274,9 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
         "system.settings.manage",
         "sessions.revoke",
         "bot_protection.manage",
+        "ai_advisor.read",
+        "ai_advisor.request",
+        "ai_advisor.approve",
     ];
     for key in permissions {
         sqlx::query(
@@ -301,11 +319,18 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
                 "certificates.read",
                 "certificates.write",
                 "audit_logs.read",
+                "ai_advisor.read",
+                "ai_advisor.request",
             ],
         ),
         (
             "viewer",
-            &["proxy_hosts.read", "certificates.read", "audit_logs.read"],
+            &[
+                "proxy_hosts.read",
+                "certificates.read",
+                "audit_logs.read",
+                "ai_advisor.read",
+            ],
         ),
     ];
     for (slug, keys) in assignments {
@@ -2199,6 +2224,161 @@ pub async fn list_audit_logs(
         .collect();
     Ok(AuditLogPage {
         items,
+        page,
+        page_size,
+        total,
+    })
+}
+
+fn advisor_workflow(value: &str) -> Result<crate::ai_advisor::AdvisorWorkflow, sqlx::Error> {
+    match value {
+        "incident_explanation" => Ok(crate::ai_advisor::AdvisorWorkflow::IncidentExplanation),
+        "security_summary" => Ok(crate::ai_advisor::AdvisorWorkflow::SecuritySummary),
+        "rule_tuning" => Ok(crate::ai_advisor::AdvisorWorkflow::RuleTuning),
+        "configuration_draft" => Ok(crate::ai_advisor::AdvisorWorkflow::ConfigurationDraft),
+        _ => Err(sqlx::Error::Protocol("invalid advisor workflow".into())),
+    }
+}
+
+fn advisor_status(value: &str) -> Result<crate::ai_advisor::AdvisorJobStatus, sqlx::Error> {
+    use crate::ai_advisor::AdvisorJobStatus::*;
+    match value {
+        "queued" => Ok(Queued),
+        "running" => Ok(Running),
+        "completed" => Ok(Completed),
+        "failed" => Ok(Failed),
+        "approved" => Ok(Approved),
+        "rejected" => Ok(Rejected),
+        "expired" => Ok(Expired),
+        _ => Err(sqlx::Error::Protocol("invalid advisor status".into())),
+    }
+}
+
+fn advisor_error(
+    value: Option<String>,
+) -> Result<Option<crate::ai_advisor::AdvisorErrorCode>, sqlx::Error> {
+    use crate::ai_advisor::AdvisorErrorCode::*;
+    match value.as_deref() {
+        None => Ok(None),
+        Some("advisor_timeout") => Ok(Some(Timeout)),
+        Some("advisor_provider_unavailable") => Ok(Some(ProviderUnavailable)),
+        Some("advisor_invalid_response") => Ok(Some(InvalidResponse)),
+        Some("advisor_response_too_large") => Ok(Some(ResponseTooLarge)),
+        Some("advisor_circuit_open") => Ok(Some(CircuitOpen)),
+        Some("advisor_expired") => Ok(Some(Expired)),
+        _ => Err(sqlx::Error::Protocol("invalid advisor error".into())),
+    }
+}
+
+fn advisor_record(row: &sqlx::any::AnyRow) -> Result<AdvisorJobRecord, sqlx::Error> {
+    Ok(AdvisorJobRecord {
+        job_id: crate::ai_advisor::AdvisorJobId(row.get("job_id")),
+        owner_id: row.get("owner_id"),
+        workflow: advisor_workflow(&row.get::<String, _>("workflow"))?,
+        status: advisor_status(&row.get::<String, _>("status"))?,
+        redacted_input: row.get("redacted_input"),
+        redacted_result: row.get("redacted_result"),
+        error_code: advisor_error(row.get("error_code"))?,
+        provider_model: row.get("provider_model"),
+        config_version: row.get("config_version"),
+        config_hash: row.get("config_hash"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        expires_at: row.get("expires_at"),
+    })
+}
+
+pub async fn insert_advisor_job(
+    pool: &DbPool,
+    job: &NewAdvisorJob,
+) -> Result<AdvisorJobRecord, sqlx::Error> {
+    if job.owner_id <= 0
+        || job.job_id.0.len() > 64
+        || job.redacted_input.len() > MAX_ADVISOR_PERSISTED_BYTES
+        || job.provider_model.len() > 128
+        || job.config_version.len() > 64
+        || job.config_hash.len() > 128
+    {
+        return Err(sqlx::Error::Protocol("invalid bounded advisor job".into()));
+    }
+    let now = job.created_at.to_rfc3339();
+    sqlx::query("INSERT INTO ai_advisor_jobs(job_id,owner_id,workflow,status,redacted_input,provider_model,config_version,config_hash,created_at,updated_at,expires_at) VALUES(?,?,?,'queued',?,?,?,?,?,?,?)")
+        .bind(&job.job_id.0).bind(job.owner_id).bind(serde_json::to_value(&job.workflow).unwrap().as_str().unwrap()).bind(&job.redacted_input).bind(&job.provider_model).bind(&job.config_version).bind(&job.config_hash).bind(&now).bind(&now).bind(job.expires_at.to_rfc3339()).execute(pool).await?;
+    get_advisor_job(pool, &job.job_id)
+        .await?
+        .ok_or_else(|| sqlx::Error::Protocol("advisor job missing after insert".into()))
+}
+
+pub async fn claim_advisor_job(
+    pool: &DbPool,
+    job_id: &crate::ai_advisor::AdvisorJobId,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, sqlx::Error> {
+    let now = now.to_rfc3339();
+    sqlx::query("UPDATE ai_advisor_jobs SET status='expired',updated_at=? WHERE job_id=? AND status='queued' AND expires_at<=?").bind(&now).bind(&job_id.0).bind(&now).execute(pool).await?;
+    Ok(sqlx::query("UPDATE ai_advisor_jobs SET status='running',updated_at=? WHERE job_id=? AND status='queued' AND expires_at>?").bind(&now).bind(&job_id.0).bind(&now).execute(pool).await?.rows_affected() == 1)
+}
+
+pub async fn finish_advisor_job(
+    pool: &DbPool,
+    job_id: &crate::ai_advisor::AdvisorJobId,
+    status: crate::ai_advisor::AdvisorJobStatus,
+    result: Option<&str>,
+    error: Option<crate::ai_advisor::AdvisorErrorCode>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, sqlx::Error> {
+    if !matches!(
+        status,
+        crate::ai_advisor::AdvisorJobStatus::Completed
+            | crate::ai_advisor::AdvisorJobStatus::Failed
+            | crate::ai_advisor::AdvisorJobStatus::Expired
+    ) || result.is_some_and(|value| value.len() > MAX_ADVISOR_PERSISTED_BYTES)
+    {
+        return Err(sqlx::Error::Protocol("invalid advisor finish".into()));
+    }
+    let status = serde_json::to_value(status)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let error = error
+        .and_then(|value| serde_json::to_value(value).ok())
+        .and_then(|value| value.as_str().map(str::to_owned));
+    Ok(sqlx::query("UPDATE ai_advisor_jobs SET status=?,redacted_result=?,error_code=?,updated_at=? WHERE job_id=? AND status='running'").bind(status).bind(result).bind(error).bind(now.to_rfc3339()).bind(&job_id.0).execute(pool).await?.rows_affected() == 1)
+}
+
+pub async fn mark_advisor_draft_decision(
+    pool: &DbPool,
+    job_id: &crate::ai_advisor::AdvisorJobId,
+    approved: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, sqlx::Error> {
+    let status = if approved { "approved" } else { "rejected" };
+    Ok(sqlx::query("UPDATE ai_advisor_jobs SET status=?,draft_decision=?,draft_decided_at=?,updated_at=? WHERE job_id=? AND workflow='configuration_draft' AND status='completed'").bind(status).bind(status).bind(now.to_rfc3339()).bind(now.to_rfc3339()).bind(&job_id.0).execute(pool).await?.rows_affected() == 1)
+}
+
+pub async fn get_advisor_job(
+    pool: &DbPool,
+    job_id: &crate::ai_advisor::AdvisorJobId,
+) -> Result<Option<AdvisorJobRecord>, sqlx::Error> {
+    sqlx::query("SELECT job_id,owner_id,workflow,status,redacted_input,redacted_result,error_code,provider_model,config_version,config_hash,created_at,updated_at,expires_at FROM ai_advisor_jobs WHERE job_id=?").bind(&job_id.0).fetch_optional(pool).await?.map(|row| advisor_record(&row)).transpose()
+}
+
+pub async fn list_advisor_jobs(
+    pool: &DbPool,
+    owner_id: i64,
+    page_size: u32,
+    page: u32,
+) -> Result<AdvisorJobPage, sqlx::Error> {
+    let page = page.max(1);
+    let page_size = page_size.clamp(1, 100);
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_advisor_jobs WHERE owner_id=?")
+        .bind(owner_id)
+        .fetch_one(pool)
+        .await?;
+    let rows = sqlx::query("SELECT job_id,owner_id,workflow,status,redacted_input,redacted_result,error_code,provider_model,config_version,config_hash,created_at,updated_at,expires_at FROM ai_advisor_jobs WHERE owner_id=? ORDER BY created_at DESC,job_id DESC LIMIT ? OFFSET ?").bind(owner_id).bind(page_size as i64).bind((page as i64 - 1) * page_size as i64).fetch_all(pool).await?;
+    Ok(AdvisorJobPage {
+        items: rows.iter().map(advisor_record).collect::<Result<_, _>>()?,
         page,
         page_size,
         total,

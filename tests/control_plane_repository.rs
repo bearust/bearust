@@ -385,7 +385,7 @@ async fn migration_seeds_builtin_roles_and_all_permissions_idempotently() {
         .unwrap();
 
     assert_eq!(roles, 3);
-    assert_eq!(permissions, 11);
+    assert_eq!(permissions, 14);
     assert_eq!(
         repository::role_by_slug(&pool, "admin")
             .await
@@ -407,7 +407,7 @@ async fn migrations_record_order_and_seed_exact_permissions() {
             .unwrap();
     assert_eq!(
         versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     );
     let lock_row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM setup_lock WHERE id=1")
         .fetch_one(&pool)
@@ -418,7 +418,7 @@ async fn migrations_record_order_and_seed_exact_permissions() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(permission_count, 11);
+    assert_eq!(permission_count, 14);
     repository::migrate(&pool).await.unwrap();
     let role_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM roles WHERE system_managed=1")
         .fetch_one(&pool)
@@ -432,7 +432,7 @@ async fn migrations_record_order_and_seed_exact_permissions() {
     .await
     .unwrap();
     assert_eq!(
-        global_rows, 19,
+        global_rows, 25,
         "built-in roles must retain every expected global grant"
     );
     let nullable_rows: i64 = sqlx::query_scalar(
