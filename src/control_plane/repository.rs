@@ -3,9 +3,9 @@ use crate::bot_protection::{
 };
 use crate::cluster_raft::{CommandResult, ConfigCommand};
 use crate::control_plane::models::{
-    AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AdvisorJobPage, AdvisorJobRecord,
-    AuditLogItem, AuditLogPage, AuditLogQuery, CertificateMetadata, ProxyHost, RateLimitConfig,
-    RoleDetail, RolePermissionScope, User, WafAction, WafConfig, WafMode, WafRule,
+    AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AdvisorDraftDecision, AdvisorJobPage,
+    AdvisorJobRecord, AuditLogItem, AuditLogPage, AuditLogQuery, CertificateMetadata, ProxyHost,
+    RateLimitConfig, RoleDetail, RolePermissionScope, User, WafAction, WafConfig, WafMode, WafRule,
 };
 use crate::control_plane::rbac::Role;
 use crate::rate_limit::{RateLimitAction, RateLimitKeyScope, RateLimitPolicy};
@@ -2299,8 +2299,20 @@ fn advisor_record(row: &sqlx::any::AnyRow) -> Result<AdvisorJobRecord, sqlx::Err
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         expires_at: row.get("expires_at"),
-        draft_decision: row.get("draft_decision"),
-        draft_decided_at: row.get("draft_decided_at"),
+        draft_decision: match row.get::<Option<String>, _>("draft_decision").as_deref() {
+            Some("approved") => Some(AdvisorDraftDecision::Approved),
+            Some("rejected") => Some(AdvisorDraftDecision::Rejected),
+            None => None,
+            _ => return Err(sqlx::Error::Protocol("invalid draft decision".into())),
+        },
+        draft_decided_at: row
+            .get::<Option<String>, _>("draft_decided_at")
+            .map(|value| {
+                chrono::DateTime::parse_from_rfc3339(&value)
+                    .map(|date| date.with_timezone(&chrono::Utc))
+                    .map_err(|_| sqlx::Error::Protocol("invalid draft decision timestamp".into()))
+            })
+            .transpose()?,
     })
 }
 

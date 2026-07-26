@@ -19,7 +19,9 @@ fn redacted(value: &str) -> RedactedValue {
 fn job(_id: &str, owner_id: i64, workflow: AdvisorWorkflow) -> repository::NewAdvisorJob {
     let now = Utc::now();
     repository::NewAdvisorJob {
-        job_id: AdvisorJobId::new(),
+        job_id: uuid::Uuid::parse_str(_id)
+            .map(|_| AdvisorJobId(_id.into()))
+            .unwrap_or_default(),
         owner_id,
         workflow,
         redacted_input: redacted(r#"{"message":"[REDACTED]"}"#),
@@ -129,7 +131,10 @@ async fn advisor_job_transitions_are_guarded_and_terminal_once() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(decided.draft_decision.as_deref(), Some("approved"));
+    assert_eq!(
+        decided.draft_decision,
+        Some(bearust::control_plane::models::AdvisorDraftDecision::Approved)
+    );
     assert!(decided.draft_decided_at.is_some());
 }
 
@@ -169,8 +174,10 @@ async fn advisor_repository_rejects_oversized_persistence_and_expires_jobs() {
 async fn advisor_repository_only_persists_validated_redacted_json_and_metadata() {
     let pool = pool().await;
     let mut raw = job("job-raw", 7, AdvisorWorkflow::IncidentExplanation);
-    raw.redacted_input = Redactor::with_secret_keys(["password"])
-        .redact(&serde_json::json!({"message":"password=hunter2"}));
+    let custom = Redactor::with_secret_keys(["tenant_secret"])
+        .redact(&serde_json::json!({"message":"tenant_secret=tenant-value"}));
+    assert!(!custom.value().to_string().contains("tenant-value"));
+    raw.redacted_input = custom;
     assert!(repository::insert_advisor_job(&pool, &raw).await.is_ok());
     let mut invalid = job("not-a-uuid", 7, AdvisorWorkflow::IncidentExplanation);
     invalid.job_id = AdvisorJobId("not-a-uuid".into());
@@ -246,10 +253,83 @@ async fn advisor_error_codes_and_terminal_statuses_round_trip_without_overwrite(
 }
 
 #[tokio::test]
+async fn advisor_rejected_and_running_expired_transitions_are_guarded() {
+    let pool = pool().await;
+    let draft = repository::insert_advisor_job(
+        &pool,
+        &job(
+            &AdvisorJobId::new().0,
+            9,
+            AdvisorWorkflow::ConfigurationDraft,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        repository::claim_advisor_job(&pool, &draft.job_id, Utc::now())
+            .await
+            .unwrap()
+    );
+    assert!(repository::finish_advisor_job(
+        &pool,
+        &draft.job_id,
+        AdvisorJobStatus::Completed,
+        Some(&redacted(r#"{"message":"draft"}"#)),
+        None,
+        Utc::now()
+    )
+    .await
+    .unwrap());
+    assert!(
+        repository::mark_advisor_draft_decision(&pool, &draft.job_id, false, Utc::now())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repository::get_advisor_job(&pool, &draft.job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AdvisorJobStatus::Rejected
+    );
+    let mut expired = job(
+        &AdvisorJobId::new().0,
+        9,
+        AdvisorWorkflow::IncidentExplanation,
+    );
+    expired.expires_at = Utc::now() - Duration::seconds(1);
+    let expired = repository::insert_advisor_job(&pool, &expired)
+        .await
+        .unwrap();
+    assert!(
+        !repository::claim_advisor_job(&pool, &expired.job_id, Utc::now())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repository::get_advisor_job(&pool, &expired.job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AdvisorJobStatus::Expired
+    );
+}
+
+#[tokio::test]
 async fn advisor_jobs_paginate_by_owner_newest_first() {
     let pool = pool().await;
-    for id in ["job-page-1", "job-page-2", "job-page-3"] {
-        repository::insert_advisor_job(&pool, &job(id, 7, AdvisorWorkflow::SecuritySummary))
+    let ids = [
+        AdvisorJobId::new(),
+        AdvisorJobId::new(),
+        AdvisorJobId::new(),
+    ];
+    for (index, id) in ids.iter().enumerate() {
+        let mut record = job(&id.0, 7, AdvisorWorkflow::SecuritySummary);
+        record.job_id = id.clone();
+        record.created_at = Utc::now() - Duration::seconds(index as i64);
+        repository::insert_advisor_job(&pool, &record)
             .await
             .unwrap();
     }
@@ -259,10 +339,13 @@ async fn advisor_jobs_paginate_by_owner_newest_first() {
     )
     .await
     .unwrap();
-    let page = repository::list_advisor_jobs(&pool, 7, 2, 2).await.unwrap();
+    let page = repository::list_advisor_jobs(&pool, 7, 2, 1).await.unwrap();
     assert_eq!(page.total, 3);
-    assert_eq!(page.items.len(), 1);
-    assert_eq!(page.items[0].owner_id, 7);
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.items[0].job_id, ids[0]);
+    assert_eq!(page.items[1].job_id, ids[1]);
+    let page2 = repository::list_advisor_jobs(&pool, 7, 2, 2).await.unwrap();
+    assert_eq!(page2.items[0].job_id, ids[2]);
 }
 
 #[tokio::test]
@@ -280,13 +363,16 @@ async fn external_advisor_migration_skips_without_opt_in_database() {
     repository::migrate(&pool)
         .await
         .unwrap_or_else(|_| panic!("repeat external migration {target}"));
+    let owner_id = (Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_default()
+        .unsigned_abs()
+        % 2_000_000_000) as i64
+        + 1000;
+    let first_id = AdvisorJobId::new();
     let inserted = repository::insert_advisor_job(
         &pool,
-        &job(
-            &AdvisorJobId::new().0,
-            1,
-            AdvisorWorkflow::IncidentExplanation,
-        ),
+        &job(&first_id.0, owner_id, AdvisorWorkflow::IncidentExplanation),
     )
     .await
     .unwrap();
@@ -310,17 +396,17 @@ async fn external_advisor_migration_skips_without_opt_in_database() {
         .unwrap()
         .is_some());
     assert_eq!(
-        repository::list_advisor_jobs(&pool, 1, 1, 10)
+        repository::list_advisor_jobs(&pool, owner_id, 1, 10)
             .await
             .unwrap()
             .total,
-        1
+        2
     );
     let draft = repository::insert_advisor_job(
         &pool,
         &job(
             &AdvisorJobId::new().0,
-            1,
+            owner_id,
             AdvisorWorkflow::ConfigurationDraft,
         ),
     )
@@ -345,6 +431,18 @@ async fn external_advisor_migration_skips_without_opt_in_database() {
         repository::mark_advisor_draft_decision(&pool, &draft.job_id, true, Utc::now())
             .await
             .unwrap()
+    );
+    sqlx::query("DELETE FROM ai_advisor_jobs WHERE owner_id=?")
+        .bind(owner_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        repository::list_advisor_jobs(&pool, owner_id, 1, 10)
+            .await
+            .unwrap()
+            .total,
+        0
     );
     pool.close().await;
 }
