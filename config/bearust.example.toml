@@ -6,6 +6,10 @@ control_database = "/data/bearust.sqlite"
 pid_file = "/run/bearust/bearust.pid"
 certificate_store = "/data/certificates"
 
+# Optional AI Advisor provider settings are supplied as environment variables,
+# never in this file. Leave LLM_API_URL/LLM_API_KEY unset to disable the advisor.
+# See DEPLOY.md for redaction, retention, and self-hosted provider guidance.
+
 # Optional native TLS. Both paths are required when this block is enabled.
 # [server.tls]
 # cert_path = "/etc/bearust/tls/fullchain.pem"

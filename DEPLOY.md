@@ -10,6 +10,18 @@ ACME credentials are accepted only by the authenticated certificate API and are 
 
 The command is `bearust serve --config /etc/bearust/bearust.toml --json-logs`. The PID file defaults to `./bearust.pid` relative to `/run/bearust`; send `SIGHUP` (`docker compose kill -s HUP bearust`) after atomically replacing the mounted config. Shutdown is graceful: listeners stop accepting new work and in-flight requests drain.
 
+## Optional AI Advisor
+
+The advisor remains disabled unless both `LLM_API_URL` and `LLM_API_KEY` are
+set. Use an OpenAI-compatible `/v1/chat/completions` endpoint; optional bounded
+settings include `LLM_MODEL`, `LLM_REQUEST_TIMEOUT_SECONDS`,
+`LLM_RESPONSE_LIMIT_BYTES`, `LLM_QUEUE_CAPACITY`, `LLM_WORKER_COUNT`, and
+`LLM_CIRCUIT_FAILURE_THRESHOLD`. Empty values use safe defaults. Prompts contain
+redacted aggregate snapshots only; raw URLs, headers, bodies, IPs, credentials,
+tokens, and provider responses are not retained. Unset both required variables
+and restart to disable safely. Self-hosted HTTPS endpoints are supported. Never
+commit API keys or include them in support bundles.
+
 ## Database profiles
 
 The default `docker compose up -d` keeps the control plane on SQLite at
