@@ -4,7 +4,7 @@ import React from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { api, type User } from "./api";
-import { AiAdvisorSection } from "./ui";
+import { AiAdvisorSection } from "./aiAdvisor";
 
 const admin: User = { id: 1, email: "admin@example.com", role: "admin", disabled: false };
 const viewer: User = { id: 2, email: "viewer@example.com", role: "viewer", disabled: false };
