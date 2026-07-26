@@ -275,7 +275,6 @@ pub(super) async fn create_analysis(
     )
     .await;
     state.realtime.publish("ai_advisor.changed");
-    state.advisor_metrics.record_job("approved");
     tokio::spawn(synchronize_job(state.clone(), user.id, job_id));
     (StatusCode::ACCEPTED, Json(job_view(record).unwrap())).into_response()
 }
@@ -408,7 +407,7 @@ pub(super) async fn approve_draft(
     )
     .await;
     state.realtime.publish("ai_advisor.changed");
-    state.advisor_metrics.record_job("rejected");
+    state.advisor_metrics.record_job("approved");
     match repository::get_advisor_job(&state.db, &job_id)
         .await
         .ok()
@@ -455,6 +454,7 @@ pub(super) async fn reject_draft(
     )
     .await;
     state.realtime.publish("ai_advisor.changed");
+    state.advisor_metrics.record_job("rejected");
     match repository::get_advisor_job(&state.db, &job_id)
         .await
         .ok()

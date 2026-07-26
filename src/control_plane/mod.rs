@@ -599,27 +599,57 @@ async fn prometheus_metrics(State(s): State<AppState>, h: HeaderMap) -> Response
             return StatusCode::UNAUTHORIZED.into_response();
         }
     }
-    match crate::analytics_prometheus::render(&s.analytics.snapshot(), &s.prometheus) {
-        Ok(mut body) => {
-            body.push_str(&s.advisor_metrics.render_prometheus());
-            if body.len() > s.prometheus.max_output_bytes {
-                let end = body
-                    .get(..s.prometheus.max_output_bytes)
-                    .and_then(|prefix| prefix.rfind('\n'))
-                    .map(|idx| idx + 1)
-                    .unwrap_or(0);
-                body.truncate(end);
-            }
-            (
-                [(
-                    axum::http::header::CONTENT_TYPE,
-                    "text/plain; version=0.0.4",
-                )],
-                body,
-            )
-                .into_response()
+    let advisor = s.advisor_metrics.render_prometheus();
+    let advisor = complete_lines(&advisor, s.prometheus.max_output_bytes);
+    let analytics_budget = s.prometheus.max_output_bytes.saturating_sub(advisor.len());
+    let analytics = if analytics_budget == 0 {
+        String::new()
+    } else {
+        let mut config = s.prometheus.clone();
+        config.max_output_bytes = analytics_budget;
+        match crate::analytics_prometheus::render(&s.analytics.snapshot(), &config) {
+            Ok(body) => body,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let mut body = analytics;
+    body.push_str(&advisor);
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        body,
+    )
+        .into_response()
+}
+
+fn complete_lines(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_owned();
+    }
+    value
+        .get(..limit)
+        .and_then(|prefix| prefix.rfind('\n').map(|idx| &prefix[..idx + 1]))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[cfg(test)]
+mod advisor_metrics_tests {
+    use super::complete_lines;
+    use crate::observability::AdvisorMetrics;
+
+    #[test]
+    fn advisor_metrics_keep_fixed_samples_and_respect_cap() {
+        let metrics = AdvisorMetrics::default();
+        metrics.record_job("approved");
+        let rendered = metrics.render_prometheus();
+        let capped = complete_lines(&rendered, rendered.len());
+        assert_eq!(capped, rendered);
+        assert!(capped.contains("decision=\"approved\""));
+        assert!(complete_lines("first\nsecond\n", 7).ends_with('\n'));
+        assert!(complete_lines("first\nsecond\n", 7).len() <= 7);
     }
 }
 
