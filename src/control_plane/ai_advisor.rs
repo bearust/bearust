@@ -362,22 +362,39 @@ pub(super) async fn approve_draft(
         DraftWafMode::MonitorOnly => WafMode::MonitorOnly,
         DraftWafMode::Block => WafMode::Block,
     };
-    if repository::update_waf_mode(&state.db, next_mode)
-        .await
-        .is_err()
-        || state.waf.reload(&state.db).await.is_err()
+    let applied_at = match repository::approve_waf_draft_atomic(
+        &state.db,
+        &job_id,
+        &record.config_version,
+        &record.config_hash,
+        current.mode,
+        next_mode,
+        Utc::now(),
+    )
+    .await
     {
-        let _ = repository::update_waf_mode(&state.db, current.mode).await;
-        let _ = state.waf.reload(&state.db).await;
+        Ok(repository::WafDraftApprovalOutcome::Applied { applied_at }) => applied_at,
+        Ok(repository::WafDraftApprovalOutcome::StaleConfig) => {
+            return advisor_error(AdvisorErrorCode::StaleDraft)
+        }
+        Ok(repository::WafDraftApprovalOutcome::DraftConflict) => return draft_conflict(),
+        Err(_) => return database_error(),
+    };
+    if state.waf.reload(&state.db).await.is_err() {
+        let compensated = repository::compensate_waf_draft_approval(
+            &state.db,
+            &job_id,
+            next_mode,
+            &applied_at,
+            &current,
+            Utc::now(),
+        )
+        .await
+        .unwrap_or(false);
+        if compensated {
+            let _ = state.waf.reload(&state.db).await;
+        }
         return database_error();
-    }
-    if !repository::mark_advisor_draft_decision(&state.db, &job_id, true, Utc::now())
-        .await
-        .unwrap_or(false)
-    {
-        let _ = repository::update_waf_mode(&state.db, current.mode).await;
-        let _ = state.waf.reload(&state.db).await;
-        return draft_conflict();
     }
     audit::record_state(
         &state,

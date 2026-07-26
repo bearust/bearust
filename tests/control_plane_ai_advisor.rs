@@ -14,7 +14,7 @@ use bearust::ai_advisor_provider::{
     ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, LlmProvider,
     ProviderError,
 };
-use bearust::control_plane::models::WafMode;
+use bearust::control_plane::models::{WafAction, WafMode, WafRule};
 use bearust::control_plane::{auth, build_state, router, AppState};
 use bearust::control_plane::{rbac::Permission, repository};
 use chrono::{Duration, Utc};
@@ -514,6 +514,152 @@ async fn advisor_draft_approval_is_admin_stale_safe_guarded_and_audited() {
             .status,
         AdvisorJobStatus::Rejected
     );
+}
+
+#[tokio::test]
+async fn advisor_waf_approval_transaction_rolls_back_mode_when_decision_write_fails() {
+    let provider = r#"{"workflow":"security_summary","summary":"Safe","severity":"info","signals":[],"reason_ids":[],"score":70}"#;
+    let (_, state, _, _, _) = api_state(enabled_service(provider)).await;
+    let admin_id = repository::find_user(&state.db, "admin@advisor.test")
+        .await
+        .unwrap()
+        .unwrap()
+        .0
+        .id;
+    let job_id = completed_waf_draft(&state, admin_id, DraftWafMode::Block, None).await;
+    let before = repository::get_waf_config(&state.db).await.unwrap();
+    let expected_hash = bearust::control_plane::ai_advisor::waf_config_hash(&before);
+    sqlx::query(
+        "CREATE TRIGGER fail_ai_advisor_approval BEFORE UPDATE ON ai_advisor_jobs \
+         WHEN NEW.status='approved' BEGIN SELECT RAISE(FAIL, 'forced decision failure'); END",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let result = repository::approve_waf_draft_atomic(
+        &state.db,
+        &job_id,
+        &before.updated_at,
+        &expected_hash,
+        before.mode,
+        WafMode::Block,
+        Utc::now(),
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(repository::get_waf_config(&state.db).await.unwrap(), before);
+    assert_eq!(
+        repository::get_advisor_job(&state.db, &job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AdvisorJobStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn advisor_waf_approval_transaction_rejects_hash_mismatch_without_mode_change() {
+    let provider = r#"{"workflow":"security_summary","summary":"Safe","severity":"info","signals":[],"reason_ids":[],"score":70}"#;
+    let (_, state, _, _, _) = api_state(enabled_service(provider)).await;
+    let admin_id = repository::find_user(&state.db, "admin@advisor.test")
+        .await
+        .unwrap()
+        .unwrap()
+        .0
+        .id;
+    let job_id = completed_waf_draft(&state, admin_id, DraftWafMode::Block, None).await;
+    let before = repository::get_waf_config(&state.db).await.unwrap();
+
+    let outcome = repository::approve_waf_draft_atomic(
+        &state.db,
+        &job_id,
+        &before.updated_at,
+        &"b".repeat(64),
+        before.mode,
+        WafMode::Block,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, repository::WafDraftApprovalOutcome::DraftConflict);
+    assert_eq!(repository::get_waf_config(&state.db).await.unwrap(), before);
+    assert_eq!(
+        repository::get_advisor_job(&state.db, &job_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        AdvisorJobStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn advisor_reload_failure_compensates_mode_and_draft_without_success_events() {
+    let provider = r#"{"workflow":"security_summary","summary":"Safe","severity":"info","signals":[],"reason_ids":[],"score":70}"#;
+    let (app, state, admin, _, _) = api_state(enabled_service(provider)).await;
+    let admin_id = repository::find_user(&state.db, "admin@advisor.test")
+        .await
+        .unwrap()
+        .unwrap()
+        .0
+        .id;
+    let before = repository::get_waf_config(&state.db).await.unwrap();
+    let job_id = completed_waf_draft(&state, admin_id, DraftWafMode::Block, None).await;
+    repository::insert_waf_rule(
+        &state.db,
+        &WafRule {
+            id: 0,
+            name: "Invalid reload fixture".into(),
+            source: "custom".into(),
+            category: "test".into(),
+            severity: "low".into(),
+            enabled: true,
+            action: WafAction::Inherit,
+            matcher_json: "{".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let mut events = state.realtime.subscribe();
+
+    let response = app
+        .oneshot(
+            Request::post(format!("/api/ai-advisor/drafts/{}/approve", job_id.0))
+                .header("cookie", admin)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(json_body(response).await["code"], "database_error");
+    assert_eq!(repository::get_waf_config(&state.db).await.unwrap(), before);
+    let draft = repository::get_advisor_job(&state.db, &job_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(draft.status, AdvisorJobStatus::Completed);
+    assert!(draft.draft_decision.is_none());
+    assert_eq!(state.waf.snapshot().mode, WafMode::MonitorOnly);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), events.recv())
+            .await
+            .is_err()
+    );
+    let approvals: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_logs WHERE event='ai_advisor_draft_approved'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(approvals, 0);
 }
 
 #[tokio::test]

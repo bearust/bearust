@@ -31,6 +31,13 @@ pub struct NewAdvisorJob {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WafDraftApprovalOutcome {
+    Applied { applied_at: String },
+    StaleConfig,
+    DraftConflict,
+}
+
 /// Database pool type used by the control plane once all repositories have
 /// been migrated to SQLx's backend-agnostic driver.
 pub type DbPool = sqlx::AnyPool;
@@ -2403,6 +2410,123 @@ pub async fn mark_advisor_draft_decision(
 ) -> Result<bool, sqlx::Error> {
     let status = if approved { "approved" } else { "rejected" };
     Ok(sqlx::query("UPDATE ai_advisor_jobs SET status=?,draft_decision=?,draft_decided_at=?,updated_at=? WHERE job_id=? AND workflow='configuration_draft' AND status='completed'").bind(status).bind(status).bind(now.to_rfc3339()).bind(now.to_rfc3339()).bind(&job_id.0).execute(pool).await?.rows_affected() == 1)
+}
+
+/// Atomically changes the WAF mode and consumes a completed advisor draft.
+/// The outcome distinguishes a changed WAF version from a consumed draft.
+pub async fn approve_waf_draft_atomic(
+    pool: &DbPool,
+    job_id: &crate::ai_advisor::AdvisorJobId,
+    expected_config_version: &str,
+    expected_config_hash: &str,
+    expected_mode: WafMode,
+    next_mode: WafMode,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<WafDraftApprovalOutcome, sqlx::Error> {
+    if !valid_job_id(&job_id.0)
+        || expected_config_version.is_empty()
+        || expected_config_version.len() > 64
+        || !valid_hash(expected_config_hash)
+    {
+        return Err(sqlx::Error::Protocol(
+            "invalid atomic advisor approval".into(),
+        ));
+    }
+    let applied_at = now.to_rfc3339();
+    let mut tx = pool.begin().await?;
+    let waf_rows = sqlx::query(
+        "UPDATE waf_config SET mode=?,updated_at=? WHERE id=1 AND mode=? AND updated_at=?",
+    )
+    .bind(waf_mode_value(next_mode))
+    .bind(&applied_at)
+    .bind(waf_mode_value(expected_mode))
+    .bind(expected_config_version)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if waf_rows != 1 {
+        tx.rollback().await?;
+        return Ok(WafDraftApprovalOutcome::StaleConfig);
+    }
+    let decision = sqlx::query(
+        "UPDATE ai_advisor_jobs SET status='approved',draft_decision='approved',draft_decided_at=?,updated_at=? \
+         WHERE job_id=? AND workflow='configuration_draft' AND status='completed' \
+         AND config_version=? AND config_hash=? AND expires_at>?",
+    )
+    .bind(&applied_at)
+    .bind(&applied_at)
+    .bind(&job_id.0)
+    .bind(expected_config_version)
+    .bind(expected_config_hash)
+    .bind(&applied_at)
+    .execute(&mut *tx)
+    .await;
+    let decision_rows = match decision {
+        Ok(result) => result.rows_affected(),
+        Err(error) => {
+            tx.rollback().await?;
+            return Err(error);
+        }
+    };
+    if decision_rows != 1 {
+        tx.rollback().await?;
+        return Ok(WafDraftApprovalOutcome::DraftConflict);
+    }
+    tx.commit().await?;
+    Ok(WafDraftApprovalOutcome::Applied { applied_at })
+}
+
+/// Restores the exact prior WAF configuration and reopens the draft only when
+/// both records still match the approval produced by `approve_waf_draft_atomic`.
+pub async fn compensate_waf_draft_approval(
+    pool: &DbPool,
+    job_id: &crate::ai_advisor::AdvisorJobId,
+    applied_mode: WafMode,
+    applied_at: &str,
+    prior_config: &WafConfig,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, sqlx::Error> {
+    if !valid_job_id(&job_id.0)
+        || applied_at.is_empty()
+        || applied_at.len() > 64
+        || prior_config.updated_at.is_empty()
+        || prior_config.updated_at.len() > 64
+    {
+        return Err(sqlx::Error::Protocol(
+            "invalid advisor approval compensation".into(),
+        ));
+    }
+    let mut tx = pool.begin().await?;
+    let waf_rows = sqlx::query(
+        "UPDATE waf_config SET mode=?,updated_at=? WHERE id=1 AND mode=? AND updated_at=?",
+    )
+    .bind(waf_mode_value(prior_config.mode))
+    .bind(&prior_config.updated_at)
+    .bind(waf_mode_value(applied_mode))
+    .bind(applied_at)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if waf_rows != 1 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let draft_rows = sqlx::query(
+        "UPDATE ai_advisor_jobs SET status='completed',draft_decision=NULL,draft_decided_at=NULL,updated_at=? \
+         WHERE job_id=? AND workflow='configuration_draft' AND status='approved' AND draft_decided_at=?",
+    )
+    .bind(now.to_rfc3339())
+    .bind(&job_id.0)
+    .bind(applied_at)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if draft_rows != 1 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    tx.commit().await?;
+    Ok(true)
 }
 
 pub async fn get_advisor_job(
