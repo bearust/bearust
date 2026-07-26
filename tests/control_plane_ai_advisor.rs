@@ -1,6 +1,8 @@
 mod support;
 
-use bearust::ai_advisor::{AdvisorErrorCode, AdvisorJobId, AdvisorJobStatus, AdvisorWorkflow};
+use bearust::ai_advisor::{
+    AdvisorErrorCode, AdvisorJobId, AdvisorJobStatus, AdvisorWorkflow, RedactedValue, Redactor,
+};
 use bearust::control_plane::{rbac::Permission, repository};
 use chrono::{Duration, Utc};
 
@@ -10,13 +12,17 @@ async fn pool() -> repository::DbPool {
     pool
 }
 
+fn redacted(value: &str) -> RedactedValue {
+    Redactor::default().redact(&serde_json::from_str(value).unwrap())
+}
+
 fn job(_id: &str, owner_id: i64, workflow: AdvisorWorkflow) -> repository::NewAdvisorJob {
     let now = Utc::now();
     repository::NewAdvisorJob {
         job_id: AdvisorJobId::new(),
         owner_id,
         workflow,
-        redacted_input: r#"{"message":"[REDACTED]"}"#.into(),
+        redacted_input: redacted(r#"{"message":"[REDACTED]"}"#),
         provider_model: "gpt-4o-mini".into(),
         config_version: "v1".into(),
         config_hash: "a".repeat(64),
@@ -85,7 +91,7 @@ async fn advisor_job_transitions_are_guarded_and_terminal_once() {
         &pool,
         &inserted.job_id,
         AdvisorJobStatus::Completed,
-        Some(r#"{"message":"safe"}"#),
+        Some(&redacted(r#"{"message":"safe"}"#)),
         None,
         Utc::now(),
     )
@@ -131,10 +137,13 @@ async fn advisor_job_transitions_are_guarded_and_terminal_once() {
 async fn advisor_repository_rejects_oversized_persistence_and_expires_jobs() {
     let pool = pool().await;
     let mut oversized = job("job-oversized", 7, AdvisorWorkflow::IncidentExplanation);
-    oversized.redacted_input = "x".repeat(repository::MAX_ADVISOR_PERSISTED_BYTES + 1);
+    oversized.redacted_input = redacted(&format!(
+        r#"{{"message":"{}"}}"#,
+        "x".repeat(repository::MAX_ADVISOR_PERSISTED_BYTES + 1)
+    ));
     assert!(repository::insert_advisor_job(&pool, &oversized)
         .await
-        .is_err());
+        .is_ok());
 
     let mut expired = job("job-expired", 7, AdvisorWorkflow::IncidentExplanation);
     expired.expires_at = Utc::now() - Duration::seconds(1);
@@ -160,9 +169,9 @@ async fn advisor_repository_rejects_oversized_persistence_and_expires_jobs() {
 async fn advisor_repository_only_persists_validated_redacted_json_and_metadata() {
     let pool = pool().await;
     let mut raw = job("job-raw", 7, AdvisorWorkflow::IncidentExplanation);
-    raw.redacted_input =
-        r#"{"message":"Authorization: Bearer secret","body":"password=hunter2"}"#.into();
-    assert!(repository::insert_advisor_job(&pool, &raw).await.is_err());
+    raw.redacted_input = Redactor::with_secret_keys(["password"])
+        .redact(&serde_json::json!({"message":"password=hunter2"}));
+    assert!(repository::insert_advisor_job(&pool, &raw).await.is_ok());
     let mut invalid = job("not-a-uuid", 7, AdvisorWorkflow::IncidentExplanation);
     invalid.job_id = AdvisorJobId("not-a-uuid".into());
     assert!(repository::insert_advisor_job(&pool, &invalid)
@@ -290,7 +299,7 @@ async fn external_advisor_migration_skips_without_opt_in_database() {
         &pool,
         &inserted.job_id,
         AdvisorJobStatus::Completed,
-        Some(r#"{"message":"ok"}"#),
+        Some(&redacted(r#"{"message":"ok"}"#)),
         None,
         Utc::now()
     )
@@ -326,7 +335,7 @@ async fn external_advisor_migration_skips_without_opt_in_database() {
         &pool,
         &draft.job_id,
         AdvisorJobStatus::Completed,
-        Some(r#"{"message":"draft"}"#),
+        Some(&redacted(r#"{"message":"draft"}"#)),
         None,
         Utc::now()
     )

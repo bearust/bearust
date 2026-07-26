@@ -23,7 +23,7 @@ pub struct NewAdvisorJob {
     pub job_id: crate::ai_advisor::AdvisorJobId,
     pub owner_id: i64,
     pub workflow: crate::ai_advisor::AdvisorWorkflow,
-    pub redacted_input: String,
+    pub redacted_input: crate::ai_advisor::RedactedValue,
     pub provider_model: String,
     pub config_version: String,
     pub config_hash: String,
@@ -2304,20 +2304,13 @@ fn advisor_record(row: &sqlx::any::AnyRow) -> Result<AdvisorJobRecord, sqlx::Err
     })
 }
 
-fn valid_redacted_json(value: &str) -> bool {
-    if value.is_empty() || value.len() > MAX_ADVISOR_PERSISTED_BYTES {
-        return false;
+fn redacted_json(value: &crate::ai_advisor::RedactedValue) -> Result<String, sqlx::Error> {
+    let encoded = serde_json::to_string(value.value())
+        .map_err(|_| sqlx::Error::Protocol("invalid redacted JSON".into()))?;
+    if encoded.len() > MAX_ADVISOR_PERSISTED_BYTES {
+        return Err(sqlx::Error::Protocol("redacted JSON exceeds bound".into()));
     }
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) else {
-        return false;
-    };
-    if !matches!(&parsed, serde_json::Value::Object(values) if !values.is_empty()) {
-        return false;
-    }
-    crate::ai_advisor::Redactor::default()
-        .redact(&parsed)
-        .value()
-        == &parsed
+    Ok(encoded)
 }
 
 fn valid_job_id(value: &str) -> bool {
@@ -2333,7 +2326,7 @@ pub async fn insert_advisor_job(
 ) -> Result<AdvisorJobRecord, sqlx::Error> {
     if job.owner_id <= 0
         || !valid_job_id(&job.job_id.0)
-        || !valid_redacted_json(&job.redacted_input)
+        || redacted_json(&job.redacted_input).is_err()
         || job.provider_model.is_empty()
         || job.provider_model.len() > 128
         || job.config_version.is_empty()
@@ -2343,8 +2336,9 @@ pub async fn insert_advisor_job(
         return Err(sqlx::Error::Protocol("invalid bounded advisor job".into()));
     }
     let now = job.created_at.to_rfc3339();
+    let redacted_input = redacted_json(&job.redacted_input)?;
     sqlx::query("INSERT INTO ai_advisor_jobs(job_id,owner_id,workflow,status,redacted_input,provider_model,config_version,config_hash,created_at,updated_at,expires_at) VALUES(?,?,?,'queued',?,?,?,?,?,?,?)")
-        .bind(&job.job_id.0).bind(job.owner_id).bind(serde_json::to_value(&job.workflow).unwrap().as_str().unwrap()).bind(&job.redacted_input).bind(&job.provider_model).bind(&job.config_version).bind(&job.config_hash).bind(&now).bind(&now).bind(job.expires_at.to_rfc3339()).execute(pool).await?;
+        .bind(&job.job_id.0).bind(job.owner_id).bind(serde_json::to_value(&job.workflow).unwrap().as_str().unwrap()).bind(&redacted_input).bind(&job.provider_model).bind(&job.config_version).bind(&job.config_hash).bind(&now).bind(&now).bind(job.expires_at.to_rfc3339()).execute(pool).await?;
     get_advisor_job(pool, &job.job_id)
         .await?
         .ok_or_else(|| sqlx::Error::Protocol("advisor job missing after insert".into()))
@@ -2364,7 +2358,7 @@ pub async fn finish_advisor_job(
     pool: &DbPool,
     job_id: &crate::ai_advisor::AdvisorJobId,
     status: crate::ai_advisor::AdvisorJobStatus,
-    result: Option<&str>,
+    result: Option<&crate::ai_advisor::RedactedValue>,
     error: Option<crate::ai_advisor::AdvisorErrorCode>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, sqlx::Error> {
@@ -2373,7 +2367,7 @@ pub async fn finish_advisor_job(
         crate::ai_advisor::AdvisorJobStatus::Completed
             | crate::ai_advisor::AdvisorJobStatus::Failed
             | crate::ai_advisor::AdvisorJobStatus::Expired
-    ) || result.is_some_and(|value| !valid_redacted_json(value))
+    ) || result.is_some_and(|value| redacted_json(value).is_err())
     {
         return Err(sqlx::Error::Protocol("invalid advisor finish".into()));
     }
@@ -2385,6 +2379,7 @@ pub async fn finish_advisor_job(
     let error = error
         .and_then(|value| serde_json::to_value(value).ok())
         .and_then(|value| value.as_str().map(str::to_owned));
+    let result = result.map(redacted_json).transpose()?;
     Ok(sqlx::query("UPDATE ai_advisor_jobs SET status=?,redacted_result=?,error_code=?,updated_at=? WHERE job_id=? AND status='running'").bind(status).bind(result).bind(error).bind(now.to_rfc3339()).bind(&job_id.0).execute(pool).await?.rows_affected() == 1)
 }
 
