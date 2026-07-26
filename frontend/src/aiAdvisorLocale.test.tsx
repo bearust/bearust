@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import en from "./locales/en.json";
 import id from "./locales/id.json";
 import ja from "./locales/ja.json";
@@ -20,4 +22,20 @@ describe("AI advisor locale catalogs", () => {
     "advisor.errors.advisor_busy", "advisor.errors.advisor_stale_draft", "advisor.errors.advisor_expired",
     "advisor.accessibility.refresh", "advisor.accessibility.result",
   ])("catalogues %s", (key) => expect(flatten(en)).toContain(key));
+
+  it.each([["en", en], ["id", id], ["ja", ja]] as const)("renders advisor states for %s", (_locale, catalog) => {
+    const advisor = catalog.advisor;
+    const html = renderToStaticMarkup(createElement("section", null,
+      createElement("h2", null, advisor.title),
+      createElement("p", null, advisor.redactionNotice),
+      createElement("span", null, advisor.status.queued),
+      createElement("span", null, advisor.errors.advisor_busy),
+      createElement("button", { "aria-label": advisor.accessibility.refresh }, advisor.refresh),
+    ));
+    expect(html).toContain(advisor.title);
+    expect(html).toContain(advisor.redactionNotice);
+    expect(html).toContain(advisor.status.queued);
+    expect(html).toContain(advisor.errors.advisor_busy);
+    expect(html).toContain(advisor.accessibility.refresh);
+  });
 });

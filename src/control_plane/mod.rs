@@ -89,6 +89,7 @@ pub struct AppState {
     /// worker, keeping the proxy and ordinary control-plane startup isolated
     /// from provider availability.
     pub ai_advisor: Arc<AiAdvisorService>,
+    pub advisor_metrics: Arc<crate::observability::AdvisorMetrics>,
 }
 
 impl AppState {
@@ -409,6 +410,7 @@ pub async fn build_state(
         config_gateway: None,
         prometheus: PrometheusConfig::default(),
         ai_advisor: Arc::new(AiAdvisorService::disabled()),
+        advisor_metrics: Arc::new(crate::observability::AdvisorMetrics::default()),
     })
 }
 
@@ -598,14 +600,25 @@ async fn prometheus_metrics(State(s): State<AppState>, h: HeaderMap) -> Response
         }
     }
     match crate::analytics_prometheus::render(&s.analytics.snapshot(), &s.prometheus) {
-        Ok(body) => (
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; version=0.0.4",
-            )],
-            body,
-        )
-            .into_response(),
+        Ok(mut body) => {
+            body.push_str(&s.advisor_metrics.render_prometheus());
+            if body.len() > s.prometheus.max_output_bytes {
+                let end = body
+                    .get(..s.prometheus.max_output_bytes)
+                    .and_then(|prefix| prefix.rfind('\n'))
+                    .map(|idx| idx + 1)
+                    .unwrap_or(0);
+                body.truncate(end);
+            }
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; version=0.0.4",
+                )],
+                body,
+            )
+                .into_response()
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

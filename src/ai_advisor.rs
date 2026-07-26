@@ -404,11 +404,23 @@ impl fmt::Debug for Secret {
 
 /// Optional advisor service. It intentionally owns no workers until the
 /// provider/queue increment attaches them; cloning simply clones an `Arc`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AiAdvisorService {
     config: Option<Arc<AdvisorConfig>>,
     runtime: Option<Arc<AdvisorRuntime>>,
     approval_lock: Arc<tokio::sync::Mutex<()>>,
+    metrics: Arc<crate::observability::AdvisorMetrics>,
+}
+
+impl Default for AiAdvisorService {
+    fn default() -> Self {
+        Self {
+            config: None,
+            runtime: None,
+            approval_lock: Arc::new(tokio::sync::Mutex::new(())),
+            metrics: Arc::new(crate::observability::AdvisorMetrics::default()),
+        }
+    }
 }
 
 struct AdvisorRuntime {
@@ -490,6 +502,11 @@ impl AiAdvisorService {
         Self::default()
     }
 
+    pub fn with_metrics(mut self, metrics: Arc<crate::observability::AdvisorMetrics>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
     pub fn from_env() -> Result<Self, AdvisorConfigError> {
         Self::from_env_with(|name| std::env::var(name).ok())
     }
@@ -510,10 +527,12 @@ impl AiAdvisorService {
         let worker_results = results.clone();
         let worker_validated_results = validated_results.clone();
         let concurrency = Arc::new(tokio::sync::Semaphore::new(worker_count.max(1)));
+        let worker_metrics = self.metrics.clone();
         tokio::spawn(async move {
             loop {
                 if *worker_shutdown.borrow() {
                     while let Ok((queued_id, _)) = receiver.try_recv() {
+                        worker_metrics.record_job("failed");
                         store_result(
                             &worker_results,
                             &worker_terminal_order,
@@ -532,6 +551,7 @@ impl AiAdvisorService {
                 };
                 let Some((job_id, request)) = next else {
                     while let Ok((queued_id, _)) = receiver.try_recv() {
+                        worker_metrics.record_job("failed");
                         store_result(
                             &worker_results,
                             &worker_terminal_order,
@@ -544,6 +564,7 @@ impl AiAdvisorService {
                     }
                     break;
                 };
+                worker_metrics.record_job("running");
                 store_result(
                     &worker_results,
                     &worker_terminal_order,
@@ -555,7 +576,7 @@ impl AiAdvisorService {
                 );
                 let permit = tokio::select! {
                     permit = concurrency.clone().acquire_owned() => permit,
-                    _ = worker_shutdown.changed() => { store_result(&worker_results, &worker_terminal_order, AdvisorResponse { job_id, status: AdvisorJobStatus::Failed, error_code: Some(AdvisorErrorCode::Timeout) }); continue; }
+                    _ = worker_shutdown.changed() => { worker_metrics.record_job("failed"); store_result(&worker_results, &worker_terminal_order, AdvisorResponse { job_id, status: AdvisorJobStatus::Failed, error_code: Some(AdvisorErrorCode::Timeout) }); continue; }
                 };
                 let Ok(_permit) = permit else { break };
                 let provider = provider.clone();
@@ -569,7 +590,7 @@ impl AiAdvisorService {
                             }],
                         }) => result,
                     _ = worker_shutdown.changed() => {
-                        store_result(&worker_results, &worker_terminal_order, AdvisorResponse { job_id: job_id.clone(), status: AdvisorJobStatus::Failed, error_code: Some(AdvisorErrorCode::Timeout) });
+                        worker_metrics.record_job("failed"); store_result(&worker_results, &worker_terminal_order, AdvisorResponse { job_id: job_id.clone(), status: AdvisorJobStatus::Failed, error_code: Some(AdvisorErrorCode::Timeout) });
                         continue;
                     },
                 };
@@ -595,6 +616,14 @@ impl AiAdvisorService {
                     },
                     Err(error) => (AdvisorJobStatus::Failed, Some(provider_error_code(error))),
                 };
+                worker_metrics.record_job(match (status, error_code) {
+                    (AdvisorJobStatus::Completed, _) => "completed",
+                    (AdvisorJobStatus::Failed, Some(AdvisorErrorCode::CircuitOpen)) => {
+                        "breaker_open"
+                    }
+                    (AdvisorJobStatus::Failed, _) => "failed",
+                    _ => "failed",
+                });
                 store_result(
                     &worker_results,
                     &worker_terminal_order,
@@ -696,6 +725,7 @@ impl AiAdvisorService {
             config: Some(Arc::new(config)),
             runtime: None,
             approval_lock: Arc::new(tokio::sync::Mutex::new(())),
+            metrics: Arc::new(crate::observability::AdvisorMetrics::default()),
         })
     }
 
@@ -738,6 +768,7 @@ impl AiAdvisorService {
                 error_code: None,
             },
         );
+        self.metrics.record_job("queued");
         match runtime.sender.try_send((id.clone(), request)) {
             Ok(()) => Ok(()),
             Err(_) => {

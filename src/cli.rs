@@ -263,6 +263,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
         control_state.ai_advisor = Arc::new(
             crate::ai_advisor::AiAdvisorService::from_env()
+                .map(|service| service.with_metrics(control_state.advisor_metrics.clone()))
                 .map(crate::ai_advisor::AiAdvisorService::with_configured_provider)
                 .unwrap_or_else(|error| {
                     tracing::warn!(event = "ai_advisor_disabled", reason = %error);
