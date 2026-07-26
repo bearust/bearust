@@ -235,6 +235,16 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
         Err(error) if error.to_string().to_ascii_lowercase().contains("already exists") || error.to_string().to_ascii_lowercase().contains("duplicate") => {}
         Err(error) => return Err(error),
     }
+    for statement in [
+        "CREATE INDEX idx_ai_advisor_jobs_owner_status_created ON ai_advisor_jobs (owner_id, status, created_at)",
+        "CREATE INDEX idx_ai_advisor_jobs_owner_created ON ai_advisor_jobs (owner_id, created_at)",
+    ] {
+        match sqlx::query(statement).execute(pool).await {
+            Ok(_) => {}
+            Err(error) if error.to_string().to_ascii_lowercase().contains("already exists") || error.to_string().to_ascii_lowercase().contains("duplicate") => {}
+            Err(error) => return Err(error),
+        }
+    }
 
     // The first release created these columns inline. Add them for those
     // databases without dropping or rewriting existing rows. Each backend
@@ -2260,11 +2270,15 @@ fn advisor_error(
     use crate::ai_advisor::AdvisorErrorCode::*;
     match value.as_deref() {
         None => Ok(None),
+        Some("advisor_disabled") => Ok(Some(Disabled)),
+        Some("advisor_busy") => Ok(Some(Busy)),
         Some("advisor_timeout") => Ok(Some(Timeout)),
         Some("advisor_provider_unavailable") => Ok(Some(ProviderUnavailable)),
         Some("advisor_invalid_response") => Ok(Some(InvalidResponse)),
         Some("advisor_response_too_large") => Ok(Some(ResponseTooLarge)),
         Some("advisor_circuit_open") => Ok(Some(CircuitOpen)),
+        Some("advisor_invalid_request") => Ok(Some(InvalidRequest)),
+        Some("advisor_stale_draft") => Ok(Some(StaleDraft)),
         Some("advisor_expired") => Ok(Some(Expired)),
         _ => Err(sqlx::Error::Protocol("invalid advisor error".into())),
     }
@@ -2285,7 +2299,32 @@ fn advisor_record(row: &sqlx::any::AnyRow) -> Result<AdvisorJobRecord, sqlx::Err
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         expires_at: row.get("expires_at"),
+        draft_decision: row.get("draft_decision"),
+        draft_decided_at: row.get("draft_decided_at"),
     })
+}
+
+fn valid_redacted_json(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_ADVISOR_PERSISTED_BYTES {
+        return false;
+    }
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) else {
+        return false;
+    };
+    if !matches!(&parsed, serde_json::Value::Object(values) if !values.is_empty()) {
+        return false;
+    }
+    crate::ai_advisor::Redactor::default()
+        .redact(&parsed)
+        .value()
+        == &parsed
+}
+
+fn valid_job_id(value: &str) -> bool {
+    value.len() <= 64 && uuid::Uuid::parse_str(value).is_ok()
+}
+fn valid_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub async fn insert_advisor_job(
@@ -2293,11 +2332,13 @@ pub async fn insert_advisor_job(
     job: &NewAdvisorJob,
 ) -> Result<AdvisorJobRecord, sqlx::Error> {
     if job.owner_id <= 0
-        || job.job_id.0.len() > 64
-        || job.redacted_input.len() > MAX_ADVISOR_PERSISTED_BYTES
+        || !valid_job_id(&job.job_id.0)
+        || !valid_redacted_json(&job.redacted_input)
+        || job.provider_model.is_empty()
         || job.provider_model.len() > 128
+        || job.config_version.is_empty()
         || job.config_version.len() > 64
-        || job.config_hash.len() > 128
+        || !valid_hash(&job.config_hash)
     {
         return Err(sqlx::Error::Protocol("invalid bounded advisor job".into()));
     }
@@ -2332,7 +2373,7 @@ pub async fn finish_advisor_job(
         crate::ai_advisor::AdvisorJobStatus::Completed
             | crate::ai_advisor::AdvisorJobStatus::Failed
             | crate::ai_advisor::AdvisorJobStatus::Expired
-    ) || result.is_some_and(|value| value.len() > MAX_ADVISOR_PERSISTED_BYTES)
+    ) || result.is_some_and(|value| !valid_redacted_json(value))
     {
         return Err(sqlx::Error::Protocol("invalid advisor finish".into()));
     }
@@ -2361,7 +2402,7 @@ pub async fn get_advisor_job(
     pool: &DbPool,
     job_id: &crate::ai_advisor::AdvisorJobId,
 ) -> Result<Option<AdvisorJobRecord>, sqlx::Error> {
-    sqlx::query("SELECT job_id,owner_id,workflow,status,redacted_input,redacted_result,error_code,provider_model,config_version,config_hash,created_at,updated_at,expires_at FROM ai_advisor_jobs WHERE job_id=?").bind(&job_id.0).fetch_optional(pool).await?.map(|row| advisor_record(&row)).transpose()
+    sqlx::query("SELECT job_id,owner_id,workflow,status,redacted_input,redacted_result,error_code,provider_model,config_version,config_hash,created_at,updated_at,expires_at,draft_decision,draft_decided_at FROM ai_advisor_jobs WHERE job_id=?").bind(&job_id.0).fetch_optional(pool).await?.map(|row| advisor_record(&row)).transpose()
 }
 
 pub async fn list_advisor_jobs(
@@ -2376,7 +2417,7 @@ pub async fn list_advisor_jobs(
         .bind(owner_id)
         .fetch_one(pool)
         .await?;
-    let rows = sqlx::query("SELECT job_id,owner_id,workflow,status,redacted_input,redacted_result,error_code,provider_model,config_version,config_hash,created_at,updated_at,expires_at FROM ai_advisor_jobs WHERE owner_id=? ORDER BY created_at DESC,job_id DESC LIMIT ? OFFSET ?").bind(owner_id).bind(page_size as i64).bind((page as i64 - 1) * page_size as i64).fetch_all(pool).await?;
+    let rows = sqlx::query("SELECT job_id,owner_id,workflow,status,redacted_input,redacted_result,error_code,provider_model,config_version,config_hash,created_at,updated_at,expires_at,draft_decision,draft_decided_at FROM ai_advisor_jobs WHERE owner_id=? ORDER BY created_at DESC,job_id DESC LIMIT ? OFFSET ?").bind(owner_id).bind(page_size as i64).bind((page as i64 - 1) * page_size as i64).fetch_all(pool).await?;
     Ok(AdvisorJobPage {
         items: rows.iter().map(advisor_record).collect::<Result<_, _>>()?,
         page,

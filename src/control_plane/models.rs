@@ -205,6 +205,8 @@ pub struct AdvisorJobRecord {
     pub created_at: String,
     pub updated_at: String,
     pub expires_at: String,
+    pub draft_decision: Option<String>,
+    pub draft_decided_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
