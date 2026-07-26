@@ -3,6 +3,7 @@
     clippy::collapsible_if,
     clippy::possible_missing_else
 )]
+pub mod ai_advisor;
 pub mod audit;
 pub mod auth;
 pub mod locale;
@@ -465,6 +466,20 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
             post(verify_bot_challenge).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/api/events", get(events))
+        .route("/api/ai-advisor/status", get(ai_advisor::status))
+        .route(
+            "/api/ai-advisor/analyses",
+            post(ai_advisor::create_analysis).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route("/api/ai-advisor/insights", get(ai_advisor::list_insights))
+        .route(
+            "/api/ai-advisor/drafts/{id}/approve",
+            post(ai_advisor::approve_draft),
+        )
+        .route(
+            "/api/ai-advisor/drafts/{id}/reject",
+            post(ai_advisor::reject_draft),
+        )
         .route("/api/analytics/summary", get(analytics_summary))
         .route("/api/analytics/timeseries", get(analytics_timeseries))
         .route("/api/analytics/baseline", get(analytics_baseline))

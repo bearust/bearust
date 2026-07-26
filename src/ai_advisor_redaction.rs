@@ -449,6 +449,9 @@ fn is_safe_key(key: &str) -> bool {
             | "model"
             | "label"
             | "message"
+            | "action"
+            | "mode"
+            | "expected_config_hash"
     )
 }
 

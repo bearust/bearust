@@ -29,7 +29,15 @@ impl LlmProvider for TestProvider {
             id: "x".into(),
             choices: vec![ChatChoice {
                 message: ChatMessage {
-                    content: "ok".into(),
+                    content: serde_json::json!({
+                        "workflow": "incident_explanation",
+                        "summary": "Validated test insight",
+                        "severity": "info",
+                        "signals": [],
+                        "reason_ids": [],
+                        "score": 0
+                    })
+                    .to_string(),
                 },
             }],
         })

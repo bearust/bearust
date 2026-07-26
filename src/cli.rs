@@ -262,10 +262,12 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let mut control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
         control_state.ai_advisor = Arc::new(
-            crate::ai_advisor::AiAdvisorService::from_env().unwrap_or_else(|error| {
-                tracing::warn!(event = "ai_advisor_disabled", reason = %error);
-                crate::ai_advisor::AiAdvisorService::disabled()
-            }),
+            crate::ai_advisor::AiAdvisorService::from_env()
+                .map(crate::ai_advisor::AiAdvisorService::with_configured_provider)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(event = "ai_advisor_disabled", reason = %error);
+                    crate::ai_advisor::AiAdvisorService::disabled()
+                }),
         );
         control_state.prometheus = config.prometheus.clone();
         // Construct the Raft runtime only for an explicitly configured,
