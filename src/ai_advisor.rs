@@ -768,9 +768,11 @@ impl AiAdvisorService {
                 error_code: None,
             },
         );
-        self.metrics.record_job("queued");
         match runtime.sender.try_send((id.clone(), request)) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.metrics.record_job("queued");
+                Ok(())
+            }
             Err(_) => {
                 remove_queued_result(&runtime.results, &id);
                 Err(AdvisorErrorCode::Busy)
