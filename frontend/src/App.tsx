@@ -49,6 +49,7 @@ import {
 } from "./i18n";
 import {
   Alert,
+  AiAdvisorSection,
   Button,
   Card,
   Field,
@@ -2678,6 +2679,7 @@ function Dashboard({
       </header>
       <div className="mx-auto grid max-w-7xl gap-6">
         {error && <Alert variant="danger">{error}</Alert>}
+        <AiAdvisorSection user={user} onChanged={() => void refresh()} />
         <CertificateTable user={user} onChanged={() => void refresh()} />
         <WafSection user={user} refreshToken={wafRefresh} />
         <BotProtectionSection user={user} refreshToken={wafRefresh} />
