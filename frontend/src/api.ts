@@ -42,6 +42,20 @@ export type AnomalyRecord = { id: number; host_id: number; rule: AnomalyRule; se
 export type TuningMode = 'monitor' | 'recommend' | 'enforce';
 export type TuningPolicy = { mode: TuningMode; max_delta_percent: number; cooldown_seconds: number; min_confidence: number };
 export type PolicyRecommendation = { id: number; host_id: number; patch: { capacity?: number; refill_per_second?: number; waf_mode?: WafMode }; confidence: number; reason: string; created_at: string; applied: boolean };
+export type AdvisorWorkflow = 'incident_explanation'|'security_summary'|'rule_tuning'|'configuration_draft';
+export type AdvisorStatus = { enabled: boolean };
+export type AdvisorJobStatus = 'queued'|'running'|'completed'|'failed'|'approved'|'rejected'|'expired';
+export type AdvisorErrorCode = 'advisor_disabled'|'advisor_busy'|'advisor_timeout'|'advisor_provider_unavailable'|'advisor_invalid_response'|'advisor_response_too_large'|'advisor_circuit_open'|'advisor_invalid_request'|'advisor_stale_draft'|'advisor_expired';
+export type AdvisorInsightWorkflow = 'incident_explanation'|'security_summary'|'rule_tuning';
+export type InsightSeverity = 'info'|'warning'|'critical';
+export type AdvisorInsightResult = { workflow: AdvisorInsightWorkflow; summary: string; severity: InsightSeverity; signals: string[]; reason_ids: string[]; score: number };
+export type AdvisorDraftResult = { workflow: 'configuration_draft'; summary: string; action: 'set_waf_mode'; mode: WafMode; expected_config_hash: string };
+export type AdvisorResult = AdvisorInsightResult | AdvisorDraftResult;
+export type AdvisorJob = { job_id: string; workflow: AdvisorWorkflow; status: AdvisorJobStatus; redacted_input: Record<string, unknown>; redacted_result: AdvisorResult | null; error_code: AdvisorErrorCode | null; provider_model: string; config_version: string; config_hash: string; created_at: string; updated_at: string; expires_at: string; draft_decision: 'approved'|'rejected'|null; draft_decided_at: string | null };
+export type AdvisorInsight = AdvisorJob;
+export type AdvisorDraft = AdvisorJob & { workflow: 'configuration_draft'; redacted_result: AdvisorDraftResult | null };
+export type AdvisorJobPage = { items: AdvisorInsight[]; page: number; page_size: number; total: number };
+export type AdvisorAnalysisRequest = { workflow: AdvisorWorkflow; host_id?: number; from?: string; to?: string; command?: string };
 
 export type ApiError = Error & { status: number; code?: string };
 
@@ -75,5 +89,6 @@ export const api={
  getRecommendations:()=>request<PolicyRecommendation[]>('/api/adaptive-tuning/recommendations'),
  applyRecommendation:(id:number)=>request<void>(`/api/adaptive-tuning/recommendations/${id}/apply`,{method:'POST'}),
  rollbackRecommendation:(id:number)=>request<void>(`/api/adaptive-tuning/recommendations/${id}/rollback`,{method:'POST'}),
- emergencyDisableTuning:()=>request<{emergency_disabled:boolean}>('/api/adaptive-tuning/emergency-disable',{method:'POST'})
+ emergencyDisableTuning:()=>request<{emergency_disabled:boolean}>('/api/adaptive-tuning/emergency-disable',{method:'POST'}),
+ aiAdvisorStatus:()=>request<AdvisorStatus>('/api/ai-advisor/status'),startAiAnalysis:(x:AdvisorAnalysisRequest)=>request<AdvisorJob>('/api/ai-advisor/analyses',{method:'POST',body:JSON.stringify(x)}),listAiInsights:(query:{page?:number;page_size?:number}={})=>{const p=new URLSearchParams();for(const [k,v] of Object.entries(query)){if(v!==undefined)p.set(k,String(v))}const s=p.toString();return request<AdvisorJobPage>(`/api/ai-advisor/insights${s?`?${s}`:''}`)},approveAiDraft:(id:string)=>request<AdvisorDraft>(`/api/ai-advisor/drafts/${id}/approve`,{method:'POST'}),rejectAiDraft:(id:string)=>request<AdvisorDraft>(`/api/ai-advisor/drafts/${id}/reject`,{method:'POST'})
 };

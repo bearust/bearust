@@ -15,6 +15,7 @@ export type RealtimeLoaders = Partial<{
   baseline: () => unknown | Promise<unknown>;
   anomaly: () => unknown | Promise<unknown>;
   adaptiveTuning: () => unknown | Promise<unknown>;
+  aiAdvisor: () => unknown | Promise<unknown>;
 }>;
 
 const EVENT_LOADERS: Record<string, keyof RealtimeLoaders> = {
@@ -30,6 +31,7 @@ const EVENT_LOADERS: Record<string, keyof RealtimeLoaders> = {
   "baseline.changed": "baseline",
   "anomaly.changed": "anomaly",
   "adaptive_tuning.changed": "adaptiveTuning",
+  "ai_advisor.changed": "aiAdvisor",
 };
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;

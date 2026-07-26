@@ -1,6 +1,53 @@
 use pingora_http::RequestHeader;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type InitError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Bounded, provider-agnostic AI advisor counters for operational dashboards.
+/// Labels are fixed enum values; request text, user IDs, model names, and
+/// provider responses are intentionally never accepted here.
+#[derive(Debug, Default)]
+pub struct AdvisorMetrics {
+    queued: AtomicU64,
+    completed: AtomicU64,
+    failed: AtomicU64,
+    breaker_open: AtomicU64,
+    approved: AtomicU64,
+    rejected: AtomicU64,
+}
+
+impl AdvisorMetrics {
+    pub fn record_job(&self, status: &str) {
+        match status {
+            "queued" => self.queued.fetch_add(1, Ordering::Relaxed),
+            "completed" => self.completed.fetch_add(1, Ordering::Relaxed),
+            "failed" => self.failed.fetch_add(1, Ordering::Relaxed),
+            "breaker_open" => self.breaker_open.fetch_add(1, Ordering::Relaxed),
+            "approved" => self.approved.fetch_add(1, Ordering::Relaxed),
+            "rejected" => self.rejected.fetch_add(1, Ordering::Relaxed),
+            _ => 0,
+        };
+    }
+
+    pub fn render_prometheus(&self) -> String {
+        format!(
+            "# TYPE bearust_ai_advisor_jobs_total counter\n\
+bearust_ai_advisor_jobs_total{{status=\"queued\"}} {}\n\
+bearust_ai_advisor_jobs_total{{status=\"completed\"}} {}\n\
+bearust_ai_advisor_jobs_total{{status=\"failed\"}} {}\n\
+bearust_ai_advisor_jobs_total{{status=\"breaker_open\"}} {}\n\
+# TYPE bearust_ai_advisor_approval_total counter\n\
+bearust_ai_advisor_approval_total{{decision=\"approved\"}} {}\n\
+bearust_ai_advisor_approval_total{{decision=\"rejected\"}} {}\n",
+            self.queued.load(Ordering::Relaxed),
+            self.completed.load(Ordering::Relaxed),
+            self.failed.load(Ordering::Relaxed),
+            self.breaker_open.load(Ordering::Relaxed),
+            self.approved.load(Ordering::Relaxed),
+            self.rejected.load(Ordering::Relaxed),
+        )
+    }
+}
 
 pub fn init(json: bool, filter: &str) -> Result<(), InitError> {
     let filter = tracing_subscriber::EnvFilter::try_new(filter)
@@ -148,5 +195,17 @@ mod tests {
         assert_eq!(classify_error(&error), "connect");
         let error = Error::explain(ErrorType::HTTPStatus(503), "no healthy upstream");
         assert_eq!(classify_error(&error), "no_healthy_upstream");
+    }
+
+    #[test]
+    fn advisor_metrics_use_only_fixed_labels() {
+        let metrics = AdvisorMetrics::default();
+        metrics.record_job("queued");
+        metrics.record_job("approved");
+        metrics.record_job("user-controlled-value");
+        let output = metrics.render_prometheus();
+        assert!(output.contains("status=\"queued\""));
+        assert!(output.contains("decision=\"approved\""));
+        assert!(!output.contains("user-controlled-value"));
     }
 }

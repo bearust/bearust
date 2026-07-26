@@ -3,6 +3,7 @@
     clippy::collapsible_if,
     clippy::possible_missing_else
 )]
+pub mod ai_advisor;
 pub mod audit;
 pub mod auth;
 pub mod locale;
@@ -11,6 +12,7 @@ pub mod rbac;
 pub mod realtime;
 pub mod repository;
 use crate::acme::{AcmeEnvironment, AcmeManager, LetsEncryptClient};
+use crate::ai_advisor::AiAdvisorService;
 use crate::analytics::{AnalyticsCollector, AnalyticsFilter};
 use crate::analytics_prometheus::PrometheusConfig;
 use crate::bot_challenge::{unix_now, ChallengeService};
@@ -83,6 +85,11 @@ pub struct AppState {
     pub cluster: Arc<crate::cluster::ClusterService>,
     pub config_gateway: Option<ConfigCommandGateway>,
     pub prometheus: PrometheusConfig,
+    /// Optional AI advisor state. The default service is disabled and has no
+    /// worker, keeping the proxy and ordinary control-plane startup isolated
+    /// from provider availability.
+    pub ai_advisor: Arc<AiAdvisorService>,
+    pub advisor_metrics: Arc<crate::observability::AdvisorMetrics>,
 }
 
 impl AppState {
@@ -402,6 +409,8 @@ pub async fn build_state(
         )),
         config_gateway: None,
         prometheus: PrometheusConfig::default(),
+        ai_advisor: Arc::new(AiAdvisorService::disabled()),
+        advisor_metrics: Arc::new(crate::observability::AdvisorMetrics::default()),
     })
 }
 
@@ -459,6 +468,20 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
             post(verify_bot_challenge).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/api/events", get(events))
+        .route("/api/ai-advisor/status", get(ai_advisor::status))
+        .route(
+            "/api/ai-advisor/analyses",
+            post(ai_advisor::create_analysis).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route("/api/ai-advisor/insights", get(ai_advisor::list_insights))
+        .route(
+            "/api/ai-advisor/drafts/{id}/approve",
+            post(ai_advisor::approve_draft),
+        )
+        .route(
+            "/api/ai-advisor/drafts/{id}/reject",
+            post(ai_advisor::reject_draft),
+        )
         .route("/api/analytics/summary", get(analytics_summary))
         .route("/api/analytics/timeseries", get(analytics_timeseries))
         .route("/api/analytics/baseline", get(analytics_baseline))
@@ -576,16 +599,57 @@ async fn prometheus_metrics(State(s): State<AppState>, h: HeaderMap) -> Response
             return StatusCode::UNAUTHORIZED.into_response();
         }
     }
-    match crate::analytics_prometheus::render(&s.analytics.snapshot(), &s.prometheus) {
-        Ok(body) => (
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; version=0.0.4",
-            )],
-            body,
-        )
-            .into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let advisor = s.advisor_metrics.render_prometheus();
+    let advisor = complete_lines(&advisor, s.prometheus.max_output_bytes);
+    let analytics_budget = s.prometheus.max_output_bytes.saturating_sub(advisor.len());
+    let analytics = if analytics_budget == 0 {
+        String::new()
+    } else {
+        let mut config = s.prometheus.clone();
+        config.max_output_bytes = analytics_budget;
+        match crate::analytics_prometheus::render(&s.analytics.snapshot(), &config) {
+            Ok(body) => body,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        }
+    };
+    let mut body = analytics;
+    body.push_str(&advisor);
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        body,
+    )
+        .into_response()
+}
+
+fn complete_lines(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_owned();
+    }
+    value
+        .get(..limit)
+        .and_then(|prefix| prefix.rfind('\n').map(|idx| &prefix[..idx + 1]))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[cfg(test)]
+mod advisor_metrics_tests {
+    use super::complete_lines;
+    use crate::observability::AdvisorMetrics;
+
+    #[test]
+    fn advisor_metrics_keep_fixed_samples_and_respect_cap() {
+        let metrics = AdvisorMetrics::default();
+        metrics.record_job("approved");
+        let rendered = metrics.render_prometheus();
+        let capped = complete_lines(&rendered, rendered.len());
+        assert_eq!(capped, rendered);
+        assert!(capped.contains("decision=\"approved\""));
+        assert!(complete_lines("first\nsecond\n", 7).ends_with('\n'));
+        assert!(complete_lines("first\nsecond\n", 7).len() <= 7);
     }
 }
 

@@ -23,6 +23,16 @@ backup and restore plan before changing a production database URL.
 
 Focused TDD: add a minimal regression test, run it to observe failure, implement the smallest change, then rerun the focused test and the full suite.
 
+## AI Advisor development
+
+Leave `LLM_API_URL` and `LLM_API_KEY` unset for the default disabled mode. For
+manual testing use a local OpenAI-compatible endpoint and keep credentials in
+an untracked `.env`. Optional settings are `LLM_MODEL`,
+`LLM_REQUEST_TIMEOUT_SECONDS`, `LLM_RESPONSE_LIMIT_BYTES`, `LLM_QUEUE_CAPACITY`,
+`LLM_WORKER_COUNT`, and `LLM_CIRCUIT_FAILURE_THRESHOLD`. Inputs are redacted
+aggregate snapshots and bounded in-memory results; provider/user data never
+belongs in logs or metrics. Unset both variables and restart to test disablement.
+
 ## Localization contribution workflow
 
 The supported dashboard locale codes are `en` (English, the source and

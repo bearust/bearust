@@ -3,9 +3,9 @@ use crate::bot_protection::{
 };
 use crate::cluster_raft::{CommandResult, ConfigCommand};
 use crate::control_plane::models::{
-    AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AuditLogItem, AuditLogPage,
-    AuditLogQuery, CertificateMetadata, ProxyHost, RateLimitConfig, RoleDetail,
-    RolePermissionScope, User, WafAction, WafConfig, WafMode, WafRule,
+    AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AdvisorDraftDecision, AdvisorJobPage,
+    AdvisorJobRecord, AuditLogItem, AuditLogPage, AuditLogQuery, CertificateMetadata, ProxyHost,
+    RateLimitConfig, RoleDetail, RolePermissionScope, User, WafAction, WafConfig, WafMode, WafRule,
 };
 use crate::control_plane::rbac::Role;
 use crate::rate_limit::{RateLimitAction, RateLimitKeyScope, RateLimitPolicy};
@@ -15,6 +15,28 @@ use sqlx::{any::AnyPoolOptions, Row};
 use std::hash::{Hash, Hasher};
 use std::sync::Once;
 use uuid::Uuid;
+
+pub const MAX_ADVISOR_PERSISTED_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug)]
+pub struct NewAdvisorJob {
+    pub job_id: crate::ai_advisor::AdvisorJobId,
+    pub owner_id: i64,
+    pub workflow: crate::ai_advisor::AdvisorWorkflow,
+    pub redacted_input: crate::ai_advisor::RedactedValue,
+    pub provider_model: String,
+    pub config_version: String,
+    pub config_hash: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WafDraftApprovalOutcome {
+    Applied { applied_at: String },
+    StaleConfig,
+    DraftConflict,
+}
 
 /// Database pool type used by the control plane once all repositories have
 /// been migrated to SQLx's backend-agnostic driver.
@@ -220,6 +242,16 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
         Err(error) if error.to_string().to_ascii_lowercase().contains("already exists") || error.to_string().to_ascii_lowercase().contains("duplicate") => {}
         Err(error) => return Err(error),
     }
+    for statement in [
+        "CREATE INDEX idx_ai_advisor_jobs_owner_status_created ON ai_advisor_jobs (owner_id, status, created_at)",
+        "CREATE INDEX idx_ai_advisor_jobs_owner_created ON ai_advisor_jobs (owner_id, created_at)",
+    ] {
+        match sqlx::query(statement).execute(pool).await {
+            Ok(_) => {}
+            Err(error) if error.to_string().to_ascii_lowercase().contains("already exists") || error.to_string().to_ascii_lowercase().contains("duplicate") => {}
+            Err(error) => return Err(error),
+        }
+    }
 
     // The first release created these columns inline. Add them for those
     // databases without dropping or rewriting existing rows. Each backend
@@ -259,6 +291,9 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
         "system.settings.manage",
         "sessions.revoke",
         "bot_protection.manage",
+        "ai_advisor.read",
+        "ai_advisor.request",
+        "ai_advisor.approve",
     ];
     for key in permissions {
         sqlx::query(
@@ -301,11 +336,18 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
                 "certificates.read",
                 "certificates.write",
                 "audit_logs.read",
+                "ai_advisor.read",
+                "ai_advisor.request",
             ],
         ),
         (
             "viewer",
-            &["proxy_hosts.read", "certificates.read", "audit_logs.read"],
+            &[
+                "proxy_hosts.read",
+                "certificates.read",
+                "audit_logs.read",
+                "ai_advisor.read",
+            ],
         ),
     ];
     for (slug, keys) in assignments {
@@ -2205,6 +2247,316 @@ pub async fn list_audit_logs(
     })
 }
 
+fn advisor_workflow(value: &str) -> Result<crate::ai_advisor::AdvisorWorkflow, sqlx::Error> {
+    match value {
+        "incident_explanation" => Ok(crate::ai_advisor::AdvisorWorkflow::IncidentExplanation),
+        "security_summary" => Ok(crate::ai_advisor::AdvisorWorkflow::SecuritySummary),
+        "rule_tuning" => Ok(crate::ai_advisor::AdvisorWorkflow::RuleTuning),
+        "configuration_draft" => Ok(crate::ai_advisor::AdvisorWorkflow::ConfigurationDraft),
+        _ => Err(sqlx::Error::Protocol("invalid advisor workflow".into())),
+    }
+}
+
+fn advisor_status(value: &str) -> Result<crate::ai_advisor::AdvisorJobStatus, sqlx::Error> {
+    use crate::ai_advisor::AdvisorJobStatus::*;
+    match value {
+        "queued" => Ok(Queued),
+        "running" => Ok(Running),
+        "completed" => Ok(Completed),
+        "failed" => Ok(Failed),
+        "approved" => Ok(Approved),
+        "rejected" => Ok(Rejected),
+        "expired" => Ok(Expired),
+        _ => Err(sqlx::Error::Protocol("invalid advisor status".into())),
+    }
+}
+
+fn advisor_error(
+    value: Option<String>,
+) -> Result<Option<crate::ai_advisor::AdvisorErrorCode>, sqlx::Error> {
+    use crate::ai_advisor::AdvisorErrorCode::*;
+    match value.as_deref() {
+        None => Ok(None),
+        Some("advisor_disabled") => Ok(Some(Disabled)),
+        Some("advisor_busy") => Ok(Some(Busy)),
+        Some("advisor_timeout") => Ok(Some(Timeout)),
+        Some("advisor_provider_unavailable") => Ok(Some(ProviderUnavailable)),
+        Some("advisor_invalid_response") => Ok(Some(InvalidResponse)),
+        Some("advisor_response_too_large") => Ok(Some(ResponseTooLarge)),
+        Some("advisor_circuit_open") => Ok(Some(CircuitOpen)),
+        Some("advisor_invalid_request") => Ok(Some(InvalidRequest)),
+        Some("advisor_stale_draft") => Ok(Some(StaleDraft)),
+        Some("advisor_expired") => Ok(Some(Expired)),
+        _ => Err(sqlx::Error::Protocol("invalid advisor error".into())),
+    }
+}
+
+fn advisor_record(row: &sqlx::any::AnyRow) -> Result<AdvisorJobRecord, sqlx::Error> {
+    Ok(AdvisorJobRecord {
+        job_id: crate::ai_advisor::AdvisorJobId(row.get("job_id")),
+        owner_id: row.get("owner_id"),
+        workflow: advisor_workflow(&row.get::<String, _>("workflow"))?,
+        status: advisor_status(&row.get::<String, _>("status"))?,
+        redacted_input: row.get("redacted_input"),
+        redacted_result: row.get("redacted_result"),
+        error_code: advisor_error(row.get("error_code"))?,
+        provider_model: row.get("provider_model"),
+        config_version: row.get("config_version"),
+        config_hash: row.get("config_hash"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        expires_at: row.get("expires_at"),
+        draft_decision: match row.get::<Option<String>, _>("draft_decision").as_deref() {
+            Some("approved") => Some(AdvisorDraftDecision::Approved),
+            Some("rejected") => Some(AdvisorDraftDecision::Rejected),
+            None => None,
+            _ => return Err(sqlx::Error::Protocol("invalid draft decision".into())),
+        },
+        draft_decided_at: row
+            .get::<Option<String>, _>("draft_decided_at")
+            .map(|value| {
+                chrono::DateTime::parse_from_rfc3339(&value)
+                    .map(|date| date.with_timezone(&chrono::Utc))
+                    .map_err(|_| sqlx::Error::Protocol("invalid draft decision timestamp".into()))
+            })
+            .transpose()?,
+    })
+}
+
+fn redacted_json(value: &crate::ai_advisor::RedactedValue) -> Result<String, sqlx::Error> {
+    let encoded = serde_json::to_string(value.value())
+        .map_err(|_| sqlx::Error::Protocol("invalid redacted JSON".into()))?;
+    if encoded.len() > MAX_ADVISOR_PERSISTED_BYTES {
+        return Err(sqlx::Error::Protocol("redacted JSON exceeds bound".into()));
+    }
+    Ok(encoded)
+}
+
+fn valid_job_id(value: &str) -> bool {
+    value.len() <= 64 && uuid::Uuid::parse_str(value).is_ok()
+}
+fn valid_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+pub async fn insert_advisor_job(
+    pool: &DbPool,
+    job: &NewAdvisorJob,
+) -> Result<AdvisorJobRecord, sqlx::Error> {
+    if job.owner_id <= 0
+        || !valid_job_id(&job.job_id.0)
+        || redacted_json(&job.redacted_input).is_err()
+        || job.provider_model.is_empty()
+        || job.provider_model.len() > 128
+        || job.config_version.is_empty()
+        || job.config_version.len() > 64
+        || !valid_hash(&job.config_hash)
+    {
+        return Err(sqlx::Error::Protocol("invalid bounded advisor job".into()));
+    }
+    let now = job.created_at.to_rfc3339();
+    let redacted_input = redacted_json(&job.redacted_input)?;
+    sqlx::query("INSERT INTO ai_advisor_jobs(job_id,owner_id,workflow,status,redacted_input,provider_model,config_version,config_hash,created_at,updated_at,expires_at) VALUES(?,?,?,'queued',?,?,?,?,?,?,?)")
+        .bind(&job.job_id.0).bind(job.owner_id).bind(serde_json::to_value(&job.workflow).unwrap().as_str().unwrap()).bind(&redacted_input).bind(&job.provider_model).bind(&job.config_version).bind(&job.config_hash).bind(&now).bind(&now).bind(job.expires_at.to_rfc3339()).execute(pool).await?;
+    get_advisor_job(pool, &job.job_id)
+        .await?
+        .ok_or_else(|| sqlx::Error::Protocol("advisor job missing after insert".into()))
+}
+
+pub async fn claim_advisor_job(
+    pool: &DbPool,
+    job_id: &crate::ai_advisor::AdvisorJobId,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, sqlx::Error> {
+    let now = now.to_rfc3339();
+    sqlx::query("UPDATE ai_advisor_jobs SET status='expired',updated_at=? WHERE job_id=? AND status='queued' AND expires_at<=?").bind(&now).bind(&job_id.0).bind(&now).execute(pool).await?;
+    Ok(sqlx::query("UPDATE ai_advisor_jobs SET status='running',updated_at=? WHERE job_id=? AND status='queued' AND expires_at>?").bind(&now).bind(&job_id.0).bind(&now).execute(pool).await?.rows_affected() == 1)
+}
+
+pub async fn finish_advisor_job(
+    pool: &DbPool,
+    job_id: &crate::ai_advisor::AdvisorJobId,
+    status: crate::ai_advisor::AdvisorJobStatus,
+    result: Option<&crate::ai_advisor::RedactedValue>,
+    error: Option<crate::ai_advisor::AdvisorErrorCode>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, sqlx::Error> {
+    if !matches!(
+        status,
+        crate::ai_advisor::AdvisorJobStatus::Completed
+            | crate::ai_advisor::AdvisorJobStatus::Failed
+            | crate::ai_advisor::AdvisorJobStatus::Expired
+    ) || result.is_some_and(|value| redacted_json(value).is_err())
+    {
+        return Err(sqlx::Error::Protocol("invalid advisor finish".into()));
+    }
+    let status = serde_json::to_value(status)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let error = error
+        .and_then(|value| serde_json::to_value(value).ok())
+        .and_then(|value| value.as_str().map(str::to_owned));
+    let result = result.map(redacted_json).transpose()?;
+    Ok(sqlx::query("UPDATE ai_advisor_jobs SET status=?,redacted_result=?,error_code=?,updated_at=? WHERE job_id=? AND status='running'").bind(status).bind(result).bind(error).bind(now.to_rfc3339()).bind(&job_id.0).execute(pool).await?.rows_affected() == 1)
+}
+
+pub async fn mark_advisor_draft_decision(
+    pool: &DbPool,
+    job_id: &crate::ai_advisor::AdvisorJobId,
+    approved: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, sqlx::Error> {
+    let status = if approved { "approved" } else { "rejected" };
+    Ok(sqlx::query("UPDATE ai_advisor_jobs SET status=?,draft_decision=?,draft_decided_at=?,updated_at=? WHERE job_id=? AND workflow='configuration_draft' AND status='completed'").bind(status).bind(status).bind(now.to_rfc3339()).bind(now.to_rfc3339()).bind(&job_id.0).execute(pool).await?.rows_affected() == 1)
+}
+
+/// Atomically changes the WAF mode and consumes a completed advisor draft.
+/// The outcome distinguishes a changed WAF version from a consumed draft.
+pub async fn approve_waf_draft_atomic(
+    pool: &DbPool,
+    job_id: &crate::ai_advisor::AdvisorJobId,
+    expected_config_version: &str,
+    expected_config_hash: &str,
+    expected_mode: WafMode,
+    next_mode: WafMode,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<WafDraftApprovalOutcome, sqlx::Error> {
+    if !valid_job_id(&job_id.0)
+        || expected_config_version.is_empty()
+        || expected_config_version.len() > 64
+        || !valid_hash(expected_config_hash)
+    {
+        return Err(sqlx::Error::Protocol(
+            "invalid atomic advisor approval".into(),
+        ));
+    }
+    let applied_at = now.to_rfc3339();
+    let mut tx = pool.begin().await?;
+    let waf_rows = sqlx::query(
+        "UPDATE waf_config SET mode=?,updated_at=? WHERE id=1 AND mode=? AND updated_at=?",
+    )
+    .bind(waf_mode_value(next_mode))
+    .bind(&applied_at)
+    .bind(waf_mode_value(expected_mode))
+    .bind(expected_config_version)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if waf_rows != 1 {
+        tx.rollback().await?;
+        return Ok(WafDraftApprovalOutcome::StaleConfig);
+    }
+    let decision = sqlx::query(
+        "UPDATE ai_advisor_jobs SET status='approved',draft_decision='approved',draft_decided_at=?,updated_at=? \
+         WHERE job_id=? AND workflow='configuration_draft' AND status='completed' \
+         AND config_version=? AND config_hash=? AND expires_at>?",
+    )
+    .bind(&applied_at)
+    .bind(&applied_at)
+    .bind(&job_id.0)
+    .bind(expected_config_version)
+    .bind(expected_config_hash)
+    .bind(&applied_at)
+    .execute(&mut *tx)
+    .await;
+    let decision_rows = match decision {
+        Ok(result) => result.rows_affected(),
+        Err(error) => {
+            tx.rollback().await?;
+            return Err(error);
+        }
+    };
+    if decision_rows != 1 {
+        tx.rollback().await?;
+        return Ok(WafDraftApprovalOutcome::DraftConflict);
+    }
+    tx.commit().await?;
+    Ok(WafDraftApprovalOutcome::Applied { applied_at })
+}
+
+/// Restores the exact prior WAF configuration and reopens the draft only when
+/// both records still match the approval produced by `approve_waf_draft_atomic`.
+pub async fn compensate_waf_draft_approval(
+    pool: &DbPool,
+    job_id: &crate::ai_advisor::AdvisorJobId,
+    applied_mode: WafMode,
+    applied_at: &str,
+    prior_config: &WafConfig,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, sqlx::Error> {
+    if !valid_job_id(&job_id.0)
+        || applied_at.is_empty()
+        || applied_at.len() > 64
+        || prior_config.updated_at.is_empty()
+        || prior_config.updated_at.len() > 64
+    {
+        return Err(sqlx::Error::Protocol(
+            "invalid advisor approval compensation".into(),
+        ));
+    }
+    let mut tx = pool.begin().await?;
+    let waf_rows = sqlx::query(
+        "UPDATE waf_config SET mode=?,updated_at=? WHERE id=1 AND mode=? AND updated_at=?",
+    )
+    .bind(waf_mode_value(prior_config.mode))
+    .bind(&prior_config.updated_at)
+    .bind(waf_mode_value(applied_mode))
+    .bind(applied_at)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if waf_rows != 1 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let draft_rows = sqlx::query(
+        "UPDATE ai_advisor_jobs SET status='completed',draft_decision=NULL,draft_decided_at=NULL,updated_at=? \
+         WHERE job_id=? AND workflow='configuration_draft' AND status='approved' AND draft_decided_at=?",
+    )
+    .bind(now.to_rfc3339())
+    .bind(&job_id.0)
+    .bind(applied_at)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if draft_rows != 1 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub async fn get_advisor_job(
+    pool: &DbPool,
+    job_id: &crate::ai_advisor::AdvisorJobId,
+) -> Result<Option<AdvisorJobRecord>, sqlx::Error> {
+    sqlx::query("SELECT job_id,owner_id,workflow,status,redacted_input,redacted_result,error_code,provider_model,config_version,config_hash,created_at,updated_at,expires_at,draft_decision,draft_decided_at FROM ai_advisor_jobs WHERE job_id=?").bind(&job_id.0).fetch_optional(pool).await?.map(|row| advisor_record(&row)).transpose()
+}
+
+pub async fn list_advisor_jobs(
+    pool: &DbPool,
+    owner_id: i64,
+    page_size: u32,
+    page: u32,
+) -> Result<AdvisorJobPage, sqlx::Error> {
+    let page = page.max(1);
+    let page_size = page_size.clamp(1, 100);
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_advisor_jobs WHERE owner_id=?")
+        .bind(owner_id)
+        .fetch_one(pool)
+        .await?;
+    let rows = sqlx::query("SELECT job_id,owner_id,workflow,status,redacted_input,redacted_result,error_code,provider_model,config_version,config_hash,created_at,updated_at,expires_at,draft_decision,draft_decided_at FROM ai_advisor_jobs WHERE owner_id=? ORDER BY created_at DESC,job_id DESC LIMIT ? OFFSET ?").bind(owner_id).bind(page_size as i64).bind((page as i64 - 1) * page_size as i64).fetch_all(pool).await?;
+    Ok(AdvisorJobPage {
+        items: rows.iter().map(advisor_record).collect::<Result<_, _>>()?,
+        page,
+        page_size,
+        total,
+    })
+}
+
 pub async fn count_active_admins(pool: &DbPool) -> Result<i64, sqlx::Error> {
     Ok(
         sqlx::query("SELECT COUNT(*) c FROM users WHERE role='admin' AND disabled=0")
@@ -3088,4 +3440,65 @@ pub async fn rollback_tuning_recommendation_tx(
     tx.commit().await?;
 
     Ok(Some((host_id, restored_rl)))
+}
+
+#[cfg(test)]
+mod advisor_persistence_tests {
+    use super::*;
+    use crate::ai_advisor::{
+        AdvisorErrorCode, AdvisorJobId, AdvisorJobStatus, AdvisorWorkflow, RedactedValue, Redactor,
+    };
+    use chrono::{Duration, Utc};
+
+    fn advisor_job(redacted_input: RedactedValue) -> NewAdvisorJob {
+        let now = Utc::now();
+        NewAdvisorJob {
+            job_id: AdvisorJobId::new(),
+            owner_id: 1,
+            workflow: AdvisorWorkflow::IncidentExplanation,
+            redacted_input,
+            provider_model: "test-model".into(),
+            config_version: "v1".into(),
+            config_hash: "a".repeat(64),
+            created_at: now,
+            expires_at: now + Duration::hours(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn advisor_rejects_oversized_sealed_input_and_result() {
+        let pool = connect("sqlite::memory:").await.unwrap();
+        migrate(&pool).await.unwrap();
+        let oversized = RedactedValue::for_repository_test(serde_json::json!({
+            "message": "x".repeat(MAX_ADVISOR_PERSISTED_BYTES + 1)
+        }));
+        assert!(serde_json::to_vec(oversized.value()).unwrap().len() > MAX_ADVISOR_PERSISTED_BYTES);
+        assert!(insert_advisor_job(&pool, &advisor_job(oversized.clone()))
+            .await
+            .is_err());
+
+        let safe = Redactor::default().redact(&serde_json::json!({"message": "safe"}));
+        let inserted = insert_advisor_job(&pool, &advisor_job(safe)).await.unwrap();
+        assert!(claim_advisor_job(&pool, &inserted.job_id, Utc::now())
+            .await
+            .unwrap());
+        assert!(finish_advisor_job(
+            &pool,
+            &inserted.job_id,
+            AdvisorJobStatus::Expired,
+            Some(&oversized),
+            Some(AdvisorErrorCode::Expired),
+            Utc::now(),
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            get_advisor_job(&pool, &inserted.job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            AdvisorJobStatus::Running
+        );
+    }
 }

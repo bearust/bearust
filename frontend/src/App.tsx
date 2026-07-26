@@ -57,6 +57,7 @@ import {
   TextareaField,
   ThemeSelect,
 } from "./ui";
+import { AiAdvisorSection } from "./aiAdvisor";
 import { useTranslation } from "react-i18next";
 
 void initI18n();
@@ -2562,6 +2563,7 @@ function Dashboard({
   const [baselineRefresh, setBaselineRefresh] = useState(0);
   const [anomalyRefresh, setAnomalyRefresh] = useState(0);
   const [adaptiveTuningRefresh, setAdaptiveTuningRefresh] = useState(0);
+  const [aiAdvisorRefresh, setAiAdvisorRefresh] = useState(0);
   const [form, setForm] = useState({
     name: "",
     domain: "",
@@ -2626,6 +2628,7 @@ function Dashboard({
     baseline: () => setBaselineRefresh((value) => value + 1),
     anomaly: () => setAnomalyRefresh((value) => value + 1),
     adaptiveTuning: () => setAdaptiveTuningRefresh((value) => value + 1),
+    aiAdvisor: () => setAiAdvisorRefresh((value) => value + 1),
   });
   const refresh = async () => {
     try {
@@ -2678,6 +2681,7 @@ function Dashboard({
       </header>
       <div className="mx-auto grid max-w-7xl gap-6">
         {error && <Alert variant="danger">{error}</Alert>}
+        <AiAdvisorSection user={user} refreshToken={aiAdvisorRefresh} onChanged={() => void refresh()} />
         <CertificateTable user={user} onChanged={() => void refresh()} />
         <WafSection user={user} refreshToken={wafRefresh} />
         <BotProtectionSection user={user} refreshToken={wafRefresh} />

@@ -10,3 +10,6 @@ Phase 7B Task 7: complete (final verification documented; targeted 42/42, clippy
 Phase 7B final review: complete (base 6023c15..d9124a5; no blocking Phase 7B defect)
 Phase 7B broad-review hardening: complete (trusted source gate, HMAC fingerprints, bounded telemetry, migration/users baselines fixed; targeted tests pass)
 Phase 7B trusted-crawler safety deferral: complete (CRUD/config delivered; proxy bypass disabled until signed ingress marker)
+
+Phase 12 Task 8: complete (Playwright advisor spec: disabled/enabled UI, redaction, admin approval, viewer read-only, en/id/ja, 390/768/1280 responsive; 11/11 pass)
+Phase 12 acceptance gates: frontend 24 files/161 tests, build, locale validation, focused Rust advisor tests/control-plane tests, clippy, fmt, and diff check pass.

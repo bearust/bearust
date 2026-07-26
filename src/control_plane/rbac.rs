@@ -39,6 +39,9 @@ pub enum Permission {
     SystemSettingsManage,
     SessionsRevoke,
     BotProtectionManage,
+    AiAdvisorRead,
+    AiAdvisorRequest,
+    AiAdvisorApprove,
 }
 impl Permission {
     pub const fn key(self) -> &'static str {
@@ -54,6 +57,9 @@ impl Permission {
             Self::SystemSettingsManage => "system.settings.manage",
             Self::SessionsRevoke => "sessions.revoke",
             Self::BotProtectionManage => "bot_protection.manage",
+            Self::AiAdvisorRead => "ai_advisor.read",
+            Self::AiAdvisorRequest => "ai_advisor.request",
+            Self::AiAdvisorApprove => "ai_advisor.approve",
         }
     }
 }
@@ -82,6 +88,9 @@ pub fn allowed(role: Role, permission: Permission) -> bool {
         | Permission::SystemSettingsManage
         | Permission::SessionsRevoke
         | Permission::BotProtectionManage => matches!(role, Role::Admin),
+        Permission::AiAdvisorRead => true,
+        Permission::AiAdvisorRequest => matches!(role, Role::Admin | Role::Operator),
+        Permission::AiAdvisorApprove => matches!(role, Role::Admin),
     }
 }
 

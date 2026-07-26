@@ -3,7 +3,7 @@ mod support;
 use bearust::control_plane::repository;
 use uuid::Uuid;
 
-const PERMISSIONS: [&str; 10] = [
+const PERMISSIONS: [&str; 14] = [
     "proxy_hosts.read",
     "proxy_hosts.write",
     "certificates.read",
@@ -14,6 +14,10 @@ const PERMISSIONS: [&str; 10] = [
     "audit_logs.export",
     "system.settings.manage",
     "sessions.revoke",
+    "bot_protection.manage",
+    "ai_advisor.read",
+    "ai_advisor.request",
+    "ai_advisor.approve",
 ];
 
 #[tokio::test]

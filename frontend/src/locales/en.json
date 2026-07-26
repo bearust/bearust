@@ -332,5 +332,15 @@
     "details": "Details",
     "empty": "No audit log entries found.",
     "pageOf": "Page {{page}} · {{total}} total"
+  },
+  "advisor": {
+    "title": "AI Advisor", "workflow": "Workflow", "command": "Question or context", "start": "Analyze", "refresh": "Refresh", "loading": "Working…", "empty": "No advisor insights yet.", "redactionNotice": "Inputs and results are redacted before provider access.", "approve": "Approve draft", "reject": "Reject draft",
+    "workflows": { "incident_explanation": "Incident explanation", "security_summary": "Security summary", "rule_tuning": "Rule tuning", "configuration_draft": "Configuration draft" },
+    "status": { "queued": "Queued", "running": "Running", "completed": "Completed", "failed": "Failed", "approved": "Approved", "rejected": "Rejected", "expired": "Expired" },
+    "errors": { "generic": "The advisor request could not be completed.", "advisorError": "The advisor request could not be completed.", "advisor_busy": "The advisor queue is busy; try again shortly.", "advisor_provider_unavailable": "The advisor provider is unavailable.", "advisor_circuit_open": "The advisor provider circuit is open; try again later.", "advisor_stale_draft": "This draft is stale; refresh insights and try again.", "advisor_expired": "This draft has expired." },
+    "accessibility": { "refresh": "Refresh advisor insights", "result": "Advisor insight result" },
+    "result": { "severity": "Severity", "score": "Score", "signals": "Signals", "unavailable": "No safe redacted result is available." },
+    "severities": { "info": "Info", "warning": "Warning", "critical": "Critical" },
+    "diff": { "from": "Previous mode", "to": "Proposed mode", "redacted": "Redacted", "modes": { "monitor-only": "Monitor-only", "block": "Block" } }
   }
 }

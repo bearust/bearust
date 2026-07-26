@@ -19,6 +19,14 @@ services:
       RUST_LOG: debug
       BEARUST_SETUP_TOKEN: "${BEARUST_SETUP_TOKEN:-}"
       DATABASE_URL: "${DATABASE_URL:-sqlite:///data/bearust.sqlite}"
+      LLM_API_URL: "${LLM_API_URL:-}"
+      LLM_API_KEY: "${LLM_API_KEY:-}"
+      LLM_MODEL: "${LLM_MODEL:-}"
+      LLM_REQUEST_TIMEOUT_SECONDS: "${LLM_REQUEST_TIMEOUT_SECONDS:-}"
+      LLM_QUEUE_CAPACITY: "${LLM_QUEUE_CAPACITY:-}"
+      LLM_RESPONSE_LIMIT_BYTES: "${LLM_RESPONSE_LIMIT_BYTES:-}"
+      LLM_WORKER_COUNT: "${LLM_WORKER_COUNT:-}"
+      LLM_CIRCUIT_FAILURE_THRESHOLD: "${LLM_CIRCUIT_FAILURE_THRESHOLD:-}"
     depends_on:
       postgres:
         condition: service_healthy
