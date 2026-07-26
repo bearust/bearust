@@ -154,7 +154,7 @@ async fn admin_role_lifecycle_and_audits_are_safe() {
             .fetch_one(&db)
             .await
             .unwrap(),
-        11
+        14
     );
     let (status, body, _) = request(app.clone(), "POST", "/api/roles", Some(&admin), r#"{"slug":" Security_Auditor ","name":"Security Auditor","permissions":["audit_logs.read"]}"#).await;
     assert_eq!(status, StatusCode::CREATED);
