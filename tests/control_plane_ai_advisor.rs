@@ -5,6 +5,8 @@ use bearust::ai_advisor::{
 };
 use bearust::control_plane::{rbac::Permission, repository};
 use chrono::{Duration, Utc};
+use futures_util::FutureExt;
+use std::panic::AssertUnwindSafe;
 
 async fn pool() -> repository::DbPool {
     let pool = repository::connect("sqlite::memory:").await.unwrap();
@@ -54,14 +56,57 @@ async fn advisor_migration_is_idempotent_and_seeds_builtin_permissions() {
         ]
     );
     assert_eq!(Permission::AiAdvisorRead.key(), "ai_advisor.read");
-    let admin = repository::role_by_slug(&pool, "admin")
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(repository::role_permissions(&pool, admin.id)
-        .await
-        .unwrap()
-        .contains(&"ai_advisor.approve".to_owned()));
+    for (slug, expected) in [
+        (
+            "admin",
+            vec![
+                "ai_advisor.approve",
+                "ai_advisor.read",
+                "ai_advisor.request",
+                "audit_logs.export",
+                "audit_logs.read",
+                "bot_protection.manage",
+                "certificates.read",
+                "certificates.write",
+                "proxy_hosts.read",
+                "proxy_hosts.write",
+                "roles.manage",
+                "sessions.revoke",
+                "system.settings.manage",
+                "users.manage",
+            ],
+        ),
+        (
+            "operator",
+            vec![
+                "ai_advisor.read",
+                "ai_advisor.request",
+                "audit_logs.read",
+                "certificates.read",
+                "certificates.write",
+                "proxy_hosts.read",
+                "proxy_hosts.write",
+            ],
+        ),
+        (
+            "viewer",
+            vec![
+                "ai_advisor.read",
+                "audit_logs.read",
+                "certificates.read",
+                "proxy_hosts.read",
+            ],
+        ),
+    ] {
+        let role = repository::role_by_slug(&pool, slug)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            repository::role_permissions(&pool, role.id).await.unwrap(),
+            expected
+        );
+    }
 }
 
 #[test]
@@ -139,17 +184,8 @@ async fn advisor_job_transitions_are_guarded_and_terminal_once() {
 }
 
 #[tokio::test]
-async fn advisor_repository_rejects_oversized_persistence_and_expires_jobs() {
+async fn advisor_repository_expires_queued_jobs() {
     let pool = pool().await;
-    let mut oversized = job("job-oversized", 7, AdvisorWorkflow::IncidentExplanation);
-    oversized.redacted_input = redacted(&format!(
-        r#"{{"message":"{}"}}"#,
-        "x".repeat(repository::MAX_ADVISOR_PERSISTED_BYTES + 1)
-    ));
-    assert!(repository::insert_advisor_job(&pool, &oversized)
-        .await
-        .is_ok());
-
     let mut expired = job("job-expired", 7, AdvisorWorkflow::IncidentExplanation);
     expired.expires_at = Utc::now() - Duration::seconds(1);
     repository::insert_advisor_job(&pool, &expired)
@@ -179,22 +215,52 @@ async fn advisor_repository_only_persists_validated_redacted_json_and_metadata()
     assert!(!custom.value().to_string().contains("tenant-value"));
     raw.redacted_input = custom;
     assert!(repository::insert_advisor_job(&pool, &raw).await.is_ok());
-    let mut invalid = job("not-a-uuid", 7, AdvisorWorkflow::IncidentExplanation);
-    invalid.job_id = AdvisorJobId("not-a-uuid".into());
-    assert!(repository::insert_advisor_job(&pool, &invalid)
-        .await
-        .is_err());
-    invalid.job_id = AdvisorJobId::new();
-    invalid.config_hash = "z".repeat(64);
-    assert!(repository::insert_advisor_job(&pool, &invalid)
-        .await
-        .is_err());
     let valid = job(
         &AdvisorJobId::new().0,
         7,
         AdvisorWorkflow::IncidentExplanation,
     );
     assert!(repository::insert_advisor_job(&pool, &valid).await.is_ok());
+
+    let mut invalid_id = valid.clone();
+    invalid_id.job_id = AdvisorJobId("not-a-uuid".into());
+    assert!(repository::insert_advisor_job(&pool, &invalid_id)
+        .await
+        .is_err());
+
+    for model in ["", &"m".repeat(129)] {
+        let mut invalid = valid.clone();
+        invalid.job_id = AdvisorJobId::new();
+        invalid.provider_model = model.to_owned();
+        assert!(repository::insert_advisor_job(&pool, &invalid)
+            .await
+            .is_err());
+    }
+    for version in ["", &"v".repeat(65)] {
+        let mut invalid = valid.clone();
+        invalid.job_id = AdvisorJobId::new();
+        invalid.config_version = version.to_owned();
+        assert!(repository::insert_advisor_job(&pool, &invalid)
+            .await
+            .is_err());
+    }
+    for hash in ["", &"a".repeat(63), &"a".repeat(65), &"z".repeat(64)] {
+        let mut invalid = valid.clone();
+        invalid.job_id = AdvisorJobId::new();
+        invalid.config_hash = hash.to_owned();
+        assert!(repository::insert_advisor_job(&pool, &invalid)
+            .await
+            .is_err());
+    }
+
+    let mut exact_bounds = valid;
+    exact_bounds.job_id = AdvisorJobId::new();
+    exact_bounds.provider_model = "m".repeat(128);
+    exact_bounds.config_version = "v".repeat(64);
+    exact_bounds.config_hash = "f".repeat(64);
+    assert!(repository::insert_advisor_job(&pool, &exact_bounds)
+        .await
+        .is_ok());
 }
 
 #[tokio::test]
@@ -293,42 +359,51 @@ async fn advisor_rejected_and_running_expired_transitions_are_guarded() {
             .status,
         AdvisorJobStatus::Rejected
     );
-    let mut expired = job(
+    let expired = job(
         &AdvisorJobId::new().0,
         9,
         AdvisorWorkflow::IncidentExplanation,
     );
-    expired.expires_at = Utc::now() - Duration::seconds(1);
     let expired = repository::insert_advisor_job(&pool, &expired)
         .await
         .unwrap();
     assert!(
-        !repository::claim_advisor_job(&pool, &expired.job_id, Utc::now())
+        repository::claim_advisor_job(&pool, &expired.job_id, Utc::now())
             .await
             .unwrap()
     );
-    assert_eq!(
-        repository::get_advisor_job(&pool, &expired.job_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        AdvisorJobStatus::Expired
-    );
+    assert!(repository::finish_advisor_job(
+        &pool,
+        &expired.job_id,
+        AdvisorJobStatus::Expired,
+        None,
+        Some(AdvisorErrorCode::Expired),
+        Utc::now(),
+    )
+    .await
+    .unwrap());
+    let expired = repository::get_advisor_job(&pool, &expired.job_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(expired.status, AdvisorJobStatus::Expired);
+    assert_eq!(expired.error_code, Some(AdvisorErrorCode::Expired));
+    assert_eq!(expired.redacted_result, None);
 }
 
 #[tokio::test]
 async fn advisor_jobs_paginate_by_owner_newest_first() {
     let pool = pool().await;
-    let ids = [
-        AdvisorJobId::new(),
-        AdvisorJobId::new(),
-        AdvisorJobId::new(),
+    let ascending_ids = [
+        AdvisorJobId("00000000-0000-4000-8000-000000000001".into()),
+        AdvisorJobId("00000000-0000-4000-8000-000000000002".into()),
+        AdvisorJobId("00000000-0000-4000-8000-000000000003".into()),
     ];
-    for (index, id) in ids.iter().enumerate() {
+    let tied_created_at = Utc::now();
+    for id in &ascending_ids {
         let mut record = job(&id.0, 7, AdvisorWorkflow::SecuritySummary);
         record.job_id = id.clone();
-        record.created_at = Utc::now() - Duration::seconds(index as i64);
+        record.created_at = tied_created_at;
         repository::insert_advisor_job(&pool, &record)
             .await
             .unwrap();
@@ -342,10 +417,10 @@ async fn advisor_jobs_paginate_by_owner_newest_first() {
     let page = repository::list_advisor_jobs(&pool, 7, 2, 1).await.unwrap();
     assert_eq!(page.total, 3);
     assert_eq!(page.items.len(), 2);
-    assert_eq!(page.items[0].job_id, ids[0]);
-    assert_eq!(page.items[1].job_id, ids[1]);
+    assert_eq!(page.items[0].job_id, ascending_ids[2]);
+    assert_eq!(page.items[1].job_id, ascending_ids[1]);
     let page2 = repository::list_advisor_jobs(&pool, 7, 2, 2).await.unwrap();
-    assert_eq!(page2.items[0].job_id, ids[2]);
+    assert_eq!(page2.items[0].job_id, ascending_ids[0]);
 }
 
 #[tokio::test]
@@ -363,86 +438,93 @@ async fn external_advisor_migration_skips_without_opt_in_database() {
     repository::migrate(&pool)
         .await
         .unwrap_or_else(|_| panic!("repeat external migration {target}"));
-    let owner_id = (Utc::now()
-        .timestamp_nanos_opt()
-        .unwrap_or_default()
-        .unsigned_abs()
-        % 2_000_000_000) as i64
-        + 1000;
+    let owner_id = (uuid::Uuid::new_v4().as_u128() % (i64::MAX as u128 - 1)) as i64 + 1;
     let first_id = AdvisorJobId::new();
-    let inserted = repository::insert_advisor_job(
-        &pool,
-        &job(&first_id.0, owner_id, AdvisorWorkflow::IncidentExplanation),
-    )
-    .await
-    .unwrap();
-    assert!(
-        repository::claim_advisor_job(&pool, &inserted.job_id, Utc::now())
-            .await
-            .unwrap()
-    );
-    assert!(repository::finish_advisor_job(
-        &pool,
-        &inserted.job_id,
-        AdvisorJobStatus::Completed,
-        Some(&redacted(r#"{"message":"ok"}"#)),
-        None,
-        Utc::now()
-    )
-    .await
-    .unwrap());
-    assert!(repository::get_advisor_job(&pool, &inserted.job_id)
-        .await
-        .unwrap()
-        .is_some());
-    assert_eq!(
-        repository::list_advisor_jobs(&pool, owner_id, 1, 10)
-            .await
-            .unwrap()
-            .total,
-        2
-    );
-    let draft = repository::insert_advisor_job(
-        &pool,
-        &job(
-            &AdvisorJobId::new().0,
-            owner_id,
-            AdvisorWorkflow::ConfigurationDraft,
-        ),
-    )
-    .await
-    .unwrap();
-    assert!(
-        repository::claim_advisor_job(&pool, &draft.job_id, Utc::now())
-            .await
-            .unwrap()
-    );
-    assert!(repository::finish_advisor_job(
-        &pool,
-        &draft.job_id,
-        AdvisorJobStatus::Completed,
-        Some(&redacted(r#"{"message":"draft"}"#)),
-        None,
-        Utc::now()
-    )
-    .await
-    .unwrap());
-    assert!(
-        repository::mark_advisor_draft_decision(&pool, &draft.job_id, true, Utc::now())
-            .await
-            .unwrap()
-    );
-    sqlx::query("DELETE FROM ai_advisor_jobs WHERE owner_id=?")
-        .bind(owner_id)
-        .execute(&pool)
+    let lifecycle = AssertUnwindSafe(async {
+        let inserted = repository::insert_advisor_job(
+            &pool,
+            &job(&first_id.0, owner_id, AdvisorWorkflow::IncidentExplanation),
+        )
         .await
         .unwrap();
-    assert_eq!(
-        repository::list_advisor_jobs(&pool, owner_id, 1, 10)
+        assert!(
+            repository::claim_advisor_job(&pool, &inserted.job_id, Utc::now())
+                .await
+                .unwrap()
+        );
+        assert!(repository::finish_advisor_job(
+            &pool,
+            &inserted.job_id,
+            AdvisorJobStatus::Completed,
+            Some(&redacted(r#"{"message":"ok"}"#)),
+            None,
+            Utc::now()
+        )
+        .await
+        .unwrap());
+        assert!(repository::get_advisor_job(&pool, &inserted.job_id)
             .await
             .unwrap()
-            .total,
-        0
-    );
+            .is_some());
+        assert_eq!(
+            repository::list_advisor_jobs(&pool, owner_id, 10, 1)
+                .await
+                .unwrap()
+                .total,
+            1
+        );
+
+        let draft_id = AdvisorJobId::new();
+        let draft = repository::insert_advisor_job(
+            &pool,
+            &job(&draft_id.0, owner_id, AdvisorWorkflow::ConfigurationDraft),
+        )
+        .await
+        .unwrap();
+        assert!(
+            repository::claim_advisor_job(&pool, &draft.job_id, Utc::now())
+                .await
+                .unwrap()
+        );
+        assert!(repository::finish_advisor_job(
+            &pool,
+            &draft.job_id,
+            AdvisorJobStatus::Completed,
+            Some(&redacted(r#"{"message":"draft"}"#)),
+            None,
+            Utc::now()
+        )
+        .await
+        .unwrap());
+        assert!(
+            repository::mark_advisor_draft_decision(&pool, &draft.job_id, true, Utc::now())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            repository::list_advisor_jobs(&pool, owner_id, 10, 1)
+                .await
+                .unwrap()
+                .total,
+            2
+        );
+    })
+    .catch_unwind()
+    .await;
+
+    let cleanup = sqlx::query("DELETE FROM ai_advisor_jobs WHERE owner_id=?")
+        .bind(owner_id)
+        .execute(&pool)
+        .await;
+    let remaining = repository::list_advisor_jobs(&pool, owner_id, 10, 1).await;
     pool.close().await;
+
+    if let Err(panic) = lifecycle {
+        if let Err(error) = cleanup {
+            eprintln!("external advisor cleanup also failed: {error}");
+        }
+        std::panic::resume_unwind(panic);
+    }
+    cleanup.unwrap();
+    assert_eq!(remaining.unwrap().total, 0);
 }

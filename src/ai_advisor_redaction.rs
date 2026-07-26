@@ -48,6 +48,15 @@ impl RedactedValue {
     pub fn correlation_hash(&self) -> &str {
         &self.correlation_hash
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_repository_test(value: Value) -> Self {
+        let encoded = serde_json::to_vec(&value).unwrap_or_default();
+        Self {
+            value,
+            correlation_hash: hex::encode(Sha256::digest(&encoded)),
+        }
+    }
 }
 
 impl fmt::Debug for RedactedValue {

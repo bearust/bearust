@@ -3317,3 +3317,64 @@ pub async fn rollback_tuning_recommendation_tx(
 
     Ok(Some((host_id, restored_rl)))
 }
+
+#[cfg(test)]
+mod advisor_persistence_tests {
+    use super::*;
+    use crate::ai_advisor::{
+        AdvisorErrorCode, AdvisorJobId, AdvisorJobStatus, AdvisorWorkflow, RedactedValue, Redactor,
+    };
+    use chrono::{Duration, Utc};
+
+    fn advisor_job(redacted_input: RedactedValue) -> NewAdvisorJob {
+        let now = Utc::now();
+        NewAdvisorJob {
+            job_id: AdvisorJobId::new(),
+            owner_id: 1,
+            workflow: AdvisorWorkflow::IncidentExplanation,
+            redacted_input,
+            provider_model: "test-model".into(),
+            config_version: "v1".into(),
+            config_hash: "a".repeat(64),
+            created_at: now,
+            expires_at: now + Duration::hours(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn advisor_rejects_oversized_sealed_input_and_result() {
+        let pool = connect("sqlite::memory:").await.unwrap();
+        migrate(&pool).await.unwrap();
+        let oversized = RedactedValue::for_repository_test(serde_json::json!({
+            "message": "x".repeat(MAX_ADVISOR_PERSISTED_BYTES + 1)
+        }));
+        assert!(serde_json::to_vec(oversized.value()).unwrap().len() > MAX_ADVISOR_PERSISTED_BYTES);
+        assert!(insert_advisor_job(&pool, &advisor_job(oversized.clone()))
+            .await
+            .is_err());
+
+        let safe = Redactor::default().redact(&serde_json::json!({"message": "safe"}));
+        let inserted = insert_advisor_job(&pool, &advisor_job(safe)).await.unwrap();
+        assert!(claim_advisor_job(&pool, &inserted.job_id, Utc::now())
+            .await
+            .unwrap());
+        assert!(finish_advisor_job(
+            &pool,
+            &inserted.job_id,
+            AdvisorJobStatus::Expired,
+            Some(&oversized),
+            Some(AdvisorErrorCode::Expired),
+            Utc::now(),
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            get_advisor_job(&pool, &inserted.job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            AdvisorJobStatus::Running
+        );
+    }
+}
