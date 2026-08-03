@@ -49,4 +49,45 @@ as a rollback copy. Never paste `DATABASE_URL` values containing passwords into
 logs, issue reports, or support bundles; redact credentials before sharing
 Compose output or diagnostic archives.
 
+## Optional WASM plugins (Phase 13A)
+
+Production deployments keep plugins disabled unless a reviewed local module is
+required. The default is `[plugins].enabled = false` with `directory =
+"./plugins"`; when enabled, mount a dedicated read-only plugin directory below
+the container and set an explicit absolute path in the TOML configuration:
+
+```toml
+[plugins]
+enabled = true
+directory = "/etc/bearust/plugins"
+max_plugins = 64
+max_module_bytes = 16777216
+max_memory_pages = 256
+max_fuel = 10000000
+invocation_timeout_ms = 1000
+max_output_bytes = 65536
+```
+
+The directory layout is one child per plugin (`plugin.toml` and one `.wasm`
+module). Manifests use ABI version `1`, allow only `health_check`, and declare
+bounded memory pages, fuel, timeout, and output limits. The runtime provides no
+WASI, filesystem, network, environment, clock, random, database, or proxy
+request access. It canonicalizes module paths beneath the configured root and
+rejects traversal and symlink escapes.
+
+After startup, administrators can use the authenticated control-plane API:
+`GET /api/plugins` and `POST /api/plugins/reload` for status/reload,
+`POST /api/plugins/{id}/enable` or `/disable`, `DELETE /api/plugins/{id}`, and
+`POST /api/plugins/{id}/health-check`. `plugins.read` permits listing and health
+checks; `plugins.manage` permits lifecycle changes. The API exposes only
+bounded metadata (including SHA-256 digest and safe error code), never paths,
+manifest text, module bytes, runtime errors, request data, or secrets.
+
+Invalid configuration, compilation errors, traps, timeouts, fuel exhaustion,
+and memory limits disable/isolate the affected plugin. The proxy remains
+available and startup continues. Phase 13A has **no signature verification,
+registry, or remote download**; deploy only reviewed local modules and keep
+the directory read-only. The public SDK and traffic hooks are deferred to
+Phase 13B/13C; registry/signature enforcement is Phase 14 work.
+
 JSON logs include event, level, timestamp, request identifiers, route/upstream context, and error category. Unhealthy TCP/HTTP backends are removed from selection; no healthy backend returns `503`, while a route/host miss returns `404`. For `404`, verify `Host`, path prefix, and pool. For `503`, inspect health addresses/paths and reachability from the container. Roll back by restoring the prior image tag and config, then restart or issue `SIGHUP`.

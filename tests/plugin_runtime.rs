@@ -38,6 +38,30 @@ fn valid_manifest() {
 }
 
 #[test]
+fn checked_in_health_fixture_is_deterministic_and_loadable() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("health-ok");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/health_ok/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!("fixtures/plugins/health_ok/health_ok.wat")).unwrap();
+    fs::write(plugin.join("health_ok.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 1);
+    assert_eq!(manager.health_check("health-ok").unwrap().status, 1);
+    assert_eq!(manager.list()[0].digest, module_digest(&module));
+}
+
+#[test]
 fn unknown_fields_rejected() {
     assert!(PluginManifest::from_toml(manifest("extra = true").as_bytes()).is_err());
 }
