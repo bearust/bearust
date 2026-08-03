@@ -34,10 +34,10 @@ run (pre-existing failures, if any, are listed explicitly rather than hidden).
 
 ```text
 cargo +nightly fmt -- --check                         PASS
-cargo +nightly clippy --all-targets -- -D warnings   BLOCKED by pre-existing warnings
+cargo +nightly clippy --all-targets -- -D warnings   FAIL (pre-existing unrelated diagnostics)
 DATABASE_URL=sqlite::memory: cargo +nightly test --all-targets  BLOCKED by disk exhaustion
-npm test --prefix frontend -- --run                    BLOCKED: vitest is not installed
-npm run build --prefix frontend                        BLOCKED: tsc is not installed
+npm test --prefix frontend -- --run                    PASS (161 tests)
+npm run build --prefix frontend                        PASS
 npm run validate-locales --prefix frontend             PASS
 git diff --check                                       PASS
 ```
@@ -48,9 +48,9 @@ the linker but exhausted the host filesystem while compiling parallel test
 targets; no test assertion failure was reported. Clippy's only diagnostics are
 pre-existing unrelated warnings in `src/ai_advisor_redaction.rs` (deprecated
 `fetch_update`) and `src/cluster_raft_runtime.rs` (two
-`result_large_err` lints). Frontend test/build dependencies are absent from the
-worktree (`vitest` and `tsc` not found); locale validation passes without
-network access.
+`result_large_err` lints). After installing frontend dependencies, the frontend
+suite passed all 161 tests, the production build passed, and locale validation
+passed.
 
 ## Deferred scope
 

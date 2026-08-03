@@ -58,6 +58,21 @@ module, and the manifest fields/capabilities are documented in the README.
 Do not copy arbitrary third-party WASM into tests or commit generated compiler
 caches.
 
+To exercise a filesystem load manually, compile and copy the deterministic
+fixture into a temporary plugin directory (requires `wat2wasm`):
+
+```bash
+tmp_plugin="$(mktemp -d)/health-ok"
+mkdir -p "$tmp_plugin"
+wat2wasm tests/fixtures/plugins/health_ok/health_ok.wat \
+  -o "$tmp_plugin/health_ok.wasm"
+cp tests/fixtures/plugins/health_ok/plugin.toml "$tmp_plugin/plugin.toml"
+```
+
+Point `[plugins].directory` at the temporary parent, run the authenticated
+reload/health-check calls, and remove the temporary directory afterward. The
+generated binary is intentionally not checked in.
+
 Use the authenticated API to verify lifecycle behavior: `GET /api/plugins`,
 `POST /api/plugins/reload`, `POST /api/plugins/{id}/enable`,
 `POST /api/plugins/{id}/disable`, `DELETE /api/plugins/{id}`, and

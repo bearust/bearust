@@ -833,9 +833,10 @@ Phase 12 is complete as an optional, bounded, fail-open advisor. It remains
 disabled unless explicitly configured with both provider URL and key; inputs,
 results, queues, and telemetry are bounded and redacted.
 
-### Phase 13A status: WASM plugin runtime foundation (complete)
+### Phase 13A status: WASM plugin runtime foundation (implementation complete; acceptance gate pending)
 
-Phase 13A is complete. BeaRust now has an optional, deny-by-default local
+The Phase 13A implementation is complete. BeaRust now has an optional,
+deny-by-default local
 `wasmtime` runtime with versioned `plugin.toml` validation, canonicalized path
 containment, the health-check-only ABI, fuel/memory/timeout/output limits,
 atomic load/enable/disable/unload snapshots, and authenticated lifecycle APIs.
@@ -843,6 +844,12 @@ Plugins receive no WASI, filesystem, network, environment, database, secret, or
 proxy request access. Invalid manifests, traps, resource exhaustion, and
 runtime initialization failures are isolated from startup and proxy traffic;
 status, audit, realtime, and metrics surfaces are bounded and redacted.
+
+The final acceptance gate remains pending: nightly Clippy reports three
+pre-existing unrelated diagnostics, and the full all-targets Rust run was
+blocked by host disk exhaustion while compiling parallel test targets. The
+focused plugin suite passes; frontend tests/build/locale validation pass after
+installing frontend dependencies.
 
 The default is `plugins.enabled = false`. Phase 13A deliberately has no public
 SDK, traffic hooks, registry, remote download, signature verification, or
