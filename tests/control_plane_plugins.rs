@@ -141,6 +141,11 @@ async fn admin_can_run_bounded_plugin_lifecycle() {
         json_request(app.clone(), "POST", "/api/plugins/reload", "", Some(&admin)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["loaded"], 1);
+    let (status, body) = request(app.clone(), "GET", "/api/plugins", Some(&admin)).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = serde_json::from_str::<Value>(&body).unwrap();
+    assert!(listed[0].get("source_dir").is_none());
+    assert!(listed[0].get("module").is_none());
     let (status, body) = request(
         app.clone(),
         "POST",
