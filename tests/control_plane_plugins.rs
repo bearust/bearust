@@ -7,7 +7,7 @@ use axum::{
 };
 use bearust::{
     config::PluginConfig,
-    control_plane::{build_state, repository, router},
+    control_plane::{audit, build_state, repository, router},
     plugin_runtime::PluginManager,
 };
 use serde_json::Value;
@@ -19,11 +19,17 @@ async fn app() -> (Router, repository::DbPool, tempfile::TempDir) {
     let mut state = build_state("sqlite::memory:", dir.path(), "setup-token")
         .await
         .unwrap();
-    state.plugin_manager = PluginManager::new(PluginConfig {
+    let manager = PluginManager::new(PluginConfig {
         enabled: true,
         directory: dir.path().join("plugins"),
         ..PluginConfig::default()
     });
+    manager.attach_realtime(state.realtime.clone());
+    manager.attach_audit_sink(std::sync::Arc::new(audit::PluginAuditDbSink::new(
+        state.db.clone(),
+        state.realtime.clone(),
+    )));
+    state.plugin_manager = manager;
     (router(state.clone()), state.db, dir)
 }
 
@@ -123,7 +129,7 @@ max_output_bytes = 1024
 
 #[tokio::test]
 async fn admin_can_run_bounded_plugin_lifecycle() {
-    let (app, _db, dir) = app().await;
+    let (app, db, dir) = app().await;
     write_plugin(dir.path());
     assert_eq!(json_request(app.clone(), "POST", "/api/setup/initialize", r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#, None).await.0, StatusCode::CREATED);
     let admin = login(app.clone(), "admin@example.com", "correct horse battery").await;
@@ -141,6 +147,12 @@ async fn admin_can_run_bounded_plugin_lifecycle() {
         json_request(app.clone(), "POST", "/api/plugins/reload", "", Some(&admin)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["loaded"], 1);
+    let audit_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE event='plugin_lifecycle'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(audit_count, 1);
     let (status, body) = request(app.clone(), "GET", "/api/plugins", Some(&admin)).await;
     assert_eq!(status, StatusCode::OK);
     let listed = serde_json::from_str::<Value>(&body).unwrap();
@@ -205,6 +217,12 @@ async fn admin_can_run_bounded_plugin_lifecycle() {
         request(app, "GET", "/api/plugins", Some(&admin)).await.1,
         "[]"
     );
+    let audit_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE event='plugin_lifecycle'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(audit_count, 6);
 }
 
 #[tokio::test]

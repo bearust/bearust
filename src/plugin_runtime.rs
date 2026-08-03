@@ -748,6 +748,16 @@ impl PluginManager {
     }
 
     pub fn reload_from_disk(&self) -> Result<ReloadSummary, PluginError> {
+        self.reload_from_disk_impl(true)
+    }
+
+    /// API handlers use this variant when they persist an actor-aware audit
+    /// row themselves. Metrics and realtime invalidation remain unchanged.
+    pub(crate) fn reload_from_disk_without_audit(&self) -> Result<ReloadSummary, PluginError> {
+        self.reload_from_disk_impl(false)
+    }
+
+    fn reload_from_disk_impl(&self, emit_audit: bool) -> Result<ReloadSummary, PluginError> {
         let result = self.reload_from_disk_inner();
         self.update_loaded_metric();
         match &result {
@@ -758,12 +768,14 @@ impl PluginManager {
                     "failure"
                 };
                 self.record_operation("reload", outcome);
-                self.record_audit(
-                    "all",
-                    "reload",
-                    outcome,
-                    (summary.failed > 0).then_some("partial_failure"),
-                );
+                if emit_audit {
+                    self.record_audit(
+                        "all",
+                        "reload",
+                        outcome,
+                        (summary.failed > 0).then_some("partial_failure"),
+                    );
+                }
                 // reload_from_disk_inner publishes the ArcSwap snapshot before
                 // returning, even for a partial reload. This invalidation is
                 // therefore emitted only after an atomic publication.
@@ -771,7 +783,9 @@ impl PluginManager {
             }
             Err(error) => {
                 self.record_operation("reload", "failure");
-                self.record_audit("all", "reload", "failure", Some(error.code()));
+                if emit_audit {
+                    self.record_audit("all", "reload", "failure", Some(error.code()));
+                }
             }
         }
         result
@@ -996,18 +1010,39 @@ impl PluginManager {
     }
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<PluginStatus, PluginError> {
+        self.set_enabled_impl(id, enabled, true)
+    }
+
+    pub(crate) fn set_enabled_without_audit(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<PluginStatus, PluginError> {
+        self.set_enabled_impl(id, enabled, false)
+    }
+
+    fn set_enabled_impl(
+        &self,
+        id: &str,
+        enabled: bool,
+        emit_audit: bool,
+    ) -> Result<PluginStatus, PluginError> {
         let operation = if enabled { "enable" } else { "disable" };
         let result = self.set_enabled_inner(id, enabled);
         match &result {
             Ok(_) => {
                 self.record_operation(operation, "success");
-                self.record_audit(id, operation, "success", None);
+                if emit_audit {
+                    self.record_audit(id, operation, "success", None);
+                }
                 self.update_loaded_metric();
                 self.publish_changed();
             }
             Err(error) => {
                 self.record_operation(operation, "failure");
-                self.record_audit(id, operation, "failure", Some(error.code()));
+                if emit_audit {
+                    self.record_audit(id, operation, "failure", Some(error.code()));
+                }
             }
         }
         result
@@ -1051,17 +1086,29 @@ impl PluginManager {
     }
 
     pub fn unload(&self, id: &str) -> Result<(), PluginError> {
+        self.unload_impl(id, true)
+    }
+
+    pub(crate) fn unload_without_audit(&self, id: &str) -> Result<(), PluginError> {
+        self.unload_impl(id, false)
+    }
+
+    fn unload_impl(&self, id: &str, emit_audit: bool) -> Result<(), PluginError> {
         let result = self.unload_inner(id);
         match &result {
             Ok(()) => {
                 self.record_operation("unload", "success");
-                self.record_audit(id, "unload", "success", None);
+                if emit_audit {
+                    self.record_audit(id, "unload", "success", None);
+                }
                 self.update_loaded_metric();
                 self.publish_changed();
             }
             Err(error) => {
                 self.record_operation("unload", "failure");
-                self.record_audit(id, "unload", "failure", Some(error.code()));
+                if emit_audit {
+                    self.record_audit(id, "unload", "failure", Some(error.code()));
+                }
             }
         }
         result
@@ -1112,17 +1159,27 @@ impl PluginManager {
     }
 
     pub fn health_check(&self, id: &str) -> Result<HealthResult, PluginError> {
+        self.health_check_impl(id, true)
+    }
+
+    pub(crate) fn health_check_without_audit(&self, id: &str) -> Result<HealthResult, PluginError> {
+        self.health_check_impl(id, false)
+    }
+
+    fn health_check_impl(&self, id: &str, emit_audit: bool) -> Result<HealthResult, PluginError> {
         let result = self.health_check_inner(id);
         self.record_operation(
             "health_check",
             if result.is_ok() { "success" } else { "failure" },
         );
-        self.record_audit(
-            id,
-            "health_check",
-            if result.is_ok() { "success" } else { "failure" },
-            result.as_ref().err().map(PluginError::code),
-        );
+        if emit_audit {
+            self.record_audit(
+                id,
+                "health_check",
+                if result.is_ok() { "success" } else { "failure" },
+                result.as_ref().err().map(PluginError::code),
+            );
+        }
         result
     }
 

@@ -106,7 +106,7 @@ pub async fn reload(State(state): State<AppState>, headers: HeaderMap) -> Respon
         Ok(actor) => actor,
         Err(response) => return response,
     };
-    match state.plugin_manager.reload_from_disk() {
+    match state.plugin_manager.reload_from_disk_without_audit() {
         Ok(summary) => {
             let (outcome, error_code) = if summary.failed == 0 {
                 ("success", None)
@@ -157,7 +157,7 @@ async fn set_enabled(
         return response;
     }
     let operation = if enabled { "enable" } else { "disable" };
-    match state.plugin_manager.set_enabled(&id, enabled) {
+    match state.plugin_manager.set_enabled_without_audit(&id, enabled) {
         Ok(status) => {
             audit::record_plugin_state(&state, Some(actor.id), &id, operation, "success", None)
                 .await;
@@ -198,7 +198,7 @@ pub async fn unload(
     if let Err(response) = validate_id(&id) {
         return response;
     }
-    match state.plugin_manager.unload(&id) {
+    match state.plugin_manager.unload_without_audit(&id) {
         Ok(()) => {
             audit::record_plugin_state(&state, Some(actor.id), &id, "unload", "success", None)
                 .await;
@@ -231,7 +231,7 @@ pub async fn health_check(
     if let Err(response) = validate_id(&id) {
         return response;
     }
-    match state.plugin_manager.health_check(&id) {
+    match state.plugin_manager.health_check_without_audit(&id) {
         Ok(result) => {
             audit::record_plugin_state(
                 &state,
