@@ -344,6 +344,10 @@ fn new_store(engine: &Engine, limits: &PluginLimits) -> Result<Store<StoreState>
         .ok_or(PluginError::MemoryLimit)?;
     let store_limits = StoreLimitsBuilder::new()
         .memory_size(memory_size)
+        .memories(1)
+        .instances(1)
+        .tables(1)
+        .table_elements(1024)
         // Turn failed memory.grow operations into a trap so a plugin cannot
         // silently continue after exceeding its declared server limit.
         .trap_on_grow_failure(true)

@@ -240,6 +240,17 @@ fn engine_rejects_oversized_module_bytes() {
 }
 
 #[test]
+fn engine_rejects_multi_memory_modules() {
+    let error = compile_error(
+        r#"(module
+            (memory 1)
+            (memory 1)
+            (func (export "bearust_abi_version") (result i32) i32.const 1))"#,
+    );
+    assert_eq!(error.code(), "memory_limit");
+}
+
+#[test]
 fn engine_rejects_output_limit_smaller_than_i32_abi() {
     let mut limits = limits();
     limits.max_output_bytes = 3;
