@@ -530,6 +530,98 @@ pub struct ReloadSummary {
     pub failed: usize,
 }
 
+/// Redacted, bounded metadata for a plugin lifecycle audit record. The
+/// constructor is the single boundary for values that may reach an audit
+/// sink; arbitrary paths, digests, and runtime strings are discarded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginAuditEvent {
+    plugin_id: String,
+    operation: String,
+    outcome: String,
+    error_code: Option<String>,
+}
+
+impl PluginAuditEvent {
+    pub fn new(plugin_id: &str, operation: &str, outcome: &str, error_code: Option<&str>) -> Self {
+        Self {
+            plugin_id: sanitize_plugin_id(plugin_id),
+            operation: sanitize_operation(operation),
+            outcome: sanitize_outcome(outcome),
+            error_code: error_code.and_then(sanitize_error_code),
+        }
+    }
+
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    pub fn operation(&self) -> &str {
+        &self.operation
+    }
+
+    pub fn outcome(&self) -> &str {
+        &self.outcome
+    }
+
+    pub fn error_code(&self) -> Option<&str> {
+        self.error_code.as_deref()
+    }
+}
+
+pub trait PluginAuditSink: Send + Sync {
+    fn record(&self, event: &PluginAuditEvent);
+}
+
+fn sanitize_plugin_id(value: &str) -> String {
+    if value.is_empty()
+        || value.len() > MAX_ID_LEN
+        || value.starts_with('-')
+        || value.ends_with('-')
+        || value.contains("--")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        "unavailable".to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn sanitize_operation(value: &str) -> String {
+    match value {
+        "reload" | "enable" | "disable" | "unload" | "health_check" => value.to_owned(),
+        _ => "unknown".to_owned(),
+    }
+}
+
+fn sanitize_outcome(value: &str) -> String {
+    match value {
+        "success" | "failure" => value.to_owned(),
+        _ => "failure".to_owned(),
+    }
+}
+
+fn sanitize_error_code(value: &str) -> Option<String> {
+    let safe = matches!(
+        value,
+        "invalid_manifest"
+            | "abi_mismatch"
+            | "disabled"
+            | "timeout"
+            | "fuel_exhausted"
+            | "memory_limit"
+            | "trap"
+            | "compile_failed"
+            | "not_found"
+            | "duplicate_id"
+            | "max_plugins"
+            | "io_error"
+            | "partial_failure"
+    );
+    safe.then(|| value.to_owned())
+}
+
 struct PluginRecord {
     status: PluginStatus,
     compiled: Option<Arc<CompiledPlugin>>,
@@ -563,6 +655,7 @@ pub struct PluginManager {
     last_errors: Mutex<BTreeMap<String, (String, String)>>,
     metrics: Arc<PluginMetrics>,
     realtime: Mutex<Option<Arc<RealtimeHub>>>,
+    audit_sink: Mutex<Option<Arc<dyn PluginAuditSink>>>,
 }
 
 impl PluginManager {
@@ -584,6 +677,7 @@ impl PluginManager {
             last_errors: Mutex::new(BTreeMap::new()),
             metrics: Arc::new(PluginMetrics::default()),
             realtime: Mutex::new(None),
+            audit_sink: Mutex::new(None),
         })
     }
 
@@ -599,6 +693,12 @@ impl PluginManager {
         Arc::clone(&self.metrics)
     }
 
+    pub fn attach_audit_sink(&self, sink: Arc<dyn PluginAuditSink>) {
+        if let Ok(mut current) = self.audit_sink.lock() {
+            *current = Some(sink);
+        }
+    }
+
     fn record_operation(&self, operation: &str, outcome: &str) {
         self.metrics.record_operation(operation, outcome);
     }
@@ -607,6 +707,21 @@ impl PluginManager {
         if let Ok(sink) = self.realtime.lock() {
             if let Some(realtime) = sink.as_ref() {
                 realtime.publish("plugins.changed");
+            }
+        }
+    }
+
+    fn record_audit(
+        &self,
+        plugin_id: &str,
+        operation: &str,
+        outcome: &str,
+        error_code: Option<&str>,
+    ) {
+        let event = PluginAuditEvent::new(plugin_id, operation, outcome, error_code);
+        if let Ok(sink) = self.audit_sink.lock() {
+            if let Some(sink) = sink.as_ref() {
+                sink.record(&event);
             }
         }
     }
@@ -636,13 +751,28 @@ impl PluginManager {
         let result = self.reload_from_disk_inner();
         self.update_loaded_metric();
         match &result {
-            Ok(summary) if summary.failed == 0 => {
-                self.record_operation("reload", "success");
+            Ok(summary) => {
+                let outcome = if summary.failed == 0 {
+                    "success"
+                } else {
+                    "failure"
+                };
+                self.record_operation("reload", outcome);
+                self.record_audit(
+                    "all",
+                    "reload",
+                    outcome,
+                    (summary.failed > 0).then_some("partial_failure"),
+                );
                 // reload_from_disk_inner publishes the ArcSwap snapshot before
-                // returning, so this event cannot precede the atomic change.
+                // returning, even for a partial reload. This invalidation is
+                // therefore emitted only after an atomic publication.
                 self.publish_changed();
             }
-            _ => self.record_operation("reload", "failure"),
+            Err(error) => {
+                self.record_operation("reload", "failure");
+                self.record_audit("all", "reload", "failure", Some(error.code()));
+            }
         }
         result
     }
@@ -871,10 +1001,14 @@ impl PluginManager {
         match &result {
             Ok(_) => {
                 self.record_operation(operation, "success");
+                self.record_audit(id, operation, "success", None);
                 self.update_loaded_metric();
                 self.publish_changed();
             }
-            Err(_) => self.record_operation(operation, "failure"),
+            Err(error) => {
+                self.record_operation(operation, "failure");
+                self.record_audit(id, operation, "failure", Some(error.code()));
+            }
         }
         result
     }
@@ -921,10 +1055,14 @@ impl PluginManager {
         match &result {
             Ok(()) => {
                 self.record_operation("unload", "success");
+                self.record_audit(id, "unload", "success", None);
                 self.update_loaded_metric();
                 self.publish_changed();
             }
-            Err(_) => self.record_operation("unload", "failure"),
+            Err(error) => {
+                self.record_operation("unload", "failure");
+                self.record_audit(id, "unload", "failure", Some(error.code()));
+            }
         }
         result
     }
@@ -978,6 +1116,12 @@ impl PluginManager {
         self.record_operation(
             "health_check",
             if result.is_ok() { "success" } else { "failure" },
+        );
+        self.record_audit(
+            id,
+            "health_check",
+            if result.is_ok() { "success" } else { "failure" },
+            result.as_ref().err().map(PluginError::code),
         );
         result
     }

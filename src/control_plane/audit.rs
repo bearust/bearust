@@ -36,11 +36,13 @@ pub async fn record_plugin_state(
     outcome: &str,
     error_code: Option<&str>,
 ) {
+    let event =
+        crate::plugin_runtime::PluginAuditEvent::new(plugin_id, operation, outcome, error_code);
     let details = serde_json::json!({
-        "plugin_id": plugin_id,
-        "operation": operation,
-        "outcome": outcome,
-        "error_code": error_code,
+        "plugin_id": event.plugin_id(),
+        "operation": event.operation(),
+        "outcome": event.outcome(),
+        "error_code": event.error_code(),
     })
     .to_string();
     record_state(state, user_id, "plugin_lifecycle", &details).await;
