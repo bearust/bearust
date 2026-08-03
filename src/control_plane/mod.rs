@@ -389,10 +389,12 @@ pub async fn build_state(
         }
     }
 
+    let plugin_manager =
+        crate::plugin_runtime::PluginManager::new(crate::config::PluginConfig::default());
+    plugin_manager.attach_realtime(realtime.clone());
+
     Ok(AppState {
-        plugin_manager: crate::plugin_runtime::PluginManager::new(
-            crate::config::PluginConfig::default(),
-        ),
+        plugin_manager,
         db,
         certificates,
         reloader,
@@ -628,6 +630,14 @@ async fn prometheus_metrics(State(s): State<AppState>, h: HeaderMap) -> Response
     };
     let mut body = analytics;
     body.push_str(&advisor);
+    let plugin_budget = s.prometheus.max_output_bytes.saturating_sub(body.len());
+    if plugin_budget > 0 {
+        let plugin = complete_lines(
+            &s.plugin_manager.metrics().render_prometheus(),
+            plugin_budget,
+        );
+        body.push_str(&plugin);
+    }
     (
         [(
             axum::http::header::CONTENT_TYPE,

@@ -261,7 +261,9 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         tracing::info!(event = "control_plane_start", bind = %config.server.control_bind, setup_token_configured = setup_token_from_env.is_some(), generated_setup_token = setup_token_from_env.is_none());
         let mut control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
-        control_state.plugin_manager = crate::plugin_runtime::PluginManager::new(config.plugins.clone());
+        let plugin_manager = crate::plugin_runtime::PluginManager::new(config.plugins.clone());
+        plugin_manager.attach_realtime(control_state.realtime.clone());
+        control_state.plugin_manager = plugin_manager;
         if config.plugins.enabled {
             match control_state.plugin_manager.reload_from_disk() {
                 Err(error) => {

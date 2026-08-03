@@ -1,5 +1,7 @@
 //! Secure manifest parsing and path validation for WASM plugins.
 use crate::config::PluginConfig;
+use crate::control_plane::realtime::RealtimeHub;
+use crate::observability::PluginMetrics;
 use arc_swap::ArcSwap;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -559,6 +561,8 @@ pub struct PluginManager {
     // an old ArcSwap snapshot must never overwrite diagnostics for a newer
     // module with the same plugin ID.
     last_errors: Mutex<BTreeMap<String, (String, String)>>,
+    metrics: Arc<PluginMetrics>,
+    realtime: Mutex<Option<Arc<RealtimeHub>>>,
 }
 
 impl PluginManager {
@@ -578,7 +582,44 @@ impl PluginManager {
             current: ArcSwap::from_pointee(PluginSnapshot::empty()),
             reload_lock: Mutex::new(()),
             last_errors: Mutex::new(BTreeMap::new()),
+            metrics: Arc::new(PluginMetrics::default()),
+            realtime: Mutex::new(None),
         })
+    }
+
+    /// Attach the bounded control-plane event sink. The sink is optional so
+    /// standalone runtime users do not need a control-plane dependency.
+    pub fn attach_realtime(&self, realtime: Arc<RealtimeHub>) {
+        if let Ok(mut sink) = self.realtime.lock() {
+            *sink = Some(realtime);
+        }
+    }
+
+    pub fn metrics(&self) -> Arc<PluginMetrics> {
+        Arc::clone(&self.metrics)
+    }
+
+    fn record_operation(&self, operation: &str, outcome: &str) {
+        self.metrics.record_operation(operation, outcome);
+    }
+
+    fn publish_changed(&self) {
+        if let Ok(sink) = self.realtime.lock() {
+            if let Some(realtime) = sink.as_ref() {
+                realtime.publish("plugins.changed");
+            }
+        }
+    }
+
+    fn update_loaded_metric(&self) {
+        let loaded = self
+            .current
+            .load_full()
+            .plugins
+            .values()
+            .filter(|record| record.status.loaded)
+            .count();
+        self.metrics.set_loaded(loaded);
     }
 
     fn engine(&self) -> Result<Arc<PluginEngine>, PluginError> {
@@ -592,6 +633,21 @@ impl PluginManager {
     }
 
     pub fn reload_from_disk(&self) -> Result<ReloadSummary, PluginError> {
+        let result = self.reload_from_disk_inner();
+        self.update_loaded_metric();
+        match &result {
+            Ok(summary) if summary.failed == 0 => {
+                self.record_operation("reload", "success");
+                // reload_from_disk_inner publishes the ArcSwap snapshot before
+                // returning, so this event cannot precede the atomic change.
+                self.publish_changed();
+            }
+            _ => self.record_operation("reload", "failure"),
+        }
+        result
+    }
+
+    fn reload_from_disk_inner(&self) -> Result<ReloadSummary, PluginError> {
         let _guard = self
             .reload_lock
             .lock()
@@ -810,6 +866,20 @@ impl PluginManager {
     }
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<PluginStatus, PluginError> {
+        let operation = if enabled { "enable" } else { "disable" };
+        let result = self.set_enabled_inner(id, enabled);
+        match &result {
+            Ok(_) => {
+                self.record_operation(operation, "success");
+                self.update_loaded_metric();
+                self.publish_changed();
+            }
+            Err(_) => self.record_operation(operation, "failure"),
+        }
+        result
+    }
+
+    fn set_enabled_inner(&self, id: &str, enabled: bool) -> Result<PluginStatus, PluginError> {
         let _guard = self
             .reload_lock
             .lock()
@@ -847,6 +917,19 @@ impl PluginManager {
     }
 
     pub fn unload(&self, id: &str) -> Result<(), PluginError> {
+        let result = self.unload_inner(id);
+        match &result {
+            Ok(()) => {
+                self.record_operation("unload", "success");
+                self.update_loaded_metric();
+                self.publish_changed();
+            }
+            Err(_) => self.record_operation("unload", "failure"),
+        }
+        result
+    }
+
+    fn unload_inner(&self, id: &str) -> Result<(), PluginError> {
         let _guard = self
             .reload_lock
             .lock()
@@ -891,6 +974,15 @@ impl PluginManager {
     }
 
     pub fn health_check(&self, id: &str) -> Result<HealthResult, PluginError> {
+        let result = self.health_check_inner(id);
+        self.record_operation(
+            "health_check",
+            if result.is_ok() { "success" } else { "failure" },
+        );
+        result
+    }
+
+    fn health_check_inner(&self, id: &str) -> Result<HealthResult, PluginError> {
         let snapshot = self.current.load_full();
         let record = snapshot.plugins.get(id).ok_or(PluginError::NotFound)?;
         let digest = record.status.digest.clone();

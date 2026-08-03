@@ -4,7 +4,7 @@
 //! `plugin_runtime`; filesystem paths, manifests, module bytes, and runtime
 //! diagnostics never cross the HTTP boundary.
 
-use super::{authorize, current, user_error, AppState};
+use super::{audit, authorize, current, user_error, AppState};
 use crate::control_plane::models::{
     PluginHealthResponse, PluginReloadResponse, PluginStatusResponse, User,
 };
@@ -102,16 +102,44 @@ pub async fn list(State(state): State<AppState>, headers: HeaderMap) -> Response
 }
 
 pub async fn reload(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_permission(&state, &headers, Permission::PluginsManage).await {
-        return response;
-    }
+    let actor = match require_permission(&state, &headers, Permission::PluginsManage).await {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
     match state.plugin_manager.reload_from_disk() {
-        Ok(summary) => Json(PluginReloadResponse {
-            loaded: summary.loaded,
-            failed: summary.failed,
-        })
-        .into_response(),
-        Err(error) => plugin_error(error),
+        Ok(summary) => {
+            let (outcome, error_code) = if summary.failed == 0 {
+                ("success", None)
+            } else {
+                ("failure", Some("partial_failure"))
+            };
+            audit::record_plugin_state(
+                &state,
+                Some(actor.id),
+                "all",
+                "reload",
+                outcome,
+                error_code,
+            )
+            .await;
+            Json(PluginReloadResponse {
+                loaded: summary.loaded,
+                failed: summary.failed,
+            })
+            .into_response()
+        }
+        Err(error) => {
+            audit::record_plugin_state(
+                &state,
+                Some(actor.id),
+                "all",
+                "reload",
+                "failure",
+                Some(error.code()),
+            )
+            .await;
+            plugin_error(error)
+        }
     }
 }
 
@@ -121,15 +149,32 @@ async fn set_enabled(
     Path(id): Path<String>,
     enabled: bool,
 ) -> Response {
-    if let Err(response) = require_permission(&state, &headers, Permission::PluginsManage).await {
-        return response;
-    }
+    let actor = match require_permission(&state, &headers, Permission::PluginsManage).await {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
     if let Err(response) = validate_id(&id) {
         return response;
     }
+    let operation = if enabled { "enable" } else { "disable" };
     match state.plugin_manager.set_enabled(&id, enabled) {
-        Ok(status) => Json(plugin_status(status)).into_response(),
-        Err(error) => plugin_error(error),
+        Ok(status) => {
+            audit::record_plugin_state(&state, Some(actor.id), &id, operation, "success", None)
+                .await;
+            Json(plugin_status(status)).into_response()
+        }
+        Err(error) => {
+            audit::record_plugin_state(
+                &state,
+                Some(actor.id),
+                &id,
+                operation,
+                "failure",
+                Some(error.code()),
+            )
+            .await;
+            plugin_error(error)
+        }
     }
 }
 
@@ -146,15 +191,31 @@ pub async fn unload(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(response) = require_permission(&state, &headers, Permission::PluginsManage).await {
-        return response;
-    }
+    let actor = match require_permission(&state, &headers, Permission::PluginsManage).await {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
     if let Err(response) = validate_id(&id) {
         return response;
     }
     match state.plugin_manager.unload(&id) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => plugin_error(error),
+        Ok(()) => {
+            audit::record_plugin_state(&state, Some(actor.id), &id, "unload", "success", None)
+                .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(error) => {
+            audit::record_plugin_state(
+                &state,
+                Some(actor.id),
+                &id,
+                "unload",
+                "failure",
+                Some(error.code()),
+            )
+            .await;
+            plugin_error(error)
+        }
     }
 }
 
@@ -163,19 +224,42 @@ pub async fn health_check(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(response) = require_permission(&state, &headers, Permission::PluginsRead).await {
-        return response;
-    }
+    let actor = match require_permission(&state, &headers, Permission::PluginsRead).await {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
     if let Err(response) = validate_id(&id) {
         return response;
     }
     match state.plugin_manager.health_check(&id) {
-        Ok(result) => Json(PluginHealthResponse {
-            status: result.status,
-            elapsed_ms: result.elapsed.as_millis().min(u64::MAX as u128) as u64,
-        })
-        .into_response(),
-        Err(error) => plugin_error(error),
+        Ok(result) => {
+            audit::record_plugin_state(
+                &state,
+                Some(actor.id),
+                &id,
+                "health_check",
+                "success",
+                None,
+            )
+            .await;
+            Json(PluginHealthResponse {
+                status: result.status,
+                elapsed_ms: result.elapsed.as_millis().min(u64::MAX as u128) as u64,
+            })
+            .into_response()
+        }
+        Err(error) => {
+            audit::record_plugin_state(
+                &state,
+                Some(actor.id),
+                &id,
+                "health_check",
+                "failure",
+                Some(error.code()),
+            )
+            .await;
+            plugin_error(error)
+        }
     }
 }
 

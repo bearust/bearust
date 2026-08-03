@@ -24,3 +24,24 @@ pub async fn record_state(state: &AppState, user_id: Option<i64>, event: &str, d
     record(&state.db, user_id, event, details).await;
     state.realtime.publish("audit");
 }
+
+/// Records a plugin lifecycle operation using only bounded identifiers and
+/// stable error codes. Paths, digests, manifests, and module contents never
+/// enter audit details.
+pub async fn record_plugin_state(
+    state: &AppState,
+    user_id: Option<i64>,
+    plugin_id: &str,
+    operation: &str,
+    outcome: &str,
+    error_code: Option<&str>,
+) {
+    let details = serde_json::json!({
+        "plugin_id": plugin_id,
+        "operation": operation,
+        "outcome": outcome,
+        "error_code": error_code,
+    })
+    .to_string();
+    record_state(state, user_id, "plugin_lifecycle", &details).await;
+}

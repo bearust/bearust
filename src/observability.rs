@@ -16,6 +16,74 @@ pub struct AdvisorMetrics {
     rejected: AtomicU64,
 }
 
+/// Fixed-cardinality metrics for plugin lifecycle operations. Plugin IDs and
+/// runtime details are intentionally not represented as labels.
+#[derive(Debug, Default)]
+pub struct PluginMetrics {
+    reload_success: AtomicU64,
+    reload_failure: AtomicU64,
+    enable_success: AtomicU64,
+    enable_failure: AtomicU64,
+    disable_success: AtomicU64,
+    disable_failure: AtomicU64,
+    unload_success: AtomicU64,
+    unload_failure: AtomicU64,
+    health_check_success: AtomicU64,
+    health_check_failure: AtomicU64,
+    loaded: AtomicU64,
+}
+
+impl PluginMetrics {
+    pub fn record_operation(&self, operation: &str, outcome: &str) {
+        let counter = match (operation, outcome) {
+            ("reload", "success") => &self.reload_success,
+            ("reload", "failure") => &self.reload_failure,
+            ("enable", "success") => &self.enable_success,
+            ("enable", "failure") => &self.enable_failure,
+            ("disable", "success") => &self.disable_success,
+            ("disable", "failure") => &self.disable_failure,
+            ("unload", "success") => &self.unload_success,
+            ("unload", "failure") => &self.unload_failure,
+            ("health_check", "success") => &self.health_check_success,
+            ("health_check", "failure") => &self.health_check_failure,
+            _ => return,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn set_loaded(&self, loaded: usize) {
+        self.loaded.store(loaded as u64, Ordering::Relaxed);
+    }
+
+    pub fn render_prometheus(&self) -> String {
+        let samples = [
+            ("reload", "success", &self.reload_success),
+            ("reload", "failure", &self.reload_failure),
+            ("enable", "success", &self.enable_success),
+            ("enable", "failure", &self.enable_failure),
+            ("disable", "success", &self.disable_success),
+            ("disable", "failure", &self.disable_failure),
+            ("unload", "success", &self.unload_success),
+            ("unload", "failure", &self.unload_failure),
+            ("health_check", "success", &self.health_check_success),
+            ("health_check", "failure", &self.health_check_failure),
+        ];
+        let mut output = String::from("# TYPE bearust_plugins_operations_total counter\n");
+        for (operation, outcome, value) in samples {
+            output.push_str(&format!(
+                "bearust_plugins_operations_total{{operation=\"{operation}\",outcome=\"{outcome}\"}} {}\n",
+                value.load(Ordering::Relaxed)
+            ));
+        }
+        output.push_str("# TYPE bearust_plugins_loaded gauge\n");
+        output.push_str(&format!(
+            "bearust_plugins_loaded {}\n",
+            self.loaded.load(Ordering::Relaxed)
+        ));
+        output
+    }
+}
+
 impl AdvisorMetrics {
     pub fn record_job(&self, status: &str) {
         match status {
