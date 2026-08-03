@@ -42,6 +42,8 @@ pub enum Permission {
     AiAdvisorRead,
     AiAdvisorRequest,
     AiAdvisorApprove,
+    PluginsRead,
+    PluginsManage,
 }
 impl Permission {
     pub const fn key(self) -> &'static str {
@@ -60,6 +62,8 @@ impl Permission {
             Self::AiAdvisorRead => "ai_advisor.read",
             Self::AiAdvisorRequest => "ai_advisor.request",
             Self::AiAdvisorApprove => "ai_advisor.approve",
+            Self::PluginsRead => "plugins.read",
+            Self::PluginsManage => "plugins.manage",
         }
     }
 }
@@ -91,6 +95,8 @@ pub fn allowed(role: Role, permission: Permission) -> bool {
         Permission::AiAdvisorRead => true,
         Permission::AiAdvisorRequest => matches!(role, Role::Admin | Role::Operator),
         Permission::AiAdvisorApprove => matches!(role, Role::Admin),
+        Permission::PluginsRead => matches!(role, Role::Admin),
+        Permission::PluginsManage => matches!(role, Role::Admin),
     }
 }
 
