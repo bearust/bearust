@@ -1,6 +1,7 @@
+use bearust::config::PluginConfig;
 use bearust::plugin_runtime::{
     module_digest, resolve_module_path, CompiledPlugin, HealthResult, PluginEngine, PluginError,
-    PluginLimits, PluginManifest, PluginPolicy, ValidatedManifest,
+    PluginLimits, PluginManager, PluginManifest, PluginPolicy, ValidatedManifest,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -151,6 +152,237 @@ fn compile_error(wat: &str) -> PluginError {
         Ok(_) => panic!("module unexpectedly compiled"),
         Err(error) => error,
     }
+}
+
+#[test]
+fn manager_lifecycle_publishes_atomic_status() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("demo");
+    fs::create_dir(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        r#"id = "demo-plugin"
+display_name = "Demo"
+abi_version = 1
+module = "demo.wasm"
+capabilities = ["health_check"]
+[limits]
+memory_pages = 1
+fuel = 10000
+invocation_timeout_ms = 100
+max_output_bytes = 1024
+"#,
+    )
+    .unwrap();
+    fs::write(
+        plugin.join("demo.wasm"),
+        wat::parse_str(
+            r#"(module
+                (func (export "bearust_abi_version") (result i32) i32.const 1)
+                (func (export "bearust_health_check") (result i32) i32.const 7))"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let config = PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    };
+    let manager = PluginManager::new(config);
+    assert_eq!(manager.reload_from_disk().unwrap().loaded, 1);
+    assert_eq!(manager.list().len(), 1);
+    assert_eq!(manager.health_check("demo-plugin").unwrap().status, 7);
+    assert!(!manager.set_enabled("demo-plugin", false).unwrap().enabled);
+    assert_eq!(
+        manager.health_check("demo-plugin").unwrap_err(),
+        PluginError::Disabled
+    );
+    assert!(manager.set_enabled("demo-plugin", true).unwrap().enabled);
+    manager.unload("demo-plugin").unwrap();
+    assert!(manager.list().is_empty());
+}
+
+#[test]
+fn manager_missing_directory_is_fail_open() {
+    let config = PluginConfig {
+        enabled: true,
+        directory: PathBuf::from("/definitely/missing/bearust-plugins"),
+        ..PluginConfig::default()
+    };
+    let manager = PluginManager::new(config);
+    assert_eq!(manager.reload_from_disk().unwrap().loaded, 0);
+    assert!(manager.list().is_empty());
+}
+
+fn lifecycle_config(root: &std::path::Path) -> PluginConfig {
+    PluginConfig {
+        enabled: true,
+        directory: root.to_path_buf(),
+        ..PluginConfig::default()
+    }
+}
+
+fn write_lifecycle_plugin(root: &std::path::Path, dir: &str, id: &str, wasm: &[u8]) {
+    let plugin = root.join(dir);
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        format!(
+            "id = \"{id}\"\ndisplay_name = \"Demo\"\nabi_version = 1\nmodule = \"demo.wasm\"\ncapabilities = [\"health_check\"]\n[limits]\nmemory_pages = 1\nfuel = 10000\ninvocation_timeout_ms = 100\nmax_output_bytes = 1024\n"
+        ),
+    )
+    .unwrap();
+    fs::write(plugin.join("demo.wasm"), wasm).unwrap();
+}
+
+fn lifecycle_wasm(status: i32) -> Vec<u8> {
+    wat::parse_str(format!(
+        "(module (func (export \"bearust_abi_version\") (result i32) i32.const 1) (func (export \"bearust_health_check\") (result i32) i32.const {status}))"
+    ))
+    .unwrap()
+}
+
+#[test]
+fn manager_isolates_invalid_plugin_from_healthy_sibling() {
+    let root = tempdir().unwrap();
+    write_lifecycle_plugin(root.path(), "good", "good-plugin", &lifecycle_wasm(1));
+    write_lifecycle_plugin(root.path(), "bad", "bad-plugin", b"not wasm");
+    let manager = PluginManager::new(lifecycle_config(root.path()));
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 1);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(manager.health_check("good-plugin").unwrap().status, 1);
+    assert!(
+        !manager
+            .list()
+            .iter()
+            .find(|status| status.id == "bad-plugin")
+            .unwrap()
+            .loaded
+    );
+}
+
+#[test]
+fn manager_rejects_duplicate_ids_and_max_bound_transactionally() {
+    let root = tempdir().unwrap();
+    let wasm = lifecycle_wasm(2);
+    write_lifecycle_plugin(root.path(), "one", "same-plugin", &wasm);
+    write_lifecycle_plugin(root.path(), "two", "same-plugin", &wasm);
+    let manager = PluginManager::new(lifecycle_config(root.path()));
+    assert_eq!(
+        manager.reload_from_disk().unwrap_err(),
+        PluginError::DuplicateId
+    );
+    assert!(manager.list().is_empty());
+
+    let root = tempdir().unwrap();
+    write_lifecycle_plugin(root.path(), "one", "one-plugin", &wasm);
+    write_lifecycle_plugin(root.path(), "two", "two-plugin", &wasm);
+    let manager = PluginManager::new(PluginConfig {
+        max_plugins: 1,
+        ..lifecycle_config(root.path())
+    });
+    assert_eq!(
+        manager.reload_from_disk().unwrap_err(),
+        PluginError::MaxPlugins
+    );
+    assert!(manager.list().is_empty());
+}
+
+#[test]
+fn failed_reload_retains_previous_snapshot() {
+    let root = tempdir().unwrap();
+    write_lifecycle_plugin(root.path(), "good", "good-plugin", &lifecycle_wasm(3));
+    let manager = PluginManager::new(lifecycle_config(root.path()));
+    manager.reload_from_disk().unwrap();
+    fs::write(root.path().join("good/plugin.toml"), b"not valid toml").unwrap();
+    assert_eq!(
+        manager.reload_from_disk().unwrap_err(),
+        PluginError::CompileFailed
+    );
+    assert_eq!(manager.health_check("good-plugin").unwrap().status, 3);
+    write_lifecycle_plugin(root.path(), "good", "good-plugin", &lifecycle_wasm(3));
+    write_lifecycle_plugin(root.path(), "duplicate", "good-plugin", &lifecycle_wasm(9));
+    assert_eq!(
+        manager.reload_from_disk().unwrap_err(),
+        PluginError::DuplicateId
+    );
+    assert_eq!(manager.health_check("good-plugin").unwrap().status, 3);
+}
+
+#[test]
+fn concurrent_health_reads_remain_bounded_during_reload() {
+    let root = tempdir().unwrap();
+    write_lifecycle_plugin(root.path(), "good", "good-plugin", &lifecycle_wasm(4));
+    let manager = PluginManager::new(lifecycle_config(root.path()));
+    manager.reload_from_disk().unwrap();
+    let captured_old_result = manager.health_check("good-plugin").unwrap();
+    assert_eq!(captured_old_result.status, 4);
+    write_lifecycle_plugin(root.path(), "good", "good-plugin", &lifecycle_wasm(8));
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
+    let mut workers = Vec::new();
+    for _ in 0..4 {
+        let manager = std::sync::Arc::clone(&manager);
+        let barrier = std::sync::Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            for _ in 0..20 {
+                let result = manager.health_check("good-plugin");
+                if let Ok(result) = result {
+                    assert!(matches!(result.status, 4 | 8));
+                }
+            }
+        }));
+    }
+    barrier.wait();
+    for _ in 0..3 {
+        manager.reload_from_disk().unwrap();
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert_eq!(manager.health_check("good-plugin").unwrap().status, 8);
+    assert_eq!(captured_old_result.status, 4);
+}
+
+#[test]
+fn manager_preserves_last_error_across_enable_toggle() {
+    let root = tempdir().unwrap();
+    let trap = wat::parse_str(
+        r#"(module
+            (func (export "bearust_abi_version") (result i32) i32.const 1)
+            (func (export "bearust_health_check") (result i32) unreachable))"#,
+    )
+    .unwrap();
+    write_lifecycle_plugin(root.path(), "trap", "trap-plugin", &trap);
+    let manager = PluginManager::new(lifecycle_config(root.path()));
+    manager.reload_from_disk().unwrap();
+    assert_eq!(
+        manager.health_check("trap-plugin").unwrap_err(),
+        PluginError::Trap
+    );
+    assert_eq!(manager.list()[0].last_error_code.as_deref(), Some("trap"));
+    assert_eq!(
+        manager
+            .set_enabled("trap-plugin", false)
+            .unwrap()
+            .last_error_code
+            .as_deref(),
+        Some("trap")
+    );
+    assert_eq!(
+        manager
+            .set_enabled("trap-plugin", true)
+            .unwrap()
+            .last_error_code
+            .as_deref(),
+        Some("trap")
+    );
+    write_lifecycle_plugin(root.path(), "trap", "trap-plugin", &lifecycle_wasm(6));
+    manager.reload_from_disk().unwrap();
+    assert!(manager.list()[0].last_error_code.is_none());
+    assert_eq!(manager.health_check("trap-plugin").unwrap().status, 6);
 }
 
 #[test]
@@ -306,7 +538,7 @@ fn engine_maps_trap_fuel_and_memory_limits() {
             (memory 1)
             (func (export "bearust_abi_version") (result i32) i32.const 1)
             (func (export "bearust_health_check") (result i32)
-                i32.const 2 memory.grow drop unreachable))"#,
+                i32.const 65536 i32.load))"#,
         limits(),
     )
     .unwrap();
@@ -316,7 +548,7 @@ fn engine_maps_trap_fuel_and_memory_limits() {
 #[test]
 fn engine_maps_epoch_timeout() {
     let mut timeout_limits = limits();
-    timeout_limits.fuel = 10_000_000;
+    timeout_limits.fuel = 1_000_000_000;
     timeout_limits.invocation_timeout_ms = 10;
     let plugin = compile(
         r#"(module

@@ -26,6 +26,7 @@ fn proxy_builder_accepts_analytics_collector() {
             rate_limit: Default::default(),
             prometheus: Default::default(),
             cluster: Default::default(),
+            plugins: Default::default(),
         },
         None,
     )
@@ -75,6 +76,7 @@ fn analytics_event_path_is_fail_open_without_collector() {
             rate_limit: Default::default(),
             prometheus: Default::default(),
             cluster: Default::default(),
+            plugins: Default::default(),
         },
         None,
     )

@@ -72,6 +72,7 @@ async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() 
         rate_limit: Default::default(),
         prometheus: Default::default(),
         cluster: Default::default(),
+        plugins: Default::default(),
     };
     let snapshot = RuntimeSnapshot::build(config, None).unwrap();
     let pool = snapshot.pool("main").unwrap();

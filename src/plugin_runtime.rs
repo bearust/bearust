@@ -1,7 +1,10 @@
 //! Secure manifest parsing and path validation for WASM plugins.
+use crate::config::PluginConfig;
+use arc_swap::ArcSwap;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fmt, fs,
     path::{Path, PathBuf},
     sync::{
@@ -75,7 +78,7 @@ impl Default for PluginPolicy {
         Self {
             max_module_bytes: 16 * 1024 * 1024,
             max_memory_pages: 256,
-            max_fuel: 10_000_000,
+            max_fuel: 1_000_000_000,
             max_invocation_timeout_ms: 1_000,
             max_output_bytes: 64 * 1024,
             module_root: PathBuf::from("."),
@@ -93,7 +96,7 @@ pub struct ValidatedManifest {
     pub limits: PluginLimits,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginError {
     InvalidManifest,
     AbiMismatch,
@@ -103,6 +106,10 @@ pub enum PluginError {
     MemoryLimit,
     Trap,
     CompileFailed,
+    NotFound,
+    DuplicateId,
+    MaxPlugins,
+    Io,
 }
 impl PluginError {
     pub fn code(&self) -> &'static str {
@@ -115,6 +122,10 @@ impl PluginError {
             Self::MemoryLimit => "memory_limit",
             Self::Trap => "trap",
             Self::CompileFailed => "compile_failed",
+            Self::NotFound => "not_found",
+            Self::DuplicateId => "duplicate_id",
+            Self::MaxPlugins => "max_plugins",
+            Self::Io => "io_error",
         }
     }
 }
@@ -376,7 +387,20 @@ fn map_runtime_error(
     started: Instant,
     limits: &PluginLimits,
 ) -> PluginError {
-    if started.elapsed() >= Duration::from_millis(limits.invocation_timeout_ms) {
+    let timed_out = started.elapsed() >= Duration::from_millis(limits.invocation_timeout_ms);
+    if let Some(trap) = error.downcast_ref::<wasmtime::Trap>() {
+        return match trap {
+            wasmtime::Trap::OutOfFuel if timed_out => PluginError::Timeout,
+            wasmtime::Trap::OutOfFuel => PluginError::FuelExhausted,
+            wasmtime::Trap::Interrupt => PluginError::Timeout,
+            wasmtime::Trap::MemoryOutOfBounds
+            | wasmtime::Trap::AllocationTooLarge
+            | wasmtime::Trap::TableOutOfBounds
+            | wasmtime::Trap::ArrayOutOfBounds => PluginError::MemoryLimit,
+            _ => PluginError::Trap,
+        };
+    }
+    if timed_out {
         return PluginError::Timeout;
     }
     let text = error.to_string().to_ascii_lowercase();
@@ -484,4 +508,423 @@ pub fn resolve_module_path(root: &Path, relative: &str) -> Result<PathBuf, Plugi
 
 pub fn module_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Redacted, stable lifecycle information exposed to the control plane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginStatus {
+    pub id: String,
+    pub display_name: String,
+    pub abi_version: u32,
+    pub digest: String,
+    pub enabled: bool,
+    pub loaded: bool,
+    pub last_error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReloadSummary {
+    pub loaded: usize,
+    pub failed: usize,
+}
+
+struct PluginRecord {
+    status: PluginStatus,
+    compiled: Option<Arc<CompiledPlugin>>,
+    source_dir: PathBuf,
+}
+
+struct PluginSnapshot {
+    plugins: BTreeMap<String, Arc<PluginRecord>>,
+}
+
+impl PluginSnapshot {
+    fn empty() -> Self {
+        Self {
+            plugins: BTreeMap::new(),
+        }
+    }
+}
+
+/// Owns plugin compilation and publishes complete immutable snapshots.
+/// Reads only clone an `Arc`, so an invocation is never affected by a later
+/// reload, disable, or unload operation.
+pub struct PluginManager {
+    config: PluginConfig,
+    policy: PluginPolicy,
+    engine: Mutex<Option<Arc<PluginEngine>>>,
+    current: ArcSwap<PluginSnapshot>,
+    reload_lock: Mutex<()>,
+    // Diagnostics are tied to the loaded module digest.  An invocation from
+    // an old ArcSwap snapshot must never overwrite diagnostics for a newer
+    // module with the same plugin ID.
+    last_errors: Mutex<BTreeMap<String, (String, String)>>,
+}
+
+impl PluginManager {
+    pub fn new(config: PluginConfig) -> Arc<Self> {
+        let policy = PluginPolicy {
+            max_module_bytes: config.max_module_bytes,
+            max_memory_pages: config.max_memory_pages,
+            max_fuel: config.max_fuel,
+            max_invocation_timeout_ms: config.invocation_timeout_ms,
+            max_output_bytes: config.max_output_bytes,
+            module_root: config.directory.clone(),
+        };
+        Arc::new(Self {
+            config,
+            policy,
+            engine: Mutex::new(None),
+            current: ArcSwap::from_pointee(PluginSnapshot::empty()),
+            reload_lock: Mutex::new(()),
+            last_errors: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    fn engine(&self) -> Result<Arc<PluginEngine>, PluginError> {
+        let mut guard = self.engine.lock().map_err(|_| PluginError::CompileFailed)?;
+        if let Some(engine) = guard.as_ref() {
+            return Ok(Arc::clone(engine));
+        }
+        let engine = Arc::new(PluginEngine::new(self.policy.clone())?);
+        *guard = Some(Arc::clone(&engine));
+        Ok(engine)
+    }
+
+    pub fn reload_from_disk(&self) -> Result<ReloadSummary, PluginError> {
+        let _guard = self
+            .reload_lock
+            .lock()
+            .map_err(|_| PluginError::CompileFailed)?;
+        if !self.config.enabled {
+            self.current.store(Arc::new(PluginSnapshot::empty()));
+            return Ok(ReloadSummary::default());
+        }
+
+        let directory = &self.config.directory;
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.current.store(Arc::new(PluginSnapshot::empty()));
+                return Ok(ReloadSummary::default());
+            }
+            Err(_) => return Err(PluginError::Io),
+        };
+        let mut children = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|_| PluginError::Io)?;
+            if entry.file_type().map_err(|_| PluginError::Io)?.is_dir() {
+                if children.len() >= self.config.max_plugins {
+                    return Err(PluginError::MaxPlugins);
+                }
+                children.push(entry);
+            }
+        }
+        children.sort_by_key(|entry| entry.file_name());
+
+        let previous = self.current.load_full();
+        let engine = self.engine()?;
+        let mut candidate = BTreeMap::new();
+        let mut seen_ids = BTreeSet::new();
+        let mut summary = ReloadSummary::default();
+        let mut fatal_existing_failure = false;
+
+        for child in children {
+            let manifest_path = child.path().join("plugin.toml");
+            let manifest = match fs::metadata(&manifest_path)
+                .map_err(|_| PluginError::Io)
+                .and_then(|metadata| {
+                    if metadata.len() > MAX_MANIFEST_BYTES as u64 {
+                        Err(PluginError::InvalidManifest)
+                    } else {
+                        fs::read(&manifest_path).map_err(|_| PluginError::Io)
+                    }
+                })
+                .and_then(|bytes| PluginManifest::from_toml(&bytes))
+            {
+                Ok(manifest) => manifest,
+                Err(_) => {
+                    summary.failed += 1;
+                    // Plugin directories are conventionally named by ID. If
+                    // a previously loaded directory becomes malformed, retain
+                    // its immutable record for this candidate snapshot.
+                    if let Some((old_id, old)) = previous
+                        .plugins
+                        .iter()
+                        .find(|(_, record)| record.source_dir == child.path())
+                    {
+                        candidate.insert(old_id.clone(), Arc::clone(old));
+                        fatal_existing_failure = true;
+                    } else {
+                        let mut safe_id = child
+                            .file_name()
+                            .to_string_lossy()
+                            .chars()
+                            .map(|ch| {
+                                if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' {
+                                    ch
+                                } else {
+                                    '-'
+                                }
+                            })
+                            .take(MAX_ID_LEN)
+                            .collect::<String>();
+                        while safe_id.ends_with('-') {
+                            safe_id.pop();
+                        }
+                        if safe_id.is_empty() {
+                            safe_id = "unavailable".to_owned();
+                        }
+                        if !candidate.contains_key(&safe_id) {
+                            candidate.insert(
+                                safe_id.clone(),
+                                Arc::new(PluginRecord {
+                                    status: PluginStatus {
+                                        id: safe_id,
+                                        display_name: String::new(),
+                                        abi_version: 0,
+                                        digest: String::new(),
+                                        enabled: false,
+                                        loaded: false,
+                                        last_error_code: Some("invalid_manifest".to_owned()),
+                                    },
+                                    compiled: None,
+                                    source_dir: child.path(),
+                                }),
+                            );
+                        }
+                    }
+                    continue;
+                }
+            };
+            let id = manifest.id.clone();
+            if !seen_ids.insert(id.clone()) {
+                return Err(PluginError::DuplicateId);
+            }
+            let old = previous.plugins.get(&id);
+            let build = (|| {
+                let mut policy = self.policy.clone();
+                policy.module_root = child.path();
+                let validated = manifest.validate(&policy)?;
+                let metadata =
+                    fs::metadata(&validated.module).map_err(|_| PluginError::InvalidManifest)?;
+                if metadata.len() > policy.max_module_bytes as u64 {
+                    return Err(PluginError::InvalidManifest);
+                }
+                let bytes =
+                    fs::read(&validated.module).map_err(|_| PluginError::InvalidManifest)?;
+                let digest = module_digest(&bytes);
+                let compiled = engine.compile(validated.clone(), &bytes)?;
+                Ok::<_, PluginError>((validated, digest, Arc::new(compiled)))
+            })();
+            match build {
+                Ok((validated, digest, compiled)) => {
+                    if candidate.contains_key(&validated.id) {
+                        return Err(PluginError::DuplicateId);
+                    }
+                    let enabled = old
+                        .map(|record| {
+                            if record.compiled.is_some() {
+                                record.status.enabled
+                            } else {
+                                // An unavailable record is not an explicit
+                                // operator disable; a repaired module may
+                                // become active on the next reload.
+                                true
+                            }
+                        })
+                        .unwrap_or(true);
+                    candidate.insert(
+                        validated.id.clone(),
+                        Arc::new(PluginRecord {
+                            status: PluginStatus {
+                                id: validated.id,
+                                display_name: validated.display_name,
+                                abi_version: validated.abi_version,
+                                digest,
+                                enabled,
+                                loaded: true,
+                                last_error_code: None,
+                            },
+                            compiled: Some(compiled),
+                            source_dir: child.path(),
+                        }),
+                    );
+                    summary.loaded += 1;
+                }
+                Err(error) => {
+                    summary.failed += 1;
+                    if let Some(old) = old {
+                        // A failed replacement must not take a healthy
+                        // previously published instance out of service.
+                        candidate.insert(id, Arc::clone(old));
+                        fatal_existing_failure = true;
+                    } else if !candidate.contains_key(&id) {
+                        let safe_id = id.chars().take(MAX_ID_LEN).collect::<String>();
+                        let safe_display_name = manifest
+                            .display_name
+                            .chars()
+                            .take(MAX_DISPLAY_NAME_LEN)
+                            .collect::<String>();
+                        candidate.insert(
+                            safe_id.clone(),
+                            Arc::new(PluginRecord {
+                                status: PluginStatus {
+                                    id: safe_id,
+                                    display_name: safe_display_name,
+                                    abi_version: manifest.abi_version,
+                                    digest: String::new(),
+                                    enabled: false,
+                                    loaded: false,
+                                    last_error_code: Some(error.code().to_string()),
+                                },
+                                compiled: None,
+                                source_dir: child.path(),
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+        if fatal_existing_failure {
+            return Err(PluginError::CompileFailed);
+        }
+        if let Ok(mut errors) = self.last_errors.lock() {
+            let current_digests = candidate
+                .iter()
+                .filter_map(|(id, record)| {
+                    record
+                        .status
+                        .loaded
+                        .then(|| (id.clone(), record.status.digest.clone()))
+                })
+                .collect::<BTreeMap<_, _>>();
+            errors.retain(|id, _| {
+                candidate.get(id).is_some_and(|record| {
+                    !record.status.loaded
+                        || current_digests
+                            .get(id)
+                            .is_some_and(|digest| digest == &record.status.digest)
+                })
+            });
+        }
+        self.current
+            .store(Arc::new(PluginSnapshot { plugins: candidate }));
+        Ok(summary)
+    }
+
+    pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<PluginStatus, PluginError> {
+        let _guard = self
+            .reload_lock
+            .lock()
+            .map_err(|_| PluginError::CompileFailed)?;
+        let snapshot = self.current.load_full();
+        let record = snapshot.plugins.get(id).ok_or(PluginError::NotFound)?;
+        if enabled && record.compiled.is_none() {
+            return Err(PluginError::InvalidManifest);
+        }
+        let mut candidate = snapshot
+            .plugins
+            .iter()
+            .map(|(key, value)| (key.clone(), Arc::clone(value)))
+            .collect::<BTreeMap<_, _>>();
+        let mut status = record.status.clone();
+        status.enabled = enabled;
+        if let Ok(errors) = self.last_errors.lock() {
+            status.last_error_code = errors
+                .get(id)
+                .filter(|(digest, _)| digest == &status.digest)
+                .map(|(_, error)| error.clone())
+                .or(status.last_error_code);
+        }
+        candidate.insert(
+            id.to_owned(),
+            Arc::new(PluginRecord {
+                status: status.clone(),
+                compiled: record.compiled.clone(),
+                source_dir: record.source_dir.clone(),
+            }),
+        );
+        self.current
+            .store(Arc::new(PluginSnapshot { plugins: candidate }));
+        Ok(status)
+    }
+
+    pub fn unload(&self, id: &str) -> Result<(), PluginError> {
+        let _guard = self
+            .reload_lock
+            .lock()
+            .map_err(|_| PluginError::CompileFailed)?;
+        let snapshot = self.current.load_full();
+        if !snapshot.plugins.contains_key(id) {
+            return Err(PluginError::NotFound);
+        }
+        let mut candidate = snapshot
+            .plugins
+            .iter()
+            .filter(|(key, _)| key.as_str() != id)
+            .map(|(key, value)| (key.clone(), Arc::clone(value)))
+            .collect::<BTreeMap<_, _>>();
+        self.current.store(Arc::new(PluginSnapshot {
+            plugins: std::mem::take(&mut candidate),
+        }));
+        if let Ok(mut errors) = self.last_errors.lock() {
+            errors.remove(id);
+        }
+        Ok(())
+    }
+
+    pub fn list(&self) -> Vec<PluginStatus> {
+        let errors = self.last_errors.lock().ok();
+        self.current
+            .load_full()
+            .plugins
+            .values()
+            .map(|record| {
+                let mut status = record.status.clone();
+                if let Some(errors) = errors.as_ref() {
+                    if let Some((digest, error)) = errors.get(&status.id) {
+                        if digest == &status.digest {
+                            status.last_error_code = Some(error.clone());
+                        }
+                    }
+                }
+                status
+            })
+            .collect()
+    }
+
+    pub fn health_check(&self, id: &str) -> Result<HealthResult, PluginError> {
+        let snapshot = self.current.load_full();
+        let record = snapshot.plugins.get(id).ok_or(PluginError::NotFound)?;
+        let digest = record.status.digest.clone();
+        if !record.status.enabled {
+            return Err(PluginError::Disabled);
+        }
+        let result = record
+            .compiled
+            .as_ref()
+            .ok_or(PluginError::InvalidManifest)?
+            .health_check();
+        if let Err(error) = &result {
+            let current_snapshot = self.current.load_full();
+            if let Some(current) = current_snapshot.plugins.get(id) {
+                if current.status.digest == digest {
+                    if let Ok(mut errors) = self.last_errors.lock() {
+                        errors.insert(id.to_owned(), (digest.clone(), error.code().to_string()));
+                    }
+                }
+            }
+        } else {
+            let current_snapshot = self.current.load_full();
+            if let Some(current) = current_snapshot.plugins.get(id) {
+                if current.status.digest == digest {
+                    if let Ok(mut errors) = self.last_errors.lock() {
+                        errors.remove(id);
+                    }
+                }
+            }
+        }
+        result
+    }
 }

@@ -64,6 +64,7 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub plugin_manager: Arc<crate::plugin_runtime::PluginManager>,
     pub db: repository::DbPool,
     pub certificates: Arc<CertificateStore>,
     pub reloader: Arc<dyn ConfigReloader>,
@@ -388,6 +389,9 @@ pub async fn build_state(
     }
 
     Ok(AppState {
+        plugin_manager: crate::plugin_runtime::PluginManager::new(
+            crate::config::PluginConfig::default(),
+        ),
         db,
         certificates,
         reloader,
