@@ -238,3 +238,30 @@ async fn audit_sse_and_prometheus_observability_are_redacted_and_bounded() {
     let body = to_bytes(response.into_body(), 1024).await.unwrap();
     assert!(body.len() <= 128);
 }
+
+#[tokio::test]
+async fn build_state_wires_database_audit_sink_for_direct_manager_calls() {
+    let dir = tempdir().unwrap();
+    let state = build_state("sqlite::memory:", dir.path(), "setup-token")
+        .await
+        .unwrap();
+    state.plugin_manager.reload_from_disk().unwrap();
+    let details = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if let Ok(details) = sqlx::query_scalar::<_, String>(
+                "SELECT details FROM audit_logs WHERE event='plugin_lifecycle' ORDER BY created_at DESC LIMIT 1",
+            )
+            .fetch_one(&state.db)
+            .await
+            {
+                break details;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("database audit sink did not persist manager event");
+    assert!(details.contains("\"plugin_id\":\"all\""));
+    assert!(details.contains("\"operation\":\"reload\""));
+    assert!(details.contains("\"outcome\":\"success\""));
+}

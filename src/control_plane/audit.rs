@@ -1,5 +1,7 @@
 use super::AppState;
 use crate::control_plane::repository::DbPool;
+use crate::plugin_runtime::{PluginAuditEvent, PluginAuditSink};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Writes a deliberately small, redacted audit record. Callers must pass only
@@ -25,6 +27,45 @@ pub async fn record_state(state: &AppState, user_id: Option<i64>, event: &str, d
     state.realtime.publish("audit");
 }
 
+fn plugin_details(event: &PluginAuditEvent) -> String {
+    serde_json::json!({
+        "plugin_id": event.plugin_id(),
+        "operation": event.operation(),
+        "outcome": event.outcome(),
+        "error_code": event.error_code(),
+    })
+    .to_string()
+}
+
+/// Audit sink used by direct and startup plugin-manager calls. Manager hooks
+/// are synchronous, so persistence is dispatched onto the active Tokio
+/// runtime; the mutation result never depends on audit availability.
+pub struct PluginAuditDbSink {
+    pool: DbPool,
+    realtime: Arc<crate::control_plane::realtime::RealtimeHub>,
+}
+
+impl PluginAuditDbSink {
+    pub fn new(pool: DbPool, realtime: Arc<crate::control_plane::realtime::RealtimeHub>) -> Self {
+        Self { pool, realtime }
+    }
+}
+
+impl PluginAuditSink for PluginAuditDbSink {
+    fn record(&self, event: &PluginAuditEvent) {
+        let pool = self.pool.clone();
+        let realtime = Arc::clone(&self.realtime);
+        let details = plugin_details(event);
+        let task = async move {
+            record(&pool, None, "plugin_lifecycle", &details).await;
+            realtime.publish("audit");
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(task);
+        }
+    }
+}
+
 /// Records a plugin lifecycle operation using only bounded identifiers and
 /// stable error codes. Paths, digests, manifests, and module contents never
 /// enter audit details.
@@ -38,12 +79,6 @@ pub async fn record_plugin_state(
 ) {
     let event =
         crate::plugin_runtime::PluginAuditEvent::new(plugin_id, operation, outcome, error_code);
-    let details = serde_json::json!({
-        "plugin_id": event.plugin_id(),
-        "operation": event.operation(),
-        "outcome": event.outcome(),
-        "error_code": event.error_code(),
-    })
-    .to_string();
+    let details = plugin_details(&event);
     record_state(state, user_id, "plugin_lifecycle", &details).await;
 }

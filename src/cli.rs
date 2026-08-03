@@ -263,6 +263,12 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
         let plugin_manager = crate::plugin_runtime::PluginManager::new(config.plugins.clone());
         plugin_manager.attach_realtime(control_state.realtime.clone());
+        plugin_manager.attach_audit_sink(Arc::new(
+            crate::control_plane::audit::PluginAuditDbSink::new(
+                control_state.db.clone(),
+                control_state.realtime.clone(),
+            ),
+        ));
         control_state.plugin_manager = plugin_manager;
         if config.plugins.enabled {
             match control_state.plugin_manager.reload_from_disk() {

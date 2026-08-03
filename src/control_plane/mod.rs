@@ -392,6 +392,10 @@ pub async fn build_state(
     let plugin_manager =
         crate::plugin_runtime::PluginManager::new(crate::config::PluginConfig::default());
     plugin_manager.attach_realtime(realtime.clone());
+    plugin_manager.attach_audit_sink(Arc::new(audit::PluginAuditDbSink::new(
+        db.clone(),
+        realtime.clone(),
+    )));
 
     Ok(AppState {
         plugin_manager,
