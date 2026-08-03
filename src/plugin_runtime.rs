@@ -792,12 +792,8 @@ impl PluginManager {
         if let Ok(mut errors) = self.last_errors.lock() {
             let current_digests = candidate
                 .iter()
-                .filter_map(|(id, record)| {
-                    record
-                        .status
-                        .loaded
-                        .then(|| (id.clone(), record.status.digest.clone()))
-                })
+                .filter(|(_, record)| record.status.loaded)
+                .map(|(id, record)| (id.clone(), record.status.digest.clone()))
                 .collect::<BTreeMap<_, _>>();
             errors.retain(|id, _| {
                 candidate.get(id).is_some_and(|record| {

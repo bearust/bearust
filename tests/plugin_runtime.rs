@@ -439,10 +439,12 @@ fn engine_rejects_host_and_wasi_imports() {
 
 #[test]
 fn engine_clamps_manifest_limits_to_policy() {
-    let mut policy = PluginPolicy::default();
-    policy.max_memory_pages = 1;
-    policy.max_fuel = 100;
-    policy.max_invocation_timeout_ms = 20;
+    let policy = PluginPolicy {
+        max_memory_pages: 1,
+        max_fuel: 100,
+        max_invocation_timeout_ms: 20,
+        ..PluginPolicy::default()
+    };
     let engine = PluginEngine::new(policy).unwrap();
     let mut requested = limits();
     requested.memory_pages = 99;
