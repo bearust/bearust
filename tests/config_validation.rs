@@ -24,10 +24,61 @@ fn parses_valid_configuration_and_defaults() {
         Algorithm::LeastConnections
     );
     assert!(config.cluster.auth_token.is_empty());
+    assert!(!config.plugins.enabled);
+    assert_eq!(config.plugins.directory.to_string_lossy(), "./plugins");
+    assert_eq!(config.plugins.max_plugins, 64);
+    assert_eq!(config.plugins.max_module_bytes, 16 * 1024 * 1024);
+    assert_eq!(config.plugins.max_memory_pages, 256);
+    assert_eq!(config.plugins.max_fuel, 10_000_000);
+    assert_eq!(config.plugins.invocation_timeout_ms, 1_000);
+    assert_eq!(config.plugins.max_output_bytes, 64 * 1024);
     assert_eq!(
         config.upstream_pools[0].backends[0].health_check,
         HealthCheckKind::Http
     );
+}
+
+#[test]
+fn parses_plugin_configuration_and_rejects_invalid_limits() {
+    let input = format!(
+        "{VALID}\n[plugins]\nenabled = true\ndirectory = \"/var/lib/bearust/plugins\"\nmax_plugins = 8\nmax_module_bytes = 1048576\nmax_memory_pages = 64\nmax_fuel = 100000\ninvocation_timeout_ms = 500\nmax_output_bytes = 8192\n"
+    );
+    let config = Config::parse(&input).expect("valid plugin configuration");
+    assert!(config.plugins.enabled);
+    assert_eq!(
+        config.plugins.directory.to_string_lossy(),
+        "/var/lib/bearust/plugins"
+    );
+    assert_eq!(config.plugins.max_plugins, 8);
+    assert_eq!(config.plugins.max_module_bytes, 1_048_576);
+    assert_eq!(config.plugins.max_memory_pages, 64);
+    assert_eq!(config.plugins.max_fuel, 100_000);
+    assert_eq!(config.plugins.invocation_timeout_ms, 500);
+    assert_eq!(config.plugins.max_output_bytes, 8_192);
+
+    for replacement in [
+        "max_plugins = 0",
+        "max_module_bytes = 0",
+        "max_memory_pages = 0",
+        "max_fuel = 0",
+        "invocation_timeout_ms = 0",
+        "max_output_bytes = 0",
+        "max_plugins = 257",
+        "max_module_bytes = 67108865",
+        "max_memory_pages = 4097",
+        "max_fuel = 1000000001",
+        "invocation_timeout_ms = 60001",
+        "max_output_bytes = 1048577",
+    ] {
+        let input = format!("{VALID}\n[plugins]\n{replacement}\n");
+        assert!(
+            Config::parse(&input).is_err(),
+            "accepted invalid plugin: {replacement}"
+        );
+    }
+
+    let empty = format!("{VALID}\n[plugins]\nenabled = true\ndirectory = \"\"\n");
+    assert!(Config::parse(&empty).is_err());
 }
 
 #[test]
