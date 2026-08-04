@@ -65,6 +65,8 @@ fn plugin_status(status: PluginStatus) -> PluginStatusResponse {
         enabled: status.enabled,
         loaded: status.loaded,
         last_error_code: status.last_error_code,
+        created_at: status.created_at,
+        updated_at: status.updated_at,
     }
 }
 
@@ -106,7 +108,17 @@ pub async fn reload(State(state): State<AppState>, headers: HeaderMap) -> Respon
         Ok(actor) => actor,
         Err(response) => return response,
     };
-    match state.plugin_manager.reload_from_disk_without_audit() {
+    // Compilation and filesystem scanning are synchronous Wasmtime work. Keep
+    // it off Tokio's request executor so a large or malformed module cannot
+    // stall unrelated control-plane requests.
+    let manager = std::sync::Arc::clone(&state.plugin_manager);
+    let reload =
+        tokio::task::spawn_blocking(move || manager.reload_from_disk_without_audit()).await;
+    let result = match reload {
+        Ok(result) => result,
+        Err(_) => Err(PluginError::CompileFailed),
+    };
+    match result {
         Ok(summary) => {
             let (outcome, error_code) = if summary.failed == 0 {
                 ("success", None)

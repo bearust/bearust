@@ -25,16 +25,20 @@ source is reproducible with the repository's pinned `wat` dev dependency.
 | Capability escalation | Pass | Manifest validation accepts only `health_check`; unknown and duplicate capabilities fail closed; linker supplies no host/WASI imports. |
 | Unbounded resource use | Pass | Server maxima clamp memory pages, fuel, invocation timeout, output bytes, module bytes, and plugin count; Wasmtime stores have bounded memories/instances/tables. |
 | Secret/raw module leakage | Pass | API models expose only bounded status/digest/error code; audit, realtime, metrics, and errors use allow-listed values and omit paths, bytes, manifests, backtraces, request data, and secrets. |
-| Proxy-path coupling | Pass | Compilation/reload is off the request path; invocation errors are isolated and startup continues when plugins are disabled, missing, invalid, or unavailable. |
+| Proxy-path coupling | Pass | Invocation errors are isolated and startup continues when plugins are disabled, missing, invalid, or unavailable; reload compilation is dispatched to a blocking worker. |
 
 ## Acceptance gate
 
 The plan's required stable-toolchain commands were also checked explicitly:
 
 ```text
-cargo +stable fmt --all -- --check                         PASS
-cargo +stable clippy --all-targets -- -D warnings          BLOCKED: Cargo 1.84 cannot resolve the edition-2024 clap_lex dependency
-DATABASE_URL=sqlite::memory: cargo +stable test --all-targets BLOCKED: linker ran out of disk space
+cargo +1.84.1 fmt --all -- --check                              PASS
+cargo +1.84.1 clippy --all-targets -- -D warnings               BLOCKED: edition-2024 clap_lex cannot be parsed
+DATABASE_URL=sqlite::memory: cargo +1.84.1 test --all-targets    BLOCKED: edition-2024 clap_lex cannot be parsed (latest-toolchain linker exhaustion observed separately)
+
+For comparison, the latest installed stable toolchain can run the Clippy
+command successfully; the pinned project toolchain is `1.84.1` and remains the
+release gate.
 ```
 
 Nightly was used for the focused plugin verification below because it can
@@ -65,6 +69,12 @@ suite passed all 161 tests, the production build passed, and locale validation
 passed.
 
 ## Deferred scope
+
+The acceptance gate still has two operational follow-ups: mutating plugin
+endpoints use the existing authenticated RBAC/session contract but do not yet
+enforce a dedicated CSRF token, and the pinned 1.84.1 dependency graph cannot
+be compiled until its `clap_lex` edition mismatch is resolved. These are
+release blockers, not silently waived security guarantees.
 
 Phase 13B (public SDK and stable memory/serialization conventions), Phase 13C
 (traffic hooks with explicit redaction/backpressure and fail-open/fail-closed

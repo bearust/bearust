@@ -522,6 +522,8 @@ pub struct PluginStatus {
     pub enabled: bool,
     pub loaded: bool,
     pub last_error_code: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -887,6 +889,8 @@ impl PluginManager {
                                         enabled: false,
                                         loaded: false,
                                         last_error_code: Some("invalid_manifest".to_owned()),
+                                        created_at: chrono::Utc::now(),
+                                        updated_at: chrono::Utc::now(),
                                     },
                                     compiled: None,
                                     source_dir: child.path(),
@@ -934,6 +938,8 @@ impl PluginManager {
                             }
                         })
                         .unwrap_or(true);
+                    let now = chrono::Utc::now();
+                    let created_at = old.map(|record| record.status.created_at).unwrap_or(now);
                     candidate.insert(
                         validated.id.clone(),
                         Arc::new(PluginRecord {
@@ -945,6 +951,8 @@ impl PluginManager {
                                 enabled,
                                 loaded: true,
                                 last_error_code: None,
+                                created_at,
+                                updated_at: now,
                             },
                             compiled: Some(compiled),
                             source_dir: child.path(),
@@ -977,6 +985,8 @@ impl PluginManager {
                                     enabled: false,
                                     loaded: false,
                                     last_error_code: Some(error.code().to_string()),
+                                    created_at: chrono::Utc::now(),
+                                    updated_at: chrono::Utc::now(),
                                 },
                                 compiled: None,
                                 source_dir: child.path(),
@@ -1065,6 +1075,7 @@ impl PluginManager {
             .collect::<BTreeMap<_, _>>();
         let mut status = record.status.clone();
         status.enabled = enabled;
+        status.updated_at = chrono::Utc::now();
         if let Ok(errors) = self.last_errors.lock() {
             status.last_error_code = errors
                 .get(id)

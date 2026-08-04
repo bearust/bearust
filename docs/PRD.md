@@ -845,14 +845,17 @@ proxy request access. Invalid manifests, traps, resource exhaustion, and
 runtime initialization failures are isolated from startup and proxy traffic;
 status, audit, realtime, and metrics surfaces are bounded and redacted.
 
-The final acceptance gate remains pending: the required stable-toolchain gate
-could not complete in this environment (stable Clippy is blocked by the
-edition-2024 `clap_lex` dependency and the stable all-targets linker run
-exhausted disk space). Nightly Clippy reports three
+The final acceptance gate remains pending: the required pinned `1.84.1`
+toolchain gate could not complete in this environment (`clap_lex` uses an
+edition-2024 manifest that the pinned Cargo cannot parse, and the pinned
+all-targets linker run exhausted disk space). The latest installed stable
+toolchain can run Clippy successfully. Nightly Clippy reports three
 pre-existing unrelated diagnostics, and the full all-targets Rust run was
 blocked by host disk exhaustion while compiling parallel test targets. The
 focused plugin suite passes; frontend tests/build/locale validation pass after
-installing frontend dependencies.
+installing frontend dependencies. Mutating plugin endpoints use the existing
+authenticated RBAC/session contract, but a dedicated CSRF token contract is
+still a release follow-up; it is not being treated as implicitly satisfied.
 
 The default is `plugins.enabled = false`. Phase 13A deliberately has no public
 SDK, traffic hooks, registry, remote download, signature verification, or
