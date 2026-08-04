@@ -1,0 +1,11 @@
+id = "health-ok"
+display_name = "Deterministic health check"
+abi_version = 1
+module = "health_ok.wasm"
+capabilities = ["health_check"]
+
+[limits]
+memory_pages = 1
+fuel = 10000
+invocation_timeout_ms = 100
+max_output_bytes = 1024

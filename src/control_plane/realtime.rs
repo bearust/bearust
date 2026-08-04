@@ -53,6 +53,7 @@ impl RealtimeHub {
         match kind {
             "proxy_hosts.changed" => Some(self.publish("proxy_hosts.changed")),
             "rate_limit.changed" => Some(self.publish("rate_limit.changed")),
+            "plugins.changed" => Some(self.publish("plugins.changed")),
             _ => None,
         }
     }

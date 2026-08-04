@@ -827,4 +827,40 @@ Phase 11 is complete across three increments:
   layouts are covered by frontend tests; and the documented JSON catalog review
   flow is enforced by `npm run validate-locales --prefix frontend`.
 
-Phase 12 (AI Advisor) is next.
+### Phase 12 status: AI Advisor
+
+Phase 12 is complete as an optional, bounded, fail-open advisor. It remains
+disabled unless explicitly configured with both provider URL and key; inputs,
+results, queues, and telemetry are bounded and redacted.
+
+### Phase 13A status: WASM plugin runtime foundation (implementation complete; acceptance gate pending)
+
+The Phase 13A implementation is complete. BeaRust now has an optional,
+deny-by-default local
+`wasmtime` runtime with versioned `plugin.toml` validation, canonicalized path
+containment, the health-check-only ABI, fuel/memory/timeout/output limits,
+atomic load/enable/disable/unload snapshots, and authenticated lifecycle APIs.
+Plugins receive no WASI, filesystem, network, environment, database, secret, or
+proxy request access. Invalid manifests, traps, resource exhaustion, and
+runtime initialization failures are isolated from startup and proxy traffic;
+status, audit, realtime, and metrics surfaces are bounded and redacted.
+
+The final acceptance gate remains pending: the required pinned `1.84.1`
+toolchain gate could not complete in this environment: the dependency graph
+still contains transitive crates requiring newer Cargo features than 1.84.1
+(the current first parse failure is `time-core` edition 2024), and a pinned
+all-targets linker run previously exhausted disk space. The latest installed stable
+toolchain can run Clippy successfully. Nightly Clippy reports three
+pre-existing unrelated diagnostics, and the full all-targets Rust run was
+blocked by host disk exhaustion while compiling parallel test targets. The
+focused plugin suite passes; frontend tests/build/locale validation pass after
+installing frontend dependencies. Mutating plugin endpoints use the existing
+authenticated RBAC/session contract, but a dedicated CSRF token contract is
+still a release follow-up; it is not being treated as implicitly satisfied.
+
+The default is `plugins.enabled = false`. Phase 13A deliberately has no public
+SDK, traffic hooks, registry, remote download, signature verification, or
+trust-on-first-use behavior. Phase 13B is next and will define the public SDK
+and stable memory/serialization conventions. Phase 13C will add explicitly
+reviewed traffic hooks with input redaction and backpressure semantics. Phase
+14 remains deferred for registry distribution and signature verification.

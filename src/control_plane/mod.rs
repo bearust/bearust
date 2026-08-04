@@ -8,6 +8,7 @@ pub mod audit;
 pub mod auth;
 pub mod locale;
 pub mod models;
+pub mod plugins;
 pub mod rbac;
 pub mod realtime;
 pub mod repository;
@@ -64,6 +65,7 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub plugin_manager: Arc<crate::plugin_runtime::PluginManager>,
     pub db: repository::DbPool,
     pub certificates: Arc<CertificateStore>,
     pub reloader: Arc<dyn ConfigReloader>,
@@ -387,7 +389,16 @@ pub async fn build_state(
         }
     }
 
+    let plugin_manager =
+        crate::plugin_runtime::PluginManager::new(crate::config::PluginConfig::default());
+    plugin_manager.attach_realtime(realtime.clone());
+    plugin_manager.attach_audit_sink(Arc::new(audit::PluginAuditDbSink::new(
+        db.clone(),
+        realtime.clone(),
+    )));
+
     Ok(AppState {
+        plugin_manager,
         db,
         certificates,
         reloader,
@@ -468,6 +479,15 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
             post(verify_bot_challenge).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/api/events", get(events))
+        .route("/api/plugins", get(plugins::list))
+        .route("/api/plugins/reload", post(plugins::reload))
+        .route("/api/plugins/{id}/enable", post(plugins::enable))
+        .route("/api/plugins/{id}/disable", post(plugins::disable))
+        .route("/api/plugins/{id}", axum::routing::delete(plugins::unload))
+        .route(
+            "/api/plugins/{id}/health-check",
+            post(plugins::health_check),
+        )
         .route("/api/ai-advisor/status", get(ai_advisor::status))
         .route(
             "/api/ai-advisor/analyses",
@@ -614,6 +634,14 @@ async fn prometheus_metrics(State(s): State<AppState>, h: HeaderMap) -> Response
     };
     let mut body = analytics;
     body.push_str(&advisor);
+    let plugin_budget = s.prometheus.max_output_bytes.saturating_sub(body.len());
+    if plugin_budget > 0 {
+        let plugin = complete_lines(
+            &s.plugin_manager.metrics().render_prometheus(),
+            plugin_budget,
+        );
+        body.push_str(&plugin);
+    }
     (
         [(
             axum::http::header::CONTENT_TYPE,

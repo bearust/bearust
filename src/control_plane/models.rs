@@ -116,6 +116,35 @@ pub struct User {
     pub preferred_locale: Option<String>,
 }
 
+/// Safe, bounded response for a plugin reload operation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginReloadResponse {
+    pub loaded: usize,
+    pub failed: usize,
+}
+
+/// Redacted plugin metadata exposed by the control plane.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginStatusResponse {
+    pub id: String,
+    pub display_name: String,
+    pub abi_version: u32,
+    pub digest: String,
+    pub enabled: bool,
+    pub loaded: bool,
+    pub last_error_code: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Safe response for a plugin health invocation. Runtime details and module
+/// paths are intentionally not exposed by the control plane.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginHealthResponse {
+    pub status: i32,
+    pub elapsed_ms: u64,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserPreferencesPatch {

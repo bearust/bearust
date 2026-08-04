@@ -22,6 +22,84 @@ pub struct Config {
     pub prometheus: PrometheusConfig,
     #[serde(default)]
     pub cluster: ClusterConfig,
+    #[serde(default)]
+    pub plugins: PluginConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_plugin_directory")]
+    pub directory: PathBuf,
+    #[serde(default = "default_plugin_max_plugins")]
+    pub max_plugins: usize,
+    #[serde(default = "default_plugin_max_module_bytes")]
+    pub max_module_bytes: usize,
+    #[serde(default = "default_plugin_max_memory_pages")]
+    pub max_memory_pages: u32,
+    #[serde(default = "default_plugin_max_fuel")]
+    pub max_fuel: u64,
+    #[serde(default = "default_plugin_invocation_timeout_ms")]
+    pub invocation_timeout_ms: u64,
+    #[serde(default = "default_plugin_max_output_bytes")]
+    pub max_output_bytes: usize,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            directory: default_plugin_directory(),
+            max_plugins: default_plugin_max_plugins(),
+            max_module_bytes: default_plugin_max_module_bytes(),
+            max_memory_pages: default_plugin_max_memory_pages(),
+            max_fuel: default_plugin_max_fuel(),
+            invocation_timeout_ms: default_plugin_invocation_timeout_ms(),
+            max_output_bytes: default_plugin_max_output_bytes(),
+        }
+    }
+}
+
+impl PluginConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.enabled && self.directory.as_os_str().is_empty() {
+            return err(
+                "plugins.directory",
+                "must not be empty when plugins are enabled",
+            );
+        }
+        macro_rules! check_limit {
+            ($field:literal, $value:expr, $maximum:expr) => {
+                if $value == 0 {
+                    return err($field, "must be positive");
+                }
+                if $value > $maximum {
+                    return err($field, format!("must not exceed {}", $maximum));
+                }
+            };
+        }
+        check_limit!("plugins.max_plugins", self.max_plugins, 256usize);
+        check_limit!(
+            "plugins.max_module_bytes",
+            self.max_module_bytes,
+            64 * 1024 * 1024usize
+        );
+        check_limit!("plugins.max_memory_pages", self.max_memory_pages, 4096u32);
+        check_limit!("plugins.max_fuel", self.max_fuel, 1_000_000_000u64);
+        check_limit!(
+            "plugins.invocation_timeout_ms",
+            self.invocation_timeout_ms,
+            60_000u64
+        );
+        check_limit!(
+            "plugins.max_output_bytes",
+            self.max_output_bytes,
+            1024 * 1024usize
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -291,6 +369,27 @@ fn default_rate_capacity() -> u64 {
 fn default_rate_refill() -> f64 {
     10.0
 }
+fn default_plugin_directory() -> PathBuf {
+    "./plugins".into()
+}
+fn default_plugin_max_plugins() -> usize {
+    64
+}
+fn default_plugin_max_module_bytes() -> usize {
+    16 * 1024 * 1024
+}
+fn default_plugin_max_memory_pages() -> u32 {
+    256
+}
+fn default_plugin_max_fuel() -> u64 {
+    10_000_000
+}
+fn default_plugin_invocation_timeout_ms() -> u64 {
+    1_000
+}
+fn default_plugin_max_output_bytes() -> usize {
+    64 * 1024
+}
 
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
     let input = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
@@ -383,6 +482,7 @@ impl Config {
         if let Err(message) = self.prometheus.validate() {
             return Err(validation("prometheus", message));
         }
+        self.plugins.validate()?;
         if let Some(tls) = &self.server.tls {
             if tls.cert_path.as_os_str().is_empty() {
                 return err("server.tls.cert_path", "must not be empty");

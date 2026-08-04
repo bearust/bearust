@@ -294,6 +294,8 @@ pub async fn migrate(pool: &DbPool) -> Result<(), sqlx::Error> {
         "ai_advisor.read",
         "ai_advisor.request",
         "ai_advisor.approve",
+        "plugins.read",
+        "plugins.manage",
     ];
     for key in permissions {
         sqlx::query(

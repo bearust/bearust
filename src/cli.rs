@@ -261,6 +261,26 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         tracing::info!(event = "control_plane_start", bind = %config.server.control_bind, setup_token_configured = setup_token_from_env.is_some(), generated_setup_token = setup_token_from_env.is_none());
         let mut control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
+        let plugin_manager = crate::plugin_runtime::PluginManager::new(config.plugins.clone());
+        plugin_manager.attach_realtime(control_state.realtime.clone());
+        plugin_manager.attach_audit_sink(Arc::new(
+            crate::control_plane::audit::PluginAuditDbSink::new(
+                control_state.db.clone(),
+                control_state.realtime.clone(),
+            ),
+        ));
+        control_state.plugin_manager = plugin_manager;
+        if config.plugins.enabled {
+            match control_state.plugin_manager.reload_from_disk() {
+                Err(error) => {
+                    tracing::warn!(event = "plugin_startup_failed", code = error.code());
+                }
+                Ok(summary) if summary.failed > 0 => {
+                    tracing::warn!(event = "plugin_startup_partial", failed = summary.failed);
+                }
+                Ok(_) => {}
+            }
+        }
         control_state.ai_advisor = Arc::new(
             crate::ai_advisor::AiAdvisorService::from_env()
                 .map(|service| service.with_metrics(control_state.advisor_metrics.clone()))

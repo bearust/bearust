@@ -94,6 +94,77 @@ The role matrix is:
 
 The backend remains authoritative even when the UI hides write controls or the admin-only Users section for non-admin users. Successful and denied user mutations are recorded as redacted audit events. Per-host permissions, custom permissions, and SSO/external identity providers remain future work.
 
+### Phase 13A WASM plugins (optional and disabled by default)
+
+Phase 13A provides a local, health-check-only WASM runtime foundation. Plugins
+are not loaded unless `[plugins].enabled = true`; the default directory is
+`./plugins`. With plugins disabled, a missing directory, an invalid manifest, or
+a failed invocation, BeaRust starts normally and proxy traffic is unaffected.
+
+Configuration limits are bounded by the server and can be lowered per
+deployment:
+
+```toml
+[plugins]
+enabled = false
+directory = "./plugins"
+max_plugins = 64
+max_module_bytes = 16777216       # 16 MiB
+max_memory_pages = 256            # 64 KiB per page
+max_fuel = 10000000
+invocation_timeout_ms = 1000
+max_output_bytes = 65536
+```
+
+Each immediate child directory is one plugin and contains only a manifest and
+its module:
+
+```text
+plugins/
+└── health-ok/
+    ├── plugin.toml
+    └── health_ok.wasm
+```
+
+The versioned manifest requires `id` (lowercase letters, digits, and hyphens),
+`display_name`, `abi_version = 1`, and a module filename. The only accepted
+capability is `health_check`; `[limits]` may set `memory_pages`, `fuel`,
+`invocation_timeout_ms`, and `max_output_bytes` within the configured maxima.
+The module exports `bearust_abi_version() -> i32` and may export
+`bearust_health_check() -> i32`. No WASI imports or host functions are
+available.
+
+Administrators use the authenticated control-plane API (permissions are
+`plugins.read` and `plugins.manage`):
+
+| Method and path | Permission | Purpose |
+| --- | --- | --- |
+| `GET /api/plugins` | `plugins.read` | List bounded, redacted status |
+| `POST /api/plugins/reload` | `plugins.manage` | Atomically reload local plugins |
+| `POST /api/plugins/{id}/enable` | `plugins.manage` | Enable a loaded plugin |
+| `POST /api/plugins/{id}/disable` | `plugins.manage` | Disable invocation |
+| `DELETE /api/plugins/{id}` | `plugins.manage` | Unload a plugin |
+| `POST /api/plugins/{id}/health-check` | `plugins.read` | Run the bounded health ABI |
+
+For example, `curl -b cookies.txt -X POST
+http://127.0.0.1:8081/api/plugins/reload` returns `{ "loaded": 1, "failed": 0 }`.
+Status responses contain only the plugin ID/display name, ABI, SHA-256 digest,
+enabled/loaded flags, and a safe error code. Invalid manifests, ABI mismatches,
+compilation failures, disabled plugins, timeouts, fuel exhaustion, memory
+limits, traps, and missing IDs map to stable codes such as
+`invalid_manifest`, `abi_mismatch`, `compile_failed`, `disabled`, `timeout`,
+`fuel_exhausted`, `memory_limit`, `trap`, `not_found`, and `io_error`.
+Unauthorized callers receive the standard `401`/`403` envelope.
+
+Security boundary: paths are canonicalized beneath the configured plugin
+directory; traversal, absolute paths, symlink escapes, unknown capabilities,
+WASI imports, and unbounded limits are rejected. Audit/realtime/metrics output
+is redacted and never contains module bytes, manifest contents, filesystem
+paths, runtime backtraces, request data, or secrets. Phase 13A intentionally has
+**no signature verification or remote trust decision**; install only reviewed
+local modules. The public SDK and traffic hooks are deferred to Phase 13B/13C,
+and registry distribution/signatures to Phase 14.
+
 ### Audit log API and viewer
 
 Authenticated `admin`, `operator`, and `viewer` sessions can read the audit history through `GET /api/audit-logs`; unauthenticated requests are rejected. The dashboard exposes the same read-only view for every role. Results are newest first (`created_at DESC, id DESC`) and are returned as `{items, page, page_size, total}`.

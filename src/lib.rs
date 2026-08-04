@@ -22,6 +22,7 @@ pub mod config;
 pub mod control_plane;
 pub mod health;
 pub mod observability;
+pub mod plugin_runtime;
 pub mod proxy;
 pub mod rate_limit;
 pub mod rate_limit_store;

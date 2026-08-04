@@ -33,6 +33,62 @@ an untracked `.env`. Optional settings are `LLM_MODEL`,
 aggregate snapshots and bounded in-memory results; provider/user data never
 belongs in logs or metrics. Unset both variables and restart to test disablement.
 
+## WASM plugin runtime (Phase 13A)
+
+Plugin loading is disabled by default. For a local runtime smoke test, create
+an isolated directory and explicitly enable it in TOML:
+
+```toml
+[plugins]
+enabled = true
+directory = "./tests/fixtures/plugins"
+max_plugins = 64
+max_module_bytes = 16777216
+max_memory_pages = 256
+max_fuel = 10000000
+invocation_timeout_ms = 1000
+max_output_bytes = 65536
+```
+
+The deterministic fixture at
+`tests/fixtures/plugins/health_ok/health_ok.wat` is compiled in the integration
+test with the pinned `wat` crate. It exports the ABI version and health status
+`1`; it has no imports. A plugin directory contains `plugin.toml` plus one
+module, and the manifest fields/capabilities are documented in the README.
+Do not copy arbitrary third-party WASM into tests or commit generated compiler
+caches.
+
+To exercise a filesystem load manually, compile and copy the deterministic
+fixture into a temporary plugin directory (requires `wat2wasm`):
+
+```bash
+tmp_plugin="$(mktemp -d)/health-ok"
+mkdir -p "$tmp_plugin"
+wat2wasm tests/fixtures/plugins/health_ok/health_ok.wat \
+  -o "$tmp_plugin/health_ok.wasm"
+cp tests/fixtures/plugins/health_ok/plugin.toml "$tmp_plugin/plugin.toml"
+```
+
+Point `[plugins].directory` at the temporary parent, run the authenticated
+reload/health-check calls, and remove the temporary directory afterward. The
+generated binary is intentionally not checked in.
+
+Use the authenticated API to verify lifecycle behavior: `GET /api/plugins`,
+`POST /api/plugins/reload`, `POST /api/plugins/{id}/enable`,
+`POST /api/plugins/{id}/disable`, `DELETE /api/plugins/{id}`, and
+`POST /api/plugins/{id}/health-check`. `plugins.read` is required for listing
+and health checks; `plugins.manage` is required for reload, enable, disable,
+and unload. Responses and audit/realtime events are bounded and redacted.
+
+The runtime supplies no WASI or host imports and rejects path traversal,
+symlink escapes, unknown capabilities, malformed ABI exports, and limits above
+the configured maxima. Errors are stable codes (`invalid_manifest`,
+`abi_mismatch`, `compile_failed`, `disabled`, `timeout`, `fuel_exhausted`,
+`memory_limit`, `trap`, `not_found`, `io_error`). A plugin failure never fails
+proxy requests or prevents normal startup. Phase 13A does not verify signatures
+or download modules; treat local modules as trusted reviewed inputs until the
+registry/signature work in Phase 14.
+
 ## Localization contribution workflow
 
 The supported dashboard locale codes are `en` (English, the source and
