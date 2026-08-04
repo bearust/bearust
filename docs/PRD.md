@@ -846,9 +846,10 @@ runtime initialization failures are isolated from startup and proxy traffic;
 status, audit, realtime, and metrics surfaces are bounded and redacted.
 
 The final acceptance gate remains pending: the required pinned `1.84.1`
-toolchain gate could not complete in this environment (`clap_lex` uses an
-edition-2024 manifest that the pinned Cargo cannot parse, and the pinned
-all-targets linker run exhausted disk space). The latest installed stable
+toolchain gate could not complete in this environment: the dependency graph
+still contains transitive crates requiring newer Cargo features than 1.84.1
+(the current first parse failure is `time-core` edition 2024), and a pinned
+all-targets linker run previously exhausted disk space. The latest installed stable
 toolchain can run Clippy successfully. Nightly Clippy reports three
 pre-existing unrelated diagnostics, and the full all-targets Rust run was
 blocked by host disk exhaustion while compiling parallel test targets. The

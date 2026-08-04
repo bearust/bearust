@@ -15,7 +15,7 @@ instant-acme = "=0.7.2"
 async-trait = "0.1"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["multipart"] }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "=4.5.32", features = ["derive"] }
 http = "1"
 http-body-util = "0.1"
 futures-util = "0.3"

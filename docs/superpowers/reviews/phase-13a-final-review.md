@@ -33,8 +33,8 @@ The plan's required stable-toolchain commands were also checked explicitly:
 
 ```text
 cargo +1.84.1 fmt --all -- --check                              PASS
-cargo +1.84.1 clippy --all-targets -- -D warnings               BLOCKED: edition-2024 clap_lex cannot be parsed
-DATABASE_URL=sqlite::memory: cargo +1.84.1 test --all-targets    BLOCKED: edition-2024 clap_lex cannot be parsed (latest-toolchain linker exhaustion observed separately)
+cargo +1.84.1 clippy --all-targets -- -D warnings               BLOCKED: transitive edition-2024 crate (`time-core`) cannot be parsed
+DATABASE_URL=sqlite::memory: cargo +1.84.1 test --all-targets    BLOCKED: same dependency-graph parse incompatibility (latest-toolchain linker exhaustion observed separately)
 
 For comparison, the latest installed stable toolchain can run the Clippy
 command successfully; the pinned project toolchain is `1.84.1` and remains the
@@ -73,7 +73,7 @@ passed.
 The acceptance gate still has two operational follow-ups: mutating plugin
 endpoints use the existing authenticated RBAC/session contract but do not yet
 enforce a dedicated CSRF token, and the pinned 1.84.1 dependency graph cannot
-be compiled until its `clap_lex` edition mismatch is resolved. These are
+be compiled until its transitive minimum-toolchain mismatches are resolved. These are
 release blockers, not silently waived security guarantees.
 
 Phase 13B (public SDK and stable memory/serialization conventions), Phase 13C
