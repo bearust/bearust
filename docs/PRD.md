@@ -845,7 +845,10 @@ proxy request access. Invalid manifests, traps, resource exhaustion, and
 runtime initialization failures are isolated from startup and proxy traffic;
 status, audit, realtime, and metrics surfaces are bounded and redacted.
 
-The final acceptance gate remains pending: nightly Clippy reports three
+The final acceptance gate remains pending: the required stable-toolchain gate
+could not complete in this environment (stable Clippy is blocked by the
+edition-2024 `clap_lex` dependency and the stable all-targets linker run
+exhausted disk space). Nightly Clippy reports three
 pre-existing unrelated diagnostics, and the full all-targets Rust run was
 blocked by host disk exhaustion while compiling parallel test targets. The
 focused plugin suite passes; frontend tests/build/locale validation pass after

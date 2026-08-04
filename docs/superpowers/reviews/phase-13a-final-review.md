@@ -29,6 +29,18 @@ source is reproducible with the repository's pinned `wat` dev dependency.
 
 ## Acceptance gate
 
+The plan's required stable-toolchain commands were also checked explicitly:
+
+```text
+cargo +stable fmt --all -- --check                         PASS
+cargo +stable clippy --all-targets -- -D warnings          BLOCKED: Cargo 1.84 cannot resolve the edition-2024 clap_lex dependency
+DATABASE_URL=sqlite::memory: cargo +stable test --all-targets BLOCKED: linker ran out of disk space
+```
+
+Nightly was used for the focused plugin verification below because it can
+resolve the current dependency graph. This toolchain deviation is recorded
+explicitly; it does not change the pending status of the full stable gate.
+
 Run from the repository root. Results are recorded here after the final review
 run (pre-existing failures, if any, are listed explicitly rather than hidden).
 
