@@ -99,6 +99,19 @@ fn capabilities_and_abi_rejected() {
 }
 
 #[test]
+fn abi_version_two_is_accepted_at_manifest_validation() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("demo.wasm"), b"wasm").unwrap();
+    let text = manifest("").replace("abi_version = 1", "abi_version = 2");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    let p = PluginPolicy {
+        module_root: dir.path().into(),
+        ..Default::default()
+    };
+    assert_eq!(m.validate(&p).unwrap().abi_version, 2);
+}
+
+#[test]
 fn path_containment_and_missing_module() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("ok.wasm"), b"x").unwrap();

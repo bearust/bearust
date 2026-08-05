@@ -18,7 +18,7 @@ use std::{
 };
 use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
 
-pub const SUPPORTED_ABI_VERSION: u32 = 1;
+pub const SUPPORTED_ABI_VERSIONS: std::ops::RangeInclusive<u32> = 1..=2;
 pub const MAX_ID_LEN: usize = 64;
 pub const MAX_DISPLAY_NAME_LEN: usize = 128;
 pub const MAX_MODULE_NAME_LEN: usize = 128;
@@ -205,6 +205,7 @@ pub struct CompiledPlugin {
     scheduler: Arc<EpochScheduler>,
     module: Module,
     limits: PluginLimits,
+    abi_version: u32,
     has_health_check: bool,
 }
 
@@ -235,7 +236,7 @@ impl PluginEngine {
         manifest: ValidatedManifest,
         module_bytes: &[u8],
     ) -> Result<CompiledPlugin, PluginError> {
-        if manifest.abi_version != SUPPORTED_ABI_VERSION {
+        if !SUPPORTED_ABI_VERSIONS.contains(&manifest.abi_version) {
             return Err(PluginError::AbiMismatch);
         }
         if module_bytes.len() > self.policy.max_module_bytes {
@@ -285,6 +286,7 @@ impl PluginEngine {
             scheduler: Arc::clone(&self.scheduler),
             module,
             limits,
+            abi_version: manifest.abi_version,
             has_health_check,
         })
     }
@@ -310,7 +312,7 @@ impl CompiledPlugin {
             let version = abi
                 .call(&mut store, ())
                 .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
-            if version != SUPPORTED_ABI_VERSION as i32 {
+            if version != self.abi_version as i32 {
                 return Err(PluginError::AbiMismatch);
             }
             if !self.has_health_check {
@@ -434,7 +436,7 @@ impl PluginManifest {
         if self.module.is_empty() || self.module.len() > MAX_MODULE_NAME_LEN {
             return Err(PluginError::InvalidManifest);
         }
-        if self.abi_version != SUPPORTED_ABI_VERSION {
+        if !SUPPORTED_ABI_VERSIONS.contains(&self.abi_version) {
             return Err(PluginError::AbiMismatch);
         }
         if self
