@@ -394,6 +394,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "bearust-plugin-sdk",
  "bytes",
  "chrono",
  "clap",
@@ -430,6 +431,14 @@ dependencies = [
  "uuid",
  "wasmtime",
  "wat",
+]
+
+[[package]]
+name = "bearust-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

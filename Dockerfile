@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends clang cmake mak
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
+COPY crates ./crates
+COPY migrations ./migrations
 RUN cargo build --release --locked
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates netcat-openbsd && rm -rf /var/lib/apt/lists/* \

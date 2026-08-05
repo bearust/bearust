@@ -6,10 +6,14 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 description = "Open source reverse proxy and load balancer"
 
+[workspace]
+members = ["crates/bearust-plugin-sdk"]
+
 [dependencies]
 arc-swap = "1.7"
 bytes = "1"
 base64 = "0.22"
+bearust-plugin-sdk = { path = "crates/bearust-plugin-sdk" }
 openssl = "=0.10.68"
 instant-acme = "=0.7.2"
 async-trait = "0.1"
