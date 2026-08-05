@@ -191,6 +191,71 @@ fn compile_error(wat: &str) -> PluginError {
     }
 }
 
+fn compile_v2(wat: &str, limits: PluginLimits) -> Result<CompiledPlugin, PluginError> {
+    compile_bytes_v2(&wat::parse_str(wat).unwrap(), limits)
+}
+
+fn compile_bytes_v2(bytes: &[u8], limits: PluginLimits) -> Result<CompiledPlugin, PluginError> {
+    let engine = PluginEngine::new(PluginPolicy::default())?;
+    engine.compile(validated_v2(limits), bytes)
+}
+
+fn validated_v2(limits: PluginLimits) -> ValidatedManifest {
+    ValidatedManifest {
+        abi_version: 2,
+        ..validated(limits)
+    }
+}
+
+fn compile_error_v2(wat: &str) -> PluginError {
+    match compile_v2(wat, limits()) {
+        Ok(_) => panic!("module unexpectedly compiled"),
+        Err(error) => error,
+    }
+}
+
+#[test]
+fn v2_missing_alloc_export_is_abi_mismatch() {
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0))"#;
+    assert_eq!(compile_error_v2(wat), PluginError::AbiMismatch);
+}
+
+#[test]
+fn v2_missing_health_check_v2_export_is_abi_mismatch() {
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 0)
+        (func (export "bearust_dealloc") (param i32 i32)))"#;
+    assert_eq!(compile_error_v2(wat), PluginError::AbiMismatch);
+}
+
+#[test]
+fn v2_missing_memory_export_is_abi_mismatch() {
+    let wat = r#"(module
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 0)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0))"#;
+    assert_eq!(compile_error_v2(wat), PluginError::AbiMismatch);
+}
+
+#[test]
+fn v2_wrong_signature_export_is_abi_mismatch() {
+    // bearust_alloc declared with the wrong result type (i64 instead of i32).
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i64) i64.const 0)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0))"#;
+    assert_eq!(compile_error_v2(wat), PluginError::AbiMismatch);
+}
+
 #[test]
 fn manager_lifecycle_publishes_atomic_status() {
     let root = tempdir().unwrap();

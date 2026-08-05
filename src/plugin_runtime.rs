@@ -268,7 +268,7 @@ impl PluginEngine {
         instance
             .get_typed_func::<(), i32>(&mut store, "bearust_abi_version")
             .map_err(|_| PluginError::AbiMismatch)?;
-        let has_health_check =
+        let has_health_check = if manifest.abi_version == 1 {
             match instance.get_typed_func::<(), i32>(&mut store, "bearust_health_check") {
                 Ok(_) => true,
                 Err(_)
@@ -279,7 +279,25 @@ impl PluginEngine {
                     false
                 }
                 Err(_) => return Err(PluginError::AbiMismatch),
-            };
+            }
+        } else {
+            // abi_version 2: bearust_health_check is not part of this ABI.
+            // Require the memory-convention exports and the guest's linear
+            // memory instead, all with exact typed signatures.
+            instance
+                .get_memory(&mut store, "memory")
+                .ok_or(PluginError::AbiMismatch)?;
+            instance
+                .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
+                .map_err(|_| PluginError::AbiMismatch)?;
+            instance
+                .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
+                .map_err(|_| PluginError::AbiMismatch)?;
+            instance
+                .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_health_check_v2")
+                .map_err(|_| PluginError::AbiMismatch)?;
+            false
+        };
 
         Ok(CompiledPlugin {
             engine: self.engine.clone(),
