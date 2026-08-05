@@ -62,6 +62,34 @@ fn checked_in_health_fixture_is_deterministic_and_loadable() {
 }
 
 #[test]
+fn v2_health_fixture_round_trips_json_over_guest_memory() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("health-ok-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/health_ok_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/health_ok_v2/health_ok_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("health_ok_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 1);
+    let result = manager.health_check("health-ok-v2").unwrap();
+    assert_eq!(result.status, 1);
+    assert_eq!(result.detail.as_deref(), Some("wat-v2"));
+}
+
+#[test]
 fn unknown_fields_rejected() {
     assert!(PluginManifest::from_toml(manifest("extra = true").as_bytes()).is_err());
 }
@@ -662,4 +690,116 @@ fn engine_maps_epoch_timeout() {
     )
     .unwrap();
     assert_eq!(plugin.health_check().unwrap_err().code(), "timeout");
+}
+
+#[test]
+fn v2_malformed_json_output_is_trap() {
+    // health_check_v2 returns a pointer to non-JSON bytes ("xyz", 3 bytes)
+    // stored at offset 0.
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (data (i32.const 0) "xyz")
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 64)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64)
+            (i64.or
+                (i64.shl (i64.extend_i32_u (i32.const 0)) (i64.const 32))
+                (i64.extend_i32_u (i32.const 3)))))"#;
+    let plugin = compile_v2(wat, limits()).unwrap();
+    assert_eq!(plugin.health_check().unwrap_err(), PluginError::Trap);
+}
+
+#[test]
+fn v2_out_of_bounds_output_pointer_is_trap_not_a_host_crash() {
+    // health_check_v2 claims an absurd pointer far outside the guest's
+    // single-page (65536-byte) memory.
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 0)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64)
+            (i64.or
+                (i64.shl (i64.extend_i32_u (i32.const 1000000)) (i64.const 32))
+                (i64.extend_i32_u (i32.const 10)))))"#;
+    let plugin = compile_v2(wat, limits()).unwrap();
+    assert_eq!(plugin.health_check().unwrap_err(), PluginError::Trap);
+}
+
+#[test]
+fn v2_oversized_output_is_memory_limit_not_trap() {
+    // Two pages (131072 bytes) of real memory so the claimed range is
+    // in-bounds, but the claimed length (2000) exceeds max_output_bytes
+    // (1024, from the `limits()` helper) — isolates the cap check from the
+    // bounds check.
+    let wat = r#"(module
+        (memory (export "memory") 2)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 0)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64)
+            (i64.or
+                (i64.shl (i64.extend_i32_u (i32.const 0)) (i64.const 32))
+                (i64.extend_i32_u (i32.const 2000)))))"#;
+    // The store's memory limiter is derived from `PluginLimits.memory_pages`
+    // (an independent cap from `max_output_bytes`), so it must be raised to
+    // fit the WAT's declared two-page memory or `compile_v2` itself fails
+    // with `MemoryLimit` before the codepath under test ever runs.
+    let plugin = compile_v2(
+        wat,
+        PluginLimits {
+            memory_pages: 2,
+            ..limits()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        plugin.health_check().unwrap_err(),
+        PluginError::MemoryLimit
+    );
+}
+
+#[test]
+fn v2_long_detail_is_truncated_at_a_char_boundary() {
+    // "détail" repeated has multi-byte UTF-8 characters; build a >4096-byte
+    // JSON detail string entirely out of a 4-byte-wide repeated codepoint so
+    // any naive byte-index truncation would either panic or split a
+    // character, and assert the runtime does neither.
+    let long = "\u{1F600}".repeat(2000); // 4 bytes each => 8000 bytes total
+    let json = format!(r#"{{"healthy":true,"detail":"{long}"}}"#);
+    let json_bytes = json.into_bytes();
+    let wat = format!(
+        r#"(module
+        (memory (export "memory") 4)
+        (data (i32.const 0) "{escaped}")
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 200000)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64)
+            (i64.or
+                (i64.shl (i64.extend_i32_u (i32.const 0)) (i64.const 32))
+                (i64.extend_i32_u (i32.const {len})))))"#,
+        escaped = wat_escape(&json_bytes),
+        len = json_bytes.len(),
+    );
+    // Likewise, `memory_pages` must be raised to fit the WAT's declared
+    // four-page memory or `compile_v2` fails with `MemoryLimit` before the
+    // health-check invocation (and its detail truncation) ever runs.
+    let big_limits = PluginLimits {
+        max_output_bytes: 65536,
+        memory_pages: 4,
+        ..limits()
+    };
+    let plugin = compile_v2(&wat, big_limits).unwrap();
+    let result = plugin.health_check().unwrap();
+    let detail = result.detail.unwrap();
+    assert!(detail.len() <= 4096);
+    // No panic and the string is valid UTF-8 by construction (String
+    // guarantees this); the assertion above proves truncation happened
+    // without needing to inspect a specific cut point.
+}
+
+fn wat_escape(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("\\{b:02x}")).collect()
 }

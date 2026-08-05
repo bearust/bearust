@@ -26,6 +26,7 @@ pub const MAX_CAPABILITY_LEN: usize = 64;
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 const HEALTH_RESULT_BYTES: usize = std::mem::size_of::<i32>();
 const EPOCH_TICK: Duration = Duration::from_millis(1);
+const MAX_DETAIL_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -138,10 +139,12 @@ impl fmt::Display for PluginError {
 }
 impl std::error::Error for PluginError {}
 
-/// The bounded result returned by a plugin health invocation.
+/// The bounded result returned by a plugin health invocation. `detail` is
+/// populated only by `abi_version: 2` plugins and is length-capped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthResult {
     pub status: i32,
+    pub detail: Option<String>,
     pub elapsed: Duration,
 }
 
@@ -310,6 +313,66 @@ impl PluginEngine {
     }
 }
 
+/// Validates that `ptr..ptr+len` (as claimed by a guest) lies entirely
+/// within that guest's own linear memory and within `limits.max_output_bytes`.
+/// A negative `ptr`/`len`, an overflowing range, or a range that would read
+/// or write outside the guest's actual memory is rejected before any byte is
+/// touched. Returns the validated `(start, len)` as `usize`.
+fn bounded_guest_range(
+    memory: &wasmtime::Memory,
+    store: &impl wasmtime::AsContext,
+    ptr: i32,
+    len: i32,
+    limits: &PluginLimits,
+) -> Result<(usize, usize), PluginError> {
+    if ptr < 0 || len < 0 {
+        return Err(PluginError::Trap);
+    }
+    let len = len as usize;
+    if len > limits.max_output_bytes {
+        return Err(PluginError::MemoryLimit);
+    }
+    let start = ptr as usize;
+    let end = start.checked_add(len).ok_or(PluginError::Trap)?;
+    if end > memory.data_size(store) {
+        return Err(PluginError::Trap);
+    }
+    Ok((start, len))
+}
+
+/// Writes `bytes` into guest memory at `ptr`, after bounds-checking the
+/// target range.
+fn write_guest_bytes(
+    memory: &wasmtime::Memory,
+    store: &mut Store<StoreState>,
+    ptr: i32,
+    bytes: &[u8],
+    limits: &PluginLimits,
+) -> Result<(), PluginError> {
+    let (start, len) = bounded_guest_range(memory, &*store, ptr, bytes.len() as i32, limits)?;
+    debug_assert_eq!(len, bytes.len());
+    memory
+        .write(&mut *store, start, bytes)
+        .map_err(|_| PluginError::Trap)
+}
+
+/// Reads `len` bytes from guest memory at `ptr`, after bounds-checking the
+/// source range.
+fn read_guest_bytes(
+    memory: &wasmtime::Memory,
+    store: &Store<StoreState>,
+    ptr: i32,
+    len: i32,
+    limits: &PluginLimits,
+) -> Result<Vec<u8>, PluginError> {
+    let (start, length) = bounded_guest_range(memory, store, ptr, len, limits)?;
+    let mut buf = vec![0u8; length];
+    memory
+        .read(store, start, &mut buf)
+        .map_err(|_| PluginError::Trap)?;
+    Ok(buf)
+}
+
 impl CompiledPlugin {
     pub fn health_check(&self) -> Result<HealthResult, PluginError> {
         let started = Instant::now();
@@ -321,7 +384,7 @@ impl CompiledPlugin {
             .map_err(|_| PluginError::FuelExhausted)?;
         store.set_epoch_deadline(epoch_ticks(self.limits.invocation_timeout_ms));
 
-        let result = (|| {
+        let result: Result<(i32, Option<String>), PluginError> = (|| {
             let instance = Instance::new(&mut store, &self.module, &[])
                 .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
             let abi = instance
@@ -333,20 +396,74 @@ impl CompiledPlugin {
             if version != self.abi_version as i32 {
                 return Err(PluginError::AbiMismatch);
             }
+
+            if self.abi_version == 2 {
+                let memory = instance
+                    .get_memory(&mut store, "memory")
+                    .ok_or(PluginError::AbiMismatch)?;
+                let alloc = instance
+                    .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
+                    .map_err(|_| PluginError::AbiMismatch)?;
+                let dealloc = instance
+                    .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
+                    .map_err(|_| PluginError::AbiMismatch)?;
+                let health = instance
+                    .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_health_check_v2")
+                    .map_err(|_| PluginError::AbiMismatch)?;
+
+                let input = bearust_plugin_sdk::encode(&bearust_plugin_sdk::HealthCheckInput {
+                    requested_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                });
+                let input_len: i32 = input
+                    .len()
+                    .try_into()
+                    .map_err(|_| PluginError::MemoryLimit)?;
+                let input_ptr = alloc
+                    .call(&mut store, input_len)
+                    .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+                write_guest_bytes(&memory, &mut store, input_ptr, &input, &self.limits)?;
+
+                let packed = health
+                    .call(&mut store, (input_ptr, input_len))
+                    .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+                let (out_ptr, out_len) = bearust_plugin_sdk::unpack(packed);
+                let bytes = read_guest_bytes(&memory, &store, out_ptr, out_len, &self.limits)?;
+                dealloc
+                    .call(&mut store, (out_ptr, out_len))
+                    .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+
+                let output: bearust_plugin_sdk::HealthCheckOutput =
+                    bearust_plugin_sdk::decode(&bytes).map_err(|_| PluginError::Trap)?;
+                let status = if output.healthy { 1 } else { 0 };
+                let detail = output.detail.map(|mut d| {
+                    if d.len() > MAX_DETAIL_BYTES {
+                        let mut cut = MAX_DETAIL_BYTES;
+                        while !d.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                        d.truncate(cut);
+                    }
+                    d
+                });
+                return Ok((status, detail));
+            }
+
             if !self.has_health_check {
-                return Ok(0);
+                return Ok((0, None));
             }
             let health = instance
                 .get_typed_func::<(), i32>(&mut store, "bearust_health_check")
                 .map_err(|_| PluginError::AbiMismatch)?;
-            health
+            let status = health
                 .call(&mut store, ())
-                .map_err(|error| map_runtime_error(&error, started, &self.limits))
+                .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+            Ok((status, None))
         })();
 
         match result {
-            Ok(status) => Ok(HealthResult {
+            Ok((status, detail)) => Ok(HealthResult {
                 status,
+                detail,
                 elapsed: started.elapsed(),
             }),
             Err(error) => Err(error),
