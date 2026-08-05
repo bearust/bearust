@@ -833,7 +833,7 @@ Phase 12 is complete as an optional, bounded, fail-open advisor. It remains
 disabled unless explicitly configured with both provider URL and key; inputs,
 results, queues, and telemetry are bounded and redacted.
 
-### Phase 13A status: WASM plugin runtime foundation (implementation complete; acceptance gate pending)
+### Phase 13A status: WASM plugin runtime foundation (complete, acceptance gate passing)
 
 The Phase 13A implementation is complete. BeaRust now has an optional,
 deny-by-default local
@@ -845,18 +845,20 @@ proxy request access. Invalid manifests, traps, resource exhaustion, and
 runtime initialization failures are isolated from startup and proxy traffic;
 status, audit, realtime, and metrics surfaces are bounded and redacted.
 
-The final acceptance gate remains pending: the required pinned `1.84.1`
-toolchain gate could not complete in this environment: the dependency graph
-still contains transitive crates requiring newer Cargo features than 1.84.1
-(the current first parse failure is `time-core` edition 2024), and a pinned
-all-targets linker run previously exhausted disk space. The latest installed stable
-toolchain can run Clippy successfully. Nightly Clippy reports three
-pre-existing unrelated diagnostics, and the full all-targets Rust run was
-blocked by host disk exhaustion while compiling parallel test targets. The
-focused plugin suite passes; frontend tests/build/locale validation pass after
-installing frontend dependencies. Mutating plugin endpoints use the existing
-authenticated RBAC/session contract, but a dedicated CSRF token contract is
-still a release follow-up; it is not being treated as implicitly satisfied.
+The acceptance gate now passes. The previously pinned `1.84.1` toolchain could
+not resolve transitive dependencies that require `edition2024` (stabilized in
+Rust 1.85); the project's pinned toolchain was raised to `1.97.1` (current
+stable) across `rust-toolchain.toml`, CI, and developer docs, with
+`Cargo.toml`'s `rust-version` set to the true MSRV of `1.85`. With that
+toolchain, `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test --all-targets` all pass, along with the frontend test/build/locale
+gates. Running the full Rust suite end-to-end (previously blocked by disk
+exhaustion) surfaced one stale test assertion predating Phase 13A's
+`plugins.manage`/`plugins.read` permissions, now fixed. Mutating plugin
+endpoints (and all other mutating control-plane endpoints) use the existing
+authenticated RBAC/session contract with a `SameSite=Lax` cookie, but a
+dedicated CSRF token contract is a project-wide release follow-up, not
+specific to plugins.
 
 The default is `plugins.enabled = false`. Phase 13A deliberately has no public
 SDK, traffic hooks, registry, remote download, signature verification, or

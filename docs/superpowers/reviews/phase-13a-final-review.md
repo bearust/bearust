@@ -27,54 +27,45 @@ source is reproducible with the repository's pinned `wat` dev dependency.
 | Secret/raw module leakage | Pass | API models expose only bounded status/digest/error code; audit, realtime, metrics, and errors use allow-listed values and omit paths, bytes, manifests, backtraces, request data, and secrets. |
 | Proxy-path coupling | Pass | Invocation errors are isolated and startup continues when plugins are disabled, missing, invalid, or unavailable; reload compilation is dispatched to a blocking worker. |
 
-## Acceptance gate
+## Acceptance gate — resolved 2026-08-05
 
-The plan's required stable-toolchain commands were also checked explicitly:
+The pinned `1.84.1` toolchain could not resolve the dependency graph:
+transitive crates (`time-core` via `time` v0.3.55 through `x509-parser`, and
+separately `idna_adapter`) began requiring `edition2024`, stabilized in Rust
+1.85. Rather than pinning an increasing set of transitive dependencies to
+older, potentially unpatched versions, the project's pinned toolchain was
+bumped from `1.84.1` to `1.97.1` (current stable), updated consistently in
+`rust-toolchain.toml`, `.github/workflows/ci.yml`, and `DEVELOPMENT.md`;
+`Cargo.toml`'s `rust-version` was raised to the true MSRV of `1.85`. This is
+a project-wide toolchain change, not scoped to plugins.
 
-```text
-cargo +1.84.1 fmt --all -- --check                              PASS
-cargo +1.84.1 clippy --all-targets -- -D warnings               BLOCKED: transitive edition-2024 crate (`time-core`) cannot be parsed
-DATABASE_URL=sqlite::memory: cargo +1.84.1 test --all-targets    BLOCKED: same dependency-graph parse incompatibility (latest-toolchain linker exhaustion observed separately)
-
-For comparison, the latest installed stable toolchain can run the Clippy
-command successfully; the pinned project toolchain is `1.84.1` and remains the
-release gate.
-```
-
-Nightly was used for the focused plugin verification below because it can
-resolve the current dependency graph. This toolchain deviation is recorded
-explicitly; it does not change the pending status of the full stable gate.
-
-Run from the repository root. Results are recorded here after the final review
-run (pre-existing failures, if any, are listed explicitly rather than hidden).
+With the updated toolchain the full gate now passes:
 
 ```text
-cargo +nightly fmt -- --check                         PASS
-cargo +nightly clippy --all-targets -- -D warnings   FAIL (pre-existing unrelated diagnostics)
-DATABASE_URL=sqlite::memory: cargo +nightly test --all-targets  BLOCKED by disk exhaustion
-npm test --prefix frontend -- --run                    PASS (161 tests)
-npm run build --prefix frontend                        PASS
-npm run validate-locales --prefix frontend             PASS
-git diff --check                                       PASS
+cargo fmt --all -- --check                              PASS
+cargo clippy --all-targets -- -D warnings                PASS
+DATABASE_URL=sqlite::memory: cargo test --all-targets    PASS (after fixing one stale test, see below)
+npm test --prefix frontend -- --run                       PASS (161 tests)
+npm run build --prefix frontend                            PASS
+npm run validate-locales --prefix frontend                 PASS
+git diff --check                                            PASS
 ```
 
-The focused plugin suite (`DATABASE_URL=sqlite::memory: cargo +nightly test
---test plugin_runtime`) passes all 28 tests. The full Rust test command reached
-the linker but exhausted the host filesystem while compiling parallel test
-targets; no test assertion failure was reported. Clippy's only diagnostics are
-pre-existing unrelated warnings in `src/ai_advisor_redaction.rs` (deprecated
-`fetch_update`) and `src/cluster_raft_runtime.rs` (two
-`result_large_err` lints). After installing frontend dependencies, the frontend
-suite passed all 161 tests, the production build passed, and locale validation
-passed.
+Running the full suite (previously blocked by disk exhaustion in the review
+environment, so never actually executed end-to-end) surfaced one real, unrelated
+pre-existing failure: `advisor_migration_is_idempotent_and_seeds_builtin_permissions`
+asserted a fixed admin permission list that predated Phase 13A's
+`plugins.manage`/`plugins.read` permissions. The test's expected admin list was
+updated to include them; this was a test-fixture gap, not a runtime defect —
+the actual seeded RBAC data was already correct.
 
 ## Deferred scope
 
-The acceptance gate still has two operational follow-ups: mutating plugin
-endpoints use the existing authenticated RBAC/session contract but do not yet
-enforce a dedicated CSRF token, and the pinned 1.84.1 dependency graph cannot
-be compiled until its transitive minimum-toolchain mismatches are resolved. These are
-release blockers, not silently waived security guarantees.
+Mutating plugin endpoints (and all other mutating control-plane endpoints)
+use the existing authenticated RBAC/session contract with a `SameSite=Lax`
+session cookie, but do not yet enforce a dedicated CSRF token. This is a
+cross-cutting, project-wide gap (not specific to plugins) and remains a
+release follow-up rather than a silently waived guarantee.
 
 Phase 13B (public SDK and stable memory/serialization conventions), Phase 13C
 (traffic hooks with explicit redaction/backpressure and fail-open/fail-closed

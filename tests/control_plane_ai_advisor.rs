@@ -851,6 +851,8 @@ async fn advisor_migration_is_idempotent_and_seeds_builtin_permissions() {
                 "bot_protection.manage",
                 "certificates.read",
                 "certificates.write",
+                "plugins.manage",
+                "plugins.read",
                 "proxy_hosts.read",
                 "proxy_hosts.write",
                 "roles.manage",
