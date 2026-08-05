@@ -754,10 +754,7 @@ fn v2_oversized_output_is_memory_limit_not_trap() {
         },
     )
     .unwrap();
-    assert_eq!(
-        plugin.health_check().unwrap_err(),
-        PluginError::MemoryLimit
-    );
+    assert_eq!(plugin.health_check().unwrap_err(), PluginError::MemoryLimit);
 }
 
 #[test]

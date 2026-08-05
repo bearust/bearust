@@ -866,3 +866,25 @@ trust-on-first-use behavior. Phase 13B is next and will define the public SDK
 and stable memory/serialization conventions. Phase 13C will add explicitly
 reviewed traffic hooks with input redaction and backpressure semantics. Phase
 14 remains deferred for registry distribution and signature verification.
+
+### Phase 13B status: plugin SDK and memory conventions
+
+Phase 13B is complete. The `bearust-plugin-sdk` crate (`crates/bearust-plugin-sdk`,
+a new Cargo workspace member) implements a JSON-over-linear-memory convention
+for host/guest data exchange: guest-exported `bearust_alloc`/`bearust_dealloc`
+plus a packed-`i64` pointer/length return convention. The plugin runtime now
+accepts `abi_version` `1` or `2`; `abi_version: 1` plugins are unchanged, and
+`abi_version: 2` plugins carry a structured JSON health-check result
+(`{"healthy": bool, "detail": Option<String>}`) through the new convention,
+surfaced as a new optional `detail` field on the existing
+`GET /api/plugins/{id}/health-check` response. Every guest-supplied
+pointer/length pair is bounds-checked against the guest's actual linear
+memory and against the plugin's configured `max_output_bytes` before any
+host read or write; out-of-range claims trap, oversized claims hit the
+existing resource-limit error, and malformed JSON never reaches the API as a
+raw error. No new plugin capability, host import, or traffic hook was added.
+
+Phase 13C is next: explicitly reviewed traffic hooks, one at a time, using
+this same memory convention, with per-hook redaction, backpressure, and
+fail-open/fail-closed semantics. Phase 14 remains deferred for registry
+distribution and signature verification.

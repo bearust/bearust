@@ -96,7 +96,7 @@ pub extern "C" fn bearust_dealloc(ptr: i32, len: i32) {
     }
     let len = len.max(0) as usize;
     unsafe {
-        drop(Box::from_raw(std::slice::from_raw_parts_mut(
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
             ptr as *mut u8,
             len,
         )));
