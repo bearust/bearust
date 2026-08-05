@@ -127,6 +127,43 @@ max_output_bytes = 1024
     .unwrap();
 }
 
+fn write_plugin_v2(root: &Path) {
+    let plugin = root.join("plugins/demo-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        r#"id = "demo-plugin-v2"
+display_name = "Demo plugin v2"
+abi_version = 2
+module = "demo.wasm"
+capabilities = ["health_check"]
+[limits]
+memory_pages = 1
+fuel = 10000
+invocation_timeout_ms = 100
+max_output_bytes = 1024
+"#,
+    )
+    .unwrap();
+    fs::write(
+        plugin.join("demo.wasm"),
+        wat::parse_str(
+            r#"(module
+      (memory (export "memory") 1)
+      (data (i32.const 0) "{\22healthy\22:true,\22detail\22:\22from-api\22}")
+      (func (export "bearust_abi_version") (result i32) i32.const 2)
+      (func (export "bearust_alloc") (param i32) (result i32) i32.const 1024)
+      (func (export "bearust_dealloc") (param i32 i32))
+      (func (export "bearust_health_check_v2") (param i32 i32) (result i64)
+        (i64.or
+          (i64.shl (i64.extend_i32_u (i32.const 0)) (i64.const 32))
+          (i64.extend_i32_u (i32.const 36)))))"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn admin_can_run_bounded_plugin_lifecycle() {
     let (app, db, dir) = app().await;
@@ -306,4 +343,40 @@ async fn plugin_permission_migration_is_idempotent_on_sqlite() {
             .unwrap(),
         16
     );
+}
+
+#[tokio::test]
+async fn health_check_response_includes_bounded_v2_detail() {
+    let (app, _db, dir) = app().await;
+    write_plugin_v2(dir.path());
+    assert_eq!(
+        json_request(
+            app.clone(),
+            "POST",
+            "/api/setup/initialize",
+            r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#,
+            None
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    let admin = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    // Reload is a global, not per-plugin, operation: POST /api/plugins/reload
+    // scans the configured plugin directory and (re)loads everything in it.
+    let (status, body, _) =
+        json_request(app.clone(), "POST", "/api/plugins/reload", "", Some(&admin)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["loaded"], 1);
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/plugins/demo-plugin-v2/health-check",
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let health = serde_json::from_str::<Value>(&body).unwrap();
+    assert_eq!(health["status"], 1);
+    assert_eq!(health["detail"], "from-api");
 }

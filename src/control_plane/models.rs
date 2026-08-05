@@ -138,11 +138,14 @@ pub struct PluginStatusResponse {
 }
 
 /// Safe response for a plugin health invocation. Runtime details and module
-/// paths are intentionally not exposed by the control plane.
+/// paths are intentionally not exposed by the control plane. `detail` is
+/// populated only for `abi_version: 2` plugins and is already length-capped
+/// by the plugin runtime before it reaches this response.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PluginHealthResponse {
     pub status: i32,
     pub elapsed_ms: u64,
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

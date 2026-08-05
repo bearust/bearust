@@ -257,6 +257,7 @@ pub async fn health_check(
             Json(PluginHealthResponse {
                 status: result.status,
                 elapsed_ms: result.elapsed.as_millis().min(u64::MAX as u128) as u64,
+                detail: result.detail,
             })
             .into_response()
         }
