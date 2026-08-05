@@ -762,11 +762,14 @@ fn v2_oversized_output_is_memory_limit_not_trap() {
 
 #[test]
 fn v2_long_detail_is_truncated_at_a_char_boundary() {
-    // "détail" repeated has multi-byte UTF-8 characters; build a >4096-byte
-    // JSON detail string entirely out of a 4-byte-wide repeated codepoint so
-    // any naive byte-index truncation would either panic or split a
-    // character, and assert the runtime does neither.
-    let long = "\u{1F600}".repeat(2000); // 4 bytes each => 8000 bytes total
+    // Build a >4096-byte JSON detail string entirely out of a 3-byte-wide
+    // repeated codepoint (the Euro sign) so any naive byte-index truncation
+    // at MAX_DETAIL_BYTES (4096) would split a character and panic: since
+    // 4096 % 3 != 0, the cut point does not land on a char boundary by
+    // coincidence the way a 4-byte-wide codepoint's would. This makes the
+    // test actually exercise the char-boundary-seeking loop rather than
+    // passing vacuously.
+    let long = "\u{20AC}".repeat(2700); // 3 bytes each => 8100 bytes total
     let json = format!(r#"{{"healthy":true,"detail":"{long}"}}"#);
     let json_bytes = json.into_bytes();
     let wat = format!(
