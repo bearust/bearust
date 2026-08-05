@@ -140,6 +140,52 @@ fn abi_version_two_is_accepted_at_manifest_validation() {
 }
 
 #[test]
+fn abi_version_two_rejects_output_limit_below_the_v2_input_floor() {
+    // A v2 plugin's health check also writes its *input* JSON (up to 40
+    // bytes) through the max_output_bytes bound, so anything under the
+    // 64-byte v2 floor must be rejected at validate() time rather than
+    // failing every invocation with an opaque MemoryLimit.
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("demo.wasm"), b"wasm").unwrap();
+    let p = PluginPolicy {
+        module_root: dir.path().into(),
+        ..Default::default()
+    };
+    let text = manifest("")
+        .replace("abi_version = 1", "abi_version = 2")
+        .replace("max_output_bytes = 1024", "max_output_bytes = 16");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(m.validate(&p).unwrap_err(), PluginError::InvalidManifest);
+
+    // Exactly at the floor is accepted.
+    let text = manifest("")
+        .replace("abi_version = 1", "abi_version = 2")
+        .replace("max_output_bytes = 1024", "max_output_bytes = 64");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(m.validate(&p).unwrap().abi_version, 2);
+}
+
+#[test]
+fn abi_version_one_output_floor_is_unaffected_by_the_v2_floor() {
+    // v1 keeps the original four-byte (i32 status) floor: a 16-byte cap is
+    // still valid for v1 even though it is rejected for v2 above.
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("demo.wasm"), b"wasm").unwrap();
+    let p = PluginPolicy {
+        module_root: dir.path().into(),
+        ..Default::default()
+    };
+    let text = manifest("").replace("max_output_bytes = 1024", "max_output_bytes = 16");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(m.validate(&p).unwrap().abi_version, 1);
+
+    // ...but below the i32 floor it is still rejected.
+    let text = manifest("").replace("max_output_bytes = 1024", "max_output_bytes = 3");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(m.validate(&p).unwrap_err(), PluginError::InvalidManifest);
+}
+
+#[test]
 fn path_containment_and_missing_module() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("ok.wasm"), b"x").unwrap();
@@ -723,6 +769,37 @@ fn v2_out_of_bounds_output_pointer_is_trap_not_a_host_crash() {
             (i64.or
                 (i64.shl (i64.extend_i32_u (i32.const 1000000)) (i64.const 32))
                 (i64.extend_i32_u (i32.const 10)))))"#;
+    let plugin = compile_v2(wat, limits()).unwrap();
+    assert_eq!(plugin.health_check().unwrap_err(), PluginError::Trap);
+}
+
+#[test]
+fn v2_negative_alloc_pointer_is_trap_on_the_input_write() {
+    // Hostile guest: bearust_alloc hands back a negative pointer. The host
+    // must reject it while bounds-checking the *input* write, before any
+    // byte is copied and before health_check_v2 is even called.
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const -1)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64)
+            unreachable))"#;
+    let plugin = compile_v2(wat, limits()).unwrap();
+    assert_eq!(plugin.health_check().unwrap_err(), PluginError::Trap);
+}
+
+#[test]
+fn v2_out_of_bounds_alloc_pointer_is_trap_on_the_input_write() {
+    // Same hostile-allocator shape, but with a large in-range-looking
+    // pointer far past the end of the guest's single 65536-byte page.
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 1000000)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64)
+            unreachable))"#;
     let plugin = compile_v2(wat, limits()).unwrap();
     assert_eq!(plugin.health_check().unwrap_err(), PluginError::Trap);
 }

@@ -877,7 +877,11 @@ accepts `abi_version` `1` or `2`; `abi_version: 1` plugins are unchanged, and
 `abi_version: 2` plugins carry a structured JSON health-check result
 (`{"healthy": bool, "detail": Option<String>}`) through the new convention,
 surfaced as a new optional `detail` field on the existing
-`GET /api/plugins/{id}/health-check` response. Every guest-supplied
+`POST /api/plugins/{id}/health-check` response. "`abi_version: 1` plugins are
+unchanged" refers to their behaviour and ABI, not to a byte-identical wire
+response: v1 health-check responses now include the additive `"detail": null`
+field (previously absent) because `detail` is serialized for every plugin
+regardless of ABI version. Every guest-supplied
 pointer/length pair is bounds-checked against the guest's actual linear
 memory and against the plugin's configured `max_output_bytes` before any
 host read or write; out-of-range claims trap, oversized claims hit the

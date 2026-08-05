@@ -70,9 +70,11 @@ mod tests {
 /// module's own linear memory and returns a pointer the host can write
 /// into before calling a plugin function that takes `(ptr, len)`.
 ///
-/// Only meaningful when compiled for `wasm32-wasip1`; not exercised by this
+/// Guest-only: compiled solely for `wasm32` targets, where pointers really
+/// are 32-bit so the `i32` return is exact. Not exercised by this
 /// repository's test suite (see Task 4's hand-written WAT fixture for the
 /// host-side contract this implements).
+#[cfg(target_arch = "wasm32")]
 #[no_mangle]
 pub extern "C" fn bearust_alloc(len: i32) -> i32 {
     let len = len.max(0) as usize;
@@ -89,6 +91,9 @@ pub extern "C" fn bearust_alloc(len: i32) -> i32 {
 /// `write_output`, whose buffer has the same provenance) and not already
 /// deallocated. The host is the only caller and always passes back exactly
 /// the pair it received.
+///
+/// Guest-only: compiled solely for `wasm32` targets.
+#[cfg(target_arch = "wasm32")]
 #[no_mangle]
 pub extern "C" fn bearust_dealloc(ptr: i32, len: i32) {
     if ptr == 0 {
@@ -104,15 +109,28 @@ pub extern "C" fn bearust_dealloc(ptr: i32, len: i32) {
 }
 
 /// Decodes a JSON payload the host wrote into this guest's own memory at
-/// `ptr` with length `len`. Guest-only; see the module-level caveat above.
-pub fn read_input<T: DeserializeOwned>(ptr: i32, len: i32) -> T {
+/// `ptr` with length `len`. Guest-only: compiled solely for `wasm32` targets.
+///
+/// # Safety
+/// `ptr` and `len` must together describe a live, valid, initialised region
+/// of *this guest module's own* linear memory — in practice, exactly the
+/// `(ptr, len)` pair the host passed to the plugin export after allocating
+/// via [`bearust_alloc`] and writing the input JSON there. The region must
+/// remain allocated and not be mutated for the duration of the call, and
+/// `len` must be non-negative. Passing arbitrary integers is undefined
+/// behaviour: this function performs no validation beyond clamping a
+/// negative `len` to zero.
+#[cfg(target_arch = "wasm32")]
+pub unsafe fn read_input<T: DeserializeOwned>(ptr: i32, len: i32) -> T {
     let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len.max(0) as usize) };
     decode(bytes).expect("bearust-plugin-sdk: host sent malformed input")
 }
 
 /// Encodes `value` as JSON into a freshly allocated guest buffer and
-/// returns the packed `(ptr, len)` result the host expects. Guest-only; see
-/// the module-level caveat above.
+/// returns the packed `(ptr, len)` result the host expects. Guest-only:
+/// compiled solely for `wasm32` targets, where the `i32` pointer cast is
+/// exact.
+#[cfg(target_arch = "wasm32")]
 pub fn write_output<T: Serialize>(value: &T) -> i64 {
     let bytes = encode(value);
     let len = bytes.len() as i32;

@@ -25,6 +25,13 @@ pub const MAX_MODULE_NAME_LEN: usize = 128;
 pub const MAX_CAPABILITY_LEN: usize = 64;
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 const HEALTH_RESULT_BYTES: usize = std::mem::size_of::<i32>();
+/// `abi_version: 2` also writes the *input* JSON through the same
+/// `max_output_bytes` bound. The worst-case input is
+/// `{"requested_at_ms":18446744073709551615}` (40 bytes), so a v2 plugin
+/// declaring less than this could never complete a health check; reject it
+/// at manifest validation instead of failing every invocation with an
+/// opaque `MemoryLimit`.
+const MIN_V2_OUTPUT_BYTES: usize = 64;
 const EPOCH_TICK: Duration = Duration::from_millis(1);
 const MAX_DETAIL_BYTES: usize = 4096;
 
@@ -271,8 +278,11 @@ impl PluginEngine {
         instance
             .get_typed_func::<(), i32>(&mut store, "bearust_abi_version")
             .map_err(|_| PluginError::AbiMismatch)?;
-        let has_health_check = if manifest.abi_version == 1 {
-            match instance.get_typed_func::<(), i32>(&mut store, "bearust_health_check") {
+        // Exhaustive on purpose: widening SUPPORTED_ABI_VERSIONS without
+        // adding an arm here fails closed with AbiMismatch rather than
+        // silently validating a new version against the wrong export set.
+        let has_health_check = match manifest.abi_version {
+            1 => match instance.get_typed_func::<(), i32>(&mut store, "bearust_health_check") {
                 Ok(_) => true,
                 Err(_)
                     if instance
@@ -282,24 +292,26 @@ impl PluginEngine {
                     false
                 }
                 Err(_) => return Err(PluginError::AbiMismatch),
+            },
+            2 => {
+                // abi_version 2: bearust_health_check is not part of this ABI.
+                // Require the memory-convention exports and the guest's linear
+                // memory instead, all with exact typed signatures.
+                instance
+                    .get_memory(&mut store, "memory")
+                    .ok_or(PluginError::AbiMismatch)?;
+                instance
+                    .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
+                    .map_err(|_| PluginError::AbiMismatch)?;
+                instance
+                    .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
+                    .map_err(|_| PluginError::AbiMismatch)?;
+                instance
+                    .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_health_check_v2")
+                    .map_err(|_| PluginError::AbiMismatch)?;
+                false
             }
-        } else {
-            // abi_version 2: bearust_health_check is not part of this ABI.
-            // Require the memory-convention exports and the guest's linear
-            // memory instead, all with exact typed signatures.
-            instance
-                .get_memory(&mut store, "memory")
-                .ok_or(PluginError::AbiMismatch)?;
-            instance
-                .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
-                .map_err(|_| PluginError::AbiMismatch)?;
-            instance
-                .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
-                .map_err(|_| PluginError::AbiMismatch)?;
-            instance
-                .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_health_check_v2")
-                .map_err(|_| PluginError::AbiMismatch)?;
-            false
+            _ => return Err(PluginError::AbiMismatch),
         };
 
         Ok(CompiledPlugin {
@@ -397,67 +409,79 @@ impl CompiledPlugin {
                 return Err(PluginError::AbiMismatch);
             }
 
-            if self.abi_version == 2 {
-                let memory = instance
-                    .get_memory(&mut store, "memory")
-                    .ok_or(PluginError::AbiMismatch)?;
-                let alloc = instance
-                    .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
-                    .map_err(|_| PluginError::AbiMismatch)?;
-                let dealloc = instance
-                    .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
-                    .map_err(|_| PluginError::AbiMismatch)?;
-                let health = instance
-                    .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_health_check_v2")
-                    .map_err(|_| PluginError::AbiMismatch)?;
-
-                let input = bearust_plugin_sdk::encode(&bearust_plugin_sdk::HealthCheckInput {
-                    requested_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
-                });
-                let input_len: i32 = input
-                    .len()
-                    .try_into()
-                    .map_err(|_| PluginError::MemoryLimit)?;
-                let input_ptr = alloc
-                    .call(&mut store, input_len)
-                    .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
-                write_guest_bytes(&memory, &mut store, input_ptr, &input, &self.limits)?;
-
-                let packed = health
-                    .call(&mut store, (input_ptr, input_len))
-                    .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
-                let (out_ptr, out_len) = bearust_plugin_sdk::unpack(packed);
-                let bytes = read_guest_bytes(&memory, &store, out_ptr, out_len, &self.limits)?;
-                dealloc
-                    .call(&mut store, (out_ptr, out_len))
-                    .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
-
-                let output: bearust_plugin_sdk::HealthCheckOutput =
-                    bearust_plugin_sdk::decode(&bytes).map_err(|_| PluginError::Trap)?;
-                let status = if output.healthy { 1 } else { 0 };
-                let detail = output.detail.map(|mut d| {
-                    if d.len() > MAX_DETAIL_BYTES {
-                        let mut cut = MAX_DETAIL_BYTES;
-                        while !d.is_char_boundary(cut) {
-                            cut -= 1;
-                        }
-                        d.truncate(cut);
+            // Exhaustive on purpose, mirroring PluginEngine::compile: an
+            // unknown ABI version fails closed instead of falling through to
+            // some other version's invocation path.
+            match self.abi_version {
+                1 => {
+                    if !self.has_health_check {
+                        return Ok((0, None));
                     }
-                    d
-                });
-                return Ok((status, detail));
-            }
+                    let health = instance
+                        .get_typed_func::<(), i32>(&mut store, "bearust_health_check")
+                        .map_err(|_| PluginError::AbiMismatch)?;
+                    let status = health
+                        .call(&mut store, ())
+                        .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+                    Ok((status, None))
+                }
+                2 => {
+                    let memory = instance
+                        .get_memory(&mut store, "memory")
+                        .ok_or(PluginError::AbiMismatch)?;
+                    let alloc = instance
+                        .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
+                        .map_err(|_| PluginError::AbiMismatch)?;
+                    let dealloc = instance
+                        .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
+                        .map_err(|_| PluginError::AbiMismatch)?;
+                    let health = instance
+                        .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_health_check_v2")
+                        .map_err(|_| PluginError::AbiMismatch)?;
 
-            if !self.has_health_check {
-                return Ok((0, None));
+                    let input = bearust_plugin_sdk::encode(&bearust_plugin_sdk::HealthCheckInput {
+                        requested_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                    });
+                    let input_len: i32 = input
+                        .len()
+                        .try_into()
+                        .map_err(|_| PluginError::MemoryLimit)?;
+                    let input_ptr = alloc
+                        .call(&mut store, input_len)
+                        .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+                    write_guest_bytes(&memory, &mut store, input_ptr, &input, &self.limits)?;
+
+                    let packed = health
+                        .call(&mut store, (input_ptr, input_len))
+                        .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+                    // The guest is done reading the input buffer once the call
+                    // returns; free it symmetrically with the output buffer.
+                    dealloc
+                        .call(&mut store, (input_ptr, input_len))
+                        .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+                    let (out_ptr, out_len) = bearust_plugin_sdk::unpack(packed);
+                    let bytes = read_guest_bytes(&memory, &store, out_ptr, out_len, &self.limits)?;
+                    dealloc
+                        .call(&mut store, (out_ptr, out_len))
+                        .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+
+                    let output: bearust_plugin_sdk::HealthCheckOutput =
+                        bearust_plugin_sdk::decode(&bytes).map_err(|_| PluginError::Trap)?;
+                    let status = if output.healthy { 1 } else { 0 };
+                    let detail = output.detail.map(|mut d| {
+                        if d.len() > MAX_DETAIL_BYTES {
+                            let mut cut = MAX_DETAIL_BYTES;
+                            while !d.is_char_boundary(cut) {
+                                cut -= 1;
+                            }
+                            d.truncate(cut);
+                        }
+                        d
+                    });
+                    Ok((status, detail))
+                }
+                _ => Err(PluginError::AbiMismatch),
             }
-            let health = instance
-                .get_typed_func::<(), i32>(&mut store, "bearust_health_check")
-                .map_err(|_| PluginError::AbiMismatch)?;
-            let status = health
-                .call(&mut store, ())
-                .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
-            Ok((status, None))
         })();
 
         match result {
@@ -599,6 +623,9 @@ impl PluginManifest {
             || self.limits.max_output_bytes < HEALTH_RESULT_BYTES
             || self.limits.max_output_bytes > policy.max_output_bytes
         {
+            return Err(PluginError::InvalidManifest);
+        }
+        if self.abi_version == 2 && self.limits.max_output_bytes < MIN_V2_OUTPUT_BYTES {
             return Err(PluginError::InvalidManifest);
         }
         let module = resolve_module_path(&policy.module_root, &self.module)?;
