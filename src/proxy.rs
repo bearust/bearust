@@ -95,6 +95,7 @@ pub struct BeaRustProxy {
     pub analytics_host_ids: HashMap<String, i64>,
     pub baseline: Option<Arc<crate::baseline::BaselineCollector>>,
     pub anomaly: Option<Arc<crate::anomaly::AnomalyDetector>>,
+    pub plugin_notify: Option<Arc<crate::plugin_notify::NotificationSink>>,
 }
 
 impl BeaRustProxy {
@@ -113,6 +114,7 @@ impl BeaRustProxy {
             analytics_host_ids: HashMap::new(),
             baseline: None,
             anomaly: None,
+            plugin_notify: None,
         }
     }
     pub fn with_challenge_store(mut self, challenges: Http01Store) -> Self {
@@ -164,6 +166,13 @@ impl BeaRustProxy {
     }
     pub fn with_anomaly(mut self, anomaly: Arc<crate::anomaly::AnomalyDetector>) -> Self {
         self.anomaly = Some(anomaly);
+        self
+    }
+    pub fn with_plugin_notify_sink(
+        mut self,
+        sink: Arc<crate::plugin_notify::NotificationSink>,
+    ) -> Self {
+        self.plugin_notify = Some(sink);
         self
     }
 
@@ -261,7 +270,33 @@ pub fn http_service(
 /// but is not an audit payload contract.  Categories are normalized into
 /// identifiers and capped so custom rule names cannot become an unbounded log
 /// injection vector.
-fn emit_waf_telemetry(request_id: &str, waf: &WafStore, evaluation: &Evaluation) {
+/// Builds the notification-sink event for a WAF decision, or `None` if the
+/// decision was not a block. Pure and side-effect free so it can be tested
+/// without a running plugin or channel.
+fn waf_block_event(
+    request_id: &str,
+    decision: WafDecision,
+    details: &crate::waf::RedactedTelemetry,
+) -> Option<bearust_plugin_sdk::WafBlockEvent> {
+    if decision != WafDecision::Block {
+        return None;
+    }
+    Some(bearust_plugin_sdk::WafBlockEvent {
+        request_id: request_id.to_owned(),
+        occurred_at_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+        category: details.category.clone(),
+        score: details.score,
+        severity: details.severity.clone(),
+        reason_ids: details.reason_ids.clone(),
+    })
+}
+
+fn emit_waf_telemetry(
+    request_id: &str,
+    waf: &WafStore,
+    evaluation: &Evaluation,
+    notify: Option<&crate::plugin_notify::NotificationSink>,
+) {
     if evaluation.semantic_score == 0 && evaluation.matched_rule_ids.is_empty() {
         return;
     }
@@ -276,6 +311,11 @@ fn emit_waf_telemetry(request_id: &str, waf: &WafStore, evaluation: &Evaluation)
         decision = ?evaluation.decision,
     );
     waf.record_detection(evaluation);
+    if let Some(event) = waf_block_event(request_id, evaluation.decision.clone(), &details) {
+        if let Some(notify) = notify {
+            notify.notify_waf_block(event);
+        }
+    }
 }
 
 fn emit_rate_limit_telemetry(
@@ -429,7 +469,12 @@ impl ProxyHttp for BeaRustProxy {
             ctx.waf_blocked = evaluation.decision == WafDecision::Block;
             ctx.waf_evaluation = Some(evaluation.clone());
             if !ctx.waf_body_expected && !ctx.waf_telemetry_emitted {
-                emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
+                emit_waf_telemetry(
+                    &ctx.request_id,
+                    waf,
+                    &evaluation,
+                    self.plugin_notify.as_deref(),
+                );
                 ctx.waf_telemetry_emitted =
                     evaluation.semantic_score > 0 || !evaluation.matched_rule_ids.is_empty();
             }
@@ -694,7 +739,12 @@ impl ProxyHttp for BeaRustProxy {
             // Evaluate every bounded chunk before forwarding it. This
             // catches body-only attacks without requiring replay/buffering.
             if ctx.waf_blocked {
-                emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
+                emit_waf_telemetry(
+                    &ctx.request_id,
+                    waf,
+                    &evaluation,
+                    self.plugin_notify.as_deref(),
+                );
                 *body = None;
                 session
                     .respond_error_with_body(403, Bytes::from_static(b"Request blocked"))
@@ -728,7 +778,12 @@ impl ProxyHttp for BeaRustProxy {
             if end_of_stream
                 && (evaluation.semantic_score > 0 || !evaluation.matched_rule_ids.is_empty())
             {
-                emit_waf_telemetry(&ctx.request_id, waf, &evaluation);
+                emit_waf_telemetry(
+                    &ctx.request_id,
+                    waf,
+                    &evaluation,
+                    self.plugin_notify.as_deref(),
+                );
             }
             let should_flush_buffer = !ctx.waf_blocked
                 && ctx.waf_buffering
@@ -858,7 +913,7 @@ fn error_status(error: &pingora_core::Error) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{error_status, invoke_analytics_changed};
+    use super::{error_status, invoke_analytics_changed, waf_block_event};
     use pingora_core::{Error, ErrorType};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -880,5 +935,23 @@ mod tests {
         }));
         invoke_analytics_changed(&notifier);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn waf_block_event_is_built_only_for_block_decisions() {
+        let details = crate::waf::RedactedTelemetry {
+            category: "sqli".into(),
+            score: 42,
+            severity: "high".into(),
+            reason_ids: "sqli".into(),
+        };
+        assert!(waf_block_event("req-1", crate::waf::WafDecision::Allow, &details).is_none());
+        assert!(waf_block_event("req-1", crate::waf::WafDecision::Log, &details).is_none());
+        let event = waf_block_event("req-1", crate::waf::WafDecision::Block, &details).unwrap();
+        assert_eq!(event.request_id, "req-1");
+        assert_eq!(event.category, "sqli");
+        assert_eq!(event.score, 42);
+        assert_eq!(event.severity, "high");
+        assert_eq!(event.reason_ids, "sqli");
     }
 }

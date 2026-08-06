@@ -281,6 +281,8 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                 Ok(_) => {}
             }
         }
+        let plugin_notify_sink =
+            crate::plugin_notify::NotificationSink::spawn(control_state.plugin_manager.clone());
         control_state.ai_advisor = Arc::new(
             crate::ai_advisor::AiAdvisorService::from_env()
                 .map(|service| service.with_metrics(control_state.advisor_metrics.clone()))
@@ -450,6 +452,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                 .with_analytics_host_ids(analytics_host_ids)
                 .with_baseline(control_state.baseline.clone())
                 .with_anomaly(control_state.anomaly.clone())
+                .with_plugin_notify_sink(plugin_notify_sink)
                 .with_rate_limiter(rate_limiter)
                 .with_rate_limit_policy(rate_policy)
                 .with_trusted_proxies(trusted_proxies),
