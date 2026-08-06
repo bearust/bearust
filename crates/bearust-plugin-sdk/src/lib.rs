@@ -64,6 +64,21 @@ mod tests {
         let result: Result<Sample, _> = decode(b"not json");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn waf_block_event_round_trips() {
+        let value = WafBlockEvent {
+            request_id: "req-1".into(),
+            occurred_at_ms: 1_700_000_000_000,
+            category: "sqli".into(),
+            score: 42,
+            severity: "high".into(),
+            reason_ids: "sqli".into(),
+        };
+        let bytes = encode(&value);
+        let decoded: WafBlockEvent = decode(&bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
 }
 
 /// Guest-exported allocator entry point: reserves `len` bytes of this
@@ -164,4 +179,19 @@ pub struct HealthCheckInput {
 pub struct HealthCheckOutput {
     pub healthy: bool,
     pub detail: Option<String>,
+}
+
+/// Event delivered to a `notify.waf_block` capability plugin when the WAF
+/// blocks a request. Mirrors `src/waf.rs::RedactedTelemetry` on the host
+/// side, plus a request identifier and timestamp. Never carries raw
+/// headers, body, query string, or client IP — only what
+/// `redacted_telemetry` already produces for tracing/audit today.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct WafBlockEvent {
+    pub request_id: String,
+    pub occurred_at_ms: u64,
+    pub category: String,
+    pub score: u16,
+    pub severity: String,
+    pub reason_ids: String,
 }
