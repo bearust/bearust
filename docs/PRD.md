@@ -888,7 +888,39 @@ host read or write; out-of-range claims trap, oversized claims hit the
 existing resource-limit error, and malformed JSON never reaches the API as a
 raw error. No new plugin capability, host import, or traffic hook was added.
 
-Phase 13C is next: explicitly reviewed traffic hooks, one at a time, using
-this same memory convention, with per-hook redaction, backpressure, and
-fail-open/fail-closed semantics. Phase 14 remains deferred for registry
-distribution and signature verification.
+Phase 14 remains deferred for registry distribution and signature
+verification.
+
+### Phase 13C status: WAF-block notification sink
+
+Phase 13C is complete. It adds the plugin system's first traffic hook: a
+notification sink that receives a structured JSON event
+(`{"request_id", "occurred_at_ms", "category", "score", "severity",
+"reason_ids"}`, mirroring `src/waf.rs::redacted_telemetry`'s existing
+tracing/audit fields) every time the WAF blocks a request. A plugin opts in
+by declaring `abi_version: 2` and `capabilities = ["notify.waf_block"]` and
+exporting `bearust_notify_waf_block(ptr, len) -> i32` using the same
+alloc/write/call/dealloc memory convention Phase 13B introduced for the
+health check. At most one enabled plugin is ever treated as the active sink
+(the lowest plugin ID declaring the capability); every other plugin is
+unaffected.
+
+The hook is purely observational and cannot influence the request/response
+that triggered it. The proxy enqueues each event with a non-blocking
+`try_send` into a bounded (256-entry) channel and returns immediately; a
+background worker task invokes the sink plugin off the request's call
+stack. A full queue drops the newest event; a trapping, timed-out,
+fuel-exhausted, or otherwise failing invocation is counted and never
+retried. Three new Prometheus counters
+(`bearust_plugins_notify_invocations_total`,
+`bearust_plugins_notify_failures_total`,
+`bearust_plugins_notify_dropped_total`) surface this on the existing plugin
+metrics endpoint. No new host import, capability, or resource-limit bypass
+was added; every guest-controlled pointer/length is bounds-checked
+identically to the Phase 13B health-check path.
+
+Phase 13D is next: a custom WAF detector hook, where a plugin's verdict can
+influence traffic (a higher blast radius than a sink, since its output can
+block requests), followed by request/response transform and custom
+load-balancing hooks — each reviewed individually and built on this same
+memory convention.
