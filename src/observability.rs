@@ -31,6 +31,9 @@ pub struct PluginMetrics {
     health_check_success: AtomicU64,
     health_check_failure: AtomicU64,
     loaded: AtomicU64,
+    notify_invocations: AtomicU64,
+    notify_failures: AtomicU64,
+    notify_dropped: AtomicU64,
 }
 
 impl PluginMetrics {
@@ -53,6 +56,24 @@ impl PluginMetrics {
 
     pub fn set_loaded(&self, loaded: usize) {
         self.loaded.store(loaded as u64, Ordering::Relaxed);
+    }
+
+    /// The registered `notify.waf_block` sink returned status `0`.
+    pub fn record_notify_invocation(&self) {
+        self.notify_invocations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The registered sink returned a nonzero status, trapped, timed out,
+    /// exhausted its fuel, or had a malformed export — any outcome other
+    /// than a clean `0` return.
+    pub fn record_notify_failure(&self) {
+        self.notify_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A WAF-block event was dropped because the notification queue was
+    /// full.
+    pub fn record_notify_dropped(&self) {
+        self.notify_dropped.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn render_prometheus(&self) -> String {
@@ -79,6 +100,21 @@ impl PluginMetrics {
         output.push_str(&format!(
             "bearust_plugins_loaded {}\n",
             self.loaded.load(Ordering::Relaxed)
+        ));
+        output.push_str("# TYPE bearust_plugins_notify_invocations_total counter\n");
+        output.push_str(&format!(
+            "bearust_plugins_notify_invocations_total {}\n",
+            self.notify_invocations.load(Ordering::Relaxed)
+        ));
+        output.push_str("# TYPE bearust_plugins_notify_failures_total counter\n");
+        output.push_str(&format!(
+            "bearust_plugins_notify_failures_total {}\n",
+            self.notify_failures.load(Ordering::Relaxed)
+        ));
+        output.push_str("# TYPE bearust_plugins_notify_dropped_total counter\n");
+        output.push_str(&format!(
+            "bearust_plugins_notify_dropped_total {}\n",
+            self.notify_dropped.load(Ordering::Relaxed)
         ));
         output
     }
@@ -275,5 +311,18 @@ mod tests {
         assert!(output.contains("status=\"queued\""));
         assert!(output.contains("decision=\"approved\""));
         assert!(!output.contains("user-controlled-value"));
+    }
+
+    #[test]
+    fn notify_metrics_render_as_counters() {
+        let metrics = PluginMetrics::default();
+        metrics.record_notify_invocation();
+        metrics.record_notify_invocation();
+        metrics.record_notify_failure();
+        metrics.record_notify_dropped();
+        let output = metrics.render_prometheus();
+        assert!(output.contains("bearust_plugins_notify_invocations_total 2"));
+        assert!(output.contains("bearust_plugins_notify_failures_total 1"));
+        assert!(output.contains("bearust_plugins_notify_dropped_total 1"));
     }
 }
