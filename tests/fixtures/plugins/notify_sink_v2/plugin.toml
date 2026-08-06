@@ -1,0 +1,11 @@
+id = "notify-sink-v2"
+display_name = "Deterministic WAF-block notification sink"
+abi_version = 2
+module = "notify_sink_v2.wasm"
+capabilities = ["notify.waf_block"]
+
+[limits]
+memory_pages = 1
+fuel = 10000
+invocation_timeout_ms = 100
+max_output_bytes = 1024

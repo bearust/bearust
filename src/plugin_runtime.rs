@@ -34,6 +34,7 @@ const HEALTH_RESULT_BYTES: usize = std::mem::size_of::<i32>();
 const MIN_V2_OUTPUT_BYTES: usize = 64;
 const EPOCH_TICK: Duration = Duration::from_millis(1);
 const MAX_DETAIL_BYTES: usize = 4096;
+const ALLOWED_CAPABILITIES: [&str; 2] = ["health_check", "notify.waf_block"];
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -217,6 +218,7 @@ pub struct CompiledPlugin {
     limits: PluginLimits,
     abi_version: u32,
     has_health_check: bool,
+    has_notify_waf_block: bool,
 }
 
 impl PluginEngine {
@@ -281,18 +283,22 @@ impl PluginEngine {
         // Exhaustive on purpose: widening SUPPORTED_ABI_VERSIONS without
         // adding an arm here fails closed with AbiMismatch rather than
         // silently validating a new version against the wrong export set.
-        let has_health_check = match manifest.abi_version {
-            1 => match instance.get_typed_func::<(), i32>(&mut store, "bearust_health_check") {
-                Ok(_) => true,
-                Err(_)
-                    if instance
-                        .get_export(&mut store, "bearust_health_check")
-                        .is_none() =>
-                {
-                    false
-                }
-                Err(_) => return Err(PluginError::AbiMismatch),
-            },
+        let (has_health_check, has_notify_waf_block) = match manifest.abi_version {
+            1 => {
+                let has_health_check =
+                    match instance.get_typed_func::<(), i32>(&mut store, "bearust_health_check") {
+                        Ok(_) => true,
+                        Err(_)
+                            if instance
+                                .get_export(&mut store, "bearust_health_check")
+                                .is_none() =>
+                        {
+                            false
+                        }
+                        Err(_) => return Err(PluginError::AbiMismatch),
+                    };
+                (has_health_check, false)
+            }
             2 => {
                 // abi_version 2: bearust_health_check is not part of this ABI.
                 // Require the memory-convention exports and the guest's linear
@@ -309,7 +315,19 @@ impl PluginEngine {
                 instance
                     .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_health_check_v2")
                     .map_err(|_| PluginError::AbiMismatch)?;
-                false
+                let has_notify_waf_block = if manifest
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "notify.waf_block")
+                {
+                    instance
+                        .get_typed_func::<(i32, i32), i32>(&mut store, "bearust_notify_waf_block")
+                        .map_err(|_| PluginError::AbiMismatch)?;
+                    true
+                } else {
+                    false
+                };
+                (false, has_notify_waf_block)
             }
             _ => return Err(PluginError::AbiMismatch),
         };
@@ -321,6 +339,7 @@ impl PluginEngine {
             limits,
             abi_version: manifest.abi_version,
             has_health_check,
+            has_notify_waf_block,
         })
     }
 }
@@ -493,6 +512,63 @@ impl CompiledPlugin {
             Err(error) => Err(error),
         }
     }
+
+    /// Invokes the `notify.waf_block` capability's entry point on an
+    /// `abi_version: 2` plugin that declared it. Returns the plugin's raw
+    /// `i32` status (`0` = success, nonzero = plugin-reported failure) or a
+    /// `PluginError` for any host-detected failure (trap, timeout, fuel
+    /// exhaustion, malformed export, or an out-of-bounds pointer). Never
+    /// panics: every guest-controlled pointer/length is bounds-checked
+    /// exactly as in `health_check`'s v2 path.
+    pub fn notify_waf_block(
+        &self,
+        event: &bearust_plugin_sdk::WafBlockEvent,
+    ) -> Result<i32, PluginError> {
+        if !self.has_notify_waf_block {
+            return Err(PluginError::AbiMismatch);
+        }
+        let started = Instant::now();
+        let _scheduler = Arc::clone(&self.scheduler);
+        let mut store = new_store(&self.engine, &self.limits)?;
+        store
+            .set_fuel(self.limits.fuel)
+            .map_err(|_| PluginError::FuelExhausted)?;
+        store.set_epoch_deadline(epoch_ticks(self.limits.invocation_timeout_ms));
+
+        let instance = Instance::new(&mut store, &self.module, &[])
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .ok_or(PluginError::AbiMismatch)?;
+        let alloc = instance
+            .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
+            .map_err(|_| PluginError::AbiMismatch)?;
+        let dealloc = instance
+            .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
+            .map_err(|_| PluginError::AbiMismatch)?;
+        let notify = instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "bearust_notify_waf_block")
+            .map_err(|_| PluginError::AbiMismatch)?;
+
+        let input = bearust_plugin_sdk::encode(event);
+        let input_len: i32 = input
+            .len()
+            .try_into()
+            .map_err(|_| PluginError::MemoryLimit)?;
+        let input_ptr = alloc
+            .call(&mut store, input_len)
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        write_guest_bytes(&memory, &mut store, input_ptr, &input, &self.limits)?;
+
+        let status = notify
+            .call(&mut store, (input_ptr, input_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        dealloc
+            .call(&mut store, (input_ptr, input_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+
+        Ok(status)
+    }
 }
 
 fn clamp_limits(requested: &PluginLimits, policy: &PluginPolicy) -> PluginLimits {
@@ -598,11 +674,12 @@ impl PluginManifest {
         if !SUPPORTED_ABI_VERSIONS.contains(&self.abi_version) {
             return Err(PluginError::AbiMismatch);
         }
-        if self
-            .capabilities
-            .iter()
-            .any(|c| c != "health_check" || c.len() > MAX_CAPABILITY_LEN)
-        {
+        if self.capabilities.iter().any(|c| {
+            c.len() > MAX_CAPABILITY_LEN || !ALLOWED_CAPABILITIES.contains(&c.as_str())
+        }) {
+            return Err(PluginError::InvalidManifest);
+        }
+        if self.abi_version != 2 && self.capabilities.iter().any(|c| c == "notify.waf_block") {
             return Err(PluginError::InvalidManifest);
         }
         let mut caps = self.capabilities.clone();
@@ -1331,6 +1408,21 @@ impl PluginManager {
                 status
             })
             .collect()
+    }
+
+    /// Returns the compiled plugin currently acting as the WAF-block
+    /// notification sink, if any: the first (lowest plugin ID) enabled
+    /// plugin whose manifest declared `notify.waf_block`. At most one
+    /// plugin is ever treated as the active sink in this phase; any other
+    /// plugin also declaring the capability is simply never selected.
+    pub fn waf_block_sink_plugin(&self) -> Option<Arc<CompiledPlugin>> {
+        self.current.load_full().plugins.values().find_map(|record| {
+            if !record.status.enabled {
+                return None;
+            }
+            let compiled = record.compiled.as_ref()?;
+            compiled.has_notify_waf_block.then(|| Arc::clone(compiled))
+        })
     }
 
     pub fn health_check(&self, id: &str) -> Result<HealthResult, PluginError> {

@@ -90,6 +90,95 @@ fn v2_health_fixture_round_trips_json_over_guest_memory() {
 }
 
 #[test]
+fn notify_sink_fixture_round_trips_json_and_reports_success() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("notify-sink-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/notify_sink_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/notify_sink_v2/notify_sink_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("notify_sink_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 1);
+
+    let sink = manager
+        .waf_block_sink_plugin()
+        .expect("notify-sink-v2 declares notify.waf_block and is enabled");
+    let event = bearust_plugin_sdk::WafBlockEvent {
+        request_id: "req-1".into(),
+        occurred_at_ms: 1_700_000_000_000,
+        category: "sqli".into(),
+        score: 42,
+        severity: "high".into(),
+        reason_ids: "sqli".into(),
+    };
+    assert_eq!(sink.notify_waf_block(&event).unwrap(), 0);
+}
+
+#[test]
+fn waf_block_sink_plugin_is_none_when_no_plugin_declares_the_capability() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("health-ok-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/health_ok_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/health_ok_v2/health_ok_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("health_ok_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    manager.reload_from_disk().unwrap();
+    assert!(manager.waf_block_sink_plugin().is_none());
+}
+
+#[test]
+fn waf_block_sink_plugin_is_none_when_disabled() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("notify-sink-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/notify_sink_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/notify_sink_v2/notify_sink_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("notify_sink_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    manager.reload_from_disk().unwrap();
+    manager.set_enabled("notify-sink-v2", false).unwrap();
+    assert!(manager.waf_block_sink_plugin().is_none());
+}
+
+#[test]
 fn unknown_fields_rejected() {
     assert!(PluginManifest::from_toml(manifest("extra = true").as_bytes()).is_err());
 }
@@ -183,6 +272,32 @@ fn abi_version_one_output_floor_is_unaffected_by_the_v2_floor() {
     let text = manifest("").replace("max_output_bytes = 1024", "max_output_bytes = 3");
     let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
     assert_eq!(m.validate(&p).unwrap_err(), PluginError::InvalidManifest);
+}
+
+#[test]
+fn notify_capability_requires_abi_version_two() {
+    let text = manifest("").replace("[\"health_check\"]", "[\"notify.waf_block\"]");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(
+        m.validate(&PluginPolicy::default()).unwrap_err(),
+        PluginError::InvalidManifest
+    );
+}
+
+#[test]
+fn notify_capability_is_accepted_with_abi_version_two() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("demo.wasm"), b"wasm").unwrap();
+    let text = manifest("")
+        .replace("abi_version = 1", "abi_version = 2")
+        .replace("[\"health_check\"]", "[\"notify.waf_block\"]");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    let p = PluginPolicy {
+        module_root: dir.path().into(),
+        ..Default::default()
+    };
+    let validated = m.validate(&p).unwrap();
+    assert_eq!(validated.capabilities, vec!["notify.waf_block".to_string()]);
 }
 
 #[test]
@@ -288,6 +403,31 @@ fn compile_error_v2(wat: &str) -> PluginError {
     }
 }
 
+fn validated_v2_with_capabilities(limits: PluginLimits, capabilities: Vec<String>) -> ValidatedManifest {
+    ValidatedManifest {
+        capabilities,
+        ..validated_v2(limits)
+    }
+}
+
+fn compile_error_v2_with_capabilities(wat: &str, capabilities: Vec<String>) -> PluginError {
+    let engine = PluginEngine::new(PluginPolicy::default()).unwrap();
+    let bytes = wat::parse_str(wat).unwrap();
+    match engine.compile(validated_v2_with_capabilities(limits(), capabilities), &bytes) {
+        Ok(_) => panic!("module unexpectedly compiled"),
+        Err(error) => error,
+    }
+}
+
+fn compile_v2_with_capabilities(
+    wat: &str,
+    capabilities: Vec<String>,
+) -> Result<CompiledPlugin, PluginError> {
+    let engine = PluginEngine::new(PluginPolicy::default())?;
+    let bytes = wat::parse_str(wat).unwrap();
+    engine.compile(validated_v2_with_capabilities(limits(), capabilities), &bytes)
+}
+
 #[test]
 fn v2_missing_alloc_export_is_abi_mismatch() {
     let wat = r#"(module
@@ -328,6 +468,51 @@ fn v2_wrong_signature_export_is_abi_mismatch() {
         (func (export "bearust_dealloc") (param i32 i32))
         (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0))"#;
     assert_eq!(compile_error_v2(wat), PluginError::AbiMismatch);
+}
+
+#[test]
+fn v2_missing_notify_export_is_abi_mismatch() {
+    // Exports the mandatory v2 baseline (memory, alloc, dealloc,
+    // bearust_health_check_v2) but not bearust_notify_waf_block, even
+    // though the manifest declares the notify.waf_block capability.
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 0)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0))"#;
+    assert_eq!(
+        compile_error_v2_with_capabilities(wat, vec!["notify.waf_block".into()]),
+        PluginError::AbiMismatch
+    );
+}
+
+#[test]
+fn v2_out_of_bounds_alloc_pointer_is_trap_on_the_notify_input_write() {
+    // Hostile guest: bearust_alloc hands back a pointer far past the end of
+    // the guest's single 65536-byte page. The host must reject it while
+    // bounds-checking the *input* write, before bearust_notify_waf_block is
+    // even called. Mirrors
+    // v2_out_of_bounds_alloc_pointer_is_trap_on_the_input_write for the
+    // health-check path.
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 1000000)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
+        (func (export "bearust_notify_waf_block") (param i32 i32) (result i32)
+            unreachable))"#;
+    let plugin = compile_v2_with_capabilities(wat, vec!["notify.waf_block".into()]).unwrap();
+    let event = bearust_plugin_sdk::WafBlockEvent {
+        request_id: "req-1".into(),
+        occurred_at_ms: 1_700_000_000_000,
+        category: "sqli".into(),
+        score: 42,
+        severity: "high".into(),
+        reason_ids: "sqli".into(),
+    };
+    assert_eq!(plugin.notify_waf_block(&event).unwrap_err(), PluginError::Trap);
 }
 
 #[test]
