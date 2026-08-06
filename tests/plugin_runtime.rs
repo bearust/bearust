@@ -403,7 +403,10 @@ fn compile_error_v2(wat: &str) -> PluginError {
     }
 }
 
-fn validated_v2_with_capabilities(limits: PluginLimits, capabilities: Vec<String>) -> ValidatedManifest {
+fn validated_v2_with_capabilities(
+    limits: PluginLimits,
+    capabilities: Vec<String>,
+) -> ValidatedManifest {
     ValidatedManifest {
         capabilities,
         ..validated_v2(limits)
@@ -413,7 +416,10 @@ fn validated_v2_with_capabilities(limits: PluginLimits, capabilities: Vec<String
 fn compile_error_v2_with_capabilities(wat: &str, capabilities: Vec<String>) -> PluginError {
     let engine = PluginEngine::new(PluginPolicy::default()).unwrap();
     let bytes = wat::parse_str(wat).unwrap();
-    match engine.compile(validated_v2_with_capabilities(limits(), capabilities), &bytes) {
+    match engine.compile(
+        validated_v2_with_capabilities(limits(), capabilities),
+        &bytes,
+    ) {
         Ok(_) => panic!("module unexpectedly compiled"),
         Err(error) => error,
     }
@@ -425,7 +431,10 @@ fn compile_v2_with_capabilities(
 ) -> Result<CompiledPlugin, PluginError> {
     let engine = PluginEngine::new(PluginPolicy::default())?;
     let bytes = wat::parse_str(wat).unwrap();
-    engine.compile(validated_v2_with_capabilities(limits(), capabilities), &bytes)
+    engine.compile(
+        validated_v2_with_capabilities(limits(), capabilities),
+        &bytes,
+    )
 }
 
 #[test]
@@ -512,7 +521,10 @@ fn v2_out_of_bounds_alloc_pointer_is_trap_on_the_notify_input_write() {
         severity: "high".into(),
         reason_ids: "sqli".into(),
     };
-    assert_eq!(plugin.notify_waf_block(&event).unwrap_err(), PluginError::Trap);
+    assert_eq!(
+        plugin.notify_waf_block(&event).unwrap_err(),
+        PluginError::Trap
+    );
 }
 
 #[test]

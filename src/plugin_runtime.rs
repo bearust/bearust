@@ -674,9 +674,11 @@ impl PluginManifest {
         if !SUPPORTED_ABI_VERSIONS.contains(&self.abi_version) {
             return Err(PluginError::AbiMismatch);
         }
-        if self.capabilities.iter().any(|c| {
-            c.len() > MAX_CAPABILITY_LEN || !ALLOWED_CAPABILITIES.contains(&c.as_str())
-        }) {
+        if self
+            .capabilities
+            .iter()
+            .any(|c| c.len() > MAX_CAPABILITY_LEN || !ALLOWED_CAPABILITIES.contains(&c.as_str()))
+        {
             return Err(PluginError::InvalidManifest);
         }
         if self.abi_version != 2 && self.capabilities.iter().any(|c| c == "notify.waf_block") {
@@ -1416,13 +1418,17 @@ impl PluginManager {
     /// plugin is ever treated as the active sink in this phase; any other
     /// plugin also declaring the capability is simply never selected.
     pub fn waf_block_sink_plugin(&self) -> Option<Arc<CompiledPlugin>> {
-        self.current.load_full().plugins.values().find_map(|record| {
-            if !record.status.enabled {
-                return None;
-            }
-            let compiled = record.compiled.as_ref()?;
-            compiled.has_notify_waf_block.then(|| Arc::clone(compiled))
-        })
+        self.current
+            .load_full()
+            .plugins
+            .values()
+            .find_map(|record| {
+                if !record.status.enabled {
+                    return None;
+                }
+                let compiled = record.compiled.as_ref()?;
+                compiled.has_notify_waf_block.then(|| Arc::clone(compiled))
+            })
     }
 
     pub fn health_check(&self, id: &str) -> Result<HealthResult, PluginError> {
