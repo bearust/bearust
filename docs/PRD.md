@@ -897,7 +897,11 @@ Phase 13C is complete. It adds the plugin system's first traffic hook: a
 notification sink that receives a structured JSON event
 (`{"request_id", "occurred_at_ms", "category", "score", "severity",
 "reason_ids"}`, mirroring `src/waf.rs::redacted_telemetry`'s existing
-tracing/audit fields) every time the WAF blocks a request. A plugin opts in
+tracing/audit fields) whenever the WAF's existing telemetry path fires for
+a blocked request — the same scope `redacted_telemetry` has always
+covered, including the pre-existing case where a request carrying a body
+that is blocked at the header stage defers to the body-stage evaluation
+(and so, correspondingly, defers its notification too). A plugin opts in
 by declaring `abi_version: 2` and `capabilities = ["notify.waf_block"]` and
 exporting `bearust_notify_waf_block(ptr, len) -> i32` using the same
 alloc/write/call/dealloc memory convention Phase 13B introduced for the

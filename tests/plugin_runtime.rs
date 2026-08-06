@@ -301,6 +301,28 @@ fn notify_capability_is_accepted_with_abi_version_two() {
 }
 
 #[test]
+fn notify_capability_rejects_output_limit_below_the_notify_input_floor() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("demo.wasm"), b"wasm").unwrap();
+    let p = PluginPolicy {
+        module_root: dir.path().into(),
+        ..Default::default()
+    };
+    let text = manifest("")
+        .replace("abi_version = 1", "abi_version = 2")
+        .replace("[\"health_check\"]", "[\"notify.waf_block\"]")
+        .replace("max_output_bytes = 1024", "max_output_bytes = 100");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(m.validate(&p).unwrap_err(), PluginError::InvalidManifest);
+
+    let text = manifest("")
+        .replace("abi_version = 1", "abi_version = 2")
+        .replace("[\"health_check\"]", "[\"notify.waf_block\"]");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(m.validate(&p).unwrap().abi_version, 2);
+}
+
+#[test]
 fn path_containment_and_missing_module() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("ok.wasm"), b"x").unwrap();

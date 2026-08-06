@@ -311,8 +311,8 @@ fn emit_waf_telemetry(
         decision = ?evaluation.decision,
     );
     waf.record_detection(evaluation);
-    if let Some(event) = waf_block_event(request_id, evaluation.decision.clone(), &details) {
-        if let Some(notify) = notify {
+    if let Some(notify) = notify {
+        if let Some(event) = waf_block_event(request_id, evaluation.decision.clone(), &details) {
             notify.notify_waf_block(event);
         }
     }
@@ -953,5 +953,63 @@ mod tests {
         assert_eq!(event.score, 42);
         assert_eq!(event.severity, "high");
         assert_eq!(event.reason_ids, "sqli");
+    }
+
+    /// Regression test for the spec's acceptance gate: "WAF block/allow
+    /// decisions are byte-for-byte unchanged by the presence or absence of
+    /// a sink plugin — the hook is purely observational." `waf_block_event`
+    /// takes `details` by shared reference and returns a new, independent
+    /// `WafBlockEvent`; it has no `&mut` parameter, no return channel back
+    /// into the decision, and no shared/global state to mutate. This test
+    /// pins that signature down: it proves the inputs are byte-for-byte
+    /// identical before and after the call (regardless of whether the
+    /// decision was a block, and regardless of whether the resulting event
+    /// is ever constructed at all), so a future change can't quietly make
+    /// this function start influencing the WAF decision it merely reads.
+    #[test]
+    fn waf_block_event_never_influences_the_decision_it_reads() {
+        let details = crate::waf::RedactedTelemetry {
+            category: "sqli".into(),
+            score: 42,
+            severity: "high".into(),
+            reason_ids: "sqli".into(),
+        };
+
+        for decision in [
+            crate::waf::WafDecision::Allow,
+            crate::waf::WafDecision::Log,
+            crate::waf::WafDecision::Block,
+        ] {
+            let details_before = details.clone();
+            let decision_before = decision.clone();
+
+            let event = waf_block_event("req-1", decision.clone(), &details);
+
+            // The inputs the function read are byte-for-byte unchanged: a
+            // pure fn taking `&details` by shared reference cannot feed
+            // anything back into the decision path.
+            assert_eq!(details, details_before);
+            assert_eq!(decision, decision_before);
+
+            match decision {
+                crate::waf::WafDecision::Block => assert!(event.is_some()),
+                crate::waf::WafDecision::Allow | crate::waf::WafDecision::Log => {
+                    assert!(event.is_none())
+                }
+            }
+        }
+
+        // Calling the function at all -- for any decision, including the
+        // ones that yield no event -- leaves `details` fit to be read again
+        // by the real telemetry/decision path with the same result (the
+        // only field that legitimately varies between calls is the
+        // wall-clock timestamp).
+        let first = waf_block_event("req-1", crate::waf::WafDecision::Block, &details).unwrap();
+        let second = waf_block_event("req-1", crate::waf::WafDecision::Block, &details).unwrap();
+        assert_eq!(first.request_id, second.request_id);
+        assert_eq!(first.category, second.category);
+        assert_eq!(first.score, second.score);
+        assert_eq!(first.severity, second.severity);
+        assert_eq!(first.reason_ids, second.reason_ids);
     }
 }

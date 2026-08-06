@@ -32,6 +32,16 @@ const HEALTH_RESULT_BYTES: usize = std::mem::size_of::<i32>();
 /// at manifest validation instead of failing every invocation with an
 /// opaque `MemoryLimit`.
 const MIN_V2_OUTPUT_BYTES: usize = 64;
+/// `WafBlockEvent`'s JSON encoding can be far larger than
+/// `HealthCheckInput`'s: the worst realistic case is a 128-byte
+/// client-supplied `request_id` plus up to eight 32-byte WAF category
+/// identifiers in both `category` and `reason_ids`. 1024 bytes gives
+/// generous headroom above that worst case (matches the checked-in
+/// `notify_sink_v2` fixture's declared limit), so a `notify.waf_block`
+/// plugin declaring less is rejected at manifest validation instead of
+/// silently failing every notification with an opaque `MemoryLimit` —
+/// mirroring `MIN_V2_OUTPUT_BYTES`'s rationale above.
+const MIN_NOTIFY_INPUT_BYTES: usize = 1024;
 const EPOCH_TICK: Duration = Duration::from_millis(1);
 const MAX_DETAIL_BYTES: usize = 4096;
 const ALLOWED_CAPABILITIES: [&str; 2] = ["health_check", "notify.waf_block"];
@@ -705,6 +715,11 @@ impl PluginManifest {
             return Err(PluginError::InvalidManifest);
         }
         if self.abi_version == 2 && self.limits.max_output_bytes < MIN_V2_OUTPUT_BYTES {
+            return Err(PluginError::InvalidManifest);
+        }
+        if self.capabilities.iter().any(|c| c == "notify.waf_block")
+            && self.limits.max_output_bytes < MIN_NOTIFY_INPUT_BYTES
+        {
             return Err(PluginError::InvalidManifest);
         }
         let module = resolve_module_path(&policy.module_root, &self.module)?;

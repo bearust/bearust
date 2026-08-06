@@ -30,7 +30,7 @@ impl NotificationSink {
     }
 
     /// Enqueues `event` for delivery. Never blocks: if the queue is full,
-    /// the event is dropped and `notify_queue_dropped_total` is
+    /// the event is dropped and `bearust_plugins_notify_dropped_total` is
     /// incremented.
     pub fn notify_waf_block(&self, event: bearust_plugin_sdk::WafBlockEvent) {
         if self.sender.try_send(event).is_err() {
@@ -44,7 +44,12 @@ impl NotificationSink {
         metrics: Arc<PluginMetrics>,
     ) {
         while let Some(event) = receiver.recv().await {
-            Self::deliver(&manager, &metrics, &event);
+            let manager = Arc::clone(&manager);
+            let metrics = Arc::clone(&metrics);
+            let _ = tokio::task::spawn_blocking(move || {
+                Self::deliver(&manager, &metrics, &event);
+            })
+            .await;
         }
     }
 
@@ -63,8 +68,18 @@ impl NotificationSink {
         };
         match plugin.notify_waf_block(event) {
             Ok(0) => metrics.record_notify_invocation(),
-            Ok(_) => metrics.record_notify_failure(),
-            Err(_) => metrics.record_notify_failure(),
+            Ok(status) => {
+                tracing::warn!(
+                    event = "notify_waf_block_failed",
+                    reason = "nonzero_status",
+                    status
+                );
+                metrics.record_notify_failure();
+            }
+            Err(error) => {
+                tracing::warn!(event = "notify_waf_block_failed", reason = error.code());
+                metrics.record_notify_failure();
+            }
         }
     }
 }
@@ -184,6 +199,28 @@ mod tests {
         let output = metrics.render_prometheus();
         assert!(output.contains("bearust_plugins_notify_invocations_total 0"));
         assert!(output.contains("bearust_plugins_notify_failures_total 1"));
+    }
+
+    #[tokio::test]
+    async fn spawn_delivers_events_through_the_real_worker_task() {
+        let manager = manager_with_notify_sink_fixture(true);
+        let sink = NotificationSink::spawn(Arc::clone(&manager));
+        sink.notify_waf_block(sample_event());
+
+        let metrics = manager.metrics();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if metrics
+                .render_prometheus()
+                .contains("bearust_plugins_notify_invocations_total 1")
+            {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("worker did not deliver the event within 1s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 
     #[test]
