@@ -972,6 +972,58 @@ existing plugin metrics endpoint. No new host import, capability, or
 resource-limit bypass was added; every guest-controlled pointer/length is
 bounds-checked identically to the Phase 13B health-check path.
 
-Phase 13E is next: request/response transform hooks, followed by custom
-load-balancing hooks, each reviewed individually and built on this same
-memory convention.
+Phase 13E is next: a request header transform hook.
+
+### Phase 13E status: request header transform hook
+
+Phase 13E is complete and adds the plugin system's first request-mutating
+hook: a plugin can rewrite the outbound request's headers before they reach
+the upstream, running once per request in `upstream_request_filter` (after
+WAF evaluation and routing have both already been finalized, so the
+transform cannot influence either).
+
+A plugin opts in by declaring `abi_version: 2`, `capabilities =
+["transform.request"]`, and exporting `bearust_transform_request(ptr: i32,
+len: i32) -> i64`. The hook receives a `TransformRequest` (method, path,
+query, and headers, bounded to the same combined budget the rule engine's
+own `InspectionContext` normalization enforces -- no body) and returns a
+`TransformResponse` (a full replacement header list) via the same
+alloc/write/call/read/dealloc memory convention Phase 13B introduced for
+the health check.
+
+A `transform.request` manifest must declare `max_output_bytes >= 32768`
+(`MIN_TRANSFORM_INPUT_BYTES` in `src/plugin_runtime.rs`) -- enforced at
+manifest validation -- sized the same way `MIN_WAF_DETECT_INPUT_BYTES` was:
+generous headroom above the worst-case bounded JSON payload in either
+direction.
+
+Application is all-or-nothing: on success, the plugin's returned header
+list wholesale-replaces the outbound request's header list. `Host`,
+`X-Forwarded-For`, and `X-Request-Id` are then unconditionally reasserted
+by the existing insertion logic that already runs immediately afterward, so
+a transform plugin -- buggy or malicious -- can never drop, blank, or spoof
+those three. Fail-open on every error class (trap, fuel exhaustion, timeout,
+ABI/output error, output exceeding the header count/size bounds, or a
+`spawn_blocking` join failure): drop the plugin's output, log a warning,
+count a failure metric, and leave the outbound headers exactly as they
+were.
+
+At most one plugin is ever treated as the active transformer (the lowest
+plugin ID among enabled plugins declaring the capability); every other
+plugin is unaffected -- the same selection rule as `notify.waf_block` and
+`waf.detect`.
+
+Three new Prometheus counters (`bearust_plugins_transform_invocations_total`,
+`bearust_plugins_transform_applied_total`,
+`bearust_plugins_transform_failures_total`) surface plugin activity on the
+existing plugin metrics endpoint. No new host import, capability, or
+resource-limit bypass was added; every guest-controlled pointer/length is
+bounds-checked identically to the Phase 13B health-check path.
+
+This phase deliberately covers request headers only: no body transform (the
+proxy already streams/buffers the request body incrementally for WAF
+inspection, and rewriting it introduces re-splicing complexity out of scope
+here), and no response transform (the proxy currently has no
+`response_filter`/`response_body_filter` hook points in `ProxyHttp` at
+all -- introducing them is a materially larger change, deferred to a later
+phase).
