@@ -107,6 +107,32 @@ mod tests {
     }
 
     #[test]
+    fn transform_request_round_trips() {
+        let value = TransformRequest {
+            method: "GET".into(),
+            path: "/api/orders".into(),
+            query: "page=2".into(),
+            headers: vec![("host".into(), "example.com".into())],
+        };
+        let bytes = encode(&value);
+        let decoded: TransformRequest = decode(&bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn transform_response_round_trips() {
+        let value = TransformResponse {
+            headers: vec![
+                ("x-region".into(), "us-east-1".into()),
+                ("host".into(), "internal.example.com".into()),
+            ],
+        };
+        let bytes = encode(&value);
+        let decoded: TransformResponse = decode(&bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
     fn waf_plugin_decision_serializes_as_lowercase() {
         assert_eq!(
             serde_json::to_string(&WafPluginDecision::Allow).unwrap(),
@@ -273,4 +299,28 @@ pub struct WafDetectVerdict {
     pub decision: WafPluginDecision,
     pub category: String,
     pub score: u16,
+}
+
+/// Input to `bearust_transform_request`. The host
+/// (`src/proxy.rs::transform_request`) bounds `method`/`path`/`query`/
+/// `headers` to the same combined `MAX_NORMALIZED_METADATA_BYTES` /
+/// `MAX_NORMALIZED_HEADERS` / `MAX_NORMALIZED_FIELD_BYTES` budgets
+/// `waf_detect_request` uses for the same raw fields. There is no `body`
+/// field: this hook only ever sees and returns headers.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TransformRequest {
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Output of `bearust_transform_request`. The host wholesale-replaces the
+/// outbound request's header list with `headers` (subject to the same
+/// bounds checked on the input side), then unconditionally reasserts
+/// `Host`, `X-Forwarded-For`, and `X-Request-Id` afterward — this hook can
+/// never remove, blank, or spoof those three.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TransformResponse {
+    pub headers: Vec<(String, String)>,
 }
