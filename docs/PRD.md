@@ -923,8 +923,41 @@ metrics endpoint. No new host import, capability, or resource-limit bypass
 was added; every guest-controlled pointer/length is bounds-checked
 identically to the Phase 13B health-check path.
 
-Phase 13D is next: a custom WAF detector hook, where a plugin's verdict can
-influence traffic (a higher blast radius than a sink, since its output can
-block requests), followed by request/response transform and custom
-load-balancing hooks — each reviewed individually and built on this same
+### Phase 13D status: custom WAF detector hook
+
+Phase 13D is complete and adds the plugin system's first traffic-influencing
+hook: a custom WAF detector that runs synchronously at both WAF evaluation
+stages (header stage and body stage), via `spawn_blocking` so the blocking
+wasmtime call never blocks the shared async runtime.
+
+A plugin opts in by declaring `abi_version: 2`, `capabilities = ["waf.detect"]`,
+and exporting `bearust_waf_detect(ptr: i32, len: i32) -> i64`. The hook receives
+a `WafDetectRequest` (method, path, query, headers, up to 8 KiB body —
+identical scope to the rule engine's own `InspectionContext`) and returns a
+`WafDetectVerdict` (decision, category, score) via the same alloc/write/call/
+read/dealloc memory convention Phase 13B introduced for the health check.
+
+Verdict merging is escalate-only: the combined decision is the more severe of
+the two (`Block` beats `Log` beats `Allow`), so a plugin verdict can raise
+severity but never downgrade an existing `Block`. The plugin's category is
+appended (deduplicated) and its score is added into the evaluation's
+`semantic_score`, with severity recomputed so the two fields stay consistent.
+
+At most one plugin is ever treated as the active detector (the lowest plugin ID
+among enabled plugins declaring the capability); every other plugin is
+unaffected. Fail-open on every error class (trap, fuel exhaustion, timeout,
+ABI/output error, `spawn_blocking` join failure): drop the plugin's
+contribution, log a warning, count a failure metric, and let the rule engine's
+own evaluation proceed unchanged.
+
+Three new Prometheus counters
+(`bearust_plugins_waf_detect_invocations_total`,
+`bearust_plugins_waf_detect_block_total`,
+`bearust_plugins_waf_detect_failures_total`) surface plugin activity on the
+existing plugin metrics endpoint. No new host import, capability, or
+resource-limit bypass was added; every guest-controlled pointer/length is
+bounds-checked identically to the Phase 13B health-check path.
+
+Phase 13E is next: request/response transform hooks, followed by custom
+load-balancing hooks, each reviewed individually and built on this same
 memory convention.
