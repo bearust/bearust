@@ -34,6 +34,9 @@ pub struct PluginMetrics {
     notify_invocations: AtomicU64,
     notify_failures: AtomicU64,
     notify_dropped: AtomicU64,
+    waf_detect_invocations: AtomicU64,
+    waf_detect_block: AtomicU64,
+    waf_detect_failures: AtomicU64,
 }
 
 impl PluginMetrics {
@@ -76,6 +79,24 @@ impl PluginMetrics {
         self.notify_dropped.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A `waf.detect` plugin call completed successfully (any decision,
+    /// including `Allow`).
+    pub fn record_waf_detect_invocation(&self) {
+        self.waf_detect_invocations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A `waf.detect` plugin verdict actually changed the merged
+    /// `Evaluation`'s decision (an escalation occurred).
+    pub fn record_waf_detect_block(&self) {
+        self.waf_detect_block.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A `waf.detect` plugin call failed: trap, timeout, fuel exhaustion,
+    /// malformed export/output, or a `spawn_blocking` join failure.
+    pub fn record_waf_detect_failure(&self) {
+        self.waf_detect_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn render_prometheus(&self) -> String {
         let samples = [
             ("reload", "success", &self.reload_success),
@@ -115,6 +136,21 @@ impl PluginMetrics {
         output.push_str(&format!(
             "bearust_plugins_notify_dropped_total {}\n",
             self.notify_dropped.load(Ordering::Relaxed)
+        ));
+        output.push_str("# TYPE bearust_plugins_waf_detect_invocations_total counter\n");
+        output.push_str(&format!(
+            "bearust_plugins_waf_detect_invocations_total {}\n",
+            self.waf_detect_invocations.load(Ordering::Relaxed)
+        ));
+        output.push_str("# TYPE bearust_plugins_waf_detect_block_total counter\n");
+        output.push_str(&format!(
+            "bearust_plugins_waf_detect_block_total {}\n",
+            self.waf_detect_block.load(Ordering::Relaxed)
+        ));
+        output.push_str("# TYPE bearust_plugins_waf_detect_failures_total counter\n");
+        output.push_str(&format!(
+            "bearust_plugins_waf_detect_failures_total {}\n",
+            self.waf_detect_failures.load(Ordering::Relaxed)
         ));
         output
     }
@@ -324,5 +360,18 @@ mod tests {
         assert!(output.contains("bearust_plugins_notify_invocations_total 2"));
         assert!(output.contains("bearust_plugins_notify_failures_total 1"));
         assert!(output.contains("bearust_plugins_notify_dropped_total 1"));
+    }
+
+    #[test]
+    fn waf_detect_metrics_render_as_counters() {
+        let metrics = PluginMetrics::default();
+        metrics.record_waf_detect_invocation();
+        metrics.record_waf_detect_invocation();
+        metrics.record_waf_detect_block();
+        metrics.record_waf_detect_failure();
+        let output = metrics.render_prometheus();
+        assert!(output.contains("bearust_plugins_waf_detect_invocations_total 2"));
+        assert!(output.contains("bearust_plugins_waf_detect_block_total 1"));
+        assert!(output.contains("bearust_plugins_waf_detect_failures_total 1"));
     }
 }
