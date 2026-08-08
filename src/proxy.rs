@@ -6,6 +6,7 @@ use crate::{
     bot_protection::{evaluate as evaluate_bot, BotAction, BotEvaluation, BotInspectionContext},
     bot_store::BotStore,
     observability::{append_forwarded_for, classify_error, log_request, validated_request_id},
+    plugin_runtime::PluginManager,
     rate_limit::{Decision as RateLimitDecision, RateLimitAction, RateLimitKey, RateLimitPolicy},
     rate_limit_store::{client_ip, IpNetSet, RateLimiterStore},
     router::{normalize_host, ResolvedRoute},
@@ -96,6 +97,7 @@ pub struct BeaRustProxy {
     pub baseline: Option<Arc<crate::baseline::BaselineCollector>>,
     pub anomaly: Option<Arc<crate::anomaly::AnomalyDetector>>,
     pub plugin_notify: Option<Arc<crate::plugin_notify::NotificationSink>>,
+    pub plugin_manager: Option<Arc<PluginManager>>,
 }
 
 impl BeaRustProxy {
@@ -115,6 +117,7 @@ impl BeaRustProxy {
             baseline: None,
             anomaly: None,
             plugin_notify: None,
+            plugin_manager: None,
         }
     }
     pub fn with_challenge_store(mut self, challenges: Http01Store) -> Self {
@@ -173,6 +176,10 @@ impl BeaRustProxy {
         sink: Arc<crate::plugin_notify::NotificationSink>,
     ) -> Self {
         self.plugin_notify = Some(sink);
+        self
+    }
+    pub fn with_plugin_manager(mut self, manager: Arc<PluginManager>) -> Self {
+        self.plugin_manager = Some(manager);
         self
     }
 
@@ -289,6 +296,64 @@ fn waf_block_event(
         severity: details.severity.clone(),
         reason_ids: details.reason_ids.clone(),
     })
+}
+
+/// Converts a WAF `InspectionContext` into the wire shape a `waf.detect`
+/// plugin receives. Pure and side-effect free.
+fn waf_detect_request(context: &InspectionContext) -> bearust_plugin_sdk::WafDetectRequest {
+    bearust_plugin_sdk::WafDetectRequest {
+        method: context.method.clone(),
+        path: context.path.clone(),
+        query: context.query.clone(),
+        headers: context.headers.clone(),
+        body: context.body.clone(),
+    }
+}
+
+/// Runs the registered `waf.detect` plugin (if any) against `context` and
+/// merges its verdict into `evaluation`. Synchronous from the caller's
+/// point of view but offloads the blocking wasmtime call via
+/// `spawn_blocking` so it never blocks the shared async runtime. Fails
+/// open on every error class: no detector configured, no plugin currently
+/// declaring the capability, a disabled plugin, a trap/timeout/fuel
+/// exhaustion, a malformed verdict, or a `spawn_blocking` join failure all
+/// return `evaluation` unchanged (after counting a failure metric where
+/// applicable).
+async fn apply_waf_detector(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    context: &InspectionContext,
+    evaluation: Evaluation,
+) -> Evaluation {
+    let Some(manager) = plugin_manager else {
+        return evaluation;
+    };
+    let Some(detector) = manager.waf_detector_plugin() else {
+        return evaluation;
+    };
+    let metrics = manager.metrics();
+    let request = waf_detect_request(context);
+    let outcome = tokio::task::spawn_blocking(move || detector.detect(&request)).await;
+    match outcome {
+        Ok(Ok(verdict)) => {
+            metrics.record_waf_detect_invocation();
+            let previous_decision = evaluation.decision.clone();
+            let merged = crate::waf::merge_plugin_verdict(evaluation, verdict);
+            if merged.decision != previous_decision {
+                metrics.record_waf_detect_block();
+            }
+            merged
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(event = "waf_detect_failed", reason = error.code());
+            metrics.record_waf_detect_failure();
+            evaluation
+        }
+        Err(_join_error) => {
+            tracing::warn!(event = "waf_detect_failed", reason = "join_error");
+            metrics.record_waf_detect_failure();
+            evaluation
+        }
+    }
 }
 
 fn emit_waf_telemetry(
@@ -466,6 +531,8 @@ impl ProxyHttp for BeaRustProxy {
                 body: Vec::new(),
             };
             let evaluation = evaluate(&waf_snapshot, &context);
+            let evaluation =
+                apply_waf_detector(self.plugin_manager.as_ref(), &context, evaluation).await;
             ctx.waf_blocked = evaluation.decision == WafDecision::Block;
             ctx.waf_evaluation = Some(evaluation.clone());
             if !ctx.waf_body_expected && !ctx.waf_telemetry_emitted {
@@ -734,6 +801,8 @@ impl ProxyHttp for BeaRustProxy {
                 .as_ref()
                 .map(|snapshot| evaluate(snapshot, &context))
                 .unwrap_or_else(|| evaluate(&waf.snapshot(), &context));
+            let evaluation =
+                apply_waf_detector(self.plugin_manager.as_ref(), &context, evaluation).await;
             ctx.waf_blocked = evaluation.decision == WafDecision::Block;
             ctx.waf_evaluation = Some(evaluation.clone());
             // Evaluate every bounded chunk before forwarding it. This
@@ -913,7 +982,7 @@ fn error_status(error: &pingora_core::Error) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{error_status, invoke_analytics_changed, waf_block_event};
+    use super::{apply_waf_detector, error_status, invoke_analytics_changed, waf_block_event};
     use pingora_core::{Error, ErrorType};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1011,5 +1080,162 @@ mod tests {
         assert_eq!(first.score, second.score);
         assert_eq!(first.severity, second.severity);
         assert_eq!(first.reason_ids, second.reason_ids);
+    }
+
+    use crate::config::PluginConfig;
+    use crate::plugin_runtime::PluginManager;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn waf_detector_manager(enabled: bool) -> Arc<PluginManager> {
+        let root = tempdir().unwrap();
+        let plugin = root.path().join("waf-detect-v2");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("plugin.toml"),
+            include_str!("../tests/fixtures/plugins/waf_detect_v2/plugin.toml"),
+        )
+        .unwrap();
+        let module = wat::parse_str(include_str!(
+            "../tests/fixtures/plugins/waf_detect_v2/waf_detect_v2.wat"
+        ))
+        .unwrap();
+        fs::write(plugin.join("waf_detect_v2.wasm"), &module).unwrap();
+
+        let manager = PluginManager::new(PluginConfig {
+            enabled: true,
+            directory: root.path().to_path_buf(),
+            ..PluginConfig::default()
+        });
+        manager.reload_from_disk().unwrap();
+        if !enabled {
+            manager.set_enabled("waf-detect-v2", false).unwrap();
+        }
+        manager
+    }
+
+    fn sample_context() -> crate::waf::InspectionContext {
+        crate::waf::InspectionContext {
+            method: "GET".into(),
+            path: "/".into(),
+            query: String::new(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    fn allow_evaluation() -> crate::waf::Evaluation {
+        crate::waf::Evaluation {
+            decision: crate::waf::WafDecision::Allow,
+            matched_rule_ids: Vec::new(),
+            categories: Vec::new(),
+            diagnostic: None,
+            semantic_score: 0,
+            severity: None,
+        }
+    }
+
+    fn block_evaluation() -> crate::waf::Evaluation {
+        crate::waf::Evaluation {
+            decision: crate::waf::WafDecision::Block,
+            ..allow_evaluation()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_block_verdict_escalates_an_allow_decision() {
+        let manager = waf_detector_manager(true);
+        let merged =
+            apply_waf_detector(Some(&manager), &sample_context(), allow_evaluation()).await;
+        assert_eq!(merged.decision, crate::waf::WafDecision::Block);
+        assert!(merged.categories.contains(&"custom_detector".to_string()));
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_waf_detect_invocations_total 1"));
+        assert!(output.contains("bearust_plugins_waf_detect_block_total 1"));
+    }
+
+    #[tokio::test]
+    async fn a_plugin_verdict_can_never_downgrade_an_existing_block() {
+        // The fixture always returns Block, so this exercises the
+        // Block-stays-Block path rather than a downgrade -- the important
+        // assertion is that a rule-engine Block is never lost.
+        let manager = waf_detector_manager(true);
+        let merged =
+            apply_waf_detector(Some(&manager), &sample_context(), block_evaluation()).await;
+        assert_eq!(merged.decision, crate::waf::WafDecision::Block);
+    }
+
+    #[tokio::test]
+    async fn no_detector_configured_leaves_the_evaluation_unchanged() {
+        let manager = PluginManager::new(PluginConfig::default());
+        let evaluation = allow_evaluation();
+        let merged =
+            apply_waf_detector(Some(&manager), &sample_context(), evaluation.clone()).await;
+        assert_eq!(merged.decision, evaluation.decision);
+        assert_eq!(merged.categories, evaluation.categories);
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_waf_detect_invocations_total 0"));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_detector_leaves_the_evaluation_unchanged() {
+        let manager = waf_detector_manager(false);
+        let evaluation = allow_evaluation();
+        let merged =
+            apply_waf_detector(Some(&manager), &sample_context(), evaluation.clone()).await;
+        assert_eq!(merged.decision, evaluation.decision);
+    }
+
+    #[tokio::test]
+    async fn no_plugin_manager_leaves_the_evaluation_unchanged() {
+        let evaluation = allow_evaluation();
+        let merged = apply_waf_detector(None, &sample_context(), evaluation.clone()).await;
+        assert_eq!(merged.decision, evaluation.decision);
+    }
+
+    #[tokio::test]
+    async fn a_trapping_detector_fails_open_and_counts_a_failure() {
+        let root = tempdir().unwrap();
+        let plugin = root.path().join("waf-detect-v2");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("plugin.toml"),
+            include_str!("../tests/fixtures/plugins/waf_detect_v2/plugin.toml"),
+        )
+        .unwrap();
+        // Same shape as the checked-in fixture, but traps on every call.
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (global $heap_ptr (mut i32) (i32.const 1024))
+            (func (export "bearust_abi_version") (result i32) i32.const 2)
+            (func (export "bearust_alloc") (param $len i32) (result i32)
+                (local $ptr i32)
+                global.get $heap_ptr
+                local.set $ptr
+                global.get $heap_ptr
+                local.get $len
+                i32.add
+                global.set $heap_ptr
+                local.get $ptr)
+            (func (export "bearust_dealloc") (param i32 i32) nop)
+            (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
+            (func (export "bearust_waf_detect") (param i32 i32) (result i64) unreachable))"#;
+        let module = wat::parse_str(wat).unwrap();
+        fs::write(plugin.join("waf_detect_v2.wasm"), &module).unwrap();
+
+        let manager = PluginManager::new(PluginConfig {
+            enabled: true,
+            directory: root.path().to_path_buf(),
+            ..PluginConfig::default()
+        });
+        manager.reload_from_disk().unwrap();
+
+        let evaluation = allow_evaluation();
+        let merged =
+            apply_waf_detector(Some(&manager), &sample_context(), evaluation.clone()).await;
+        assert_eq!(merged.decision, evaluation.decision);
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_waf_detect_failures_total 1"));
+        assert!(output.contains("bearust_plugins_waf_detect_invocations_total 0"));
     }
 }

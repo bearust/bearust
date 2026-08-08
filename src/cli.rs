@@ -453,6 +453,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                 .with_baseline(control_state.baseline.clone())
                 .with_anomaly(control_state.anomaly.clone())
                 .with_plugin_notify_sink(plugin_notify_sink)
+                .with_plugin_manager(control_state.plugin_manager.clone())
                 .with_rate_limiter(rate_limiter)
                 .with_rate_limit_policy(rate_policy)
                 .with_trusted_proxies(trusted_proxies),
