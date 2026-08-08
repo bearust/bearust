@@ -932,10 +932,24 @@ wasmtime call never blocks the shared async runtime.
 
 A plugin opts in by declaring `abi_version: 2`, `capabilities = ["waf.detect"]`,
 and exporting `bearust_waf_detect(ptr: i32, len: i32) -> i64`. The hook receives
-a `WafDetectRequest` (method, path, query, headers, up to 8 KiB body —
-identical scope to the rule engine's own `InspectionContext`) and returns a
-`WafDetectVerdict` (decision, category, score) via the same alloc/write/call/
-read/dealloc memory convention Phase 13B introduced for the health check.
+a `WafDetectRequest` (method, path, query, and headers bounded to the same
+budget the rule engine's own `InspectionContext` normalization enforces, plus
+a body capped at 2 KiB — smaller than the rule engine's 8 KiB body limit,
+since JSON encodes bytes as a decimal array at roughly 4x their raw size) and
+returns a `WafDetectVerdict` (decision, category, score) via the same
+alloc/write/call/read/dealloc memory convention Phase 13B introduced for the
+health check.
+
+A `waf.detect` manifest must declare `max_output_bytes >= 49152`
+(`MIN_WAF_DETECT_INPUT_BYTES` in `src/plugin_runtime.rs`) — enforced at
+manifest validation — because the bounded request above still encodes to a
+substantially larger worst-case JSON payload than the compact
+`notify.waf_block` event. Every detector invocation also runs on Tokio's
+shared blocking-task pool via `spawn_blocking`, so a slow or saturated
+detector plugin adds queuing latency to every WAF-evaluated request under
+load; operators enabling a custom detector should size
+`invocation_timeout_ms` conservatively rather than relying on defaults tuned
+for the lighter `notify.waf_block` and health-check paths.
 
 Verdict merging is escalate-only: the combined decision is the more severe of
 the two (`Block` beats `Log` beats `Allow`), so a plugin verdict can raise

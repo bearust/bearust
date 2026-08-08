@@ -298,15 +298,61 @@ fn waf_block_event(
     })
 }
 
+/// `waf.detect`'s body is capped smaller than the rule engine's own
+/// `MAX_INSPECTION_BODY_BYTES` (8 KiB) specifically because JSON encodes a
+/// byte array as decimal numbers -- roughly a 4x size increase -- and this
+/// keeps the worst-case wire payload well under a plugin's declared
+/// `max_output_bytes`.
+const MAX_WAF_DETECT_BODY_BYTES: usize = 2048;
+
+/// Truncates `value` to at most `*remaining` bytes (and no more than
+/// `crate::waf::MAX_NORMALIZED_FIELD_BYTES` per field), at a char boundary,
+/// decrementing `*remaining` by the bytes actually kept. Mirrors the
+/// budget-tracking shape of `crate::waf::normalize_context`'s private
+/// `normalize_metadata` closure, applied here to the raw (non-normalized)
+/// text a `waf.detect` plugin receives.
+fn bounded_metadata(value: &str, remaining: &mut usize) -> String {
+    let cap = (*remaining).min(crate::waf::MAX_NORMALIZED_FIELD_BYTES);
+    let mut end = value.len().min(cap);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = value[..end].to_owned();
+    *remaining = remaining.saturating_sub(truncated.len());
+    truncated
+}
+
 /// Converts a WAF `InspectionContext` into the wire shape a `waf.detect`
-/// plugin receives. Pure and side-effect free.
+/// plugin receives. `method`/`path`/`query`/`headers` share a
+/// `crate::waf::MAX_NORMALIZED_METADATA_BYTES` budget and each header is
+/// additionally capped at `crate::waf::MAX_NORMALIZED_FIELD_BYTES` -- the
+/// same bounds the built-in rule engine enforces on the same raw fields --
+/// so a detector plugin never receives more attacker-controlled metadata
+/// than the rule engine itself inspects. `body` is separately capped at
+/// `MAX_WAF_DETECT_BODY_BYTES`. Pure and side-effect free.
 fn waf_detect_request(context: &InspectionContext) -> bearust_plugin_sdk::WafDetectRequest {
+    let mut remaining = crate::waf::MAX_NORMALIZED_METADATA_BYTES;
+    let method = bounded_metadata(&context.method, &mut remaining);
+    let path = bounded_metadata(&context.path, &mut remaining);
+    let query = bounded_metadata(&context.query, &mut remaining);
+    let headers = context
+        .headers
+        .iter()
+        .take(crate::waf::MAX_NORMALIZED_HEADERS)
+        .map(|(name, value)| {
+            (
+                bounded_metadata(name, &mut remaining),
+                bounded_metadata(value, &mut remaining),
+            )
+        })
+        .collect();
+    let body_len = context.body.len().min(MAX_WAF_DETECT_BODY_BYTES);
     bearust_plugin_sdk::WafDetectRequest {
-        method: context.method.clone(),
-        path: context.path.clone(),
-        query: context.query.clone(),
-        headers: context.headers.clone(),
-        body: context.body.clone(),
+        method,
+        path,
+        query,
+        headers,
+        body: context.body[..body_len].to_vec(),
     }
 }
 
@@ -338,7 +384,7 @@ async fn apply_waf_detector(
             metrics.record_waf_detect_invocation();
             let previous_decision = evaluation.decision.clone();
             let merged = crate::waf::merge_plugin_verdict(evaluation, verdict);
-            if merged.decision != previous_decision {
+            if merged.decision == WafDecision::Block && previous_decision != WafDecision::Block {
                 metrics.record_waf_detect_block();
             }
             merged
@@ -796,13 +842,15 @@ impl ProxyHttp for BeaRustProxy {
                 headers: header_values,
                 body: ctx.waf_body.clone(),
             };
-            let evaluation = ctx
+            let mut evaluation = ctx
                 .waf_snapshot
                 .as_ref()
                 .map(|snapshot| evaluate(snapshot, &context))
                 .unwrap_or_else(|| evaluate(&waf.snapshot(), &context));
-            let evaluation =
-                apply_waf_detector(self.plugin_manager.as_ref(), &context, evaluation).await;
+            if end_of_stream || ctx.waf_body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES {
+                evaluation =
+                    apply_waf_detector(self.plugin_manager.as_ref(), &context, evaluation).await;
+            }
             ctx.waf_blocked = evaluation.decision == WafDecision::Block;
             ctx.waf_evaluation = Some(evaluation.clone());
             // Evaluate every bounded chunk before forwarding it. This

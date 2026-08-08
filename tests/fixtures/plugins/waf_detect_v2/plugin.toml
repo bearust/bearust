@@ -8,4 +8,4 @@ capabilities = ["waf.detect"]
 memory_pages = 1
 fuel = 10000
 invocation_timeout_ms = 100
-max_output_bytes = 1024
+max_output_bytes = 49152

@@ -85,8 +85,9 @@ impl PluginMetrics {
         self.waf_detect_invocations.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A `waf.detect` plugin verdict actually changed the merged
-    /// `Evaluation`'s decision (an escalation occurred).
+    /// A `waf.detect` plugin verdict caused the merged `Evaluation` to
+    /// transition to `Block` (i.e. the rule engine's own decision was not
+    /// already `Block`, and the plugin verdict escalated it there).
     pub fn record_waf_detect_block(&self) {
         self.waf_detect_block.fetch_add(1, Ordering::Relaxed);
     }

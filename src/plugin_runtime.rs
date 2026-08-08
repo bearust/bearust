@@ -40,10 +40,21 @@ const MIN_V2_OUTPUT_BYTES: usize = 64;
 /// `notify_sink_v2` fixture's declared limit), so a `notify.waf_block`
 /// plugin declaring less is rejected at manifest validation instead of
 /// silently failing every notification with an opaque `MemoryLimit` —
-/// mirroring `MIN_V2_OUTPUT_BYTES`'s rationale above. `waf.detect`'s
-/// worst-case verdict JSON is smaller than `WafBlockEvent`'s; it reuses
-/// this same floor rather than introducing a second constant.
+/// mirroring `MIN_V2_OUTPUT_BYTES`'s rationale above. `waf.detect` has its
+/// own, much larger floor (see `MIN_WAF_DETECT_INPUT_BYTES`) since its
+/// input carries the full inspected request rather than a compact event.
 const MIN_NOTIFY_INPUT_BYTES: usize = 1024;
+/// `waf.detect` receives the full (bounded) request context, not a compact
+/// event -- its input JSON is substantially larger than
+/// `notify.waf_block`'s. With `src/proxy.rs::waf_detect_request` capping
+/// method/path/query/headers to a combined `MAX_NORMALIZED_METADATA_BYTES`
+/// (16 KiB) budget and body to `MAX_WAF_DETECT_BODY_BYTES` (2 KiB) before
+/// encoding, worst-case JSON is roughly 33 KiB (metadata as JSON strings
+/// with escaping overhead, ~1.5x; body as a decimal byte array, ~4x). This
+/// floor gives comfortable headroom above that worst case while staying
+/// under the default 64 KiB policy ceiling. Deliberately NOT shared with
+/// `MIN_NOTIFY_INPUT_BYTES`, which sizes a much smaller event type.
+const MIN_WAF_DETECT_INPUT_BYTES: usize = 49_152;
 const EPOCH_TICK: Duration = Duration::from_millis(1);
 const MAX_DETAIL_BYTES: usize = 4096;
 const ALLOWED_CAPABILITIES: [&str; 3] = ["health_check", "notify.waf_block", "waf.detect"];
@@ -796,11 +807,13 @@ impl PluginManifest {
         if self.abi_version == 2 && self.limits.max_output_bytes < MIN_V2_OUTPUT_BYTES {
             return Err(PluginError::InvalidManifest);
         }
-        if self
-            .capabilities
-            .iter()
-            .any(|c| c == "notify.waf_block" || c == "waf.detect")
+        if self.capabilities.iter().any(|c| c == "notify.waf_block")
             && self.limits.max_output_bytes < MIN_NOTIFY_INPUT_BYTES
+        {
+            return Err(PluginError::InvalidManifest);
+        }
+        if self.capabilities.iter().any(|c| c == "waf.detect")
+            && self.limits.max_output_bytes < MIN_WAF_DETECT_INPUT_BYTES
         {
             return Err(PluginError::InvalidManifest);
         }

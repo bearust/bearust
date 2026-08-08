@@ -541,8 +541,9 @@ pub fn merge_plugin_verdict(
         (WafDecision::Log, _) | (_, WafDecision::Log) => WafDecision::Log,
         _ => WafDecision::Allow,
     };
-    if !verdict.category.is_empty() && !evaluation.categories.contains(&verdict.category) {
-        evaluation.categories.push(verdict.category);
+    let category = bounded_prefix(&verdict.category, MAX_SEMANTIC_REASON_BYTES).to_owned();
+    if !category.is_empty() && !evaluation.categories.contains(&category) {
+        evaluation.categories.push(category);
     }
     evaluation.semantic_score = evaluation.semantic_score.saturating_add(verdict.score);
     evaluation.severity = severity_for_score(evaluation.semantic_score);

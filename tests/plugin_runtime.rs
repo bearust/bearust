@@ -338,7 +338,8 @@ fn waf_detect_capability_is_accepted_with_abi_version_two() {
     fs::write(dir.path().join("demo.wasm"), b"wasm").unwrap();
     let text = manifest("")
         .replace("abi_version = 1", "abi_version = 2")
-        .replace("[\"health_check\"]", "[\"waf.detect\"]");
+        .replace("[\"health_check\"]", "[\"waf.detect\"]")
+        .replace("max_output_bytes = 1024", "max_output_bytes = 49152");
     let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
     let p = PluginPolicy {
         module_root: dir.path().into(),
@@ -349,7 +350,7 @@ fn waf_detect_capability_is_accepted_with_abi_version_two() {
 }
 
 #[test]
-fn waf_detect_capability_rejects_output_limit_below_the_notify_input_floor() {
+fn waf_detect_capability_rejects_output_limit_below_the_waf_detect_input_floor() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("demo.wasm"), b"wasm").unwrap();
     let p = PluginPolicy {
@@ -359,13 +360,14 @@ fn waf_detect_capability_rejects_output_limit_below_the_notify_input_floor() {
     let text = manifest("")
         .replace("abi_version = 1", "abi_version = 2")
         .replace("[\"health_check\"]", "[\"waf.detect\"]")
-        .replace("max_output_bytes = 1024", "max_output_bytes = 100");
+        .replace("max_output_bytes = 1024", "max_output_bytes = 4096");
     let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
     assert_eq!(m.validate(&p).unwrap_err(), PluginError::InvalidManifest);
 
     let text = manifest("")
         .replace("abi_version = 1", "abi_version = 2")
-        .replace("[\"health_check\"]", "[\"waf.detect\"]");
+        .replace("[\"health_check\"]", "[\"waf.detect\"]")
+        .replace("max_output_bytes = 1024", "max_output_bytes = 49152");
     let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
     assert_eq!(m.validate(&p).unwrap().abi_version, 2);
 }
@@ -628,6 +630,30 @@ fn v2_out_of_bounds_alloc_pointer_is_trap_on_the_detect_input_write() {
         (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
         (func (export "bearust_waf_detect") (param i32 i32) (result i64)
             unreachable))"#;
+    let plugin = compile_v2_with_capabilities(wat, vec!["waf.detect".into()]).unwrap();
+    let request = bearust_plugin_sdk::WafDetectRequest {
+        method: "GET".into(),
+        path: "/".into(),
+        query: String::new(),
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    assert_eq!(plugin.detect(&request).unwrap_err(), PluginError::Trap);
+}
+
+#[test]
+fn v2_malformed_detect_output_is_trap() {
+    // A guest that returns a packed pointer/length pointing at bytes that
+    // are not valid WafDetectVerdict JSON.
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (data (i32.const 0) "not json")
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 1024)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
+        (func (export "bearust_waf_detect") (param i32 i32) (result i64)
+            i64.const 8))"#; // pack(0, 8): (0i64 << 32) | 8
     let plugin = compile_v2_with_capabilities(wat, vec!["waf.detect".into()]).unwrap();
     let request = bearust_plugin_sdk::WafDetectRequest {
         method: "GET".into(),
@@ -1231,6 +1257,46 @@ fn waf_detect_fixture_round_trips_json_and_returns_verdict() {
     );
     assert_eq!(verdict.category, "custom_detector");
     assert_eq!(verdict.score, 10);
+}
+
+#[test]
+fn waf_detect_accepts_a_realistic_header_set_and_a_full_body() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("waf-detect-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/waf_detect_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/waf_detect_v2/waf_detect_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("waf_detect_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    manager.reload_from_disk().unwrap();
+    let detector = manager.waf_detector_plugin().unwrap();
+
+    let headers = (0..20)
+        .map(|i| (format!("x-custom-header-{i}"), "a".repeat(100)))
+        .collect();
+    let request = bearust_plugin_sdk::WafDetectRequest {
+        method: "POST".into(),
+        path: "/api/v1/upload".into(),
+        query: "token=abc123&format=json".into(),
+        headers,
+        body: vec![b'x'; 2048],
+    };
+    // Must succeed -- proves the bounded request fits comfortably under the
+    // fixture's declared max_output_bytes floor, unlike the pre-fix
+    // unbounded request would have.
+    assert!(detector.detect(&request).is_ok());
 }
 
 #[test]

@@ -249,10 +249,13 @@ pub enum WafPluginDecision {
     Block,
 }
 
-/// Input to `bearust_waf_detect`. Mirrors `src/waf.rs::InspectionContext`
-/// on the host side — the exact same bounded fields the built-in rule
-/// engine itself evaluates, so a detector plugin never receives more
-/// attacker-controlled data than the engine already inspects.
+/// Input to `bearust_waf_detect`. The host (`src/proxy.rs::waf_detect_request`)
+/// bounds `method`/`path`/`query`/`headers` to the same
+/// `MAX_NORMALIZED_METADATA_BYTES`/`MAX_NORMALIZED_HEADERS`/
+/// `MAX_NORMALIZED_FIELD_BYTES` budgets the built-in rule engine enforces on
+/// the same raw fields, and separately caps `body` smaller than the rule
+/// engine's own body limit to keep worst-case JSON size well under a
+/// plugin's declared `max_output_bytes`.
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct WafDetectRequest {
     pub method: String,
