@@ -40,11 +40,13 @@ const MIN_V2_OUTPUT_BYTES: usize = 64;
 /// `notify_sink_v2` fixture's declared limit), so a `notify.waf_block`
 /// plugin declaring less is rejected at manifest validation instead of
 /// silently failing every notification with an opaque `MemoryLimit` —
-/// mirroring `MIN_V2_OUTPUT_BYTES`'s rationale above.
+/// mirroring `MIN_V2_OUTPUT_BYTES`'s rationale above. `waf.detect`'s
+/// worst-case verdict JSON is smaller than `WafBlockEvent`'s; it reuses
+/// this same floor rather than introducing a second constant.
 const MIN_NOTIFY_INPUT_BYTES: usize = 1024;
 const EPOCH_TICK: Duration = Duration::from_millis(1);
 const MAX_DETAIL_BYTES: usize = 4096;
-const ALLOWED_CAPABILITIES: [&str; 2] = ["health_check", "notify.waf_block"];
+const ALLOWED_CAPABILITIES: [&str; 3] = ["health_check", "notify.waf_block", "waf.detect"];
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -229,6 +231,7 @@ pub struct CompiledPlugin {
     abi_version: u32,
     has_health_check: bool,
     has_notify_waf_block: bool,
+    has_waf_detect: bool,
 }
 
 impl PluginEngine {
@@ -293,7 +296,7 @@ impl PluginEngine {
         // Exhaustive on purpose: widening SUPPORTED_ABI_VERSIONS without
         // adding an arm here fails closed with AbiMismatch rather than
         // silently validating a new version against the wrong export set.
-        let (has_health_check, has_notify_waf_block) = match manifest.abi_version {
+        let (has_health_check, has_notify_waf_block, has_waf_detect) = match manifest.abi_version {
             1 => {
                 let has_health_check =
                     match instance.get_typed_func::<(), i32>(&mut store, "bearust_health_check") {
@@ -307,7 +310,7 @@ impl PluginEngine {
                         }
                         Err(_) => return Err(PluginError::AbiMismatch),
                     };
-                (has_health_check, false)
+                (has_health_check, false, false)
             }
             2 => {
                 // abi_version 2: bearust_health_check is not part of this ABI.
@@ -337,7 +340,15 @@ impl PluginEngine {
                 } else {
                     false
                 };
-                (false, has_notify_waf_block)
+                let has_waf_detect = if manifest.capabilities.iter().any(|c| c == "waf.detect") {
+                    instance
+                        .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_waf_detect")
+                        .map_err(|_| PluginError::AbiMismatch)?;
+                    true
+                } else {
+                    false
+                };
+                (false, has_notify_waf_block, has_waf_detect)
             }
             _ => return Err(PluginError::AbiMismatch),
         };
@@ -350,6 +361,7 @@ impl PluginEngine {
             abi_version: manifest.abi_version,
             has_health_check,
             has_notify_waf_block,
+            has_waf_detect,
         })
     }
 }
@@ -579,6 +591,68 @@ impl CompiledPlugin {
 
         Ok(status)
     }
+
+    /// Invokes the `waf.detect` capability's entry point on an
+    /// `abi_version: 2` plugin that declared it. Returns the plugin's
+    /// verdict or a `PluginError` for any host-detected failure (trap,
+    /// timeout, fuel exhaustion, malformed export/output, or an
+    /// out-of-bounds pointer). Never panics: every guest-controlled
+    /// pointer/length is bounds-checked exactly as in `health_check`'s v2
+    /// path.
+    pub fn detect(
+        &self,
+        request: &bearust_plugin_sdk::WafDetectRequest,
+    ) -> Result<bearust_plugin_sdk::WafDetectVerdict, PluginError> {
+        if !self.has_waf_detect {
+            return Err(PluginError::AbiMismatch);
+        }
+        let started = Instant::now();
+        let _scheduler = Arc::clone(&self.scheduler);
+        let mut store = new_store(&self.engine, &self.limits)?;
+        store
+            .set_fuel(self.limits.fuel)
+            .map_err(|_| PluginError::FuelExhausted)?;
+        store.set_epoch_deadline(epoch_ticks(self.limits.invocation_timeout_ms));
+
+        let instance = Instance::new(&mut store, &self.module, &[])
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .ok_or(PluginError::AbiMismatch)?;
+        let alloc = instance
+            .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
+            .map_err(|_| PluginError::AbiMismatch)?;
+        let dealloc = instance
+            .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
+            .map_err(|_| PluginError::AbiMismatch)?;
+        let detect = instance
+            .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_waf_detect")
+            .map_err(|_| PluginError::AbiMismatch)?;
+
+        let input = bearust_plugin_sdk::encode(request);
+        let input_len: i32 = input
+            .len()
+            .try_into()
+            .map_err(|_| PluginError::MemoryLimit)?;
+        let input_ptr = alloc
+            .call(&mut store, input_len)
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        write_guest_bytes(&memory, &mut store, input_ptr, &input, &self.limits)?;
+
+        let packed = detect
+            .call(&mut store, (input_ptr, input_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        dealloc
+            .call(&mut store, (input_ptr, input_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        let (out_ptr, out_len) = bearust_plugin_sdk::unpack(packed);
+        let bytes = read_guest_bytes(&memory, &store, out_ptr, out_len, &self.limits)?;
+        dealloc
+            .call(&mut store, (out_ptr, out_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+
+        bearust_plugin_sdk::decode(&bytes).map_err(|_| PluginError::Trap)
+    }
 }
 
 fn clamp_limits(requested: &PluginLimits, policy: &PluginPolicy) -> PluginLimits {
@@ -691,7 +765,12 @@ impl PluginManifest {
         {
             return Err(PluginError::InvalidManifest);
         }
-        if self.abi_version != 2 && self.capabilities.iter().any(|c| c == "notify.waf_block") {
+        if self.abi_version != 2
+            && self
+                .capabilities
+                .iter()
+                .any(|c| c == "notify.waf_block" || c == "waf.detect")
+        {
             return Err(PluginError::InvalidManifest);
         }
         let mut caps = self.capabilities.clone();
@@ -717,7 +796,10 @@ impl PluginManifest {
         if self.abi_version == 2 && self.limits.max_output_bytes < MIN_V2_OUTPUT_BYTES {
             return Err(PluginError::InvalidManifest);
         }
-        if self.capabilities.iter().any(|c| c == "notify.waf_block")
+        if self
+            .capabilities
+            .iter()
+            .any(|c| c == "notify.waf_block" || c == "waf.detect")
             && self.limits.max_output_bytes < MIN_NOTIFY_INPUT_BYTES
         {
             return Err(PluginError::InvalidManifest);
@@ -1443,6 +1525,26 @@ impl PluginManager {
                 }
                 let compiled = record.compiled.as_ref()?;
                 compiled.has_notify_waf_block.then(|| Arc::clone(compiled))
+            })
+    }
+
+    /// Returns the compiled plugin currently acting as the custom WAF
+    /// detector, if any: the first (lowest plugin ID) enabled plugin whose
+    /// manifest declared `waf.detect`. Mirrors `waf_block_sink_plugin`'s
+    /// selection rule exactly — at most one plugin is ever treated as the
+    /// active detector; any other plugin also declaring the capability is
+    /// simply never selected.
+    pub fn waf_detector_plugin(&self) -> Option<Arc<CompiledPlugin>> {
+        self.current
+            .load_full()
+            .plugins
+            .values()
+            .find_map(|record| {
+                if !record.status.enabled {
+                    return None;
+                }
+                let compiled = record.compiled.as_ref()?;
+                compiled.has_waf_detect.then(|| Arc::clone(compiled))
             })
     }
 

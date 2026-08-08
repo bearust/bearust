@@ -323,6 +323,54 @@ fn notify_capability_rejects_output_limit_below_the_notify_input_floor() {
 }
 
 #[test]
+fn waf_detect_capability_requires_abi_version_two() {
+    let text = manifest("").replace("[\"health_check\"]", "[\"waf.detect\"]");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(
+        m.validate(&PluginPolicy::default()).unwrap_err(),
+        PluginError::InvalidManifest
+    );
+}
+
+#[test]
+fn waf_detect_capability_is_accepted_with_abi_version_two() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("demo.wasm"), b"wasm").unwrap();
+    let text = manifest("")
+        .replace("abi_version = 1", "abi_version = 2")
+        .replace("[\"health_check\"]", "[\"waf.detect\"]");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    let p = PluginPolicy {
+        module_root: dir.path().into(),
+        ..Default::default()
+    };
+    let validated = m.validate(&p).unwrap();
+    assert_eq!(validated.capabilities, vec!["waf.detect".to_string()]);
+}
+
+#[test]
+fn waf_detect_capability_rejects_output_limit_below_the_notify_input_floor() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("demo.wasm"), b"wasm").unwrap();
+    let p = PluginPolicy {
+        module_root: dir.path().into(),
+        ..Default::default()
+    };
+    let text = manifest("")
+        .replace("abi_version = 1", "abi_version = 2")
+        .replace("[\"health_check\"]", "[\"waf.detect\"]")
+        .replace("max_output_bytes = 1024", "max_output_bytes = 100");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(m.validate(&p).unwrap_err(), PluginError::InvalidManifest);
+
+    let text = manifest("")
+        .replace("abi_version = 1", "abi_version = 2")
+        .replace("[\"health_check\"]", "[\"waf.detect\"]");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(m.validate(&p).unwrap().abi_version, 2);
+}
+
+#[test]
 fn path_containment_and_missing_module() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("ok.wasm"), b"x").unwrap();
@@ -519,6 +567,23 @@ fn v2_missing_notify_export_is_abi_mismatch() {
 }
 
 #[test]
+fn v2_missing_waf_detect_export_is_abi_mismatch() {
+    // Exports the mandatory v2 baseline (memory, alloc, dealloc,
+    // bearust_health_check_v2) but not bearust_waf_detect, even though the
+    // manifest declares the waf.detect capability.
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 0)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0))"#;
+    assert_eq!(
+        compile_error_v2_with_capabilities(wat, vec!["waf.detect".into()]),
+        PluginError::AbiMismatch
+    );
+}
+
+#[test]
 fn v2_out_of_bounds_alloc_pointer_is_trap_on_the_notify_input_write() {
     // Hostile guest: bearust_alloc hands back a pointer far past the end of
     // the guest's single 65536-byte page. The host must reject it while
@@ -547,6 +612,31 @@ fn v2_out_of_bounds_alloc_pointer_is_trap_on_the_notify_input_write() {
         plugin.notify_waf_block(&event).unwrap_err(),
         PluginError::Trap
     );
+}
+
+#[test]
+fn v2_out_of_bounds_alloc_pointer_is_trap_on_the_detect_input_write() {
+    // Hostile guest: bearust_alloc hands back a pointer far past the end of
+    // the guest's single 65536-byte page. The host must reject it while
+    // bounds-checking the *input* write, before bearust_waf_detect is even
+    // called. Mirrors the equivalent notify-path test.
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 1000000)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
+        (func (export "bearust_waf_detect") (param i32 i32) (result i64)
+            unreachable))"#;
+    let plugin = compile_v2_with_capabilities(wat, vec!["waf.detect".into()]).unwrap();
+    let request = bearust_plugin_sdk::WafDetectRequest {
+        method: "GET".into(),
+        path: "/".into(),
+        query: String::new(),
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    assert_eq!(plugin.detect(&request).unwrap_err(), PluginError::Trap);
 }
 
 #[test]
@@ -1098,4 +1188,98 @@ fn v2_long_detail_is_truncated_at_a_char_boundary() {
 
 fn wat_escape(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("\\{b:02x}")).collect()
+}
+
+#[test]
+fn waf_detect_fixture_round_trips_json_and_returns_verdict() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("waf-detect-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/waf_detect_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/waf_detect_v2/waf_detect_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("waf_detect_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 1);
+
+    let detector = manager
+        .waf_detector_plugin()
+        .expect("waf-detect-v2 declares waf.detect and is enabled");
+    let request = bearust_plugin_sdk::WafDetectRequest {
+        method: "GET".into(),
+        path: "/".into(),
+        query: String::new(),
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    let verdict = detector.detect(&request).unwrap();
+    assert_eq!(
+        verdict.decision,
+        bearust_plugin_sdk::WafPluginDecision::Block
+    );
+    assert_eq!(verdict.category, "custom_detector");
+    assert_eq!(verdict.score, 10);
+}
+
+#[test]
+fn waf_detector_plugin_is_none_when_no_plugin_declares_the_capability() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("health-ok-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/health_ok_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/health_ok_v2/health_ok_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("health_ok_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    manager.reload_from_disk().unwrap();
+    assert!(manager.waf_detector_plugin().is_none());
+}
+
+#[test]
+fn waf_detector_plugin_is_none_when_disabled() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("waf-detect-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/waf_detect_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/waf_detect_v2/waf_detect_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("waf_detect_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    manager.reload_from_disk().unwrap();
+    manager.set_enabled("waf-detect-v2", false).unwrap();
+    assert!(manager.waf_detector_plugin().is_none());
 }

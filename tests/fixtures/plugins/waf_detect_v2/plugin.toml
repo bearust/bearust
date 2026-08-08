@@ -1,0 +1,11 @@
+id = "waf-detect-v2"
+display_name = "Deterministic custom WAF detector"
+abi_version = 2
+module = "waf_detect_v2.wasm"
+capabilities = ["waf.detect"]
+
+[limits]
+memory_pages = 1
+fuel = 10000
+invocation_timeout_ms = 100
+max_output_bytes = 1024
