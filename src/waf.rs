@@ -519,3 +519,147 @@ pub fn evaluate(snapshot: &WafSnapshot, context: &InspectionContext) -> Evaluati
         severity: severity_for_score(semantic_score),
     }
 }
+
+/// Merges a `waf.detect` plugin's verdict into an existing `Evaluation`.
+/// Escalate-only: the combined decision is the more severe of the two
+/// (`Block` beats `Log` beats `Allow`), so a plugin verdict can raise
+/// severity but can never turn an `Evaluation` that already reached
+/// `Block` into anything else. The plugin's category is appended (deduped)
+/// and its score is added into `semantic_score`, with `severity`
+/// recomputed from the combined score so the two fields stay consistent.
+pub fn merge_plugin_verdict(
+    mut evaluation: Evaluation,
+    verdict: bearust_plugin_sdk::WafDetectVerdict,
+) -> Evaluation {
+    let verdict_decision = match verdict.decision {
+        bearust_plugin_sdk::WafPluginDecision::Allow => WafDecision::Allow,
+        bearust_plugin_sdk::WafPluginDecision::Log => WafDecision::Log,
+        bearust_plugin_sdk::WafPluginDecision::Block => WafDecision::Block,
+    };
+    evaluation.decision = match (evaluation.decision, verdict_decision) {
+        (WafDecision::Block, _) | (_, WafDecision::Block) => WafDecision::Block,
+        (WafDecision::Log, _) | (_, WafDecision::Log) => WafDecision::Log,
+        _ => WafDecision::Allow,
+    };
+    if !verdict.category.is_empty() && !evaluation.categories.contains(&verdict.category) {
+        evaluation.categories.push(verdict.category);
+    }
+    evaluation.semantic_score = evaluation.semantic_score.saturating_add(verdict.score);
+    evaluation.severity = severity_for_score(evaluation.semantic_score);
+    evaluation
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bearust_plugin_sdk::{WafDetectVerdict, WafPluginDecision};
+
+    fn evaluation(decision: WafDecision) -> Evaluation {
+        Evaluation {
+            decision,
+            matched_rule_ids: Vec::new(),
+            categories: Vec::new(),
+            diagnostic: None,
+            semantic_score: 0,
+            severity: None,
+        }
+    }
+
+    fn verdict(decision: WafPluginDecision) -> WafDetectVerdict {
+        WafDetectVerdict {
+            decision,
+            category: "custom_detector".into(),
+            score: 5,
+        }
+    }
+
+    #[test]
+    fn merge_is_most_severe_wins_across_all_nine_combinations() {
+        let cases = [
+            (
+                WafDecision::Allow,
+                WafPluginDecision::Allow,
+                WafDecision::Allow,
+            ),
+            (WafDecision::Allow, WafPluginDecision::Log, WafDecision::Log),
+            (
+                WafDecision::Allow,
+                WafPluginDecision::Block,
+                WafDecision::Block,
+            ),
+            (WafDecision::Log, WafPluginDecision::Allow, WafDecision::Log),
+            (WafDecision::Log, WafPluginDecision::Log, WafDecision::Log),
+            (
+                WafDecision::Log,
+                WafPluginDecision::Block,
+                WafDecision::Block,
+            ),
+            (
+                WafDecision::Block,
+                WafPluginDecision::Allow,
+                WafDecision::Block,
+            ),
+            (
+                WafDecision::Block,
+                WafPluginDecision::Log,
+                WafDecision::Block,
+            ),
+            (
+                WafDecision::Block,
+                WafPluginDecision::Block,
+                WafDecision::Block,
+            ),
+        ];
+        for (existing, plugin, expected) in cases {
+            let merged =
+                merge_plugin_verdict(evaluation(existing.clone()), verdict(plugin.clone()));
+            assert_eq!(
+                merged.decision, expected,
+                "existing={existing:?} plugin={plugin:?} expected={expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_can_never_downgrade_an_existing_block() {
+        let merged = merge_plugin_verdict(
+            evaluation(WafDecision::Block),
+            verdict(WafPluginDecision::Allow),
+        );
+        assert_eq!(merged.decision, WafDecision::Block);
+    }
+
+    #[test]
+    fn merge_appends_the_plugin_category_and_adds_its_score() {
+        let mut base = evaluation(WafDecision::Allow);
+        base.categories.push("sqli".into());
+        base.semantic_score = 3;
+        let merged = merge_plugin_verdict(base, verdict(WafPluginDecision::Log));
+        assert_eq!(
+            merged.categories,
+            vec!["sqli".to_string(), "custom_detector".to_string()]
+        );
+        assert_eq!(merged.semantic_score, 8);
+    }
+
+    #[test]
+    fn merge_does_not_duplicate_a_category_the_rule_engine_already_matched() {
+        let mut base = evaluation(WafDecision::Allow);
+        base.categories.push("custom_detector".into());
+        let merged = merge_plugin_verdict(base, verdict(WafPluginDecision::Allow));
+        assert_eq!(merged.categories, vec!["custom_detector".to_string()]);
+    }
+
+    #[test]
+    fn merge_recomputes_severity_from_the_combined_score() {
+        let merged = merge_plugin_verdict(
+            evaluation(WafDecision::Allow),
+            WafDetectVerdict {
+                decision: WafPluginDecision::Log,
+                category: "custom_detector".into(),
+                score: 8,
+            },
+        );
+        assert_eq!(merged.severity.as_deref(), Some("high"));
+    }
+}
