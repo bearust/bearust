@@ -402,6 +402,123 @@ async fn apply_waf_detector(
     }
 }
 
+/// Converts the outbound `RequestHeader` into the wire shape a
+/// `transform.request` plugin receives. `method`/`path`/`query`/`headers`
+/// share a `crate::waf::MAX_NORMALIZED_METADATA_BYTES` budget and each
+/// header is additionally capped at `crate::waf::MAX_NORMALIZED_FIELD_BYTES`
+/// -- the same bounds `waf_detect_request` enforces on the same kind of raw
+/// fields -- so a transform plugin never receives more request metadata
+/// than a detector plugin already does. There is no body: this hook only
+/// ever sees headers. Pure and side-effect free.
+fn transform_request(header: &RequestHeader) -> bearust_plugin_sdk::TransformRequest {
+    let mut remaining = crate::waf::MAX_NORMALIZED_METADATA_BYTES;
+    let method = bounded_metadata(header.method.as_str(), &mut remaining);
+    let path = bounded_metadata(header.uri.path(), &mut remaining);
+    let query = bounded_metadata(header.uri.query().unwrap_or(""), &mut remaining);
+    let headers = header
+        .headers
+        .iter()
+        .take(crate::waf::MAX_NORMALIZED_HEADERS)
+        .map(|(name, value)| {
+            (
+                bounded_metadata(name.as_str(), &mut remaining),
+                bounded_metadata(&String::from_utf8_lossy(value.as_bytes()), &mut remaining),
+            )
+        })
+        .collect();
+    bearust_plugin_sdk::TransformRequest {
+        method,
+        path,
+        query,
+        headers,
+    }
+}
+
+/// A plugin's returned header list is applied only if it stays within the
+/// same bounds `transform_request` enforces on the input side: no more than
+/// `MAX_NORMALIZED_HEADERS` entries, and no single name or value longer
+/// than `MAX_NORMALIZED_FIELD_BYTES`. A plugin that returns more than this
+/// has produced malformed output as far as the host is concerned -- the
+/// whole transform is rejected (see `apply_transform_plugin`), not
+/// partially truncated, so a plugin can't silently have some of its
+/// intended headers dropped without warning.
+fn is_valid_transform_headers(headers: &[(String, String)]) -> bool {
+    headers.len() <= crate::waf::MAX_NORMALIZED_HEADERS
+        && headers.iter().all(|(name, value)| {
+            name.len() <= crate::waf::MAX_NORMALIZED_FIELD_BYTES
+                && value.len() <= crate::waf::MAX_NORMALIZED_FIELD_BYTES
+        })
+}
+
+/// Replaces every existing header on `request` with `response`'s headers.
+/// A header whose name or value the plugin returned is not valid HTTP
+/// header syntax is silently skipped (best-effort application) rather than
+/// failing the whole request -- the caller has already validated the
+/// response's size/count bounds via `is_valid_transform_headers` before
+/// calling this.
+fn apply_transform_response(
+    request: &mut RequestHeader,
+    response: bearust_plugin_sdk::TransformResponse,
+) {
+    let existing_names: Vec<_> = request.headers.keys().cloned().collect();
+    for name in existing_names {
+        request.remove_header(&name);
+    }
+    for (name, value) in response.headers {
+        let _ = request.append_header(name, value);
+    }
+}
+
+/// Runs the registered `transform.request` plugin (if any) against
+/// `request`'s current headers and, on success, wholesale-replaces them
+/// with the plugin's response. Synchronous from the caller's point of view
+/// but offloads the blocking wasmtime call via `spawn_blocking` so it never
+/// blocks the shared async runtime. Fails open on every error class: no
+/// transformer configured, no plugin currently declaring the capability, a
+/// disabled plugin, a trap/timeout/fuel exhaustion, output exceeding the
+/// header count/size bounds, a malformed response, or a `spawn_blocking`
+/// join failure all leave `request`'s headers untouched (after counting a
+/// failure metric where applicable). The caller (`upstream_request_filter`)
+/// unconditionally reasserts `Host`/`X-Forwarded-For`/`X-Request-Id` right
+/// after this call returns, whether or not a transform was applied, so this
+/// function never needs to protect those three headers itself.
+async fn apply_transform_plugin(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    request: &mut RequestHeader,
+) {
+    let Some(manager) = plugin_manager else {
+        return;
+    };
+    let Some(transformer) = manager.transform_plugin() else {
+        return;
+    };
+    let metrics = manager.metrics();
+    metrics.record_transform_invocation();
+    let input = transform_request(request);
+    let outcome = tokio::task::spawn_blocking(move || transformer.transform(&input)).await;
+    match outcome {
+        Ok(Ok(response)) if is_valid_transform_headers(&response.headers) => {
+            apply_transform_response(request, response);
+            metrics.record_transform_applied();
+        }
+        Ok(Ok(_)) => {
+            tracing::warn!(
+                event = "transform_request_failed",
+                reason = "output_bounds_exceeded"
+            );
+            metrics.record_transform_failure();
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(event = "transform_request_failed", reason = error.code());
+            metrics.record_transform_failure();
+        }
+        Err(_join_error) => {
+            tracing::warn!(event = "transform_request_failed", reason = "join_error");
+            metrics.record_transform_failure();
+        }
+    }
+}
+
 fn emit_waf_telemetry(
     request_id: &str,
     waf: &WafStore,
@@ -773,6 +890,7 @@ impl ProxyHttp for BeaRustProxy {
                 "request blocked by waf",
             ));
         }
+        apply_transform_plugin(self.plugin_manager.as_ref(), request).await;
         if let Some(host) = session
             .req_header()
             .headers
@@ -1030,8 +1148,12 @@ fn error_status(error: &pingora_core::Error) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_waf_detector, error_status, invoke_analytics_changed, waf_block_event};
+    use super::{
+        apply_transform_plugin, apply_waf_detector, error_status, invoke_analytics_changed,
+        is_valid_transform_headers, waf_block_event,
+    };
     use pingora_core::{Error, ErrorType};
+    use pingora_http::RequestHeader;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -1285,5 +1407,146 @@ mod tests {
         let output = manager.metrics().render_prometheus();
         assert!(output.contains("bearust_plugins_waf_detect_failures_total 1"));
         assert!(output.contains("bearust_plugins_waf_detect_invocations_total 0"));
+    }
+
+    fn transform_manager(enabled: bool) -> Arc<PluginManager> {
+        let root = tempdir().unwrap();
+        let plugin = root.path().join("transform-request-v2");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("plugin.toml"),
+            include_str!("../tests/fixtures/plugins/transform_request_v2/plugin.toml"),
+        )
+        .unwrap();
+        let module = wat::parse_str(include_str!(
+            "../tests/fixtures/plugins/transform_request_v2/transform_request_v2.wat"
+        ))
+        .unwrap();
+        fs::write(plugin.join("transform_request_v2.wasm"), &module).unwrap();
+
+        let manager = PluginManager::new(PluginConfig {
+            enabled: true,
+            directory: root.path().to_path_buf(),
+            ..PluginConfig::default()
+        });
+        manager.reload_from_disk().unwrap();
+        if !enabled {
+            manager.set_enabled("transform-request-v2", false).unwrap();
+        }
+        manager
+    }
+
+    fn sample_request_header() -> RequestHeader {
+        let mut header = RequestHeader::build("GET", b"/", None).unwrap();
+        header.insert_header("Host", "example.com").unwrap();
+        header
+    }
+
+    #[tokio::test]
+    async fn a_successful_transform_replaces_the_header_list() {
+        let manager = transform_manager(true);
+        let mut header = sample_request_header();
+        apply_transform_plugin(Some(&manager), &mut header).await;
+        assert_eq!(header.headers.get("x-transformed").unwrap(), "yes");
+        // The plugin's fixed response does not include Host -- it is only
+        // reasserted by upstream_request_filter's own code, which this unit
+        // test does not call, so it is correctly absent here.
+        assert!(header.headers.get("host").is_none());
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_transform_invocations_total 1"));
+        assert!(output.contains("bearust_plugins_transform_applied_total 1"));
+    }
+
+    #[tokio::test]
+    async fn no_transformer_configured_leaves_headers_unchanged() {
+        let manager = PluginManager::new(PluginConfig::default());
+        let mut header = sample_request_header();
+        apply_transform_plugin(Some(&manager), &mut header).await;
+        assert_eq!(header.headers.get("host").unwrap(), "example.com");
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_transform_invocations_total 0"));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_transformer_leaves_headers_unchanged() {
+        let manager = transform_manager(false);
+        let mut header = sample_request_header();
+        apply_transform_plugin(Some(&manager), &mut header).await;
+        assert_eq!(header.headers.get("host").unwrap(), "example.com");
+    }
+
+    #[tokio::test]
+    async fn no_plugin_manager_leaves_headers_unchanged() {
+        let mut header = sample_request_header();
+        apply_transform_plugin(None, &mut header).await;
+        assert_eq!(header.headers.get("host").unwrap(), "example.com");
+    }
+
+    #[tokio::test]
+    async fn a_trapping_transformer_fails_open_and_counts_a_failure() {
+        let root = tempdir().unwrap();
+        let plugin = root.path().join("transform-request-v2");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("plugin.toml"),
+            include_str!("../tests/fixtures/plugins/transform_request_v2/plugin.toml"),
+        )
+        .unwrap();
+        // Same shape as the checked-in fixture, but traps on every call.
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (global $heap_ptr (mut i32) (i32.const 1024))
+            (func (export "bearust_abi_version") (result i32) i32.const 2)
+            (func (export "bearust_alloc") (param $len i32) (result i32)
+                (local $ptr i32)
+                global.get $heap_ptr
+                local.set $ptr
+                global.get $heap_ptr
+                local.get $len
+                i32.add
+                global.set $heap_ptr
+                local.get $ptr)
+            (func (export "bearust_dealloc") (param i32 i32) nop)
+            (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
+            (func (export "bearust_transform_request") (param i32 i32) (result i64) unreachable))"#;
+        let module = wat::parse_str(wat).unwrap();
+        fs::write(plugin.join("transform_request_v2.wasm"), &module).unwrap();
+
+        let manager = PluginManager::new(PluginConfig {
+            enabled: true,
+            directory: root.path().to_path_buf(),
+            ..PluginConfig::default()
+        });
+        manager.reload_from_disk().unwrap();
+
+        let mut header = sample_request_header();
+        apply_transform_plugin(Some(&manager), &mut header).await;
+        assert_eq!(header.headers.get("host").unwrap(), "example.com");
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_transform_failures_total 1"));
+        assert!(output.contains("bearust_plugins_transform_applied_total 0"));
+    }
+
+    #[test]
+    fn oversized_header_count_is_rejected_as_invalid() {
+        let headers: Vec<(String, String)> = (0..(crate::waf::MAX_NORMALIZED_HEADERS + 1))
+            .map(|i| (format!("x-h{i}"), "v".to_string()))
+            .collect();
+        assert!(!is_valid_transform_headers(&headers));
+    }
+
+    #[test]
+    fn header_field_exceeding_the_per_field_bound_is_rejected_as_invalid() {
+        let headers = vec![(
+            "x-big".to_string(),
+            "a".repeat(crate::waf::MAX_NORMALIZED_FIELD_BYTES + 1),
+        )];
+        assert!(!is_valid_transform_headers(&headers));
+    }
+
+    #[test]
+    fn ordinary_headers_are_valid() {
+        let headers = vec![("host".to_string(), "example.com".to_string())];
+        assert!(is_valid_transform_headers(&headers));
     }
 }
