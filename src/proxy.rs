@@ -434,38 +434,75 @@ fn transform_request(header: &RequestHeader) -> bearust_plugin_sdk::TransformReq
     }
 }
 
+/// Framing/hop-by-hop headers a `transform.request` plugin is never allowed
+/// to set: unlike `Host`/`X-Forwarded-For`/`X-Request-Id` (reasserted by
+/// `upstream_request_filter` after this hook runs), nothing downstream of
+/// this function protects these, and pingora's H1 client trusts them
+/// literally when framing the upstream request. Letting a plugin control
+/// them either silently drops the request body (no `Content-Length` or
+/// `Transfer-Encoding` survives the wholesale replace, so pingora frames a
+/// zero-length body) or opens a request-smuggling vector (a plugin-supplied
+/// `Content-Length` that disagrees with the real body, or a `Connection`/
+/// `Upgrade` override that breaks a WebSocket upgrade).
+const PROTECTED_FRAMING_HEADERS: [&str; 4] = [
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "upgrade",
+];
+
 /// A plugin's returned header list is applied only if it stays within the
 /// same bounds `transform_request` enforces on the input side: no more than
 /// `MAX_NORMALIZED_HEADERS` entries, and no single name or value longer
-/// than `MAX_NORMALIZED_FIELD_BYTES`. A plugin that returns more than this
-/// has produced malformed output as far as the host is concerned -- the
-/// whole transform is rejected (see `apply_transform_plugin`), not
-/// partially truncated, so a plugin can't silently have some of its
-/// intended headers dropped without warning.
+/// than `MAX_NORMALIZED_FIELD_BYTES`. Every name/value pair must also be
+/// syntactically valid as an HTTP header -- a plugin returning something
+/// `http::HeaderName`/`http::HeaderValue` reject would otherwise fail
+/// `apply_header` silently, leaving some of the plugin's intended headers
+/// applied and others dropped. A plugin that violates any of this has
+/// produced malformed output as far as the host is concerned -- the whole
+/// transform is rejected (see `apply_transform_plugin`), not partially
+/// truncated, so a plugin can't silently have some of its intended headers
+/// dropped without warning.
 fn is_valid_transform_headers(headers: &[(String, String)]) -> bool {
     headers.len() <= crate::waf::MAX_NORMALIZED_HEADERS
         && headers.iter().all(|(name, value)| {
             name.len() <= crate::waf::MAX_NORMALIZED_FIELD_BYTES
                 && value.len() <= crate::waf::MAX_NORMALIZED_FIELD_BYTES
+                && http::HeaderName::try_from(name.as_str()).is_ok()
+                && http::HeaderValue::try_from(value.as_str()).is_ok()
         })
 }
 
 /// Replaces every existing header on `request` with `response`'s headers.
-/// A header whose name or value the plugin returned is not valid HTTP
-/// header syntax is silently skipped (best-effort application) rather than
-/// failing the whole request -- the caller has already validated the
-/// response's size/count bounds via `is_valid_transform_headers` before
-/// calling this.
+/// The framing headers in `PROTECTED_FRAMING_HEADERS` are exempt: their
+/// pre-transform values (if any) are captured before the wipe, any
+/// plugin-supplied values for those same names are ignored, and the
+/// captured originals are reasserted afterward -- a transform plugin can
+/// rewrite every other header but can never touch request framing. The
+/// caller has already validated the response's size/count/syntax bounds
+/// via `is_valid_transform_headers` before calling this.
 fn apply_transform_response(
     request: &mut RequestHeader,
     response: bearust_plugin_sdk::TransformResponse,
 ) {
+    let protected: Vec<(&'static str, Option<http::HeaderValue>)> = PROTECTED_FRAMING_HEADERS
+        .iter()
+        .map(|&name| (name, request.headers.get(name).cloned()))
+        .collect();
     let existing_names: Vec<_> = request.headers.keys().cloned().collect();
     for name in existing_names {
         request.remove_header(&name);
     }
     for (name, value) in response.headers {
+        if PROTECTED_FRAMING_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
+            continue;
+        }
         let _ = request.append_header(name, value);
+    }
+    for (name, value) in protected {
+        if let Some(value) = value {
+            let _ = request.insert_header(name, value);
+        }
     }
 }
 
@@ -517,6 +554,42 @@ async fn apply_transform_plugin(
             metrics.record_transform_failure();
         }
     }
+}
+
+/// Reasserts the three headers `upstream_request_filter` guarantees a
+/// `transform.request` plugin can never drop, blank, or spoof: `Host`
+/// (the downstream's own value, or removed entirely if the downstream sent
+/// none -- never a plugin-supplied value), `X-Forwarded-For` (rebuilt from
+/// `pre_transform_forwarded_for` -- the downstream's value captured before
+/// the transform ran -- plus the real client address, never the plugin's
+/// post-transform value), and `X-Request-Id`. Takes plain values rather
+/// than a `Session` so it can be unit-tested against an adversarial
+/// `request` header without constructing a full pingora `Session`.
+fn reassert_protected_request_headers(
+    request: &mut RequestHeader,
+    pre_transform_forwarded_for: Option<&str>,
+    downstream_host: Option<&str>,
+    client_addr: Option<&str>,
+    request_id: &str,
+) {
+    match downstream_host {
+        Some(host) => {
+            let _ = request.insert_header("Host", host);
+        }
+        None => {
+            request.remove_header("host");
+        }
+    }
+    match pre_transform_forwarded_for {
+        Some(value) => {
+            let _ = request.insert_header("X-Forwarded-For", value);
+        }
+        None => {
+            request.remove_header("x-forwarded-for");
+        }
+    }
+    append_forwarded_for(request, client_addr);
+    let _ = request.insert_header("X-Request-Id", request_id.to_owned());
 }
 
 fn emit_waf_telemetry(
@@ -890,20 +963,29 @@ impl ProxyHttp for BeaRustProxy {
                 "request blocked by waf",
             ));
         }
+        // Captured before the transform runs so a plugin can never make its
+        // own spoofed X-Forwarded-For survive: whatever the plugin returns
+        // for that name is discarded in `reassert_protected_request_headers`
+        // below, regardless of whether the downstream request had one.
+        let pre_transform_forwarded_for = request
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         apply_transform_plugin(self.plugin_manager.as_ref(), request).await;
-        if let Some(host) = session
+        let downstream_host = session
             .req_header()
             .headers
             .get("host")
             .and_then(|v| v.to_str().ok())
-        {
-            let _ = request.insert_header("Host", host);
-        }
-        append_forwarded_for(
+            .map(str::to_owned);
+        reassert_protected_request_headers(
             request,
+            pre_transform_forwarded_for.as_deref(),
+            downstream_host.as_deref(),
             session.client_addr().map(ToString::to_string).as_deref(),
+            &ctx.request_id,
         );
-        let _ = request.insert_header("X-Request-Id", ctx.request_id.clone());
         ctx.upstream_started = true;
         Ok(())
     }
@@ -1150,7 +1232,7 @@ fn error_status(error: &pingora_core::Error) -> u16 {
 mod tests {
     use super::{
         apply_transform_plugin, apply_waf_detector, error_status, invoke_analytics_changed,
-        is_valid_transform_headers, waf_block_event,
+        is_valid_transform_headers, reassert_protected_request_headers, waf_block_event,
     };
     use pingora_core::{Error, ErrorType};
     use pingora_http::RequestHeader;
@@ -1548,5 +1630,143 @@ mod tests {
     fn ordinary_headers_are_valid() {
         let headers = vec![("host".to_string(), "example.com".to_string())];
         assert!(is_valid_transform_headers(&headers));
+    }
+
+    #[test]
+    fn a_header_with_invalid_http_syntax_is_rejected_as_invalid() {
+        let headers = vec![("x-bad\nname".to_string(), "value".to_string())];
+        assert!(!is_valid_transform_headers(&headers));
+        let headers = vec![("x-bad".to_string(), "va\nlue".to_string())];
+        assert!(!is_valid_transform_headers(&headers));
+    }
+
+    fn spoofing_transform_manager() -> Arc<PluginManager> {
+        let root = tempdir().unwrap();
+        let plugin = root.path().join("transform-request-v2");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("plugin.toml"),
+            include_str!("../tests/fixtures/plugins/transform_request_v2/plugin.toml"),
+        )
+        .unwrap();
+        // Same shape as the checked-in fixture, but returns a payload that
+        // tries to spoof Host/X-Forwarded-For/X-Request-Id and hijack
+        // request framing (Content-Length/Transfer-Encoding/Connection).
+        // WAT string literals use `\22` for an embedded `"` -- this is the
+        // JSON `{"headers":[["x-transformed","yes"],["host","evil.internal"],
+        // ["x-forwarded-for","10.0.0.1"],["x-request-id","spoofed"],
+        // ["content-length","5"],["transfer-encoding","chunked"],
+        // ["connection","close"]]}` (198 bytes unescaped).
+        let json = concat!(
+            "{\\22headers\\22:[[\\22x-transformed\\22,\\22yes\\22],",
+            "[\\22host\\22,\\22evil.internal\\22],",
+            "[\\22x-forwarded-for\\22,\\2210.0.0.1\\22],",
+            "[\\22x-request-id\\22,\\22spoofed\\22],",
+            "[\\22content-length\\22,\\225\\22],",
+            "[\\22transfer-encoding\\22,\\22chunked\\22],",
+            "[\\22connection\\22,\\22close\\22]]}"
+        );
+        let wat = format!(
+            r#"(module
+            (memory (export "memory") 1)
+            (global $heap_ptr (mut i32) (i32.const 1024))
+            (data (i32.const 0) "{json}")
+            (func (export "bearust_abi_version") (result i32) i32.const 2)
+            (func (export "bearust_alloc") (param $len i32) (result i32)
+                (local $ptr i32)
+                global.get $heap_ptr
+                local.set $ptr
+                global.get $heap_ptr
+                local.get $len
+                i32.add
+                global.set $heap_ptr
+                local.get $ptr)
+            (func (export "bearust_dealloc") (param i32 i32) nop)
+            (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
+            (func (export "bearust_transform_request") (param i32 i32) (result i64)
+                (i64.or
+                    (i64.shl (i64.extend_i32_u (i32.const 0)) (i64.const 32))
+                    (i64.extend_i32_u (i32.const 198)))))"#
+        );
+        let module = wat::parse_str(&wat).unwrap();
+        fs::write(plugin.join("transform_request_v2.wasm"), &module).unwrap();
+
+        let manager = PluginManager::new(PluginConfig {
+            enabled: true,
+            directory: root.path().to_path_buf(),
+            ..PluginConfig::default()
+        });
+        manager.reload_from_disk().unwrap();
+        manager
+    }
+
+    /// Regression test for the design's acceptance gate: Host,
+    /// X-Forwarded-For, X-Request-Id, and request framing headers are
+    /// always present and correct after the transform hook runs, even when
+    /// a fixture plugin deliberately tries to drop or spoof them.
+    #[tokio::test]
+    async fn reassert_protected_request_headers_defeats_a_spoofing_transform() {
+        let manager = spoofing_transform_manager();
+        let mut header = sample_request_header();
+        header
+            .insert_header("x-forwarded-for", "203.0.113.9")
+            .unwrap();
+        header.insert_header("content-length", "42").unwrap();
+
+        let pre_transform_forwarded_for = header
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        apply_transform_plugin(Some(&manager), &mut header).await;
+        // `apply_transform_response` itself already protects framing
+        // headers: the plugin's spoofed content-length/transfer-encoding/
+        // connection never make it into `header` at all, restored to their
+        // pre-transform values (or absent, if they were absent before) --
+        // this is defense-in-depth, independent of the caller's
+        // reassertion pass below. Host/X-Forwarded-For/X-Request-Id are
+        // *not* protected at this layer, so the plugin's spoofed values are
+        // visible here until `reassert_protected_request_headers` runs.
+        assert_eq!(header.headers.get("host").unwrap(), "evil.internal");
+        assert_eq!(header.headers.get("content-length").unwrap(), "42");
+        assert!(header.headers.get("transfer-encoding").is_none());
+        assert!(header.headers.get("connection").is_none());
+
+        reassert_protected_request_headers(
+            &mut header,
+            pre_transform_forwarded_for.as_deref(),
+            Some("example.com"),
+            Some("198.51.100.7"),
+            "req-123",
+        );
+
+        assert_eq!(header.headers.get("host").unwrap(), "example.com");
+        assert_eq!(
+            header.headers.get("x-forwarded-for").unwrap(),
+            "203.0.113.9, 198.51.100.7"
+        );
+        assert_eq!(header.headers.get("x-request-id").unwrap(), "req-123");
+        // Framing headers are still exactly the pre-transform original --
+        // untouched by the reassertion pass, which only handles the other
+        // three names.
+        assert_eq!(header.headers.get("content-length").unwrap(), "42");
+        assert!(header.headers.get("transfer-encoding").is_none());
+        assert!(header.headers.get("connection").is_none());
+        // Untouched, ordinary headers the plugin legitimately returned are
+        // still applied.
+        assert_eq!(header.headers.get("x-transformed").unwrap(), "yes");
+    }
+
+    #[test]
+    fn reassert_protected_request_headers_removes_host_and_xff_when_downstream_had_none() {
+        let mut header = sample_request_header();
+        header.insert_header("host", "attacker-controlled").unwrap();
+        header
+            .insert_header("x-forwarded-for", "attacker-controlled")
+            .unwrap();
+        reassert_protected_request_headers(&mut header, None, None, None, "req-456");
+        assert!(header.headers.get("host").is_none());
+        assert!(header.headers.get("x-forwarded-for").is_none());
+        assert_eq!(header.headers.get("x-request-id").unwrap(), "req-456");
     }
 }
