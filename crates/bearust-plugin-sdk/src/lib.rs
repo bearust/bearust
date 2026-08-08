@@ -79,6 +79,48 @@ mod tests {
         let decoded: WafBlockEvent = decode(&bytes).unwrap();
         assert_eq!(decoded, value);
     }
+
+    #[test]
+    fn waf_detect_request_round_trips() {
+        let value = WafDetectRequest {
+            method: "POST".into(),
+            path: "/login".into(),
+            query: "next=/".into(),
+            headers: vec![("host".into(), "example.com".into())],
+            body: b"user=admin".to_vec(),
+        };
+        let bytes = encode(&value);
+        let decoded: WafDetectRequest = decode(&bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn waf_detect_verdict_round_trips() {
+        let value = WafDetectVerdict {
+            decision: WafPluginDecision::Block,
+            category: "custom_detector".into(),
+            score: 10,
+        };
+        let bytes = encode(&value);
+        let decoded: WafDetectVerdict = decode(&bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn waf_plugin_decision_serializes_as_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&WafPluginDecision::Allow).unwrap(),
+            "\"allow\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WafPluginDecision::Log).unwrap(),
+            "\"log\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WafPluginDecision::Block).unwrap(),
+            "\"block\""
+        );
+    }
 }
 
 /// Guest-exported allocator entry point: reserves `len` bytes of this
@@ -194,4 +236,38 @@ pub struct WafBlockEvent {
     pub score: u16,
     pub severity: String,
     pub reason_ids: String,
+}
+
+/// A plugin's decision on `waf.detect`, mirroring `src/waf.rs::WafDecision`
+/// on the host side. Serialized in `snake_case` (`"allow" | "log" |
+/// "block"`).
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WafPluginDecision {
+    Allow,
+    Log,
+    Block,
+}
+
+/// Input to `bearust_waf_detect`. Mirrors `src/waf.rs::InspectionContext`
+/// on the host side — the exact same bounded fields the built-in rule
+/// engine itself evaluates, so a detector plugin never receives more
+/// attacker-controlled data than the engine already inspects.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct WafDetectRequest {
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// Output of `bearust_waf_detect`. Merged into the host's `Evaluation` via
+/// an escalate-only rule: `decision` can raise severity but never lower a
+/// decision the rule engine already reached.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct WafDetectVerdict {
+    pub decision: WafPluginDecision,
+    pub category: String,
+    pub score: u16,
 }
