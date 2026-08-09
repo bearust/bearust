@@ -133,6 +133,27 @@ mod tests {
     }
 
     #[test]
+    fn transform_response_request_round_trips() {
+        let value = TransformResponseRequest {
+            status: 200,
+            body: "aGVsbG8=".into(),
+        };
+        let bytes = encode(&value);
+        let decoded: TransformResponseRequest = decode(&bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn transform_response_result_round_trips() {
+        let value = TransformResponseResult {
+            body: "d29ybGQ=".into(),
+        };
+        let bytes = encode(&value);
+        let decoded: TransformResponseResult = decode(&bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
     fn waf_plugin_decision_serializes_as_lowercase() {
         assert_eq!(
             serde_json::to_string(&WafPluginDecision::Allow).unwrap(),
@@ -323,4 +344,26 @@ pub struct TransformRequest {
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct TransformResponse {
     pub headers: Vec<(String, String)>,
+}
+
+/// Input to `bearust_transform_response`. `status` is context only (not
+/// mutable). `body` is the full response body the host buffered, base64
+/// encoded to avoid the ~4x JSON-array expansion `WafDetectRequest::body`
+/// (a `Vec<u8>`) incurs -- matching the ~4/3 base64 overhead
+/// `MIN_TRANSFORM_RESPONSE_INPUT_BYTES` is sized around. There is no
+/// `headers` field: unlike `TransformRequest`, this hook cannot mutate
+/// headers -- pingora already sends response headers to the downstream
+/// client by the time this hook's body decision is known (see
+/// `docs/superpowers/specs/2026-08-09-phase-13f-response-transform-design.md`).
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TransformResponseRequest {
+    pub status: u16,
+    pub body: String,
+}
+
+/// Output of `bearust_transform_response`. The host replaces the buffered
+/// response body wholesale with the base64-decoded `body` on success.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TransformResponseResult {
+    pub body: String,
 }
