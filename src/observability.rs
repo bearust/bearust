@@ -133,7 +133,8 @@ impl PluginMetrics {
     /// A `transform.response` plugin call succeeded and its returned body
     /// was applied to the outbound response.
     pub fn record_transform_response_applied(&self) {
-        self.transform_response_applied.fetch_add(1, Ordering::Relaxed);
+        self.transform_response_applied
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// A `transform.response` plugin call failed: trap, timeout, fuel
