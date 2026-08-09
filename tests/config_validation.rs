@@ -82,6 +82,23 @@ fn parses_plugin_configuration_and_rejects_invalid_limits() {
 }
 
 #[test]
+fn accepts_a_plugin_output_ceiling_above_the_old_one_mib_limit() {
+    // 1.5 MiB -- above the pre-Phase-13F 1 MiB ceiling, below the new
+    // 2 MiB one, and exactly the manifest-validation floor a
+    // `transform.response` plugin requires
+    // (`plugin_runtime::MIN_TRANSFORM_RESPONSE_INPUT_BYTES`). Proves the
+    // ceiling raise took effect at the config-parsing layer, not only in
+    // manifest validation.
+    let input = format!("{VALID}\n[plugins]\nenabled = true\nmax_output_bytes = 1572864\n");
+    let config = Config::parse(&input).expect("1.5 MiB max_output_bytes should be accepted");
+    assert_eq!(config.plugins.max_output_bytes, 1_572_864);
+
+    let ceiling = format!("{VALID}\n[plugins]\nenabled = true\nmax_output_bytes = 2097152\n");
+    let config = Config::parse(&ceiling).expect("2 MiB max_output_bytes is the ceiling");
+    assert_eq!(config.plugins.max_output_bytes, 2 * 1024 * 1024);
+}
+
+#[test]
 fn cluster_peers_require_a_shared_auth_token() {
     let missing = format!(
         "{VALID}\n[cluster]\nnode_id = \"node1\"\npeers = [{{ node_id = \"node2\", address = \"127.0.0.1:7001\" }}]\n"

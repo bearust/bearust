@@ -1046,14 +1046,28 @@ plugin never receives or returns headers, closing off any header
 injection/spoofing surface for this capability by scope rather than by
 filtering.
 
-`response_filter` decides eligibility -- a plugin must be enabled and
-currently declaring `transform.response`, and the response must not be
+`response_filter` decides eligibility. A plugin must be enabled and
+currently declaring `transform.response`; the response must not be
 compressed (a non-identity `Content-Encoding` skips the plugin entirely,
 since it would otherwise receive opaque bytes it cannot meaningfully
-transform). When eligible, `Content-Length` is stripped; pingora's own H1
-pipeline then automatically upgrades framing to `Transfer-Encoding:
-chunked`, so the host never needs to (and structurally cannot)
-reconstruct `Content-Length` after the transform's outcome is known.
+transform); the status must not be informational (excluding `101
+Switching Protocols`, whose upgraded WebSocket frames arrive through the
+same body filter and must keep streaming), `204`, or `304`; the
+downstream method must not be `HEAD`; and the `Content-Type` must not be
+`text/event-stream` (an SSE stream's events would otherwise be withheld
+until the 1 MiB cap or the connection's end).
+
+When eligible, `response_filter` sets the response to HTTP/1.1, strips
+`Content-Length`, and inserts `Transfer-Encoding: chunked` itself. The
+host cannot reconstruct `Content-Length` after the transform's outcome is
+known -- headers are already on the wire by then -- so chunked framing is
+mandatory. Setting it explicitly is required: pingora's own auto-chunk
+step runs earlier in the H1 pipeline, *before* this hook, and sees the
+upstream `Content-Length` still present, so it declines to add
+`Transfer-Encoding`. Stripping `Content-Length` alone would leave the
+response with neither header, i.e. close-delimited framing that disables
+downstream keep-alive. On an HTTP/2 downstream the inserted header is
+harmless: h2 strips `Transfer-Encoding` before writing headers.
 
 `response_body_filter` buffers the response body up to a 1 MiB cap
 (`RESPONSE_BODY_TRANSFORM_CAP_BYTES`). A body exceeding the cap aborts

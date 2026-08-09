@@ -66,17 +66,28 @@ a design change.
 Flow:
 
 1. `response_filter` checks eligibility: is `plugin_manager` present, is a
-   plugin enabled declaring `transform.response`, and is the response's
-   `Content-Encoding` absent or `identity`? If all true, strip
-   `Content-Length` from the response headers. Confirmed in
-   `proxy_h1.rs:680-697`: when a response has neither `Content-Length` nor
-   `Transfer-Encoding` and isn't the final task, pingora automatically
-   inserts `Transfer-Encoding: chunked` (upgrading the response to
-   HTTP/1.1 if needed) — so stripping `Content-Length` here is sufficient
-   for correct framing regardless of the eventual (possibly different)
-   body length; no header needs to be reinstated later. Mark `ctx` to
-   buffer the body. Otherwise, mark `ctx` for passthrough — nothing else
-   in this hook touches the response.
+   plugin enabled declaring `transform.response`, is the response's
+   `Content-Encoding` absent or `identity`, is the status non-informational
+   (excluding `101 Switching Protocols`, whose upgraded WebSocket frames
+   flow through the same body filter as `HttpTask::UpgradedBody` and must
+   keep streaming) and neither `204` nor `304`, is the downstream method
+   not `HEAD`, and is the `Content-Type` not `text/event-stream` (an SSE
+   stream would otherwise stall until the 1 MiB cap)? If all true, set the
+   response version to HTTP/1.1, strip `Content-Length`, and insert
+   `Transfer-Encoding: chunked` explicitly. Doing this ourselves is
+   required — pingora's auto-chunk step (`proxy_h1.rs:680-697`, which adds
+   `Transfer-Encoding: chunked` when a response has neither
+   `Content-Length` nor `Transfer-Encoding`) runs *before* it calls
+   `self.inner.response_filter(...)`, so it sees the upstream
+   `Content-Length` still present and declines. Stripping `Content-Length`
+   alone would leave the response with neither framing header, which
+   pingora-core treats as close-delimited, disabling downstream HTTP/1.1
+   keep-alive on every transformed response. On an HTTP/2 downstream the
+   inserted header is harmless: h2 strips `Transfer-Encoding` before
+   writing headers. Chunked framing is what makes the eventual (possibly
+   different) body length correct without reinstating any header later.
+   Mark `ctx` to buffer the body. Otherwise, mark `ctx` for passthrough —
+   nothing else in this hook touches the response.
 2. `response_body_filter`, while buffering: append each chunk to a
    `ctx`-held buffer, suppressing emission (`*body = None`) until
    `end_of_stream`. If the buffer exceeds the 1 MiB cap before
@@ -171,9 +182,11 @@ an operator is permitted to configure.
   accumulator, a buffering-mode flag, and the captured response status for
   the eventual `TransformResponseRequest`.
 - New `response_filter` override: eligibility check (plugin present +
-  enabled + `Content-Encoding` absent/identity), strips `Content-Length`
-  and flips `ctx` to buffering mode when eligible. Does not otherwise
-  touch the response's headers.
+  enabled + `Content-Encoding` absent/identity + non-informational status
+  that is neither `204` nor `304` + non-`HEAD` method + non-SSE
+  `Content-Type`); when eligible it sets HTTP/1.1, strips `Content-Length`,
+  inserts `Transfer-Encoding: chunked`, and flips `ctx` to buffering mode.
+  Does not otherwise touch the response's headers.
 - New `response_body_filter` override implementing the accumulate /
   overflow-abort / end-of-stream-transform flow described in Architecture,
   calling the plugin via `tokio::task::block_in_place`. On both the
@@ -221,10 +234,11 @@ state is introduced.
 - The plugin never receives or returns headers, so there is no header
   injection/spoofing surface for this capability at all — the strongest
   possible mitigation, achieved by scope rather than by filtering.
-- `Content-Length` is stripped once, unconditionally on eligibility (not
-  on outcome), and pingora's own H1 pipeline handles correct chunked
-  framing from there — the host doesn't need to (and structurally cannot)
-  reconstruct it after the fact.
+- `Content-Length` is stripped and `Transfer-Encoding: chunked` inserted
+  once, unconditionally on eligibility (not on outcome) — pingora's own
+  auto-chunk step has already run by the time this hook is called, so the
+  framing must be set explicitly here. The host doesn't need to (and
+  structurally cannot) reconstruct `Content-Length` after the fact.
 - Compressed responses never reach the plugin, so it can neither
   misinterpret opaque compressed bytes as content nor be used to launder a
   compressed payload past any future response inspection.

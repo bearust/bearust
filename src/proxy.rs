@@ -575,19 +575,60 @@ async fn apply_transform_plugin(
 const RESPONSE_BODY_TRANSFORM_CAP_BYTES: usize = 1024 * 1024;
 
 /// Whether `response`'s body should be buffered for a `transform.response`
-/// plugin: a plugin must be enabled and currently declaring the
-/// capability, and the response must not be compressed -- a plugin would
-/// otherwise receive opaque bytes it cannot meaningfully transform, and
-/// could be misused to launder a compressed payload past any future
-/// response inspection. Pure and side-effect free.
+/// plugin. Every one of the following must hold; the check is pure and
+/// side-effect free:
+///
+/// - a plugin is enabled and currently declaring `transform.response`;
+/// - `Content-Encoding` is absent, empty, or `identity` -- a plugin would
+///   otherwise receive opaque compressed bytes it cannot meaningfully
+///   transform, and could be misused to launder a compressed payload past
+///   any future response inspection;
+/// - the status is not informational (`1xx`, which includes `101 Switching
+///   Protocols`): an upgraded connection's frames arrive through this same
+///   body filter as `HttpTask::UpgradedBody`, and buffering them would
+///   swallow WebSocket traffic instead of streaming it;
+/// - the status is neither `204 No Content` nor `304 Not Modified`, which
+///   carry no body at all -- stripping their framing headers is pointless;
+/// - the downstream request method is not `HEAD`, whose response describes
+///   what a `GET` would return but carries no body, so its `Content-Length`
+///   is meaningful to size-probing clients and must be left intact;
+/// - `Content-Type` is not `text/event-stream` (case-insensitive): a
+///   long-lived stream's events would be withheld until the 1 MiB buffer
+///   cap or the connection's end, defeating the point of streaming.
 fn should_buffer_response_for_transform(
     plugin_manager: Option<&Arc<PluginManager>>,
+    method: &http::Method,
     response: &ResponseHeader,
 ) -> bool {
     let Some(manager) = plugin_manager else {
         return false;
     };
     if manager.transform_response_plugin().is_none() {
+        return false;
+    }
+    if method == http::Method::HEAD {
+        return false;
+    }
+    let status = response.status;
+    if status.is_informational()
+        || status == http::StatusCode::NO_CONTENT
+        || status == http::StatusCode::NOT_MODIFIED
+    {
+        return false;
+    }
+    if response
+        .headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .eq_ignore_ascii_case("text/event-stream")
+        })
+    {
         return false;
     }
     match response
@@ -611,12 +652,9 @@ fn accumulate_response_chunk(ctx: &mut RequestContext, chunk: &[u8]) -> Option<V
     let remaining =
         RESPONSE_BODY_TRANSFORM_CAP_BYTES.saturating_sub(ctx.transform_response_buffer.len());
     if chunk.len() > remaining {
-        ctx.transform_response_buffer
-            .extend_from_slice(&chunk[..remaining]);
-        let mut overflow = std::mem::take(&mut ctx.transform_response_buffer);
-        overflow.extend_from_slice(&chunk[remaining..]);
+        ctx.transform_response_buffer.extend_from_slice(chunk);
         ctx.transform_response_buffering = false;
-        return Some(overflow);
+        return Some(std::mem::take(&mut ctx.transform_response_buffer));
     }
     ctx.transform_response_buffer.extend_from_slice(chunk);
     None
@@ -634,6 +672,16 @@ fn accumulate_response_chunk(ctx: &mut RequestContext, chunk: &[u8]) -> Option<V
 /// exhaustion, a malformed or oversized output body, a base64 decode
 /// failure, or a `block_in_place` panic all return `body` unchanged (after
 /// counting a failure metric where applicable).
+///
+/// Load-bearing runtime assumption: `block_in_place` is only valid on a
+/// real multi-thread tokio runtime. BeaRust's pingora `Server` is created
+/// in `src/cli.rs` with no config override for `work_stealing`, which
+/// defaults to enabled and backs the server with a multi-thread runtime.
+/// If that default ever changes to a `NoSteal`/current-thread flavor,
+/// `block_in_place` would panic on every call -- caught by the
+/// `catch_unwind` below, so it degrades to fail-open plus a failure
+/// counter rather than crashing, but the capability would be effectively
+/// disabled and would need a `spawn_blocking`-style offload instead.
 fn apply_transform_response_plugin(
     plugin_manager: Option<&Arc<PluginManager>>,
     status: u16,
@@ -1257,12 +1305,30 @@ impl ProxyHttp for BeaRustProxy {
 
     async fn response_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        if should_buffer_response_for_transform(self.plugin_manager.as_ref(), upstream_response) {
+        let method = session.req_header().method.clone();
+        if should_buffer_response_for_transform(
+            self.plugin_manager.as_ref(),
+            &method,
+            upstream_response,
+        ) {
+            // The transformed body's length is not known until
+            // `end_of_stream`, so the response must be chunk-framed. Set
+            // that framing explicitly rather than relying on pingora's
+            // auto-chunk step: that check runs earlier in the H1 pipeline,
+            // *before* this hook, and sees the upstream `Content-Length`
+            // still present, so it declines to add `Transfer-Encoding`.
+            // Removing `Content-Length` on its own would leave the response
+            // with neither header -- close-delimited framing, which kills
+            // downstream keep-alive. On an HTTP/2 downstream this is
+            // harmless: h2 strips `Transfer-Encoding` before writing
+            // headers regardless.
+            upstream_response.set_version(http::Version::HTTP_11);
             upstream_response.remove_header("content-length");
+            let _ = upstream_response.insert_header("transfer-encoding", "chunked");
             ctx.transform_response_buffering = true;
             ctx.transform_response_status = upstream_response.status.as_u16();
         }
@@ -1288,11 +1354,17 @@ impl ProxyHttp for BeaRustProxy {
         if end_of_stream {
             let buffer = std::mem::take(&mut ctx.transform_response_buffer);
             ctx.transform_response_buffering = false;
-            *body = Some(Bytes::from(apply_transform_response_plugin(
-                self.plugin_manager.as_ref(),
-                ctx.transform_response_status,
-                buffer,
-            )));
+            // An empty body has nothing to transform; skip the wasm
+            // instantiation entirely (redirects, empty 200s, ...).
+            *body = Some(if buffer.is_empty() {
+                Bytes::new()
+            } else {
+                Bytes::from(apply_transform_response_plugin(
+                    self.plugin_manager.as_ref(),
+                    ctx.transform_response_status,
+                    buffer,
+                ))
+            });
         }
         Ok(None)
     }
@@ -1988,6 +2060,7 @@ mod tests {
         let response = sample_response_header(200);
         assert!(should_buffer_response_for_transform(
             Some(&manager),
+            &http::Method::GET,
             &response
         ));
     }
@@ -2001,6 +2074,21 @@ mod tests {
             .unwrap();
         assert!(should_buffer_response_for_transform(
             Some(&manager),
+            &http::Method::GET,
+            &response
+        ));
+    }
+
+    #[test]
+    fn eligible_for_an_ordinary_json_content_type() {
+        let manager = transform_response_manager(true);
+        let mut response = sample_response_header(200);
+        response
+            .insert_header("content-type", "application/json; charset=utf-8")
+            .unwrap();
+        assert!(should_buffer_response_for_transform(
+            Some(&manager),
+            &http::Method::GET,
             &response
         ));
     }
@@ -2008,7 +2096,11 @@ mod tests {
     #[test]
     fn ineligible_without_a_plugin_manager() {
         let response = sample_response_header(200);
-        assert!(!should_buffer_response_for_transform(None, &response));
+        assert!(!should_buffer_response_for_transform(
+            None,
+            &http::Method::GET,
+            &response
+        ));
     }
 
     #[test]
@@ -2017,6 +2109,7 @@ mod tests {
         let response = sample_response_header(200);
         assert!(!should_buffer_response_for_transform(
             Some(&manager),
+            &http::Method::GET,
             &response
         ));
     }
@@ -2027,6 +2120,7 @@ mod tests {
         let response = sample_response_header(200);
         assert!(!should_buffer_response_for_transform(
             Some(&manager),
+            &http::Method::GET,
             &response
         ));
     }
@@ -2038,6 +2132,93 @@ mod tests {
         response.insert_header("content-encoding", "gzip").unwrap();
         assert!(!should_buffer_response_for_transform(
             Some(&manager),
+            &http::Method::GET,
+            &response
+        ));
+    }
+
+    #[test]
+    fn ineligible_when_the_response_is_a_websocket_upgrade() {
+        let manager = transform_response_manager(true);
+        let mut response = sample_response_header(101);
+        response.insert_header("upgrade", "websocket").unwrap();
+        response.insert_header("connection", "Upgrade").unwrap();
+        assert!(!should_buffer_response_for_transform(
+            Some(&manager),
+            &http::Method::GET,
+            &response
+        ));
+    }
+
+    #[test]
+    fn ineligible_for_other_informational_responses() {
+        let manager = transform_response_manager(true);
+        let response = sample_response_header(100);
+        assert!(!should_buffer_response_for_transform(
+            Some(&manager),
+            &http::Method::GET,
+            &response
+        ));
+    }
+
+    #[test]
+    fn ineligible_for_a_no_content_response() {
+        let manager = transform_response_manager(true);
+        let response = sample_response_header(204);
+        assert!(!should_buffer_response_for_transform(
+            Some(&manager),
+            &http::Method::GET,
+            &response
+        ));
+    }
+
+    #[test]
+    fn ineligible_for_a_not_modified_response() {
+        let manager = transform_response_manager(true);
+        let response = sample_response_header(304);
+        assert!(!should_buffer_response_for_transform(
+            Some(&manager),
+            &http::Method::GET,
+            &response
+        ));
+    }
+
+    #[test]
+    fn ineligible_for_a_head_request() {
+        let manager = transform_response_manager(true);
+        let mut response = sample_response_header(200);
+        response.insert_header("content-length", "512").unwrap();
+        assert!(!should_buffer_response_for_transform(
+            Some(&manager),
+            &http::Method::HEAD,
+            &response
+        ));
+    }
+
+    #[test]
+    fn ineligible_for_a_server_sent_event_stream() {
+        let manager = transform_response_manager(true);
+        let mut response = sample_response_header(200);
+        response
+            .insert_header("content-type", "text/event-stream")
+            .unwrap();
+        assert!(!should_buffer_response_for_transform(
+            Some(&manager),
+            &http::Method::GET,
+            &response
+        ));
+    }
+
+    #[test]
+    fn ineligible_for_a_server_sent_event_stream_with_mixed_case_and_parameters() {
+        let manager = transform_response_manager(true);
+        let mut response = sample_response_header(200);
+        response
+            .insert_header("content-type", "Text/Event-Stream; charset=utf-8")
+            .unwrap();
+        assert!(!should_buffer_response_for_transform(
+            Some(&manager),
+            &http::Method::GET,
             &response
         ));
     }
@@ -2126,6 +2307,57 @@ mod tests {
             (func (export "bearust_dealloc") (param i32 i32) nop)
             (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
             (func (export "bearust_transform_response") (param i32 i32) (result i64) unreachable))"#;
+        let module = wat::parse_str(wat).unwrap();
+        fs::write(plugin.join("transform_response_v2.wasm"), &module).unwrap();
+
+        let manager = PluginManager::new(PluginConfig {
+            enabled: true,
+            directory: root.path().to_path_buf(),
+            max_output_bytes: 2 * 1024 * 1024,
+            ..PluginConfig::default()
+        });
+        manager.reload_from_disk().unwrap();
+
+        let body = apply_transform_response_plugin(Some(&manager), 200, b"original".to_vec());
+        assert_eq!(body, b"original");
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_transform_response_failures_total 1"));
+        assert!(output.contains("bearust_plugins_transform_response_applied_total 0"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_invalid_base64_response_body_fails_open_and_counts_a_failure() {
+        let root = tempdir().unwrap();
+        let plugin = root.path().join("transform-response-v2");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("plugin.toml"),
+            include_str!("../tests/fixtures/plugins/transform_response_v2/plugin.toml"),
+        )
+        .unwrap();
+        // Same shape as the checked-in fixture, but its fixed JSON literal
+        // `{"body":"!!!not-valid-base64!!!"}` (33 bytes) carries a body
+        // field that is well-formed JSON yet not decodable base64.
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (global $heap_ptr (mut i32) (i32.const 1024))
+            (data (i32.const 0) "{\22body\22:\22!!!not-valid-base64!!!\22}")
+            (func (export "bearust_abi_version") (result i32) i32.const 2)
+            (func (export "bearust_alloc") (param $len i32) (result i32)
+                (local $ptr i32)
+                global.get $heap_ptr
+                local.set $ptr
+                global.get $heap_ptr
+                local.get $len
+                i32.add
+                global.set $heap_ptr
+                local.get $ptr)
+            (func (export "bearust_dealloc") (param i32 i32) nop)
+            (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
+            (func (export "bearust_transform_response") (param i32 i32) (result i64)
+                (i64.or
+                    (i64.shl (i64.extend_i32_u (i32.const 0)) (i64.const 32))
+                    (i64.extend_i32_u (i32.const 33)))))"#;
         let module = wat::parse_str(wat).unwrap();
         fs::write(plugin.join("transform_response_v2.wasm"), &module).unwrap();
 
