@@ -147,6 +147,16 @@ Round-trip serialization tests for both types, following the existing
   Option<Arc<CompiledPlugin>>` — mirrors `transform_plugin()`'s
   lowest-enabled-ID selection exactly.
 
+### `src/config/mod.rs`
+
+`PluginConfig::validate()` currently hard-caps `plugins.max_output_bytes`
+at `1024 * 1024` (1 MiB) — below `MIN_TRANSFORM_RESPONSE_INPUT_BYTES` (1.5
+MiB), which would make `transform.response` impossible to enable under any
+configuration. This ceiling is raised to `2 * 1024 * 1024` (2 MiB),
+comfortable headroom above the new floor, with a doc comment explaining
+why. No other capability's behavior changes — this only widens the range
+an operator is permitted to configure.
+
 ### `src/proxy.rs`
 
 - `BeaRustProxy`'s per-request `CTX` gains buffering state: a byte buffer
@@ -217,13 +227,14 @@ state is introduced.
   passthrough rather than partially transforming or blocking.
 - **Operational gate, stated explicitly**: `MIN_TRANSFORM_RESPONSE_INPUT_BYTES`
   (1.5 MiB) sits far above the default `PluginPolicy::max_output_bytes`
-  ceiling (64 KiB). Enabling any `transform.response` plugin requires an
-  operator to deliberately raise that deployment-wide ceiling in config —
-  a conscious per-deployment opt-in to a materially larger per-request
-  memory footprint, not a silent default change. Every other capability's
-  default ceiling is unaffected, since each plugin's own
-  `max_output_bytes` is independently validated against its declared
-  capabilities.
+  ceiling (64 KiB), and above the *pre-13F* hard config ceiling too (see
+  Components: `src/config/mod.rs`, raised from 1 MiB to 2 MiB by this
+  phase). Enabling any `transform.response` plugin requires an operator to
+  deliberately raise `plugins.max_output_bytes` in config — a conscious
+  per-deployment opt-in to a materially larger per-request memory
+  footprint, not a silent default change. Every other capability's default
+  ceiling is unaffected, since each plugin's own `max_output_bytes` is
+  independently validated against its declared capabilities.
 
 ## Testing / acceptance gate
 
