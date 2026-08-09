@@ -93,10 +93,14 @@ impl PluginConfig {
             self.invocation_timeout_ms,
             60_000u64
         );
+        // Raised from 1 MiB to 2 MiB in Phase 13F: a `transform.response`
+        // plugin's manifest-validation floor
+        // (`plugin_runtime::MIN_TRANSFORM_RESPONSE_INPUT_BYTES`, 1.5 MiB)
+        // would otherwise be impossible to satisfy under any configuration.
         check_limit!(
             "plugins.max_output_bytes",
             self.max_output_bytes,
-            1024 * 1024usize
+            2 * 1024 * 1024usize
         );
         Ok(())
     }

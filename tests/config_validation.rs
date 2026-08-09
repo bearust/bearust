@@ -68,7 +68,7 @@ fn parses_plugin_configuration_and_rejects_invalid_limits() {
         "max_memory_pages = 4097",
         "max_fuel = 1000000001",
         "invocation_timeout_ms = 60001",
-        "max_output_bytes = 1048577",
+        "max_output_bytes = 2097153",
     ] {
         let input = format!("{VALID}\n[plugins]\n{replacement}\n");
         assert!(

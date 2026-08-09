@@ -68,13 +68,29 @@ const MIN_WAF_DETECT_INPUT_BYTES: usize = 49_152;
 /// `MIN_WAF_DETECT_INPUT_BYTES`, whose worst cases are shaped differently
 /// (a compact event, and a metadata-plus-body request, respectively).
 const MIN_TRANSFORM_INPUT_BYTES: usize = 32_768;
+/// `transform.response` carries the full buffered response body (capped at
+/// 1 MiB by `src/proxy.rs::RESPONSE_BODY_TRANSFORM_CAP_BYTES`) as a base64
+/// string in both directions -- no headers field, unlike
+/// `transform.request` (see the Phase 13F design spec's Non-goals: pingora
+/// sends response headers to the client before this hook's body decision
+/// is known, so header mutation isn't buildable here). Base64 inflates the
+/// 1 MiB cap by ~4/3 (~1.33 MiB) with no JSON-escaping overhead (base64's
+/// alphabet needs none), plus trivial JSON structural overhead for
+/// `{"status":...,"body":"..."}`. This floor gives comfortable headroom
+/// above that worst case while staying under the 2 MiB
+/// `plugins.max_output_bytes` config ceiling (see
+/// `src/config/mod.rs::PluginConfig::validate`, raised from 1 MiB by this
+/// same phase). Deliberately its own constant -- not shared with
+/// `MIN_TRANSFORM_INPUT_BYTES` (headers only, no body, request side).
+const MIN_TRANSFORM_RESPONSE_INPUT_BYTES: usize = 1_572_864;
 const EPOCH_TICK: Duration = Duration::from_millis(1);
 const MAX_DETAIL_BYTES: usize = 4096;
-const ALLOWED_CAPABILITIES: [&str; 4] = [
+const ALLOWED_CAPABILITIES: [&str; 5] = [
     "health_check",
     "notify.waf_block",
     "waf.detect",
     "transform.request",
+    "transform.response",
 ];
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -262,6 +278,7 @@ pub struct CompiledPlugin {
     has_notify_waf_block: bool,
     has_waf_detect: bool,
     has_transform_request: bool,
+    has_transform_response: bool,
 }
 
 impl PluginEngine {
@@ -326,12 +343,16 @@ impl PluginEngine {
         // Exhaustive on purpose: widening SUPPORTED_ABI_VERSIONS without
         // adding an arm here fails closed with AbiMismatch rather than
         // silently validating a new version against the wrong export set.
-        let (has_health_check, has_notify_waf_block, has_waf_detect, has_transform_request) =
-            match manifest.abi_version {
-                1 => {
-                    let has_health_check = match instance
-                        .get_typed_func::<(), i32>(&mut store, "bearust_health_check")
-                    {
+        let (
+            has_health_check,
+            has_notify_waf_block,
+            has_waf_detect,
+            has_transform_request,
+            has_transform_response,
+        ) = match manifest.abi_version {
+            1 => {
+                let has_health_check =
+                    match instance.get_typed_func::<(), i32>(&mut store, "bearust_health_check") {
                         Ok(_) => true,
                         Err(_)
                             if instance
@@ -342,72 +363,78 @@ impl PluginEngine {
                         }
                         Err(_) => return Err(PluginError::AbiMismatch),
                     };
-                    (has_health_check, false, false, false)
-                }
-                2 => {
-                    // abi_version 2: bearust_health_check is not part of this ABI.
-                    // Require the memory-convention exports and the guest's linear
-                    // memory instead, all with exact typed signatures.
+                (has_health_check, false, false, false, false)
+            }
+            2 => {
+                // abi_version 2: bearust_health_check is not part of this ABI.
+                // Require the memory-convention exports and the guest's linear
+                // memory instead, all with exact typed signatures.
+                instance
+                    .get_memory(&mut store, "memory")
+                    .ok_or(PluginError::AbiMismatch)?;
+                instance
+                    .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
+                    .map_err(|_| PluginError::AbiMismatch)?;
+                instance
+                    .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
+                    .map_err(|_| PluginError::AbiMismatch)?;
+                instance
+                    .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_health_check_v2")
+                    .map_err(|_| PluginError::AbiMismatch)?;
+                let has_notify_waf_block = if manifest
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "notify.waf_block")
+                {
                     instance
-                        .get_memory(&mut store, "memory")
-                        .ok_or(PluginError::AbiMismatch)?;
-                    instance
-                        .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
+                        .get_typed_func::<(i32, i32), i32>(&mut store, "bearust_notify_waf_block")
                         .map_err(|_| PluginError::AbiMismatch)?;
+                    true
+                } else {
+                    false
+                };
+                let has_waf_detect = if manifest.capabilities.iter().any(|c| c == "waf.detect") {
                     instance
-                        .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
+                        .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_waf_detect")
                         .map_err(|_| PluginError::AbiMismatch)?;
+                    true
+                } else {
+                    false
+                };
+                let has_transform_request = if manifest
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "transform.request")
+                {
                     instance
-                        .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_health_check_v2")
+                        .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_transform_request")
                         .map_err(|_| PluginError::AbiMismatch)?;
-                    let has_notify_waf_block = if manifest
-                        .capabilities
-                        .iter()
-                        .any(|c| c == "notify.waf_block")
-                    {
-                        instance
-                            .get_typed_func::<(i32, i32), i32>(
-                                &mut store,
-                                "bearust_notify_waf_block",
-                            )
-                            .map_err(|_| PluginError::AbiMismatch)?;
-                        true
-                    } else {
-                        false
-                    };
-                    let has_waf_detect = if manifest.capabilities.iter().any(|c| c == "waf.detect")
-                    {
-                        instance
-                            .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_waf_detect")
-                            .map_err(|_| PluginError::AbiMismatch)?;
-                        true
-                    } else {
-                        false
-                    };
-                    let has_transform_request = if manifest
-                        .capabilities
-                        .iter()
-                        .any(|c| c == "transform.request")
-                    {
-                        instance
-                            .get_typed_func::<(i32, i32), i64>(
-                                &mut store,
-                                "bearust_transform_request",
-                            )
-                            .map_err(|_| PluginError::AbiMismatch)?;
-                        true
-                    } else {
-                        false
-                    };
-                    (
-                        false,
-                        has_notify_waf_block,
-                        has_waf_detect,
-                        has_transform_request,
-                    )
-                }
-                _ => return Err(PluginError::AbiMismatch),
-            };
+                    true
+                } else {
+                    false
+                };
+                let has_transform_response = if manifest
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "transform.response")
+                {
+                    instance
+                        .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_transform_response")
+                        .map_err(|_| PluginError::AbiMismatch)?;
+                    true
+                } else {
+                    false
+                };
+                (
+                    false,
+                    has_notify_waf_block,
+                    has_waf_detect,
+                    has_transform_request,
+                    has_transform_response,
+                )
+            }
+            _ => return Err(PluginError::AbiMismatch),
+        };
 
         Ok(CompiledPlugin {
             engine: self.engine.clone(),
@@ -419,6 +446,7 @@ impl PluginEngine {
             has_notify_waf_block,
             has_waf_detect,
             has_transform_request,
+            has_transform_response,
         })
     }
 }
@@ -772,6 +800,68 @@ impl CompiledPlugin {
 
         bearust_plugin_sdk::decode(&bytes).map_err(|_| PluginError::Trap)
     }
+
+    /// Invokes the `transform.response` capability's entry point on an
+    /// `abi_version: 2` plugin that declared it. Returns the plugin's
+    /// replacement body or a `PluginError` for any host-detected failure
+    /// (trap, timeout, fuel exhaustion, malformed export/output, or an
+    /// out-of-bounds pointer). Never panics: every guest-controlled
+    /// pointer/length is bounds-checked exactly as in `health_check`'s v2
+    /// path.
+    pub fn transform_response(
+        &self,
+        request: &bearust_plugin_sdk::TransformResponseRequest,
+    ) -> Result<bearust_plugin_sdk::TransformResponseResult, PluginError> {
+        if !self.has_transform_response {
+            return Err(PluginError::AbiMismatch);
+        }
+        let started = Instant::now();
+        let _scheduler = Arc::clone(&self.scheduler);
+        let mut store = new_store(&self.engine, &self.limits)?;
+        store
+            .set_fuel(self.limits.fuel)
+            .map_err(|_| PluginError::FuelExhausted)?;
+        store.set_epoch_deadline(epoch_ticks(self.limits.invocation_timeout_ms));
+
+        let instance = Instance::new(&mut store, &self.module, &[])
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .ok_or(PluginError::AbiMismatch)?;
+        let alloc = instance
+            .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
+            .map_err(|_| PluginError::AbiMismatch)?;
+        let dealloc = instance
+            .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
+            .map_err(|_| PluginError::AbiMismatch)?;
+        let transform = instance
+            .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_transform_response")
+            .map_err(|_| PluginError::AbiMismatch)?;
+
+        let input = bearust_plugin_sdk::encode(request);
+        let input_len: i32 = input
+            .len()
+            .try_into()
+            .map_err(|_| PluginError::MemoryLimit)?;
+        let input_ptr = alloc
+            .call(&mut store, input_len)
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        write_guest_bytes(&memory, &mut store, input_ptr, &input, &self.limits)?;
+
+        let packed = transform
+            .call(&mut store, (input_ptr, input_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        dealloc
+            .call(&mut store, (input_ptr, input_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        let (out_ptr, out_len) = bearust_plugin_sdk::unpack(packed);
+        let bytes = read_guest_bytes(&memory, &store, out_ptr, out_len, &self.limits)?;
+        dealloc
+            .call(&mut store, (out_ptr, out_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+
+        bearust_plugin_sdk::decode(&bytes).map_err(|_| PluginError::Trap)
+    }
 }
 
 fn clamp_limits(requested: &PluginLimits, policy: &PluginPolicy) -> PluginLimits {
@@ -885,10 +975,12 @@ impl PluginManifest {
             return Err(PluginError::InvalidManifest);
         }
         if self.abi_version != 2
-            && self
-                .capabilities
-                .iter()
-                .any(|c| c == "notify.waf_block" || c == "waf.detect" || c == "transform.request")
+            && self.capabilities.iter().any(|c| {
+                c == "notify.waf_block"
+                    || c == "waf.detect"
+                    || c == "transform.request"
+                    || c == "transform.response"
+            })
         {
             return Err(PluginError::InvalidManifest);
         }
@@ -927,6 +1019,11 @@ impl PluginManifest {
         }
         if self.capabilities.iter().any(|c| c == "transform.request")
             && self.limits.max_output_bytes < MIN_TRANSFORM_INPUT_BYTES
+        {
+            return Err(PluginError::InvalidManifest);
+        }
+        if self.capabilities.iter().any(|c| c == "transform.response")
+            && self.limits.max_output_bytes < MIN_TRANSFORM_RESPONSE_INPUT_BYTES
         {
             return Err(PluginError::InvalidManifest);
         }
@@ -1691,6 +1788,28 @@ impl PluginManager {
                 }
                 let compiled = record.compiled.as_ref()?;
                 compiled.has_transform_request.then(|| Arc::clone(compiled))
+            })
+    }
+
+    /// Returns the compiled plugin currently acting as the active response
+    /// transformer, if any: the first (lowest plugin ID) enabled plugin
+    /// whose manifest declared `transform.response`. Mirrors
+    /// `transform_plugin()`'s selection rule exactly -- at most one plugin
+    /// is ever treated as the active transformer; any other plugin also
+    /// declaring the capability is simply never selected.
+    pub fn transform_response_plugin(&self) -> Option<Arc<CompiledPlugin>> {
+        self.current
+            .load_full()
+            .plugins
+            .values()
+            .find_map(|record| {
+                if !record.status.enabled {
+                    return None;
+                }
+                let compiled = record.compiled.as_ref()?;
+                compiled
+                    .has_transform_response
+                    .then(|| Arc::clone(compiled))
             })
     }
 
