@@ -40,6 +40,9 @@ pub struct PluginMetrics {
     transform_invocations: AtomicU64,
     transform_applied: AtomicU64,
     transform_failures: AtomicU64,
+    transform_response_invocations: AtomicU64,
+    transform_response_applied: AtomicU64,
+    transform_response_failures: AtomicU64,
 }
 
 impl PluginMetrics {
@@ -120,6 +123,27 @@ impl PluginMetrics {
         self.transform_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A `transform.response` plugin call was attempted (regardless of
+    /// outcome).
+    pub fn record_transform_response_invocation(&self) {
+        self.transform_response_invocations
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A `transform.response` plugin call succeeded and its returned body
+    /// was applied to the outbound response.
+    pub fn record_transform_response_applied(&self) {
+        self.transform_response_applied.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A `transform.response` plugin call failed: trap, timeout, fuel
+    /// exhaustion, malformed export/output, output exceeding the body
+    /// bound, a base64 decode failure, or a `block_in_place` panic.
+    pub fn record_transform_response_failure(&self) {
+        self.transform_response_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn render_prometheus(&self) -> String {
         let samples = [
             ("reload", "success", &self.reload_success),
@@ -189,6 +213,21 @@ impl PluginMetrics {
         output.push_str(&format!(
             "bearust_plugins_transform_failures_total {}\n",
             self.transform_failures.load(Ordering::Relaxed)
+        ));
+        output.push_str("# TYPE bearust_plugins_transform_response_invocations_total counter\n");
+        output.push_str(&format!(
+            "bearust_plugins_transform_response_invocations_total {}\n",
+            self.transform_response_invocations.load(Ordering::Relaxed)
+        ));
+        output.push_str("# TYPE bearust_plugins_transform_response_applied_total counter\n");
+        output.push_str(&format!(
+            "bearust_plugins_transform_response_applied_total {}\n",
+            self.transform_response_applied.load(Ordering::Relaxed)
+        ));
+        output.push_str("# TYPE bearust_plugins_transform_response_failures_total counter\n");
+        output.push_str(&format!(
+            "bearust_plugins_transform_response_failures_total {}\n",
+            self.transform_response_failures.load(Ordering::Relaxed)
         ));
         output
     }
@@ -424,5 +463,18 @@ mod tests {
         assert!(output.contains("bearust_plugins_transform_invocations_total 2"));
         assert!(output.contains("bearust_plugins_transform_applied_total 1"));
         assert!(output.contains("bearust_plugins_transform_failures_total 1"));
+    }
+
+    #[test]
+    fn transform_response_metrics_render_as_counters() {
+        let metrics = PluginMetrics::default();
+        metrics.record_transform_response_invocation();
+        metrics.record_transform_response_invocation();
+        metrics.record_transform_response_applied();
+        metrics.record_transform_response_failure();
+        let output = metrics.render_prometheus();
+        assert!(output.contains("bearust_plugins_transform_response_invocations_total 2"));
+        assert!(output.contains("bearust_plugins_transform_response_applied_total 1"));
+        assert!(output.contains("bearust_plugins_transform_response_failures_total 1"));
     }
 }
