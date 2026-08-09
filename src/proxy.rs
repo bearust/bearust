@@ -15,11 +15,16 @@ use crate::{
     waf_store::WafStore,
 };
 use async_trait::async_trait;
+use base64::Engine as _;
 use bytes::Bytes;
 use pingora_core::{upstreams::peer::HttpPeer, ErrorType, Result};
 use pingora_http::{RequestHeader, ResponseHeader};
 use pingora_proxy::{FailToProxy, ProxyHttp, Session};
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 pub struct RequestContext {
     pub snapshot: Option<Arc<RuntimeSnapshot>>,
@@ -49,6 +54,9 @@ pub struct RequestContext {
     pub bot_blocked: bool,
     pub bot_challenge: bool,
     pub rate_limit_decision: Option<RateLimitDecision>,
+    pub transform_response_buffering: bool,
+    pub transform_response_buffer: Vec<u8>,
+    pub transform_response_status: u16,
 }
 
 impl Default for RequestContext {
@@ -78,6 +86,9 @@ impl Default for RequestContext {
             bot_blocked: false,
             bot_challenge: false,
             rate_limit_decision: None,
+            transform_response_buffering: false,
+            transform_response_buffer: Vec::new(),
+            transform_response_status: 0,
         }
     }
 }
@@ -552,6 +563,131 @@ async fn apply_transform_plugin(
         Err(_join_error) => {
             tracing::warn!(event = "transform_request_failed", reason = "join_error");
             metrics.record_transform_failure();
+        }
+    }
+}
+
+/// Response bodies larger than this are never handed to a
+/// `transform.response` plugin -- fail open to unmodified passthrough
+/// instead. Bounds per-request proxy memory from a single large upstream
+/// response; matches the design spec's chosen cap for BeaRust's typical
+/// API/JSON/HTML traffic.
+const RESPONSE_BODY_TRANSFORM_CAP_BYTES: usize = 1024 * 1024;
+
+/// Whether `response`'s body should be buffered for a `transform.response`
+/// plugin: a plugin must be enabled and currently declaring the
+/// capability, and the response must not be compressed -- a plugin would
+/// otherwise receive opaque bytes it cannot meaningfully transform, and
+/// could be misused to launder a compressed payload past any future
+/// response inspection. Pure and side-effect free.
+fn should_buffer_response_for_transform(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    response: &ResponseHeader,
+) -> bool {
+    let Some(manager) = plugin_manager else {
+        return false;
+    };
+    if manager.transform_response_plugin().is_none() {
+        return false;
+    }
+    match response
+        .headers
+        .get("content-encoding")
+        .and_then(|value| value.to_str().ok())
+    {
+        None => true,
+        Some(value) => value.is_empty() || value.eq_ignore_ascii_case("identity"),
+    }
+}
+
+/// Accumulates `chunk` into `ctx`'s response body buffer, bounded by
+/// `RESPONSE_BODY_TRANSFORM_CAP_BYTES`. Returns `Some(overflow_bytes)` if
+/// the cap was exceeded -- the combined prefix-so-far plus this chunk,
+/// ready to be emitted as-is -- with `ctx.transform_response_buffering`
+/// left `false` (buffering aborted, no further chunks are accumulated).
+/// Returns `None` if the chunk fit within the cap (buffering continues,
+/// nothing should be emitted yet).
+fn accumulate_response_chunk(ctx: &mut RequestContext, chunk: &[u8]) -> Option<Vec<u8>> {
+    let remaining =
+        RESPONSE_BODY_TRANSFORM_CAP_BYTES.saturating_sub(ctx.transform_response_buffer.len());
+    if chunk.len() > remaining {
+        ctx.transform_response_buffer
+            .extend_from_slice(&chunk[..remaining]);
+        let mut overflow = std::mem::take(&mut ctx.transform_response_buffer);
+        overflow.extend_from_slice(&chunk[remaining..]);
+        ctx.transform_response_buffering = false;
+        return Some(overflow);
+    }
+    ctx.transform_response_buffer.extend_from_slice(chunk);
+    None
+}
+
+/// Runs the registered `transform.response` plugin (if any) against the
+/// fully buffered response `body` and returns its replacement on success,
+/// or `body` unchanged on any failure. Synchronous from the caller's point
+/// of view -- `response_body_filter` is not an `async fn`, unlike the
+/// request-side hooks -- but offloads the blocking wasmtime call via
+/// `tokio::task::block_in_place` so it never stalls the calling worker
+/// thread's other queued tasks the way a bare synchronous call would.
+/// Fails open on every error class: no plugin manager, no plugin currently
+/// declaring the capability, a disabled plugin, a trap/timeout/fuel
+/// exhaustion, a malformed or oversized output body, a base64 decode
+/// failure, or a `block_in_place` panic all return `body` unchanged (after
+/// counting a failure metric where applicable).
+fn apply_transform_response_plugin(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    status: u16,
+    body: Vec<u8>,
+) -> Vec<u8> {
+    let Some(manager) = plugin_manager else {
+        return body;
+    };
+    let Some(transformer) = manager.transform_response_plugin() else {
+        return body;
+    };
+    let metrics = manager.metrics();
+    metrics.record_transform_response_invocation();
+    let request = bearust_plugin_sdk::TransformResponseRequest {
+        status,
+        body: base64::engine::general_purpose::STANDARD.encode(&body),
+    };
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tokio::task::block_in_place(|| transformer.transform_response(&request))
+    }));
+    match outcome {
+        Ok(Ok(response)) => {
+            match base64::engine::general_purpose::STANDARD.decode(&response.body) {
+                Ok(decoded) if decoded.len() <= RESPONSE_BODY_TRANSFORM_CAP_BYTES => {
+                    metrics.record_transform_response_applied();
+                    decoded
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        event = "transform_response_failed",
+                        reason = "output_bounds_exceeded"
+                    );
+                    metrics.record_transform_response_failure();
+                    body
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        event = "transform_response_failed",
+                        reason = "invalid_base64"
+                    );
+                    metrics.record_transform_response_failure();
+                    body
+                }
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(event = "transform_response_failed", reason = error.code());
+            metrics.record_transform_response_failure();
+            body
+        }
+        Err(_panic) => {
+            tracing::warn!(event = "transform_response_failed", reason = "panic");
+            metrics.record_transform_response_failure();
+            body
         }
     }
 }
@@ -1119,6 +1255,48 @@ impl ProxyHttp for BeaRustProxy {
         Ok(())
     }
 
+    async fn response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        if should_buffer_response_for_transform(self.plugin_manager.as_ref(), upstream_response) {
+            upstream_response.remove_header("content-length");
+            ctx.transform_response_buffering = true;
+            ctx.transform_response_status = upstream_response.status.as_u16();
+        }
+        Ok(())
+    }
+
+    fn response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<Option<Duration>> {
+        if !ctx.transform_response_buffering {
+            return Ok(None);
+        }
+        if let Some(chunk) = body.take() {
+            if let Some(overflow) = accumulate_response_chunk(ctx, &chunk) {
+                *body = Some(Bytes::from(overflow));
+                return Ok(None);
+            }
+        }
+        if end_of_stream {
+            let buffer = std::mem::take(&mut ctx.transform_response_buffer);
+            ctx.transform_response_buffering = false;
+            *body = Some(Bytes::from(apply_transform_response_plugin(
+                self.plugin_manager.as_ref(),
+                ctx.transform_response_status,
+                buffer,
+            )));
+        }
+        Ok(None)
+    }
+
     async fn logging(
         &self,
         session: &mut Session,
@@ -1231,11 +1409,13 @@ fn error_status(error: &pingora_core::Error) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_transform_plugin, apply_waf_detector, error_status, invoke_analytics_changed,
-        is_valid_transform_headers, reassert_protected_request_headers, waf_block_event,
+        accumulate_response_chunk, apply_transform_plugin, apply_transform_response_plugin,
+        apply_waf_detector, error_status, invoke_analytics_changed, is_valid_transform_headers,
+        reassert_protected_request_headers, should_buffer_response_for_transform, waf_block_event,
+        RequestContext, RESPONSE_BODY_TRANSFORM_CAP_BYTES,
     };
     use pingora_core::{Error, ErrorType};
-    use pingora_http::RequestHeader;
+    use pingora_http::{RequestHeader, ResponseHeader};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -1768,5 +1948,199 @@ mod tests {
         assert!(header.headers.get("host").is_none());
         assert!(header.headers.get("x-forwarded-for").is_none());
         assert_eq!(header.headers.get("x-request-id").unwrap(), "req-456");
+    }
+
+    fn transform_response_manager(enabled: bool) -> Arc<PluginManager> {
+        let root = tempdir().unwrap();
+        let plugin = root.path().join("transform-response-v2");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("plugin.toml"),
+            include_str!("../tests/fixtures/plugins/transform_response_v2/plugin.toml"),
+        )
+        .unwrap();
+        let module = wat::parse_str(include_str!(
+            "../tests/fixtures/plugins/transform_response_v2/transform_response_v2.wat"
+        ))
+        .unwrap();
+        fs::write(plugin.join("transform_response_v2.wasm"), &module).unwrap();
+
+        let manager = PluginManager::new(PluginConfig {
+            enabled: true,
+            directory: root.path().to_path_buf(),
+            max_output_bytes: 2 * 1024 * 1024,
+            ..PluginConfig::default()
+        });
+        manager.reload_from_disk().unwrap();
+        if !enabled {
+            manager.set_enabled("transform-response-v2", false).unwrap();
+        }
+        manager
+    }
+
+    fn sample_response_header(status: u16) -> ResponseHeader {
+        ResponseHeader::build(status, None).unwrap()
+    }
+
+    #[test]
+    fn eligible_when_a_transformer_is_enabled_and_no_content_encoding() {
+        let manager = transform_response_manager(true);
+        let response = sample_response_header(200);
+        assert!(should_buffer_response_for_transform(
+            Some(&manager),
+            &response
+        ));
+    }
+
+    #[test]
+    fn eligible_when_content_encoding_is_identity() {
+        let manager = transform_response_manager(true);
+        let mut response = sample_response_header(200);
+        response
+            .insert_header("content-encoding", "identity")
+            .unwrap();
+        assert!(should_buffer_response_for_transform(
+            Some(&manager),
+            &response
+        ));
+    }
+
+    #[test]
+    fn ineligible_without_a_plugin_manager() {
+        let response = sample_response_header(200);
+        assert!(!should_buffer_response_for_transform(None, &response));
+    }
+
+    #[test]
+    fn ineligible_when_no_transformer_is_configured() {
+        let manager = PluginManager::new(PluginConfig::default());
+        let response = sample_response_header(200);
+        assert!(!should_buffer_response_for_transform(
+            Some(&manager),
+            &response
+        ));
+    }
+
+    #[test]
+    fn ineligible_when_the_transformer_is_disabled() {
+        let manager = transform_response_manager(false);
+        let response = sample_response_header(200);
+        assert!(!should_buffer_response_for_transform(
+            Some(&manager),
+            &response
+        ));
+    }
+
+    #[test]
+    fn ineligible_when_the_response_is_compressed() {
+        let manager = transform_response_manager(true);
+        let mut response = sample_response_header(200);
+        response.insert_header("content-encoding", "gzip").unwrap();
+        assert!(!should_buffer_response_for_transform(
+            Some(&manager),
+            &response
+        ));
+    }
+
+    #[test]
+    fn accumulate_response_chunk_appends_within_cap() {
+        let mut ctx = RequestContext {
+            transform_response_buffering: true,
+            ..RequestContext::default()
+        };
+        let overflow = accumulate_response_chunk(&mut ctx, b"hello");
+        assert!(overflow.is_none());
+        assert_eq!(ctx.transform_response_buffer, b"hello");
+        assert!(ctx.transform_response_buffering);
+    }
+
+    #[test]
+    fn accumulate_response_chunk_aborts_buffering_past_the_cap() {
+        let mut ctx = RequestContext {
+            transform_response_buffering: true,
+            transform_response_buffer: vec![0u8; RESPONSE_BODY_TRANSFORM_CAP_BYTES - 2],
+            ..RequestContext::default()
+        };
+        let overflow = accumulate_response_chunk(&mut ctx, b"abcd").expect("chunk exceeds the cap");
+        assert_eq!(overflow.len(), RESPONSE_BODY_TRANSFORM_CAP_BYTES - 2 + 4);
+        assert!(!ctx.transform_response_buffering);
+        assert!(ctx.transform_response_buffer.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_successful_response_transform_replaces_the_body() {
+        let manager = transform_response_manager(true);
+        let body = apply_transform_response_plugin(Some(&manager), 200, b"original".to_vec());
+        assert_eq!(body, b"hello");
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_transform_response_invocations_total 1"));
+        assert!(output.contains("bearust_plugins_transform_response_applied_total 1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_response_transformer_configured_leaves_body_unchanged() {
+        let manager = PluginManager::new(PluginConfig::default());
+        let body = apply_transform_response_plugin(Some(&manager), 200, b"original".to_vec());
+        assert_eq!(body, b"original");
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_transform_response_invocations_total 0"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_disabled_response_transformer_leaves_body_unchanged() {
+        let manager = transform_response_manager(false);
+        let body = apply_transform_response_plugin(Some(&manager), 200, b"original".to_vec());
+        assert_eq!(body, b"original");
+    }
+
+    #[test]
+    fn no_plugin_manager_leaves_response_body_unchanged() {
+        let body = apply_transform_response_plugin(None, 200, b"original".to_vec());
+        assert_eq!(body, b"original");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_trapping_response_transformer_fails_open_and_counts_a_failure() {
+        let root = tempdir().unwrap();
+        let plugin = root.path().join("transform-response-v2");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("plugin.toml"),
+            include_str!("../tests/fixtures/plugins/transform_response_v2/plugin.toml"),
+        )
+        .unwrap();
+        // Same shape as the checked-in fixture, but traps on every call.
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (global $heap_ptr (mut i32) (i32.const 1024))
+            (func (export "bearust_abi_version") (result i32) i32.const 2)
+            (func (export "bearust_alloc") (param $len i32) (result i32)
+                (local $ptr i32)
+                global.get $heap_ptr
+                local.set $ptr
+                global.get $heap_ptr
+                local.get $len
+                i32.add
+                global.set $heap_ptr
+                local.get $ptr)
+            (func (export "bearust_dealloc") (param i32 i32) nop)
+            (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
+            (func (export "bearust_transform_response") (param i32 i32) (result i64) unreachable))"#;
+        let module = wat::parse_str(wat).unwrap();
+        fs::write(plugin.join("transform_response_v2.wasm"), &module).unwrap();
+
+        let manager = PluginManager::new(PluginConfig {
+            enabled: true,
+            directory: root.path().to_path_buf(),
+            max_output_bytes: 2 * 1024 * 1024,
+            ..PluginConfig::default()
+        });
+        manager.reload_from_disk().unwrap();
+
+        let body = apply_transform_response_plugin(Some(&manager), 200, b"original".to_vec());
+        assert_eq!(body, b"original");
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_transform_response_failures_total 1"));
+        assert!(output.contains("bearust_plugins_transform_response_applied_total 0"));
     }
 }
