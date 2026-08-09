@@ -1027,3 +1027,78 @@ here), and no response transform (the proxy currently has no
 `response_filter`/`response_body_filter` hook points in `ProxyHttp` at
 all -- introducing them is a materially larger change, deferred to a later
 phase).
+
+### Phase 13F status: response body transform hook
+
+Phase 13F is complete and adds the plugin system's first response-mutating
+hook: a plugin can rewrite the full response body before it is sent to the
+downstream client. It overrides two previously-unused `ProxyHttp` methods,
+`response_filter` and `response_body_filter`, on `BeaRustProxy`.
+
+Discovered during implementation planning: `pingora-proxy 0.8.1` sends the
+response header task to the downstream client as soon as `response_filter`
+returns, before body chunks have necessarily even arrived from upstream.
+By the time `response_body_filter`'s `end_of_stream` call knows the
+plugin's output, headers are already on the wire, so header mutation based
+on the plugin's output is not buildable against this pingora version.
+Phase 13F is therefore scoped to the response body only; a `transform.response`
+plugin never receives or returns headers, closing off any header
+injection/spoofing surface for this capability by scope rather than by
+filtering.
+
+`response_filter` decides eligibility -- a plugin must be enabled and
+currently declaring `transform.response`, and the response must not be
+compressed (a non-identity `Content-Encoding` skips the plugin entirely,
+since it would otherwise receive opaque bytes it cannot meaningfully
+transform). When eligible, `Content-Length` is stripped; pingora's own H1
+pipeline then automatically upgrades framing to `Transfer-Encoding:
+chunked`, so the host never needs to (and structurally cannot)
+reconstruct `Content-Length` after the transform's outcome is known.
+
+`response_body_filter` buffers the response body up to a 1 MiB cap
+(`RESPONSE_BODY_TRANSFORM_CAP_BYTES`). A body exceeding the cap aborts
+buffering and streams through unmodified -- fail open, no plugin
+invocation. Within the cap, at `end_of_stream`, the plugin is invoked with
+the full buffered body (and the response status, informational only) via
+`tokio::task::block_in_place`, since `response_body_filter` is a
+synchronous `ProxyHttp` method (unlike the request-side hooks, which are
+`async fn` and could use `spawn_blocking`). `block_in_place` lets the
+blocking wasmtime call run without stalling the calling worker thread's
+other queued tasks, requiring BeaRust's Tokio runtime to be multi-threaded
+(already the case: `rt-multi-thread` is enabled).
+
+Fail-open covers every error class: no plugin manager, no active plugin, a
+disabled plugin, a trap, fuel exhaustion, a timeout, malformed or
+oversized output, a base64 decode failure, or a `block_in_place` panic all
+leave the original buffered body unchanged. The body travels through the
+same JSON-over-linear-memory channel every other `abi_version: 2`
+capability uses, with the raw bytes base64-encoded into a `body: String`
+field (`bearust_plugin_sdk::TransformResponseRequest`/
+`TransformResponseResult`) to avoid the ~4x expansion a JSON byte array
+would incur.
+
+The new manifest-validation floor, `MIN_TRANSFORM_RESPONSE_INPUT_BYTES`
+(1.5 MiB), sits far above every other capability's floor -- sized for the
+1 MiB body cap's ~4/3 base64 inflation. This exceeded the pre-existing
+hard config-validation ceiling on `plugins.max_output_bytes` (1 MiB), so
+this phase also raises that ceiling to 2 MiB. Enabling any
+`transform.response` plugin therefore requires an operator to
+deliberately raise `plugins.max_output_bytes` in config -- a conscious
+per-deployment opt-in to a materially larger per-request memory
+footprint, not a silent default change. Every other capability's default
+ceiling (64 KiB) is unaffected, since each plugin's own `max_output_bytes`
+is independently validated against its declared capabilities.
+
+Three new Prometheus counters
+(`bearust_plugins_transform_response_invocations_total`,
+`bearust_plugins_transform_response_applied_total`,
+`bearust_plugins_transform_response_failures_total`) surface plugin
+activity on the existing plugin metrics endpoint, kept distinct from
+Phase 13E's request-side trio. No new host import, capability, or
+resource-limit bypass was added; every guest-controlled pointer/length is
+bounds-checked identically to the Phase 13B health-check path.
+
+Response header transform, chunked/streaming body transform, and
+compressed-body transform all remain deliberately out of scope; see
+`docs/superpowers/specs/2026-08-09-phase-13f-response-transform-design.md`
+for the full rationale and follow-up increments.
