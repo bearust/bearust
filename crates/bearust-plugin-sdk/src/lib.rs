@@ -168,6 +168,43 @@ mod tests {
             "\"block\""
         );
     }
+
+    #[test]
+    fn load_balance_request_round_trips() {
+        let value = LoadBalanceRequest {
+            pool: "api".into(),
+            method: "GET".into(),
+            path: "/orders".into(),
+            query: String::new(),
+            headers: vec![("host".into(), "example.com".into())],
+            backends: vec![
+                BackendCandidate {
+                    id: 0,
+                    address: "127.0.0.1:19001".into(),
+                    healthy: true,
+                    inflight: 2,
+                },
+                BackendCandidate {
+                    id: 1,
+                    address: "127.0.0.1:19002".into(),
+                    healthy: false,
+                    inflight: 0,
+                },
+            ],
+            excluded_backend_id: Some(1),
+        };
+        let bytes = encode(&value);
+        let decoded: LoadBalanceRequest = decode(&bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn load_balance_result_round_trips() {
+        let value = LoadBalanceResult { backend_id: 0 };
+        let bytes = encode(&value);
+        let decoded: LoadBalanceResult = decode(&bytes).unwrap();
+        assert_eq!(decoded, value);
+    }
 }
 
 /// Guest-exported allocator entry point: reserves `len` bytes of this
@@ -366,4 +403,51 @@ pub struct TransformResponseRequest {
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct TransformResponseResult {
     pub body: String,
+}
+
+/// One upstream backend as a `balance.select` plugin sees it: a live
+/// snapshot from the host, never plugin-supplied. `id` is the backend's
+/// stable index within its pool (`balancer::BackendId`, widened to `u64`
+/// for the wire format); `address` is `host:port`; `healthy` mirrors the
+/// host's current live health-check state; `inflight` is the backend's
+/// current in-flight request count (as `LeastConnections` already uses
+/// internally).
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BackendCandidate {
+    pub id: u64,
+    pub address: String,
+    pub healthy: bool,
+    pub inflight: u32,
+}
+
+/// Input to `bearust_balance_select`. `pool` names the upstream pool this
+/// selection is for (a single active plugin may serve several
+/// `algorithm: plugin` pools; this field lets it branch per pool).
+/// `method`/`path`/`query`/`headers` share the same
+/// `MAX_NORMALIZED_METADATA_BYTES`/`MAX_NORMALIZED_HEADERS`/
+/// `MAX_NORMALIZED_FIELD_BYTES` budget `waf_detect_request` and
+/// `transform_request` already use. `backends` is capped at
+/// `MAX_BALANCE_CANDIDATES` (128) entries by the host before this struct
+/// is built. `excluded_backend_id` is set when this call is a failover
+/// retry -- the backend that just failed on this same request. The host
+/// enforces this exclusion itself (`PoolState::select_specific`) rather
+/// than trusting the plugin to honor it.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct LoadBalanceRequest {
+    pub pool: String,
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub headers: Vec<(String, String)>,
+    pub backends: Vec<BackendCandidate>,
+    pub excluded_backend_id: Option<u64>,
+}
+
+/// Output of `bearust_balance_select`. The host leases `backend_id`
+/// directly if it names a backend that is currently healthy and isn't
+/// `excluded_backend_id` -- otherwise the whole call is treated as a
+/// failure and the host falls back to its own deterministic selection.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct LoadBalanceResult {
+    pub backend_id: u64,
 }
