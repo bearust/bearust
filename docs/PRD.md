@@ -1116,3 +1116,51 @@ Response header transform, chunked/streaming body transform, and
 compressed-body transform all remain deliberately out of scope; see
 `docs/superpowers/specs/2026-08-09-phase-13f-response-transform-design.md`
 for the full rationale and follow-up increments.
+
+### Phase 13G status: custom load-balancing hook
+
+Phase 13G is complete and adds the plugin system's first backend-selection
+hook: a plugin can pick which upstream backend serves a request, for pools
+whose `algorithm` is set to `plugin`. This is strictly opt-in per pool --
+`RoundRobin`/`LeastConnections` pools are completely unaffected by anything
+in this phase, with no plugin invocation and no metrics touched for them.
+
+The hook runs inside `upstream_peer`, which was already `async fn`, so it
+reuses Phase 13E's `spawn_blocking` pattern rather than Phase 13F's
+`block_in_place` workaround -- there's no synchronous-trait-method
+constraint here. When a `Plugin`-configured pool's `upstream_peer` runs, the
+host builds a bounded `LoadBalanceRequest` from the pool's current
+candidate snapshot (each backend's id, address, live health flag, and
+in-flight count, capped at `MAX_BALANCE_CANDIDATES` = 128) plus the
+request's bounded method/path/query/headers (the same
+`MAX_NORMALIZED_METADATA_BYTES`/`MAX_NORMALIZED_HEADERS` budget
+`waf.detect`/`transform.request` already use), and invokes the plugin.
+
+The plugin's returned `backend_id` is never trusted outright: the host
+validates it via `PoolState::select_specific`, which only leases a backend
+that is currently healthy and isn't the backend that just failed on a
+failover retry (`excluded_backend_id`). On any failure -- no plugin
+configured, disabled, a trap, fuel exhaustion, a timeout, malformed output,
+a `spawn_blocking` join failure, or an invalid `backend_id` -- the host
+falls back to `pool.select(excluded)`. `PoolState::select`'s `Algorithm::
+Plugin` arm behaves identically to `RoundRobin`, so this fallback needed no
+new selection logic: a `Plugin`-configured pool always has a deterministic,
+healthy pick available, even if its plugin is completely broken.
+
+Exactly one active `balance.select` plugin serves the whole proxy (lowest
+enabled plugin ID, same rule as every other capability), not one plugin per
+pool; the request payload's `pool` field lets a single plugin branch its
+logic across several `algorithm: plugin` pools if it manages more than one.
+Per-pool plugin assignment remains a possible future increment.
+
+The new manifest-validation floor, `MIN_BALANCE_INPUT_BYTES` (48 KiB),
+comfortably fits under the default 64 KiB `PluginPolicy::max_output_bytes`
+ceiling -- unlike Phase 13F's `transform.response`, this capability required
+no config ceiling change.
+
+Three new Prometheus counters (`bearust_plugins_balance_invocations_total`,
+`bearust_plugins_balance_applied_total`,
+`bearust_plugins_balance_failures_total`) surface plugin activity on the
+existing plugin metrics endpoint. No new host import, capability, or
+resource-limit bypass was added; every guest-controlled pointer/length is
+bounds-checked identically to the Phase 13B health-check path.
