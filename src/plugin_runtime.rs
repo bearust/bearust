@@ -83,14 +83,30 @@ const MIN_TRANSFORM_INPUT_BYTES: usize = 32_768;
 /// same phase). Deliberately its own constant -- not shared with
 /// `MIN_TRANSFORM_INPUT_BYTES` (headers only, no body, request side).
 const MIN_TRANSFORM_RESPONSE_INPUT_BYTES: usize = 1_572_864;
+/// `balance.select` carries the same bounded request metadata
+/// (`MAX_NORMALIZED_METADATA_BYTES`/`MAX_NORMALIZED_HEADERS`/
+/// `MAX_NORMALIZED_FIELD_BYTES`) `waf_detect_request`/`transform_request`
+/// already use -- roughly 24 KiB worst case with escaping overhead --
+/// plus up to `MAX_BALANCE_CANDIDATES` (128, enforced in
+/// `src/proxy.rs::load_balance_request`) backend candidates at their JSON
+/// worst case (`{"id":18446744073709551615,"address":
+/// "255.255.255.255:65535","healthy":false,"inflight":4294967295}`, ~99
+/// bytes each, ~13 KiB total for 128 of them). Combined worst case is
+/// roughly 38 KiB; this floor gives comfortable headroom above that while
+/// staying under the default 64 KiB `PluginPolicy::max_output_bytes`
+/// ceiling -- unlike Phase 13F's `transform.response`, this capability
+/// does not require raising that ceiling. Deliberately its own constant,
+/// not shared with any existing floor.
+const MIN_BALANCE_INPUT_BYTES: usize = 49_152;
 const EPOCH_TICK: Duration = Duration::from_millis(1);
 const MAX_DETAIL_BYTES: usize = 4096;
-const ALLOWED_CAPABILITIES: [&str; 5] = [
+const ALLOWED_CAPABILITIES: [&str; 6] = [
     "health_check",
     "notify.waf_block",
     "waf.detect",
     "transform.request",
     "transform.response",
+    "balance.select",
 ];
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -279,6 +295,7 @@ pub struct CompiledPlugin {
     has_waf_detect: bool,
     has_transform_request: bool,
     has_transform_response: bool,
+    has_balance_select: bool,
 }
 
 impl PluginEngine {
@@ -349,6 +366,7 @@ impl PluginEngine {
             has_waf_detect,
             has_transform_request,
             has_transform_response,
+            has_balance_select,
         ) = match manifest.abi_version {
             1 => {
                 let has_health_check =
@@ -363,7 +381,7 @@ impl PluginEngine {
                         }
                         Err(_) => return Err(PluginError::AbiMismatch),
                     };
-                (has_health_check, false, false, false, false)
+                (has_health_check, false, false, false, false, false)
             }
             2 => {
                 // abi_version 2: bearust_health_check is not part of this ABI.
@@ -425,12 +443,22 @@ impl PluginEngine {
                 } else {
                     false
                 };
+                let has_balance_select =
+                    if manifest.capabilities.iter().any(|c| c == "balance.select") {
+                        instance
+                            .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_balance_select")
+                            .map_err(|_| PluginError::AbiMismatch)?;
+                        true
+                    } else {
+                        false
+                    };
                 (
                     false,
                     has_notify_waf_block,
                     has_waf_detect,
                     has_transform_request,
                     has_transform_response,
+                    has_balance_select,
                 )
             }
             _ => return Err(PluginError::AbiMismatch),
@@ -447,6 +475,7 @@ impl PluginEngine {
             has_waf_detect,
             has_transform_request,
             has_transform_response,
+            has_balance_select,
         })
     }
 }
@@ -862,6 +891,71 @@ impl CompiledPlugin {
 
         bearust_plugin_sdk::decode(&bytes).map_err(|_| PluginError::Trap)
     }
+
+    /// Invokes the `balance.select` capability's entry point on an
+    /// `abi_version: 2` plugin that declared it. Returns the plugin's
+    /// chosen `backend_id` or a `PluginError` for any host-detected
+    /// failure (trap, timeout, fuel exhaustion, malformed export/output,
+    /// or an out-of-bounds pointer). Never panics: every guest-controlled
+    /// pointer/length is bounds-checked exactly as in `health_check`'s v2
+    /// path. The caller (`src/proxy.rs::apply_load_balancer_plugin`) is
+    /// responsible for validating the returned `backend_id` against the
+    /// pool's live health/exclusion state -- this method has no knowledge
+    /// of either.
+    pub fn balance_select(
+        &self,
+        request: &bearust_plugin_sdk::LoadBalanceRequest,
+    ) -> Result<bearust_plugin_sdk::LoadBalanceResult, PluginError> {
+        if !self.has_balance_select {
+            return Err(PluginError::AbiMismatch);
+        }
+        let started = Instant::now();
+        let _scheduler = Arc::clone(&self.scheduler);
+        let mut store = new_store(&self.engine, &self.limits)?;
+        store
+            .set_fuel(self.limits.fuel)
+            .map_err(|_| PluginError::FuelExhausted)?;
+        store.set_epoch_deadline(epoch_ticks(self.limits.invocation_timeout_ms));
+
+        let instance = Instance::new(&mut store, &self.module, &[])
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .ok_or(PluginError::AbiMismatch)?;
+        let alloc = instance
+            .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
+            .map_err(|_| PluginError::AbiMismatch)?;
+        let dealloc = instance
+            .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
+            .map_err(|_| PluginError::AbiMismatch)?;
+        let select = instance
+            .get_typed_func::<(i32, i32), i64>(&mut store, "bearust_balance_select")
+            .map_err(|_| PluginError::AbiMismatch)?;
+
+        let input = bearust_plugin_sdk::encode(request);
+        let input_len: i32 = input
+            .len()
+            .try_into()
+            .map_err(|_| PluginError::MemoryLimit)?;
+        let input_ptr = alloc
+            .call(&mut store, input_len)
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        write_guest_bytes(&memory, &mut store, input_ptr, &input, &self.limits)?;
+
+        let packed = select
+            .call(&mut store, (input_ptr, input_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        dealloc
+            .call(&mut store, (input_ptr, input_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        let (out_ptr, out_len) = bearust_plugin_sdk::unpack(packed);
+        let bytes = read_guest_bytes(&memory, &store, out_ptr, out_len, &self.limits)?;
+        dealloc
+            .call(&mut store, (out_ptr, out_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+
+        bearust_plugin_sdk::decode(&bytes).map_err(|_| PluginError::Trap)
+    }
 }
 
 fn clamp_limits(requested: &PluginLimits, policy: &PluginPolicy) -> PluginLimits {
@@ -980,6 +1074,7 @@ impl PluginManifest {
                     || c == "waf.detect"
                     || c == "transform.request"
                     || c == "transform.response"
+                    || c == "balance.select"
             })
         {
             return Err(PluginError::InvalidManifest);
@@ -1024,6 +1119,11 @@ impl PluginManifest {
         }
         if self.capabilities.iter().any(|c| c == "transform.response")
             && self.limits.max_output_bytes < MIN_TRANSFORM_RESPONSE_INPUT_BYTES
+        {
+            return Err(PluginError::InvalidManifest);
+        }
+        if self.capabilities.iter().any(|c| c == "balance.select")
+            && self.limits.max_output_bytes < MIN_BALANCE_INPUT_BYTES
         {
             return Err(PluginError::InvalidManifest);
         }
@@ -1810,6 +1910,26 @@ impl PluginManager {
                 compiled
                     .has_transform_response
                     .then(|| Arc::clone(compiled))
+            })
+    }
+
+    /// Returns the compiled plugin currently acting as the active
+    /// load-balancing selector, if any: the first (lowest plugin ID)
+    /// enabled plugin whose manifest declared `balance.select`. Mirrors
+    /// `transform_response_plugin()`'s selection rule exactly -- at most
+    /// one plugin is ever treated as the active selector; any other
+    /// plugin also declaring the capability is simply never selected.
+    pub fn balance_select_plugin(&self) -> Option<Arc<CompiledPlugin>> {
+        self.current
+            .load_full()
+            .plugins
+            .values()
+            .find_map(|record| {
+                if !record.status.enabled {
+                    return None;
+                }
+                let compiled = record.compiled.as_ref()?;
+                compiled.has_balance_select.then(|| Arc::clone(compiled))
             })
     }
 

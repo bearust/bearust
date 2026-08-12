@@ -481,6 +481,132 @@ fn transform_response_capability_rejects_output_limit_below_the_transform_respon
 }
 
 #[test]
+fn balance_select_capability_requires_abi_version_two() {
+    let text = manifest("").replace("[\"health_check\"]", "[\"balance.select\"]");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(
+        m.validate(&PluginPolicy::default()).unwrap_err(),
+        PluginError::InvalidManifest
+    );
+}
+
+#[test]
+fn balance_select_capability_is_accepted_with_abi_version_two() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("demo.wasm"), b"wasm").unwrap();
+    let text = manifest("")
+        .replace("abi_version = 1", "abi_version = 2")
+        .replace("[\"health_check\"]", "[\"balance.select\"]")
+        .replace("max_output_bytes = 1024", "max_output_bytes = 49152");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    let p = PluginPolicy {
+        module_root: dir.path().into(),
+        ..Default::default()
+    };
+    let validated = m.validate(&p).unwrap();
+    assert_eq!(validated.capabilities, vec!["balance.select".to_string()]);
+}
+
+#[test]
+fn balance_select_capability_rejects_output_limit_below_the_balance_input_floor() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("demo.wasm"), b"wasm").unwrap();
+    let p = PluginPolicy {
+        module_root: dir.path().into(),
+        ..Default::default()
+    };
+    let text = manifest("")
+        .replace("abi_version = 1", "abi_version = 2")
+        .replace("[\"health_check\"]", "[\"balance.select\"]")
+        .replace("max_output_bytes = 1024", "max_output_bytes = 4096");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(m.validate(&p).unwrap_err(), PluginError::InvalidManifest);
+
+    let text = manifest("")
+        .replace("abi_version = 1", "abi_version = 2")
+        .replace("[\"health_check\"]", "[\"balance.select\"]")
+        .replace("max_output_bytes = 1024", "max_output_bytes = 49152");
+    let m = PluginManifest::from_toml(text.as_bytes()).unwrap();
+    assert_eq!(m.validate(&p).unwrap().abi_version, 2);
+}
+
+#[test]
+fn v2_missing_balance_select_export_is_abi_mismatch() {
+    // Exports the mandatory v2 baseline (memory, alloc, dealloc,
+    // bearust_health_check_v2) but not bearust_balance_select, even
+    // though the manifest declares the balance.select capability.
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 0)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0))"#;
+    assert_eq!(
+        compile_error_v2_with_capabilities(wat, vec!["balance.select".into()]),
+        PluginError::AbiMismatch
+    );
+}
+
+#[test]
+fn v2_out_of_bounds_alloc_pointer_is_trap_on_the_balance_select_input_write() {
+    // Hostile guest: bearust_alloc hands back a pointer far past the end of
+    // the guest's single 65536-byte page. The host must reject it while
+    // bounds-checking the *input* write, before bearust_balance_select is
+    // even called. Mirrors the equivalent transform.response-path test.
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 1000000)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
+        (func (export "bearust_balance_select") (param i32 i32) (result i64)
+            unreachable))"#;
+    let plugin = compile_v2_with_capabilities(wat, vec!["balance.select".into()]).unwrap();
+    let request = bearust_plugin_sdk::LoadBalanceRequest {
+        pool: "api".into(),
+        method: "GET".into(),
+        path: "/".into(),
+        query: String::new(),
+        headers: Vec::new(),
+        backends: Vec::new(),
+        excluded_backend_id: None,
+    };
+    assert_eq!(
+        plugin.balance_select(&request).unwrap_err(),
+        PluginError::Trap
+    );
+}
+
+#[test]
+fn v2_malformed_balance_select_output_is_trap() {
+    // A guest that returns a packed pointer/length pointing at bytes that
+    // are not valid LoadBalanceResult JSON.
+    let wat = r#"(module
+        (memory (export "memory") 1)
+        (data (i32.const 0) "not json")
+        (func (export "bearust_abi_version") (result i32) i32.const 2)
+        (func (export "bearust_alloc") (param i32) (result i32) i32.const 1024)
+        (func (export "bearust_dealloc") (param i32 i32))
+        (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
+        (func (export "bearust_balance_select") (param i32 i32) (result i64)
+            i64.const 8))"#; // pack(0, 8): (0i64 << 32) | 8
+    let plugin = compile_v2_with_capabilities(wat, vec!["balance.select".into()]).unwrap();
+    let request = bearust_plugin_sdk::LoadBalanceRequest {
+        pool: "api".into(),
+        method: "GET".into(),
+        path: "/".into(),
+        query: String::new(),
+        headers: Vec::new(),
+        backends: Vec::new(),
+        excluded_backend_id: None,
+    };
+    assert_eq!(
+        plugin.balance_select(&request).unwrap_err(),
+        PluginError::Trap
+    );
+}
+
+#[test]
 fn path_containment_and_missing_module() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("ok.wasm"), b"x").unwrap();
@@ -1765,4 +1891,95 @@ fn transform_response_plugin_is_none_when_disabled() {
     manager.reload_from_disk().unwrap();
     manager.set_enabled("transform-response-v2", false).unwrap();
     assert!(manager.transform_response_plugin().is_none());
+}
+
+#[test]
+fn balance_select_fixture_round_trips_json_and_returns_backend_id() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("balance-select-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/balance_select_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/balance_select_v2/balance_select_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("balance_select_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 1);
+
+    let selector = manager
+        .balance_select_plugin()
+        .expect("balance-select-v2 declares balance.select and is enabled");
+    let request = bearust_plugin_sdk::LoadBalanceRequest {
+        pool: "api".into(),
+        method: "GET".into(),
+        path: "/".into(),
+        query: String::new(),
+        headers: Vec::new(),
+        backends: Vec::new(),
+        excluded_backend_id: None,
+    };
+    let response = selector.balance_select(&request).unwrap();
+    assert_eq!(response.backend_id, 0);
+}
+
+#[test]
+fn balance_select_plugin_is_none_when_no_plugin_declares_the_capability() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("health-ok-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/health_ok_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/health_ok_v2/health_ok_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("health_ok_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    manager.reload_from_disk().unwrap();
+    assert!(manager.balance_select_plugin().is_none());
+}
+
+#[test]
+fn balance_select_plugin_is_none_when_disabled() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("balance-select-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/balance_select_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/balance_select_v2/balance_select_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("balance_select_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    manager.reload_from_disk().unwrap();
+    manager.set_enabled("balance-select-v2", false).unwrap();
+    assert!(manager.balance_select_plugin().is_none());
 }
