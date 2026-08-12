@@ -25,6 +25,7 @@ pub mod observability;
 pub mod plugin_notify;
 pub mod plugin_runtime;
 pub mod plugin_signing;
+pub mod plugin_trust;
 pub mod proxy;
 pub mod rate_limit;
 pub mod rate_limit_store;
