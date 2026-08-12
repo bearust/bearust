@@ -46,6 +46,19 @@ pub struct BackendLease {
     backend: Arc<BackendState>,
 }
 
+/// A read-only snapshot of one backend's current state, as reported to a
+/// `balance.select` plugin (via `src/proxy.rs`, which converts this into
+/// the plugin SDK's `BackendCandidate` wire type). Deliberately not the
+/// SDK type itself -- `balancer.rs` has no dependency on the plugin
+/// system, matching how it also doesn't know about WAF or transforms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendSnapshot {
+    pub id: BackendId,
+    pub address: SocketAddr,
+    pub healthy: bool,
+    pub inflight: usize,
+}
+
 impl PoolState {
     pub fn new(config: &PoolConfig) -> Self {
         let backends = config
@@ -98,7 +111,12 @@ impl PoolState {
         }
         let start = self.cursor.fetch_add(1, Ordering::Relaxed) % self.backends.len();
         let selected = match self.algorithm {
-            Algorithm::RoundRobin => (0..self.backends.len())
+            // A `Plugin`-configured pool's primary selection happens in
+            // `src/proxy.rs::apply_load_balancer_plugin`, called before
+            // `select()`. This arm is `select()`'s role as that path's
+            // deterministic fallback -- identical to `RoundRobin` so a
+            // `Plugin` pool never has "no algorithm" to fall back to.
+            Algorithm::RoundRobin | Algorithm::Plugin => (0..self.backends.len())
                 .map(|offset| (start + offset) % self.backends.len())
                 .map(|index| &self.backends[index])
                 .find(|backend| {
@@ -165,6 +183,47 @@ impl PoolState {
     }
     pub fn request_timeout(&self) -> Duration {
         self.request_timeout
+    }
+
+    pub fn algorithm(&self) -> Algorithm {
+        self.algorithm
+    }
+
+    /// A read-only snapshot of every backend in this pool, for a
+    /// `balance.select` plugin to choose among. Pure; does not affect
+    /// selection state.
+    pub fn candidates(&self) -> Vec<BackendSnapshot> {
+        self.backends
+            .iter()
+            .map(|backend| BackendSnapshot {
+                id: backend.id,
+                address: backend.address,
+                healthy: backend.healthy.load(Ordering::Acquire),
+                inflight: backend.inflight.load(Ordering::Acquire),
+            })
+            .collect()
+    }
+
+    /// Leases `id` directly if it names a backend in this pool that is
+    /// currently healthy and isn't `excluded` -- `None` on any of those
+    /// three failures. Used to apply a `balance.select` plugin's pick;
+    /// the caller falls back to `select()` when this returns `None`.
+    pub fn select_specific(
+        self: &Arc<Self>,
+        id: BackendId,
+        excluded: Option<BackendId>,
+    ) -> Option<BackendLease> {
+        if Some(id) == excluded {
+            return None;
+        }
+        let backend = self.backends.get(id.0)?;
+        if !backend.healthy.load(Ordering::Acquire) {
+            return None;
+        }
+        backend.inflight.fetch_add(1, Ordering::AcqRel);
+        Some(BackendLease {
+            backend: Arc::clone(backend),
+        })
     }
 }
 
