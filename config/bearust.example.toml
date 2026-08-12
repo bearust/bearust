@@ -20,7 +20,7 @@ certificate_store = "/data/certificates"
 
 [[upstream_pools]]
 name = "api"
-# Supported algorithms: round_robin or least_connections.
+# Supported algorithms: round_robin, least_connections, or plugin.
 algorithm = "round_robin"
 
 [[upstream_pools.backends]]
