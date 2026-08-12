@@ -1,0 +1,11 @@
+id = "signed-health-v2"
+display_name = "Signed Health v2"
+abi_version = 2
+module = "signed_health_v2.wasm"
+capabilities = ["health_check"]
+
+[limits]
+memory_pages = 4
+fuel = 1000000
+invocation_timeout_ms = 100
+max_output_bytes = 64

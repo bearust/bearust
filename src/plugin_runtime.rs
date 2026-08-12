@@ -2,6 +2,8 @@
 use crate::config::PluginConfig;
 use crate::control_plane::realtime::RealtimeHub;
 use crate::observability::PluginMetrics;
+use crate::plugin_signing::{self, PluginSignature, SignatureError};
+use crate::plugin_trust::{TrustDecision, TrustStore, TrustStoreError};
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -194,6 +196,10 @@ pub enum PluginError {
     DuplicateId,
     MaxPlugins,
     Io,
+    SignatureRequired,
+    MalformedSignature,
+    InvalidSignature,
+    KeyMismatch,
 }
 impl PluginError {
     pub fn code(&self) -> &'static str {
@@ -210,6 +216,10 @@ impl PluginError {
             Self::DuplicateId => "duplicate_id",
             Self::MaxPlugins => "max_plugins",
             Self::Io => "io_error",
+            Self::SignatureRequired => "signature_required",
+            Self::MalformedSignature => "malformed_signature",
+            Self::InvalidSignature => "invalid_signature",
+            Self::KeyMismatch => "key_mismatch",
         }
     }
 }
@@ -1175,6 +1185,47 @@ pub fn module_digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Resolves a plugin's trust status for this load. Returns `"trusted"` or
+/// `"unsigned"` on success, or the appropriate `PluginError` (always a
+/// rejection -- see the design spec's Error Handling table) on any
+/// signature problem.
+fn resolve_trust(
+    manifest: &PluginManifest,
+    wasm_bytes: &[u8],
+    plugin_dir: &Path,
+    require_signature: bool,
+    trust_store: &TrustStore,
+) -> Result<String, PluginError> {
+    let sig_path = plugin_dir.join("plugin.sig");
+    let sig_bytes = match fs::read(&sig_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return if require_signature {
+                Err(PluginError::SignatureRequired)
+            } else {
+                Ok("unsigned".to_string())
+            };
+        }
+        Err(_) => return Err(PluginError::Io),
+    };
+    let signature: PluginSignature = toml::from_str(
+        std::str::from_utf8(&sig_bytes).map_err(|_| PluginError::MalformedSignature)?,
+    )
+    .map_err(|_| PluginError::MalformedSignature)?;
+    let key =
+        plugin_signing::verify(manifest, wasm_bytes, &signature).map_err(|error| match error {
+            SignatureError::MalformedSignature => PluginError::MalformedSignature,
+            SignatureError::InvalidSignature => PluginError::InvalidSignature,
+        })?;
+    match trust_store
+        .check_or_pin(&manifest.id, &key)
+        .map_err(|_: TrustStoreError| PluginError::Io)?
+    {
+        TrustDecision::Trusted => Ok("trusted".to_string()),
+        TrustDecision::Mismatch => Err(PluginError::KeyMismatch),
+    }
+}
+
 /// Redacted, stable lifecycle information exposed to the control plane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginStatus {
@@ -1187,6 +1238,7 @@ pub struct PluginStatus {
     pub last_error_code: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub trust_status: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1283,6 +1335,10 @@ fn sanitize_error_code(value: &str) -> Option<String> {
             | "max_plugins"
             | "io_error"
             | "partial_failure"
+            | "signature_required"
+            | "malformed_signature"
+            | "invalid_signature"
+            | "key_mismatch"
     );
     safe.then(|| value.to_owned())
 }
@@ -1494,6 +1550,9 @@ impl PluginManager {
         let mut summary = ReloadSummary::default();
         let mut fatal_existing_failure = false;
 
+        let trust_store =
+            TrustStore::load(directory.join("trusted-keys.json")).map_err(|_| PluginError::Io)?;
+
         for child in children {
             let manifest_path = child.path().join("plugin.toml");
             let manifest = match fs::metadata(&manifest_path)
@@ -1554,6 +1613,7 @@ impl PluginManager {
                                         last_error_code: Some("invalid_manifest".to_owned()),
                                         created_at: chrono::Utc::now(),
                                         updated_at: chrono::Utc::now(),
+                                        trust_status: String::new(),
                                     },
                                     compiled: None,
                                     source_dir: child.path(),
@@ -1580,12 +1640,19 @@ impl PluginManager {
                 }
                 let bytes =
                     fs::read(&validated.module).map_err(|_| PluginError::InvalidManifest)?;
+                let trust_status = resolve_trust(
+                    &manifest,
+                    &bytes,
+                    &child.path(),
+                    self.config.require_signature,
+                    &trust_store,
+                )?;
                 let digest = module_digest(&bytes);
                 let compiled = engine.compile(validated.clone(), &bytes)?;
-                Ok::<_, PluginError>((validated, digest, Arc::new(compiled)))
+                Ok::<_, PluginError>((validated, digest, Arc::new(compiled), trust_status))
             })();
             match build {
-                Ok((validated, digest, compiled)) => {
+                Ok((validated, digest, compiled, trust_status)) => {
                     if candidate.contains_key(&validated.id) {
                         return Err(PluginError::DuplicateId);
                     }
@@ -1616,6 +1683,7 @@ impl PluginManager {
                                 last_error_code: None,
                                 created_at,
                                 updated_at: now,
+                                trust_status,
                             },
                             compiled: Some(compiled),
                             source_dir: child.path(),
@@ -1625,7 +1693,21 @@ impl PluginManager {
                 }
                 Err(error) => {
                     summary.failed += 1;
-                    if let Some(old) = old {
+                    // A trust/signature rejection is a definitive security
+                    // verdict on the on-disk plugin.sig as it stands right
+                    // now, not a possibly-transient build failure -- unlike
+                    // other build errors, it must never fall back to
+                    // silently keeping a previously-trusted compiled
+                    // instance in service, so it skips the
+                    // retain-old/fatal-existing-failure path below.
+                    let is_trust_rejection = matches!(
+                        error,
+                        PluginError::SignatureRequired
+                            | PluginError::MalformedSignature
+                            | PluginError::InvalidSignature
+                            | PluginError::KeyMismatch
+                    );
+                    if let Some(old) = old.filter(|_| !is_trust_rejection) {
                         // A failed replacement must not take a healthy
                         // previously published instance out of service.
                         candidate.insert(id, Arc::clone(old));
@@ -1650,6 +1732,7 @@ impl PluginManager {
                                     last_error_code: Some(error.code().to_string()),
                                     created_at: chrono::Utc::now(),
                                     updated_at: chrono::Utc::now(),
+                                    trust_status: String::new(),
                                 },
                                 compiled: None,
                                 source_dir: child.path(),

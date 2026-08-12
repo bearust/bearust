@@ -67,6 +67,7 @@ fn plugin_status(status: PluginStatus) -> PluginStatusResponse {
         last_error_code: status.last_error_code,
         created_at: status.created_at,
         updated_at: status.updated_at,
+        trust_status: status.trust_status,
     }
 }
 
@@ -77,7 +78,11 @@ fn plugin_error(error: PluginError) -> Response {
         PluginError::InvalidManifest
         | PluginError::AbiMismatch
         | PluginError::DuplicateId
-        | PluginError::MaxPlugins => (StatusCode::BAD_REQUEST, "Invalid plugin"),
+        | PluginError::MaxPlugins
+        | PluginError::SignatureRequired
+        | PluginError::MalformedSignature
+        | PluginError::InvalidSignature
+        | PluginError::KeyMismatch => (StatusCode::BAD_REQUEST, "Invalid plugin"),
         PluginError::Timeout
         | PluginError::FuelExhausted
         | PluginError::MemoryLimit

@@ -135,6 +135,7 @@ pub struct PluginStatusResponse {
     pub last_error_code: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub trust_status: String,
 }
 
 /// Safe response for a plugin health invocation. Runtime details and module

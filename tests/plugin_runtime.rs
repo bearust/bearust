@@ -3,6 +3,9 @@ use bearust::plugin_runtime::{
     module_digest, resolve_module_path, CompiledPlugin, HealthResult, PluginEngine, PluginError,
     PluginLimits, PluginManager, PluginManifest, PluginPolicy, ValidatedManifest,
 };
+use bearust::plugin_signing::sign;
+use ed25519_dalek::SigningKey;
+use rand::rngs::OsRng;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -1982,4 +1985,167 @@ fn balance_select_plugin_is_none_when_disabled() {
     manager.reload_from_disk().unwrap();
     manager.set_enabled("balance-select-v2", false).unwrap();
     assert!(manager.balance_select_plugin().is_none());
+}
+
+fn signed_fixture_manager(
+    root: &std::path::Path,
+    require_signature: bool,
+) -> (std::sync::Arc<PluginManager>, SigningKey) {
+    let plugin = root.join("signed-health-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    let manifest_toml = include_str!("fixtures/plugins/signed_health_v2/plugin.toml");
+    fs::write(plugin.join("plugin.toml"), manifest_toml).unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/signed_health_v2/signed_health_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("signed_health_v2.wasm"), &module).unwrap();
+
+    let manifest = PluginManifest::from_toml(manifest_toml.as_bytes()).unwrap();
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let signature = sign(&manifest, &module, &signing_key);
+    fs::write(
+        plugin.join("plugin.sig"),
+        toml::to_string(&signature).unwrap(),
+    )
+    .unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.to_path_buf(),
+        require_signature,
+        ..PluginConfig::default()
+    });
+    (manager, signing_key)
+}
+
+#[test]
+fn a_validly_signed_plugin_loads_as_trusted() {
+    let root = tempdir().unwrap();
+    let (manager, _key) = signed_fixture_manager(root.path(), false);
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 1);
+    assert_eq!(manager.list()[0].trust_status, "trusted");
+}
+
+#[test]
+fn an_unsigned_plugin_loads_when_signature_is_not_required() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("health-ok-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/health_ok_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/health_ok_v2/health_ok_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("health_ok_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        require_signature: false,
+        ..PluginConfig::default()
+    });
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 1);
+    assert_eq!(manager.list()[0].trust_status, "unsigned");
+}
+
+#[test]
+fn an_unsigned_plugin_is_rejected_when_signature_is_required() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("health-ok-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/health_ok_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/health_ok_v2/health_ok_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("health_ok_v2.wasm"), &module).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        require_signature: true,
+        ..PluginConfig::default()
+    });
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 0);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(
+        manager.list()[0].last_error_code.as_deref(),
+        Some("signature_required")
+    );
+}
+
+#[test]
+fn a_key_that_differs_from_the_pinned_key_is_rejected_even_when_signature_is_not_required() {
+    let root = tempdir().unwrap();
+    let (manager, _first_key) = signed_fixture_manager(root.path(), false);
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 1);
+    assert_eq!(manager.list()[0].trust_status, "trusted");
+
+    // Re-sign the same plugin directory with a *different* key, simulating
+    // either a key rotation or a spoofing attempt.
+    let manifest_toml = include_str!("fixtures/plugins/signed_health_v2/plugin.toml");
+    let manifest = PluginManifest::from_toml(manifest_toml.as_bytes()).unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/signed_health_v2/signed_health_v2.wat"
+    ))
+    .unwrap();
+    let other_key = SigningKey::generate(&mut OsRng);
+    let other_signature = sign(&manifest, &module, &other_key);
+    fs::write(
+        root.path().join("signed-health-v2").join("plugin.sig"),
+        toml::to_string(&other_signature).unwrap(),
+    )
+    .unwrap();
+
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 0);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(
+        manager.list()[0].last_error_code.as_deref(),
+        Some("key_mismatch")
+    );
+}
+
+#[test]
+fn a_malformed_signature_file_is_rejected() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("signed-health-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/signed_health_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/signed_health_v2/signed_health_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("signed_health_v2.wasm"), &module).unwrap();
+    fs::write(plugin.join("plugin.sig"), "not valid toml {{{").unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 0);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(
+        manager.list()[0].last_error_code.as_deref(),
+        Some("malformed_signature")
+    );
 }
