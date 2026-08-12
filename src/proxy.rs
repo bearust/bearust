@@ -740,6 +740,123 @@ fn apply_transform_response_plugin(
     }
 }
 
+/// Backend candidates sent to a `balance.select` plugin are capped at this
+/// many entries -- an operator-scale bound (pool size), not an
+/// attacker-controlled one, but bounded defensively all the same, the same
+/// way `MAX_NORMALIZED_HEADERS` bounds header count.
+const MAX_BALANCE_CANDIDATES: usize = 128;
+
+/// Converts a pool's current candidate snapshot and the downstream
+/// request's bounded metadata into the wire shape a `balance.select`
+/// plugin receives. `method`/`path`/`query`/`headers` share the same
+/// `MAX_NORMALIZED_METADATA_BYTES`/`MAX_NORMALIZED_HEADERS` budget
+/// `waf_detect_request`/`transform_request` already use (this function's
+/// shape mirrors `transform_request(header: &RequestHeader)` exactly,
+/// with the pool name and candidate list added); `backends` is capped at
+/// `MAX_BALANCE_CANDIDATES`. Pure and side-effect free.
+fn load_balance_request(
+    pool: &Arc<crate::balancer::PoolState>,
+    header: &RequestHeader,
+    excluded: Option<BackendId>,
+) -> bearust_plugin_sdk::LoadBalanceRequest {
+    let mut remaining = crate::waf::MAX_NORMALIZED_METADATA_BYTES;
+    let method = bounded_metadata(header.method.as_str(), &mut remaining);
+    let path = bounded_metadata(header.uri.path(), &mut remaining);
+    let query = bounded_metadata(header.uri.query().unwrap_or(""), &mut remaining);
+    let headers = header
+        .headers
+        .iter()
+        .take(crate::waf::MAX_NORMALIZED_HEADERS)
+        .map(|(name, value)| {
+            (
+                bounded_metadata(name.as_str(), &mut remaining),
+                bounded_metadata(&String::from_utf8_lossy(value.as_bytes()), &mut remaining),
+            )
+        })
+        .collect();
+    let backends = pool
+        .candidates()
+        .into_iter()
+        .take(MAX_BALANCE_CANDIDATES)
+        .map(|snapshot| bearust_plugin_sdk::BackendCandidate {
+            id: snapshot.id.index() as u64,
+            address: snapshot.address.to_string(),
+            healthy: snapshot.healthy,
+            inflight: snapshot.inflight as u32,
+        })
+        .collect();
+    bearust_plugin_sdk::LoadBalanceRequest {
+        pool: pool.name().to_string(),
+        method,
+        path,
+        query,
+        headers,
+        backends,
+        excluded_backend_id: excluded.map(|id| id.index() as u64),
+    }
+}
+
+/// Runs the registered `balance.select` plugin (if any) against `pool`'s
+/// current candidates and `header`'s bounded metadata, returning a lease
+/// on its chosen backend if the pick is valid, or `None` on any failure --
+/// the caller falls back to `pool.select(excluded)`. Synchronous from the
+/// caller's point of view but offloads the blocking wasmtime call via
+/// `spawn_blocking` so it never blocks the shared async runtime. Fails
+/// open (`None`) on every error class: no balancer configured, no plugin
+/// currently declaring the capability, a disabled plugin, a
+/// trap/timeout/fuel exhaustion, malformed output, a `spawn_blocking` join
+/// failure, or a returned `backend_id` that names an unhealthy, excluded,
+/// or nonexistent backend.
+async fn apply_load_balancer_plugin(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    pool: &Arc<crate::balancer::PoolState>,
+    header: &RequestHeader,
+    excluded: Option<BackendId>,
+) -> Option<crate::balancer::BackendLease> {
+    let manager = plugin_manager?;
+    let selector = manager.balance_select_plugin()?;
+    let metrics = manager.metrics();
+    metrics.record_balance_invocation();
+    let request = load_balance_request(pool, header, excluded);
+    let outcome = tokio::task::spawn_blocking(move || selector.balance_select(&request)).await;
+    match outcome {
+        Ok(Ok(result)) => {
+            let Ok(index) = usize::try_from(result.backend_id) else {
+                tracing::warn!(
+                    event = "balance_select_failed",
+                    reason = "backend_id_out_of_range"
+                );
+                metrics.record_balance_failure();
+                return None;
+            };
+            match pool.select_specific(index.into(), excluded) {
+                Some(lease) => {
+                    metrics.record_balance_applied();
+                    Some(lease)
+                }
+                None => {
+                    tracing::warn!(
+                        event = "balance_select_failed",
+                        reason = "invalid_backend_id"
+                    );
+                    metrics.record_balance_failure();
+                    None
+                }
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(event = "balance_select_failed", reason = error.code());
+            metrics.record_balance_failure();
+            None
+        }
+        Err(_join_error) => {
+            tracing::warn!(event = "balance_select_failed", reason = "join_error");
+            metrics.record_balance_failure();
+            None
+        }
+    }
+}
+
 /// Reasserts the three headers `upstream_request_filter` guarantees a
 /// `transform.request` plugin can never drop, blank, or spoof: `Host`
 /// (the downstream's own value, or removed entirely if the downstream sent
@@ -1109,7 +1226,7 @@ impl ProxyHttp for BeaRustProxy {
 
     async fn upstream_peer(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         let snapshot = ctx.snapshot.as_ref().expect("request_filter must run");
@@ -1120,7 +1237,18 @@ impl ProxyHttp for BeaRustProxy {
                 "upstream pool unavailable",
             ));
         };
-        let Some(lease) = pool.select(ctx.excluded_backend) else {
+        let plugin_lease = if pool.algorithm() == crate::config::Algorithm::Plugin {
+            apply_load_balancer_plugin(
+                self.plugin_manager.as_ref(),
+                &pool,
+                session.req_header(),
+                ctx.excluded_backend,
+            )
+            .await
+        } else {
+            None
+        };
+        let Some(lease) = plugin_lease.or_else(|| pool.select(ctx.excluded_backend)) else {
             return Err(pingora_core::Error::explain(
                 ErrorType::HTTPStatus(503),
                 "no healthy upstream",
@@ -1481,8 +1609,9 @@ fn error_status(error: &pingora_core::Error) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        accumulate_response_chunk, apply_transform_plugin, apply_transform_response_plugin,
-        apply_waf_detector, error_status, invoke_analytics_changed, is_valid_transform_headers,
+        accumulate_response_chunk, apply_load_balancer_plugin, apply_transform_plugin,
+        apply_transform_response_plugin, apply_waf_detector, error_status,
+        invoke_analytics_changed, is_valid_transform_headers, load_balance_request,
         reassert_protected_request_headers, should_buffer_response_for_transform, waf_block_event,
         RequestContext, RESPONSE_BODY_TRANSFORM_CAP_BYTES,
     };
@@ -2374,5 +2503,181 @@ mod tests {
         let output = manager.metrics().render_prometheus();
         assert!(output.contains("bearust_plugins_transform_response_failures_total 1"));
         assert!(output.contains("bearust_plugins_transform_response_applied_total 0"));
+    }
+
+    fn balance_manager(enabled: bool) -> Arc<PluginManager> {
+        let root = tempdir().unwrap();
+        let plugin = root.path().join("balance-select-v2");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("plugin.toml"),
+            include_str!("../tests/fixtures/plugins/balance_select_v2/plugin.toml"),
+        )
+        .unwrap();
+        let module = wat::parse_str(include_str!(
+            "../tests/fixtures/plugins/balance_select_v2/balance_select_v2.wat"
+        ))
+        .unwrap();
+        fs::write(plugin.join("balance_select_v2.wasm"), &module).unwrap();
+
+        let manager = PluginManager::new(PluginConfig {
+            enabled: true,
+            directory: root.path().to_path_buf(),
+            ..PluginConfig::default()
+        });
+        manager.reload_from_disk().unwrap();
+        if !enabled {
+            manager.set_enabled("balance-select-v2", false).unwrap();
+        }
+        manager
+    }
+
+    fn sample_pool() -> Arc<crate::balancer::PoolState> {
+        use crate::config::{Algorithm, BackendConfig, HealthCheckKind, PoolConfig};
+        let config = PoolConfig {
+            name: "api".into(),
+            algorithm: Algorithm::Plugin,
+            connect_timeout_seconds: 3,
+            request_timeout_seconds: 30,
+            backends: vec![
+                BackendConfig {
+                    address: "127.0.0.1:19001".parse().unwrap(),
+                    health_check: HealthCheckKind::Tcp,
+                    health_path: None,
+                },
+                BackendConfig {
+                    address: "127.0.0.1:19002".parse().unwrap(),
+                    health_check: HealthCheckKind::Tcp,
+                    health_path: None,
+                },
+            ],
+        };
+        let pool = Arc::new(crate::balancer::PoolState::new(&config));
+        pool.set_healthy(0.into(), true);
+        pool.set_healthy(1.into(), true);
+        pool
+    }
+
+    #[test]
+    fn load_balance_request_reports_pool_name_and_bounded_candidates() {
+        let pool = sample_pool();
+        let header = sample_request_header();
+        let request = load_balance_request(&pool, &header, None);
+        assert_eq!(request.pool, "api");
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.backends.len(), 2);
+        assert!(request.backends.iter().all(|b| b.healthy));
+        assert_eq!(request.excluded_backend_id, None);
+    }
+
+    #[test]
+    fn load_balance_request_reports_the_excluded_backend() {
+        let pool = sample_pool();
+        let header = sample_request_header();
+        let request = load_balance_request(&pool, &header, Some(1.into()));
+        assert_eq!(request.excluded_backend_id, Some(1));
+    }
+
+    #[tokio::test]
+    async fn a_successful_balance_selection_leases_the_chosen_backend() {
+        let manager = balance_manager(true);
+        let pool = sample_pool();
+        let header = sample_request_header();
+        let lease = apply_load_balancer_plugin(Some(&manager), &pool, &header, None)
+            .await
+            .expect("fixture always returns backend_id 0");
+        assert_eq!(lease.id(), 0.into());
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_balance_invocations_total 1"));
+        assert!(output.contains("bearust_plugins_balance_applied_total 1"));
+    }
+
+    #[tokio::test]
+    async fn no_balancer_configured_returns_none() {
+        let manager = PluginManager::new(PluginConfig::default());
+        let pool = sample_pool();
+        let header = sample_request_header();
+        let lease = apply_load_balancer_plugin(Some(&manager), &pool, &header, None).await;
+        assert!(lease.is_none());
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_balance_invocations_total 0"));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_balancer_returns_none() {
+        let manager = balance_manager(false);
+        let pool = sample_pool();
+        let header = sample_request_header();
+        let lease = apply_load_balancer_plugin(Some(&manager), &pool, &header, None).await;
+        assert!(lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn no_plugin_manager_returns_none() {
+        let pool = sample_pool();
+        let header = sample_request_header();
+        let lease = apply_load_balancer_plugin(None, &pool, &header, None).await;
+        assert!(lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pick_naming_an_unhealthy_backend_fails_open_and_counts_a_failure() {
+        let manager = balance_manager(true);
+        let pool = sample_pool();
+        let header = sample_request_header();
+        // The fixture always picks backend 0; marking it unhealthy makes
+        // select_specific reject the pick.
+        pool.set_healthy(0.into(), false);
+        let lease = apply_load_balancer_plugin(Some(&manager), &pool, &header, None).await;
+        assert!(lease.is_none());
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_balance_failures_total 1"));
+        assert!(output.contains("bearust_plugins_balance_applied_total 0"));
+    }
+
+    #[tokio::test]
+    async fn a_trapping_balancer_fails_open_and_counts_a_failure() {
+        let root = tempdir().unwrap();
+        let plugin = root.path().join("balance-select-v2");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("plugin.toml"),
+            include_str!("../tests/fixtures/plugins/balance_select_v2/plugin.toml"),
+        )
+        .unwrap();
+        // Same shape as the checked-in fixture, but traps on every call.
+        let wat = r#"(module
+            (memory (export "memory") 1)
+            (global $heap_ptr (mut i32) (i32.const 1024))
+            (func (export "bearust_abi_version") (result i32) i32.const 2)
+            (func (export "bearust_alloc") (param $len i32) (result i32)
+                (local $ptr i32)
+                global.get $heap_ptr
+                local.set $ptr
+                global.get $heap_ptr
+                local.get $len
+                i32.add
+                global.set $heap_ptr
+                local.get $ptr)
+            (func (export "bearust_dealloc") (param i32 i32) nop)
+            (func (export "bearust_health_check_v2") (param i32 i32) (result i64) i64.const 0)
+            (func (export "bearust_balance_select") (param i32 i32) (result i64) unreachable))"#;
+        let module = wat::parse_str(wat).unwrap();
+        fs::write(plugin.join("balance_select_v2.wasm"), &module).unwrap();
+
+        let manager = PluginManager::new(PluginConfig {
+            enabled: true,
+            directory: root.path().to_path_buf(),
+            ..PluginConfig::default()
+        });
+        manager.reload_from_disk().unwrap();
+
+        let pool = sample_pool();
+        let header = sample_request_header();
+        let lease = apply_load_balancer_plugin(Some(&manager), &pool, &header, None).await;
+        assert!(lease.is_none());
+        let output = manager.metrics().render_prometheus();
+        assert!(output.contains("bearust_plugins_balance_failures_total 1"));
+        assert!(output.contains("bearust_plugins_balance_applied_total 0"));
     }
 }
