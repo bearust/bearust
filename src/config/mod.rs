@@ -45,6 +45,8 @@ pub struct PluginConfig {
     pub invocation_timeout_ms: u64,
     #[serde(default = "default_plugin_max_output_bytes")]
     pub max_output_bytes: usize,
+    #[serde(default)]
+    pub require_signature: bool,
 }
 
 impl Default for PluginConfig {
@@ -58,6 +60,7 @@ impl Default for PluginConfig {
             max_fuel: default_plugin_max_fuel(),
             invocation_timeout_ms: default_plugin_invocation_timeout_ms(),
             max_output_bytes: default_plugin_max_output_bytes(),
+            require_signature: false,
         }
     }
 }
@@ -707,4 +710,28 @@ pub fn normalize_config_host(host: &str) -> String {
         }
     }
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_config_require_signature_defaults_to_false() {
+        let config = PluginConfig::default();
+        assert!(!config.require_signature);
+    }
+
+    #[test]
+    fn plugin_config_require_signature_round_trips_through_toml() {
+        let parsed: PluginConfig = toml::from_str(
+            r#"
+            enabled = true
+            directory = "plugins"
+            require_signature = true
+            "#,
+        )
+        .unwrap();
+        assert!(parsed.require_signature);
+    }
 }

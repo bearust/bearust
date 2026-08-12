@@ -3,7 +3,7 @@ use crate::config::PluginConfig;
 use crate::control_plane::realtime::RealtimeHub;
 use crate::observability::PluginMetrics;
 use arc_swap::ArcSwap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -122,7 +122,7 @@ pub struct PluginManifest {
     pub limits: PluginLimits,
 }
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginLimits {
     #[serde(default = "default_memory_pages")]
