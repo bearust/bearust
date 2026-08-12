@@ -31,6 +31,7 @@ pub struct TrustStore {
     pins: Mutex<BTreeMap<String, String>>,
 }
 
+#[cfg(test)]
 impl std::fmt::Debug for TrustStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TrustStore")
@@ -39,6 +40,7 @@ impl std::fmt::Debug for TrustStore {
     }
 }
 
+#[cfg(test)]
 impl PartialEq for TrustStore {
     fn eq(&self, other: &Self) -> bool {
         self.path == other.path
@@ -78,8 +80,15 @@ impl TrustStore {
             Some(existing) if existing == &encoded => Ok(TrustDecision::Trusted),
             Some(_) => Ok(TrustDecision::Mismatch),
             None => {
-                pins.insert(plugin_id.to_string(), encoded);
-                self.persist(&pins)?;
+                // Build a candidate map and persist it *before* mutating the
+                // shared in-memory state. If `persist` fails, `pins` must be
+                // left completely unchanged so a later retry actually
+                // retries the write instead of finding a stale in-memory
+                // pin and returning `Trusted` without ever writing to disk.
+                let mut candidate = pins.clone();
+                candidate.insert(plugin_id.to_string(), encoded);
+                self.persist(&candidate)?;
+                *pins = candidate;
                 Ok(TrustDecision::Trusted)
             }
         }
@@ -178,6 +187,34 @@ mod tests {
         assert_eq!(
             store.check_or_pin("demo", &key()).unwrap(),
             TrustDecision::Trusted
+        );
+    }
+
+    #[test]
+    fn a_failed_persist_does_not_pin_in_memory_and_a_retry_tries_again() {
+        let dir = tempdir().unwrap();
+        // The parent directory of this path doesn't exist, so `persist`'s
+        // temp-file write will fail with `NotFound` every time, while
+        // `load` still treats the missing file as an empty store.
+        let path = dir
+            .path()
+            .join("does-not-exist-subdir")
+            .join("trusted-keys.json");
+        let store = TrustStore::load(path).unwrap();
+        let k = key();
+
+        assert_eq!(
+            store.check_or_pin("demo", &k),
+            Err(TrustStoreError::WriteFailed)
+        );
+        // If the failed persist had already mutated the in-memory map, this
+        // retry would hit the `Some(existing) if existing == &encoded`
+        // fast path and return `Ok(Trusted)` without attempting to write
+        // again. It must instead fail the same way, proving the write is
+        // actually retried.
+        assert_eq!(
+            store.check_or_pin("demo", &k),
+            Err(TrustStoreError::WriteFailed)
         );
     }
 
