@@ -43,6 +43,9 @@ pub struct PluginMetrics {
     transform_response_invocations: AtomicU64,
     transform_response_applied: AtomicU64,
     transform_response_failures: AtomicU64,
+    balance_invocations: AtomicU64,
+    balance_applied: AtomicU64,
+    balance_failures: AtomicU64,
 }
 
 impl PluginMetrics {
@@ -145,6 +148,26 @@ impl PluginMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A `balance.select` plugin call was attempted (regardless of
+    /// outcome).
+    pub fn record_balance_invocation(&self) {
+        self.balance_invocations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A `balance.select` plugin call succeeded and its returned
+    /// `backend_id` was valid (healthy, not excluded) and leased.
+    pub fn record_balance_applied(&self) {
+        self.balance_applied.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A `balance.select` plugin call failed: trap, timeout, fuel
+    /// exhaustion, malformed output, a `spawn_blocking` join failure, or a
+    /// `backend_id` that named an unhealthy, excluded, or nonexistent
+    /// backend.
+    pub fn record_balance_failure(&self) {
+        self.balance_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn render_prometheus(&self) -> String {
         let samples = [
             ("reload", "success", &self.reload_success),
@@ -229,6 +252,21 @@ impl PluginMetrics {
         output.push_str(&format!(
             "bearust_plugins_transform_response_failures_total {}\n",
             self.transform_response_failures.load(Ordering::Relaxed)
+        ));
+        output.push_str("# TYPE bearust_plugins_balance_invocations_total counter\n");
+        output.push_str(&format!(
+            "bearust_plugins_balance_invocations_total {}\n",
+            self.balance_invocations.load(Ordering::Relaxed)
+        ));
+        output.push_str("# TYPE bearust_plugins_balance_applied_total counter\n");
+        output.push_str(&format!(
+            "bearust_plugins_balance_applied_total {}\n",
+            self.balance_applied.load(Ordering::Relaxed)
+        ));
+        output.push_str("# TYPE bearust_plugins_balance_failures_total counter\n");
+        output.push_str(&format!(
+            "bearust_plugins_balance_failures_total {}\n",
+            self.balance_failures.load(Ordering::Relaxed)
         ));
         output
     }
@@ -477,5 +515,18 @@ mod tests {
         assert!(output.contains("bearust_plugins_transform_response_invocations_total 2"));
         assert!(output.contains("bearust_plugins_transform_response_applied_total 1"));
         assert!(output.contains("bearust_plugins_transform_response_failures_total 1"));
+    }
+
+    #[test]
+    fn balance_metrics_render_as_counters() {
+        let metrics = PluginMetrics::default();
+        metrics.record_balance_invocation();
+        metrics.record_balance_invocation();
+        metrics.record_balance_applied();
+        metrics.record_balance_failure();
+        let output = metrics.render_prometheus();
+        assert!(output.contains("bearust_plugins_balance_invocations_total 2"));
+        assert!(output.contains("bearust_plugins_balance_applied_total 1"));
+        assert!(output.contains("bearust_plugins_balance_failures_total 1"));
     }
 }
