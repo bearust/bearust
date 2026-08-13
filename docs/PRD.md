@@ -1164,3 +1164,48 @@ Three new Prometheus counters (`bearust_plugins_balance_invocations_total`,
 existing plugin metrics endpoint. No new host import, capability, or
 resource-limit bypass was added; every guest-controlled pointer/length is
 bounds-checked identically to the Phase 13B health-check path.
+
+### Phase 14 status: plugin manifest signing and trust-on-first-use (increment 1)
+
+This increment adds the trust foundation the eventual community plugin
+registry will build on -- entirely filesystem-based, with no registry
+service, fetch/install tooling, or GUI surface yet.
+
+A plugin author runs `bearust plugin keygen --out <dir>` once to generate
+an Ed25519 keypair, then `bearust plugin sign <plugin-dir> --key
+<dir>/signing.key` to write a `plugin.sig` file alongside the plugin's
+existing `plugin.toml` and wasm module. The signature covers a 64-byte
+message: the SHA-256 digest of the manifest's security-relevant fields
+(`id`, `abi_version`, sorted `capabilities`, `limits`) concatenated with
+the SHA-256 digest of the compiled wasm bytes -- tampering with either
+invalidates the signature.
+
+On `PluginManager::reload_from_disk`, a plugin with a `plugin.sig` present
+has its signature verified and its public key checked against a local,
+filesystem-backed trust-on-first-use store (`trusted-keys.json`, one file
+per plugins directory). The first time a plugin ID is seen with a validly
+signed key, that key is pinned; the same ID showing up later with a
+*different* key is always rejected (`key_mismatch`), until an operator
+manually edits or removes that entry -- there is no automatic rotation or
+central revocation list in this increment. A malformed or cryptographically
+invalid signature is likewise always rejected, regardless of any config
+flag.
+
+The new `plugins.require_signature` config flag (default `false`) governs
+only *unsigned* plugins -- when `false`, a plugin with no `plugin.sig` at
+all still loads exactly as it does today, keeping every existing local/dev
+plugin working unchanged. When `true`, an unsigned plugin fails to load
+with `signature_required`.
+
+Each plugin's resulting trust state (`"trusted"` or `"unsigned"`) is
+exposed as a new `trust_status` field on the existing `PluginStatus` /
+`PluginStatusResponse` types -- informational only in this increment, not
+yet wired into any capability-selection rule (an unsigned plugin can still
+be the active `waf.detect`/`transform.request`/etc. plugin when
+`require_signature` is `false`).
+
+A registry service, remote fetch/install tooling, a GUI surface for trust
+state, automatic key rotation, and a centralized revocation list all
+remain deliberately out of scope; see
+`docs/superpowers/specs/2026-08-12-phase-14-plugin-signing-trust-design.md`
+for the full rationale and follow-up increments.
