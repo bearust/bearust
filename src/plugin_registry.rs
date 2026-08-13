@@ -471,6 +471,24 @@ max_output_bytes = 1024
     }
 
     #[test]
+    fn extract_tarball_rejects_missing_manifest() {
+        let tarball = build_tarball(&[("demo.wasm", b"pretend-wasm-bytes")]);
+        let result = extract_tarball(&tarball, "demo-plugin");
+        assert!(matches!(result, Err(RegistryError::MalformedArchive(_))));
+    }
+
+    #[test]
+    fn extract_tarball_rejects_duplicate_entry_names() {
+        let tarball = build_tarball(&[
+            ("plugin.toml", VALID_MANIFEST),
+            ("demo.wasm", b"pretend-wasm-bytes"),
+            ("demo.wasm", b"a-second-entry-with-the-same-name"),
+        ]);
+        let result = extract_tarball(&tarball, "demo-plugin");
+        assert!(matches!(result, Err(RegistryError::MalformedArchive(_))));
+    }
+
+    #[test]
     fn parses_a_well_formed_index() {
         let json = r#"{
             "entries": [
