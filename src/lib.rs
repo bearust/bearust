@@ -23,6 +23,7 @@ pub mod control_plane;
 pub mod health;
 pub mod observability;
 pub mod plugin_notify;
+pub mod plugin_registry;
 pub mod plugin_runtime;
 pub mod plugin_signing;
 pub mod plugin_trust;

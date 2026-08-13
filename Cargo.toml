@@ -25,7 +25,9 @@ http-body-util = "0.1"
 futures-util = "0.3"
 nix = { version = "0.29", features = ["process", "signal"] }
 openraft = { version = "=0.9.21", default-features = false, features = ["serde", "serde_json", "storage-v2"] }
-reqwest = { version = "=0.12.28", default-features = false, features = ["json", "native-tls"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "native-tls", "blocking"] }
+tar = "0.4"
+flate2 = "1"
 regex = "1"
 signal-hook = "0.3"
 pingora-core = { version = "0.8.1", features = ["rustls"] }
