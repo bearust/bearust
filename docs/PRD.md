@@ -1204,8 +1204,33 @@ yet wired into any capability-selection rule (an unsigned plugin can still
 be the active `waf.detect`/`transform.request`/etc. plugin when
 `require_signature` is `false`).
 
-A registry service, remote fetch/install tooling, a GUI surface for trust
-state, automatic key rotation, and a centralized revocation list all
-remain deliberately out of scope; see
+A GUI surface for trust state, automatic key rotation, and a centralized
+revocation list all remain deliberately out of scope; see
 `docs/superpowers/specs/2026-08-12-phase-14-plugin-signing-trust-design.md`
+for the full rationale. Registry distribution and fetch/install tooling
+were added in increment 3, below.
+
+### Phase 14 status: community plugin registry (increment 3)
+
+Increment 3 adds `bearust plugin search`/`bearust plugin install`,
+letting an operator discover and install plugins from a static,
+HTTPS-hosted JSON index without a hosted backend service. `install`
+downloads and SHA-256-verifies a plugin's tarball, extracts it with
+strict path-traversal and unexpected-file rejection, and — when the
+index declares a signer for that entry — cross-checks it against the
+signature actually embedded in the archive before writing any file. The
+index is deliberately never a source of trust: a successful install
+still goes through the exact same trust-on-first-use pinning flow a
+manually-placed plugin already goes through the next time BeaRust
+reloads plugins from disk.
+
+The default index points at BeaRust's own community index repository;
+`--registry-url` or `BEARUST_PLUGIN_REGISTRY_URL` overrides it for a
+private or self-hosted index. There is no `bearust plugin publish`
+command — contributing an entry is a pull request to the index
+repository itself, reviewed by its maintainers, not a BeaRust CLI
+feature. A GUI surface for browsing/installing from the registry,
+plugin upgrade/version-management commands, and the index repository's
+own governance all remain out of scope; see
+`docs/superpowers/specs/2026-08-13-phase-14-plugin-registry-design.md`
 for the full rationale and follow-up increments.

@@ -230,6 +230,46 @@ access to the plugins directory, since they could edit or delete the pin
 file too. Ensure the plugins directory is owned and writable only by the
 account running BeaRust.
 
+### Phase 14 community plugin registry
+
+`bearust plugin search <query>` and `bearust plugin install <id>` fetch a
+static, HTTPS-hosted JSON index of published plugins and let an operator
+install one without manually downloading and extracting an archive. The
+default index URL points at BeaRust's own community index; override it
+with `--registry-url <url>` or the `BEARUST_PLUGIN_REGISTRY_URL`
+environment variable to use a private or self-hosted index instead —
+there is no requirement to use the default.
+
+```console
+$ bearust plugin search waf
+waf-guard  v1.0.0  Blocks common admin-path scanning patterns.
+
+$ bearust plugin install waf-guard --out ./plugins
+waf-guard  v1.0.0
+capabilities: waf.detect
+signer: MCowBQYDK2VwAyEA...
+Install this plugin? [y/N]: y
+installed waf-guard to ./plugins/waf-guard -- run `POST /api/plugins/reload` to load it
+```
+
+`install` downloads the plugin's archive, verifies its SHA-256 checksum
+against the index entry, extracts it (rejecting any path-traversal
+attempt or unexpected file in the archive), and — if the index declares a
+`signer_public_key` for that entry — cross-checks it against the
+signature actually embedded in the archive before writing anything to
+disk. Pass `--yes` to skip the confirmation prompt (for scripted use) and
+`--force` to overwrite an already-installed plugin directory with the
+same ID.
+
+The index is a catalog and a transport-integrity check, not a new source
+of trust: `install` never pins a key or loads a module. Trust is decided
+exactly the way it already is for a manually-placed plugin — the first
+time BeaRust reloads plugins from disk, the installed plugin's signature
+(if any) goes through the same trust-on-first-use pinning described
+above. There is no `bearust plugin publish` command; contributing an
+entry to the community index is a pull request to that index's own
+repository, reviewed by its maintainers.
+
 ### Audit log API and viewer
 
 Authenticated `admin`, `operator`, and `viewer` sessions can read the audit history through `GET /api/audit-logs`; unauthenticated requests are rejected. The dashboard exposes the same read-only view for every role. Results are newest first (`created_at DESC, id DESC`) and are returned as `{items, page, page_size, total}`.
