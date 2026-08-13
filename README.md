@@ -117,7 +117,9 @@ max_output_bytes = 65536
 ```
 
 Each immediate child directory is one plugin and contains only a manifest and
-its module:
+its module. See [`docs/PLUGIN_AUTHORING.md`](docs/PLUGIN_AUTHORING.md) for a
+full guide to writing a plugin in Rust, covering every hook capability with
+worked examples.
 
 ```text
 plugins/

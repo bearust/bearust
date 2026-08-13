@@ -536,4 +536,78 @@ relying on the host to tell you something went wrong.
 
 ## Signing and Sharing Your Plugin
 
+Signing is optional. See `README.md`'s "Phase 14 plugin manifest
+signing and trust-on-first-use" section for the full mechanism
+(trust-on-first-use pinning, key rotation, the threat model it does and
+doesn't cover) — this section only summarizes the two commands you run
+as a plugin author:
+
+```console
+$ bearust plugin keygen --out ./keys
+<base64 public key printed to stdout>
+$ bearust plugin sign ./plugins/my-plugin --key ./keys/signing.key
+wrote ./plugins/my-plugin/plugin.sig
+```
+
+`keygen` generates an Ed25519 keypair once; `sign` reads your plugin's
+manifest and compiled module and writes a `plugin.sig` file next to
+them, covering both against tampering. Keep `signing.key` private —
+anyone who has it can produce signatures a BeaRust instance will accept
+as coming from you, for any plugin ID that instance hasn't already
+pinned to a different key.
+
+There is no community plugin registry yet — BeaRust doesn't provide a
+place to publish, discover, or fetch plugins by ID. For now, share your
+plugin directory (`plugin.toml`, the compiled `.wasm` module, and
+`plugin.sig` if signed) through whatever channel you already use — a
+Git repository, a release artifact, an internal file share. Anyone
+installing it copies that directory under their own BeaRust instance's
+configured plugins directory and reloads.
+
 ## Testing Your Plugin Locally
+
+With `[plugins].enabled = true` and a running BeaRust instance, reload
+after adding or changing a plugin directory:
+
+```console
+$ curl -b cookies.txt -X POST http://127.0.0.1:8081/api/plugins/reload
+{"loaded":1,"failed":0}
+```
+
+(This requires an authenticated session with the `plugins.manage`
+permission — see `README.md`'s RBAC sections for obtaining
+`cookies.txt`.)
+
+Check load status, including the `trust_status` field added by
+signing, with:
+
+```console
+$ curl -b cookies.txt http://127.0.0.1:8081/api/plugins
+```
+
+A plugin that fails to load reports a stable error code (`invalid_manifest`,
+`abi_mismatch`, `compile_failed`, `timeout`, `fuel_exhausted`,
+`memory_limit`, `trap`, and others — see `README.md`'s Phase 13A
+section for the full list) rather than a raw error message. If yours
+reports one of these, re-check the corresponding section above before
+assuming the host is at fault.
+
+Trigger a standalone health check (exercises `bearust_health_check_v2`
+without going through live traffic):
+
+```console
+$ curl -b cookies.txt -X POST http://127.0.0.1:8081/api/plugins/my-plugin/health-check
+```
+
+To exercise a traffic hook (`waf.detect`, `transform.request`,
+`transform.response`, `notify.waf_block`, `balance.select`), send a
+request through a proxy host configured to use it and observe the
+effect directly (a modified header, a blocked request, a chosen
+backend) — there is no standalone invoke-by-capability endpoint for
+these in this increment.
+
+If you're debugging a manifest or directory-layout problem, the fixture
+manifests under `tests/fixtures/plugins/` in the BeaRust repository are
+known-good references for every capability this guide covers — compare
+your `plugin.toml` against the one matching your capability (e.g.
+`tests/fixtures/plugins/waf_detect_v2/plugin.toml` for `waf.detect`).
