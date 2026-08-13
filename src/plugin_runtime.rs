@@ -1700,6 +1700,13 @@ impl PluginManager {
                     // silently keeping a previously-trusted compiled
                     // instance in service, so it skips the
                     // retain-old/fatal-existing-failure path below.
+                    // Deliberate deviation from the design spec's Error
+                    // Handling section (which states no change to the
+                    // existing failure-isolation mechanism is needed): a
+                    // previously-trusted plugin whose key later mismatches
+                    // must be unloaded immediately rather than kept running
+                    // on a now-stale trust decision. See `resolve_trust`'s
+                    // doc comment above for the rationale.
                     let is_trust_rejection = matches!(
                         error,
                         PluginError::SignatureRequired

@@ -208,6 +208,20 @@ These all follow the existing `ReloadSummary` failure-isolation pattern —
 one plugin's rejection never affects any other plugin's load in the same
 reload cycle, so no change to that mechanism is needed.
 
+**Correction/addendum:** one exception was found during implementation.
+The existing failure-isolation mechanism also retains a previously-loaded
+plugin's healthy compiled instance in service when a *reload* attempt for
+that same id fails (protecting against transient rebuild problems). Trust
+and signature rejections (`signature_required`, `malformed_signature`,
+`invalid_signature`, `key_mismatch`) are the one case where that retention
+behavior is wrong: retaining would mean continuing to serve traffic
+through a plugin whose trust status just became invalid. So, unlike other
+build failures, these four rejections always immediately unload the
+plugin instead of falling back to the previously-trusted one, even when a
+healthy prior instance exists. See `resolve_trust` and the
+`is_trust_rejection` carve-out in `reload_from_disk_inner`
+(`src/plugin_runtime.rs`).
+
 ## Testing
 
 - **`plugin_signing.rs` unit tests**: sign→verify round trip with a test
