@@ -625,12 +625,23 @@ fn plugin_keygen(out: &Path) -> Result<(), AppError> {
     std::fs::create_dir_all(out).map_err(|e| AppError::PluginSigning(e.to_string()))?;
     let signing_key = SigningKey::generate(&mut OsRng);
     let key_path = out.join("signing.key");
-    std::fs::write(&key_path, signing_key.to_bytes())
-        .map_err(|e| AppError::PluginSigning(e.to_string()))?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&key_path)
+            .map_err(|e| AppError::PluginSigning(e.to_string()))?;
+        file.write_all(&signing_key.to_bytes())
+            .map_err(|e| AppError::PluginSigning(e.to_string()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&key_path, signing_key.to_bytes())
             .map_err(|e| AppError::PluginSigning(e.to_string()))?;
     }
     let public_key =

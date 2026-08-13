@@ -25,6 +25,16 @@ fn keygen_then_sign_produces_a_signature_the_verifier_accepts() {
     let printed_key = String::from_utf8(keygen.stdout).unwrap();
     assert!(!printed_key.trim().is_empty());
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(key_dir.path().join("signing.key"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
     let plugin_dir = tempdir().unwrap();
     fs::write(
         plugin_dir.path().join("plugin.toml"),
