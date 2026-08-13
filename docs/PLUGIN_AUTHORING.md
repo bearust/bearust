@@ -327,6 +327,168 @@ pub extern "C" fn bearust_transform_request(ptr: i32, len: i32) -> i64 {
 }
 ```
 
+### transform.response
+
+Declare `capabilities = ["transform.response"]` in `plugin.toml`.
+Called after the upstream response body is fully buffered, before it's
+sent to the client. Unlike `transform.request`, this hook **cannot**
+touch headers — by the time the body decision is known, pingora has
+already sent response headers downstream — so there is no `headers`
+field on either side. `body` is base64-encoded (not a raw byte array)
+to avoid the ~4x JSON expansion a `Vec<u8>` would incur.
+
+**Export:** `bearust_transform_response(ptr: i32, len: i32) -> i64`
+
+**Request** (`bearust_plugin_sdk::TransformResponseRequest`; `status` is
+context only, not mutable):
+
+```rust
+pub struct TransformResponseRequest {
+    pub status: u16,
+    pub body: String, // base64-encoded
+}
+```
+
+**Response** (`bearust_plugin_sdk::TransformResponseResult`; the host
+replaces the buffered response body wholesale with the base64-decoded
+`body` on success):
+
+```rust
+pub struct TransformResponseResult {
+    pub body: String, // base64-encoded
+}
+```
+
+**Example** (passes the body through unchanged — a real plugin would
+decode, transform, and re-encode):
+
+```rust
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use bearust_plugin_sdk::{TransformResponseRequest, TransformResponseResult};
+
+#[no_mangle]
+pub extern "C" fn bearust_transform_response(ptr: i32, len: i32) -> i64 {
+    let request: TransformResponseRequest = unsafe { bearust_plugin_sdk::read_input(ptr, len) };
+    let decoded = STANDARD.decode(&request.body).unwrap_or_default();
+    let output = TransformResponseResult {
+        body: STANDARD.encode(decoded),
+    };
+    bearust_plugin_sdk::write_output(&output)
+}
+```
+
+The example above uses the `base64` crate for illustration; add it to
+your plugin's own `Cargo.toml` if you need to inspect or modify the
+decoded body (`base64 = "0.22"` matches the version BeaRust's host uses).
+
+### notify.waf_block
+
+Declare `capabilities = ["notify.waf_block"]` in `plugin.toml`. Called
+as a fire-and-forget notification whenever the built-in WAF blocks a
+request — this hook cannot influence the block decision itself (see
+`waf.detect` above for that). The event never carries raw headers,
+body, query string, or client IP — only the same redacted fields
+BeaRust's own audit/tracing output already uses.
+
+**Export:** `bearust_notify_waf_block(ptr: i32, len: i32) -> i32` — note
+this returns a plain `i32` status (`0` = success, nonzero =
+plugin-reported failure), not a packed `i64`, since there is no output
+payload to return.
+
+**Request** (`bearust_plugin_sdk::WafBlockEvent`):
+
+```rust
+pub struct WafBlockEvent {
+    pub request_id: String,
+    pub occurred_at_ms: u64,
+    pub category: String,
+    pub score: u16,
+    pub severity: String,
+    pub reason_ids: String,
+}
+```
+
+**Example:**
+
+```rust
+use bearust_plugin_sdk::WafBlockEvent;
+
+#[no_mangle]
+pub extern "C" fn bearust_notify_waf_block(ptr: i32, len: i32) -> i32 {
+    let _event: WafBlockEvent = unsafe { bearust_plugin_sdk::read_input(ptr, len) };
+    // Forward `_event` to wherever your plugin sends notifications.
+    // Any WASI/network access is unavailable inside the sandbox, so a
+    // real plugin would need to accumulate events for the host to read
+    // via a future export, or another mechanism outside this guide's
+    // scope.
+    0
+}
+```
+
+### balance.select
+
+Declare `capabilities = ["balance.select"]` in `plugin.toml`, and
+configure an upstream pool with `algorithm = "plugin"` (see the load
+balancing configuration in `README.md`). Called to choose a backend for
+a pool. The plugin has no authority beyond suggestion: the host
+validates the returned `backend_id` against the pool's live
+health/exclusion state, and falls back to its own deterministic
+selection if the plugin's choice is invalid or the call fails.
+
+**Export:** `bearust_balance_select(ptr: i32, len: i32) -> i64`
+
+**Request** (`bearust_plugin_sdk::LoadBalanceRequest`; `backends` is
+capped at 128 entries by the host before this struct is built;
+`excluded_backend_id` is set when this call is a failover retry — the
+backend that just failed on this same request):
+
+```rust
+pub struct BackendCandidate {
+    pub id: u64,
+    pub address: String,
+    pub healthy: bool,
+    pub inflight: u32,
+}
+
+pub struct LoadBalanceRequest {
+    pub pool: String,
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub headers: Vec<(String, String)>,
+    pub backends: Vec<BackendCandidate>,
+    pub excluded_backend_id: Option<u64>,
+}
+```
+
+**Response** (`bearust_plugin_sdk::LoadBalanceResult`):
+
+```rust
+pub struct LoadBalanceResult {
+    pub backend_id: u64,
+}
+```
+
+**Example** (picks the first healthy, non-excluded backend — a real
+plugin would implement its own selection logic):
+
+```rust
+use bearust_plugin_sdk::{LoadBalanceRequest, LoadBalanceResult};
+
+#[no_mangle]
+pub extern "C" fn bearust_balance_select(ptr: i32, len: i32) -> i64 {
+    let request: LoadBalanceRequest = unsafe { bearust_plugin_sdk::read_input(ptr, len) };
+    let chosen = request
+        .backends
+        .iter()
+        .find(|b| b.healthy && Some(b.id) != request.excluded_backend_id)
+        .map(|b| b.id)
+        .unwrap_or(0);
+    let output = LoadBalanceResult { backend_id: chosen };
+    bearust_plugin_sdk::write_output(&output)
+}
+```
+
 ## Limits and Failure Behavior
 
 ## Signing and Sharing Your Plugin
