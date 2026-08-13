@@ -169,6 +169,164 @@ per-hook examples make sense:
 
 ## Hook Reference
 
+### health
+
+Every `abi_version: 2` plugin must export this, independent of which
+`capabilities` it declares — the host calls it during load to confirm
+the module is well-formed and again on demand via
+`POST /api/plugins/{id}/health-check`.
+
+**Export:** `bearust_health_check_v2(ptr: i32, len: i32) -> i64`
+
+**Request** (`bearust_plugin_sdk::HealthCheckInput`):
+
+```rust
+pub struct HealthCheckInput {
+    pub requested_at_ms: u64,
+}
+```
+
+**Response** (`bearust_plugin_sdk::HealthCheckOutput`):
+
+```rust
+pub struct HealthCheckOutput {
+    pub healthy: bool,
+    pub detail: Option<String>,
+}
+```
+
+`detail` is free-form and bounded by the manifest's `max_output_bytes`.
+
+**Example:**
+
+```rust
+use bearust_plugin_sdk::{HealthCheckInput, HealthCheckOutput};
+
+#[no_mangle]
+pub extern "C" fn bearust_health_check_v2(ptr: i32, len: i32) -> i64 {
+    let _input: HealthCheckInput = unsafe { bearust_plugin_sdk::read_input(ptr, len) };
+    let output = HealthCheckOutput {
+        healthy: true,
+        detail: Some("ok".to_owned()),
+    };
+    bearust_plugin_sdk::write_output(&output)
+}
+```
+
+### waf.detect
+
+Declare `capabilities = ["waf.detect"]` in `plugin.toml`. Called for
+every request the built-in WAF rule engine evaluates; the plugin's
+verdict can only ever *escalate* the rule engine's own decision, never
+lower it — see
+`docs/superpowers/specs/2026-08-06-phase-13d-waf-detector-design.md`
+for the exact merge rule.
+
+**Export:** `bearust_waf_detect(ptr: i32, len: i32) -> i64`
+
+**Request** (`bearust_plugin_sdk::WafDetectRequest`):
+
+```rust
+pub struct WafDetectRequest {
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+```
+
+**Response** (`bearust_plugin_sdk::WafDetectVerdict`, `decision` is
+`bearust_plugin_sdk::WafPluginDecision`, serialized as
+`"allow" | "log" | "block"`):
+
+```rust
+pub enum WafPluginDecision {
+    Allow,
+    Log,
+    Block,
+}
+
+pub struct WafDetectVerdict {
+    pub decision: WafPluginDecision,
+    pub category: String,
+    pub score: u16,
+}
+```
+
+**Example** (blocks any request whose path contains `/admin`):
+
+```rust
+use bearust_plugin_sdk::{WafDetectRequest, WafDetectVerdict, WafPluginDecision};
+
+#[no_mangle]
+pub extern "C" fn bearust_waf_detect(ptr: i32, len: i32) -> i64 {
+    let request: WafDetectRequest = unsafe { bearust_plugin_sdk::read_input(ptr, len) };
+    let verdict = if request.path.contains("/admin") {
+        WafDetectVerdict {
+            decision: WafPluginDecision::Block,
+            category: "custom_admin_guard".to_owned(),
+            score: 10,
+        }
+    } else {
+        WafDetectVerdict {
+            decision: WafPluginDecision::Allow,
+            category: "custom_admin_guard".to_owned(),
+            score: 0,
+        }
+    };
+    bearust_plugin_sdk::write_output(&verdict)
+}
+```
+
+### transform.request
+
+Declare `capabilities = ["transform.request"]` in `plugin.toml`. Called
+before a request is forwarded upstream; the returned header list
+wholesale-replaces the outbound request's headers. The host
+unconditionally reasserts `Host`, `X-Forwarded-For`, and `X-Request-Id`
+afterward — this hook can never remove, blank, or spoof those three, so
+don't rely on being able to.
+
+**Export:** `bearust_transform_request(ptr: i32, len: i32) -> i64`
+
+**Request** (`bearust_plugin_sdk::TransformRequest`; no `body` field —
+this hook only ever sees and returns headers):
+
+```rust
+pub struct TransformRequest {
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    pub headers: Vec<(String, String)>,
+}
+```
+
+**Response** (`bearust_plugin_sdk::TransformResponse` — despite the
+name, this is the *output* of `transform.request`, not related to the
+separate `transform.response` hook below):
+
+```rust
+pub struct TransformResponse {
+    pub headers: Vec<(String, String)>,
+}
+```
+
+**Example** (adds a header, otherwise passes headers through unchanged):
+
+```rust
+use bearust_plugin_sdk::{TransformRequest, TransformResponse};
+
+#[no_mangle]
+pub extern "C" fn bearust_transform_request(ptr: i32, len: i32) -> i64 {
+    let request: TransformRequest = unsafe { bearust_plugin_sdk::read_input(ptr, len) };
+    let mut headers = request.headers;
+    headers.push(("x-transformed".to_owned(), "yes".to_owned()));
+    let output = TransformResponse { headers };
+    bearust_plugin_sdk::write_output(&output)
+}
+```
+
 ## Limits and Failure Behavior
 
 ## Signing and Sharing Your Plugin
