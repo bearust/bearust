@@ -491,6 +491,49 @@ pub extern "C" fn bearust_balance_select(ptr: i32, len: i32) -> i64 {
 
 ## Limits and Failure Behavior
 
+Every invocation is bounded by the manifest's `[limits]` table, itself
+capped by the server's configured maxima (`README.md`'s `[plugins]`
+block):
+
+| Field | Meaning |
+|---|---|
+| `memory_pages` | Guest linear memory limit, in 64 KiB pages. |
+| `fuel` | Wasmtime fuel budget for one invocation — bounds CPU work independent of wall-clock time. |
+| `invocation_timeout_ms` | Wall-clock timeout for one invocation. |
+| `max_output_bytes` | Maximum size of the JSON the plugin writes back to the host. |
+
+If a plugin traps, times out, exhausts its fuel, or returns malformed or
+oversized output, the host never propagates that failure to the client
+request. Instead, each hook's caller falls back to BeaRust's built-in
+behavior for that request, as if the plugin capability weren't
+configured at all:
+
+- `waf.detect`: the built-in rule engine's own decision stands
+  unchanged — recall from the [Hook Reference](#hook-reference) that a
+  plugin verdict can only escalate a decision, never suppress one, so a
+  failed call simply contributes nothing.
+- `transform.request` / `transform.response`: the request or response
+  passes through with its original headers/body unmodified.
+- `notify.waf_block`: the notification is dropped; the block itself
+  already happened independently and is unaffected. This hook is also
+  fire-and-forget by design — it runs off the proxy's hot path through a
+  bounded queue, so a slow or failing plugin here can never add latency
+  to the request that triggered the block, only lose the notification.
+- `balance.select`: the pool falls back to its own configured algorithm
+  (round robin, least connections, etc.) for that selection. The same
+  fallback also applies if the plugin's chosen `backend_id` doesn't name
+  a currently healthy, non-excluded backend — an invalid pick is treated
+  the same as a failed call.
+
+This is a deliberate fail-open design: a broken or slow plugin degrades
+BeaRust to its behavior *without* that plugin, rather than failing
+traffic. Write your plugin logic knowing that any panic, infinite loop
+(caught by the fuel/timeout bounds), or malformed response you produce
+is silently ignored by the host, not surfaced to your plugin's caller —
+so test failure paths explicitly (see
+[Testing Your Plugin Locally](#testing-your-plugin-locally)) rather than
+relying on the host to tell you something went wrong.
+
 ## Signing and Sharing Your Plugin
 
 ## Testing Your Plugin Locally
