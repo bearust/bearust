@@ -66,8 +66,17 @@ yet. Later sections add a real capability to this same skeleton.
    crate-type = ["cdylib"]
 
    [dependencies]
-   bearust-plugin-sdk = "0.1"
+   bearust-plugin-sdk = { path = "../bearust/crates/bearust-plugin-sdk" }
    ```
+
+   `bearust-plugin-sdk` is not published on crates.io — in this repository
+   it's a path-only workspace member (see this repo's own `Cargo.toml`).
+   The path above is illustrative for a plugin crate checked out next to a
+   clone of BeaRust; a real external plugin author will need to vendor the
+   crate (e.g. via a `git` dependency pinned to a commit, or a local path
+   into a copy of this repository) until/unless BeaRust publishes it
+   somewhere a version specifier like `"0.1"` could actually resolve
+   against.
 
 3. Install the WASM target if you haven't already:
 
@@ -77,16 +86,36 @@ yet. Later sections add a real capability to this same skeleton.
 
 4. Write `src/lib.rs`. Every `abi_version: 2` plugin must call the
    `abi_version!` macro once at crate root — this expands to the
-   `bearust_abi_version() -> i32` export the host checks first:
+   `bearust_abi_version() -> i32` export the host checks first. On its
+   own, though, that macro is *not* enough for the plugin to load: for
+   `abi_version: 2`, the host requires the guest's linear `memory` plus
+   typed `bearust_alloc`, `bearust_dealloc`, and `bearust_health_check_v2`
+   exports to all be present before it will load the module at all — a
+   module missing any of them fails to load with `abi_mismatch`, it does
+   not load and merely fail its health check. `bearust_alloc` and
+   `bearust_dealloc` come for free from the SDK; you still need to write
+   `bearust_health_check_v2` yourself, exactly as shown in the
+   [`health`](#health) hook reference below:
 
    ```rust
+   use bearust_plugin_sdk::{HealthCheckInput, HealthCheckOutput};
+
    bearust_plugin_sdk::abi_version!(2);
+
+   #[no_mangle]
+   pub extern "C" fn bearust_health_check_v2(ptr: i32, len: i32) -> i64 {
+       let _input: HealthCheckInput = unsafe { bearust_plugin_sdk::read_input(ptr, len) };
+       let output = HealthCheckOutput {
+           healthy: true,
+           detail: Some("ok".to_owned()),
+       };
+       bearust_plugin_sdk::write_output(&output)
+   }
    ```
 
-   That's enough for the plugin to load, but not to pass a health check
-   — the host also requires every `abi_version: 2` module to export
-   `bearust_health_check_v2`, regardless of declared capabilities (see
-   [Hook Reference](#hook-reference) below for its exact signature).
+   With this in place, the crate exports everything `abi_version: 2`
+   requires at load time; adding a real hook capability later is purely
+   additive.
 
 5. Build for the WASM target:
 
@@ -116,7 +145,20 @@ yet. Later sections add a real capability to this same skeleton.
    lists any of `waf.detect`, `transform.request`, `transform.response`,
    `notify.waf_block`, `balance.select` — empty for now, since this
    skeleton doesn't implement one yet. `[limits]` values must stay within
-   the server's configured maxima (`README.md`'s `[plugins]` block).
+   the server's configured maxima (`README.md`'s `[plugins]` block), and
+   `max_output_bytes` must also clear the floor manifest validation
+   enforces for `abi_version: 2` and, once you add one, for each declared
+   capability — see the [Limits and Failure
+   Behavior](#limits-and-failure-behavior) table and the per-hook floors
+   noted in [Hook Reference](#hook-reference) below.
+
+   The `memory_pages = 1` and `fuel = 10000` values above match this
+   repo's own WASM test fixtures and are enough for a trivial
+   health-check-only module. A real Rust plugin that links `serde` and
+   `serde_json` (as the SDK's `encode`/`decode`/`read_input`/
+   `write_output` helpers do) will likely need more fuel, and possibly
+   more memory pages, than these floor values — if your plugin traps or
+   reports `fuel_exhausted` during testing, raise both here first.
 
 7. Assemble the plugin directory under BeaRust's configured plugins
    directory (`./plugins` by default):
@@ -172,11 +214,21 @@ per-hook examples make sense:
 ### health
 
 Every `abi_version: 2` plugin must export this, independent of which
-`capabilities` it declares — the host calls it during load to confirm
-the module is well-formed and again on demand via
+`capabilities` it declares. Load time only checks that the export
+*exists* with the exact typed signature `(i32, i32) -> i64` — a module
+missing it, or exporting it with the wrong signature, fails to load with
+`abi_mismatch`; the host does not actually call it during load. The
+export is only ever invoked later, on demand, via
 `POST /api/plugins/{id}/health-check`.
 
 **Export:** `bearust_health_check_v2(ptr: i32, len: i32) -> i64`
+
+Every `abi_version: 2` plugin's `max_output_bytes` — regardless of which
+other capabilities it declares — must be at least 64 bytes
+(`MIN_V2_OUTPUT_BYTES` in the host's manifest validation); a smaller
+value is rejected at load with `invalid_manifest`, since even the
+smallest realistic `HealthCheckInput` JSON payload wouldn't fit under
+it.
 
 **Request** (`bearust_plugin_sdk::HealthCheckInput`):
 
@@ -221,6 +273,14 @@ verdict can only ever *escalate* the rule engine's own decision, never
 lower it — see
 `docs/superpowers/specs/2026-08-06-phase-13d-waf-detector-design.md`
 for the exact merge rule.
+
+A plugin declaring `waf.detect` must set `max_output_bytes` to at least
+49152 bytes (`MIN_WAF_DETECT_INPUT_BYTES`) — the request context this
+hook receives (method/path/query/headers plus a bounded body) is far
+larger than a health check's, and a smaller limit is rejected at load
+with `invalid_manifest`. The checked-in
+`tests/fixtures/plugins/waf_detect_v2/plugin.toml` fixture uses exactly
+this floor value.
 
 **Export:** `bearust_waf_detect(ptr: i32, len: i32) -> i64`
 
@@ -288,6 +348,12 @@ unconditionally reasserts `Host`, `X-Forwarded-For`, and `X-Request-Id`
 afterward — this hook can never remove, blank, or spoof those three, so
 don't rely on being able to.
 
+A plugin declaring `transform.request` must set `max_output_bytes` to at
+least 32768 bytes (`MIN_TRANSFORM_INPUT_BYTES`) — a smaller value is
+rejected at load with `invalid_manifest`. The checked-in
+`tests/fixtures/plugins/transform_request_v2/plugin.toml` fixture uses
+exactly this floor value.
+
 **Export:** `bearust_transform_request(ptr: i32, len: i32) -> i64`
 
 **Request** (`bearust_plugin_sdk::TransformRequest`; no `body` field —
@@ -336,6 +402,36 @@ touch headers — by the time the body decision is known, pingora has
 already sent response headers downstream — so there is no `headers`
 field on either side. `body` is base64-encoded (not a raw byte array)
 to avoid the ~4x JSON expansion a `Vec<u8>` would incur.
+
+A plugin declaring `transform.response` must set `max_output_bytes` to at
+least 1572864 bytes (1.5 MiB, `MIN_TRANSFORM_RESPONSE_INPUT_BYTES`) — a
+smaller value is rejected at load with `invalid_manifest`. The
+checked-in `tests/fixtures/plugins/transform_response_v2/plugin.toml`
+fixture uses exactly this floor value. Note that this floor is *larger*
+than BeaRust's default server-level `[plugins].max_output_bytes`
+(65536, per `README.md`); since the manifest's own limit can never
+exceed the server's configured maximum, an operator running a
+`transform.response` plugin must also raise the server's
+`[plugins].max_output_bytes` to at least 1572864 (its ceiling is 2 MiB,
+per `src/config/mod.rs`) — raising only the plugin's own manifest limit
+is not enough on its own.
+
+This hook is also skipped entirely, and the response passes through
+unmodified, under either of these conditions (see
+`src/proxy.rs::should_buffer_response_for_transform`):
+
+- the response body is larger than 1 MiB
+  (`RESPONSE_BODY_TRANSFORM_CAP_BYTES`) — bodies over this cap are never
+  buffered for the hook, regardless of the manifest's own
+  `max_output_bytes`;
+- the response carries a `Content-Encoding` other than absent, empty, or
+  `identity` — a compressed body is never handed to the hook, since the
+  plugin would only see opaque compressed bytes it can't meaningfully
+  transform.
+
+(A few other conditions also skip this hook — informational, `204`, and
+`304` responses; `HEAD` requests; and `text/event-stream` responses —
+see the same function's doc comment in `src/proxy.rs` for the full list.)
 
 **Export:** `bearust_transform_response(ptr: i32, len: i32) -> i64`
 
@@ -390,6 +486,12 @@ request — this hook cannot influence the block decision itself (see
 body, query string, or client IP — only the same redacted fields
 BeaRust's own audit/tracing output already uses.
 
+A plugin declaring `notify.waf_block` must set `max_output_bytes` to at
+least 1024 bytes (`MIN_NOTIFY_INPUT_BYTES`) — a smaller value is
+rejected at load with `invalid_manifest`. The checked-in
+`tests/fixtures/plugins/notify_sink_v2/plugin.toml` fixture uses exactly
+this floor value.
+
 **Export:** `bearust_notify_waf_block(ptr: i32, len: i32) -> i32` — note
 this returns a plain `i32` status (`0` = success, nonzero =
 plugin-reported failure), not a packed `i64`, since there is no output
@@ -428,12 +530,27 @@ pub extern "C" fn bearust_notify_waf_block(ptr: i32, len: i32) -> i32 {
 ### balance.select
 
 Declare `capabilities = ["balance.select"]` in `plugin.toml`, and
-configure an upstream pool with `algorithm = "plugin"` (see the load
-balancing configuration in `README.md`). Called to choose a backend for
-a pool. The plugin has no authority beyond suggestion: the host
-validates the returned `backend_id` against the pool's live
-health/exclusion state, and falls back to its own deterministic
-selection if the plugin's choice is invalid or the call fails.
+configure the upstream pool that should use it with `algorithm =
+"plugin"` (see `src/config/mod.rs` for the full set of pool options),
+for example:
+
+```toml
+[[upstream_pools]]
+name = "my-pool"
+algorithm = "plugin"
+```
+
+Called to choose a backend for a pool. The plugin has no authority
+beyond suggestion: the host validates the returned `backend_id` against
+the pool's live health/exclusion state, and falls back to its own
+deterministic selection if the plugin's choice is invalid or the call
+fails.
+
+A plugin declaring `balance.select` must set `max_output_bytes` to at
+least 49152 bytes (`MIN_BALANCE_INPUT_BYTES`) — a smaller value is
+rejected at load with `invalid_manifest`. The checked-in
+`tests/fixtures/plugins/balance_select_v2/plugin.toml` fixture uses
+exactly this floor value.
 
 **Export:** `bearust_balance_select(ptr: i32, len: i32) -> i64`
 
@@ -500,7 +617,7 @@ block):
 | `memory_pages` | Guest linear memory limit, in 64 KiB pages. |
 | `fuel` | Wasmtime fuel budget for one invocation — bounds CPU work independent of wall-clock time. |
 | `invocation_timeout_ms` | Wall-clock timeout for one invocation. |
-| `max_output_bytes` | Maximum size of the JSON the plugin writes back to the host. |
+| `max_output_bytes` | Maximum size of the JSON exchanged across the host/guest boundary in *either* direction — it bounds both the host→guest input the host writes into guest memory and the guest→host output the plugin writes back, not just the output. A value too small for the input side of a call fails that call the same way an oversized output would. Manifest validation additionally enforces a per-capability floor on this field beyond the server's configured maximum — see the relevant [Hook Reference](#hook-reference) subsection for the exact floor your declared capabilities require. |
 
 If a plugin traps, times out, exhausts its fuel, or returns malformed or
 oversized output, the host never propagates that failure to the client
@@ -524,6 +641,14 @@ configured at all:
   fallback also applies if the plugin's chosen `backend_id` doesn't name
   a currently healthy, non-excluded backend — an invalid pick is treated
   the same as a failed call.
+
+Only one plugin is ever active per capability. If two enabled plugins
+both declare the same capability (say, two plugins each declaring
+`waf.detect`), the host picks the first one by lowest plugin ID as the
+active plugin for that capability and the other is simply never called
+for it — silently inactive, with no error or warning surfaced anywhere.
+If you need to combine logic from two plugins for the same capability,
+you currently have to merge that logic into a single plugin yourself.
 
 This is a deliberate fail-open design: a broken or slow plugin degrades
 BeaRust to its behavior *without* that plugin, rather than failing
