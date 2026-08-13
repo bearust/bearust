@@ -762,6 +762,15 @@ fn plugin_search(query: &str, registry_url: Option<&str>) -> Result<(), AppError
     Ok(())
 }
 
+/// Strips control characters (which could otherwise inject newlines or
+/// terminal escapes to visually spoof the confirmation summary an operator
+/// relies on) and caps the length of an index-sourced string before it is
+/// printed. The index is a catalog, not a trust source, so nothing in it
+/// should be able to affect what the operator sees on screen.
+fn sanitize_for_terminal(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(200).collect()
+}
+
 fn plugin_install(
     id: &str,
     plugins_directory: &Path,
@@ -772,6 +781,12 @@ fn plugin_install(
     use crate::plugin_registry::{
         download_and_verify, extract_tarball, verify_signer, RegistryIndex,
     };
+
+    if !crate::plugin_runtime::valid_id(id) {
+        return Err(AppError::PluginRegistry(format!(
+            "\"{id}\" is not a valid plugin id (lowercase letters, digits, and hyphens only)"
+        )));
+    }
 
     let url = resolve_registry_url(registry_url);
     let client = reqwest::blocking::Client::new();
@@ -784,6 +799,11 @@ fn plugin_install(
     })?;
 
     let target_dir = plugins_directory.join(id);
+    if target_dir.parent() != Some(plugins_directory) {
+        return Err(AppError::PluginRegistry(format!(
+            "\"{id}\" is not a valid plugin id (lowercase letters, digits, and hyphens only)"
+        )));
+    }
     if target_dir.exists() && !force {
         return Err(AppError::PluginRegistry(format!(
             "{} already exists -- pass --force to overwrite",
@@ -801,7 +821,7 @@ fn plugin_install(
     println!(
         "{}  v{}\ncapabilities: {}\nsigner: {}",
         entry.id,
-        entry.version,
+        sanitize_for_terminal(&entry.version),
         if extracted.manifest.capabilities.is_empty() {
             "(none)".to_owned()
         } else {

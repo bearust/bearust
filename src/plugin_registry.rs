@@ -91,8 +91,15 @@ impl RegistryIndex {
                 return Err(RegistryError::ResponseTooLarge);
             }
         }
-        let bytes = response
-            .bytes()
+        // `content_length()` is only a fast-path rejection for a present,
+        // honest header -- a server that omits it or lies can still make
+        // `.bytes()` buffer an unbounded body before any check fires. Read
+        // at most one byte past the limit so an oversized body is caught
+        // without ever fully buffering it.
+        let mut bytes = Vec::new();
+        response
+            .take(MAX_INDEX_RESPONSE_BYTES + 1)
+            .read_to_end(&mut bytes)
             .map_err(|e| RegistryError::Fetch(e.to_string()))?;
         if bytes.len() as u64 > MAX_INDEX_RESPONSE_BYTES {
             return Err(RegistryError::ResponseTooLarge);
@@ -123,6 +130,14 @@ impl RegistryIndex {
 /// fits well under 4x that even with compression overhead accounted for.
 const MAX_TARBALL_BYTES: u64 = 64 * 1024 * 1024;
 
+/// A generous ceiling on a single decompressed archive entry. `flate2`
+/// happily inflates a small compressed tarball into gigabytes in memory, so
+/// `MAX_TARBALL_BYTES` (which only bounds the *compressed* download) isn't
+/// enough on its own -- this bounds what `extract_tarball` will ever buffer
+/// per entry, well above the server's 16 MiB `max_module_bytes` default but
+/// nowhere near a decompression bomb's blast radius.
+const MAX_ENTRY_BYTES: u64 = 32 * 1024 * 1024;
+
 pub fn download_and_verify(
     client: &reqwest::blocking::Client,
     entry: &RegistryEntry,
@@ -143,8 +158,13 @@ pub fn download_and_verify(
             return Err(RegistryError::ResponseTooLarge);
         }
     }
-    let bytes = response
-        .bytes()
+    // See the matching comment in `RegistryIndex::fetch`: `content_length()`
+    // does nothing when the header is absent or dishonest, so bound the
+    // actual read instead of trusting it alone.
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_TARBALL_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|e| RegistryError::Fetch(e.to_string()))?;
     if bytes.len() as u64 > MAX_TARBALL_BYTES {
         return Err(RegistryError::ResponseTooLarge);
@@ -155,7 +175,7 @@ pub fn download_and_verify(
     if !actual.eq_ignore_ascii_case(&entry.sha256) {
         return Err(RegistryError::ChecksumMismatch);
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
 
 pub struct ExtractedPlugin {
@@ -182,11 +202,7 @@ pub fn extract_tarball(bytes: &[u8], expected_id: &str) -> Result<ExtractedPlugi
         .map_err(|e| RegistryError::MalformedArchive(e.to_string()))?;
     for entry in entries {
         let mut entry = entry.map_err(|e| RegistryError::MalformedArchive(e.to_string()))?;
-        if !entry
-            .header()
-            .entry_type()
-            .is_file()
-        {
+        if !entry.header().entry_type().is_file() {
             return Err(RegistryError::MalformedArchive(
                 "archive contains a non-regular-file entry (symlink, hardlink, or directory)"
                     .to_owned(),
@@ -197,8 +213,7 @@ pub fn extract_tarball(bytes: &[u8], expected_id: &str) -> Result<ExtractedPlugi
             .map_err(|e| RegistryError::MalformedArchive(e.to_string()))?
             .into_owned();
         let mut components = path.components();
-        let (Some(Component::Normal(name)), None) = (components.next(), components.next())
-        else {
+        let (Some(Component::Normal(name)), None) = (components.next(), components.next()) else {
             return Err(RegistryError::MalformedArchive(format!(
                 "unsafe archive entry path: {}",
                 path.display()
@@ -208,10 +223,37 @@ pub fn extract_tarball(bytes: &[u8], expected_id: &str) -> Result<ExtractedPlugi
             .to_str()
             .ok_or_else(|| RegistryError::MalformedArchive("non-UTF-8 entry name".to_owned()))?
             .to_owned();
+        // The header's declared size is untrusted metadata from the archive
+        // itself, but rejecting on it up front avoids even attempting to
+        // buffer an entry that claims to be huge. The bounded read below is
+        // the real defense -- it catches a header that understates the true
+        // (decompressed) entry size too.
+        if entry.size() > MAX_ENTRY_BYTES {
+            return Err(RegistryError::MalformedArchive(format!(
+                "archive entry \"{name}\" exceeds the {MAX_ENTRY_BYTES}-byte per-entry limit"
+            )));
+        }
         let mut contents = Vec::new();
         entry
+            .by_ref()
+            .take(MAX_ENTRY_BYTES)
             .read_to_end(&mut contents)
             .map_err(|e| RegistryError::MalformedArchive(e.to_string()))?;
+        if contents.len() as u64 == MAX_ENTRY_BYTES {
+            // Either genuinely exactly at the cap, or -- far more likely for
+            // a hostile archive -- silently truncated real data beyond it.
+            // Confirm nothing more was left to read; if there was, reject
+            // outright rather than accepting a truncated file.
+            let mut probe = [0u8; 1];
+            let more = entry
+                .read(&mut probe)
+                .map_err(|e| RegistryError::MalformedArchive(e.to_string()))?;
+            if more > 0 {
+                return Err(RegistryError::MalformedArchive(format!(
+                    "archive entry \"{name}\" exceeds the {MAX_ENTRY_BYTES}-byte per-entry limit"
+                )));
+            }
+        }
         if files.insert(name.clone(), contents).is_some() {
             return Err(RegistryError::MalformedArchive(format!(
                 "duplicate archive entry: {name}"
@@ -223,21 +265,22 @@ pub fn extract_tarball(bytes: &[u8], expected_id: &str) -> Result<ExtractedPlugi
         .get("plugin.toml")
         .cloned()
         .ok_or_else(|| RegistryError::MalformedArchive("missing plugin.toml".to_owned()))?;
-    let manifest = PluginManifest::from_toml(&manifest_bytes)
-        .map_err(|e| RegistryError::MalformedArchive(format!("invalid plugin.toml: {}", e.code())))?;
+    let manifest = PluginManifest::from_toml(&manifest_bytes).map_err(|e| {
+        RegistryError::MalformedArchive(format!("invalid plugin.toml: {}", e.code()))
+    })?;
     if manifest.id != expected_id {
         return Err(RegistryError::ManifestIdMismatch {
             expected: expected_id.to_owned(),
             found: manifest.id,
         });
     }
-    let wasm_bytes = files.get(&manifest.module).cloned().ok_or_else(|| {
+    let wasm_bytes = files.remove(&manifest.module).ok_or_else(|| {
         RegistryError::MalformedArchive(format!(
             "plugin.toml names module \"{}\" but the archive doesn't contain it",
             manifest.module
         ))
     })?;
-    let signature_bytes = files.get("plugin.sig").cloned();
+    let signature_bytes = files.remove("plugin.sig");
 
     let mut allowed = vec!["plugin.toml".to_owned(), manifest.module.clone()];
     if signature_bytes.is_some() {
@@ -391,7 +434,9 @@ mod tests {
         header.set_size(bypass_contents.len() as u64);
         header.set_mode(0o644);
         {
-            let gnu = header.as_gnu_mut().expect("new_gnu() always has a GNU header");
+            let gnu = header
+                .as_gnu_mut()
+                .expect("new_gnu() always has a GNU header");
             assert!(
                 bypass_name.len() < gnu.name.len(),
                 "bypass_name must fit in the 100-byte GNU header name field"
@@ -439,7 +484,10 @@ max_output_bytes = 1024
             ("plugin.sig", b"pretend-signature-toml"),
         ]);
         let extracted = extract_tarball(&tarball, "demo-plugin").unwrap();
-        assert_eq!(extracted.signature_bytes.as_deref(), Some(&b"pretend-signature-toml"[..]));
+        assert_eq!(
+            extracted.signature_bytes.as_deref(),
+            Some(&b"pretend-signature-toml"[..])
+        );
     }
 
     #[test]
@@ -526,6 +574,29 @@ max_output_bytes = 1024
     }
 
     #[test]
+    fn extract_tarball_rejects_a_decompression_bomb_without_buffering_it() {
+        // A highly-compressible entry that genuinely decompresses to well
+        // past MAX_ENTRY_BYTES, well within MAX_TARBALL_BYTES compressed --
+        // exactly the "small download, huge in memory" attack the size cap
+        // on the compressed download alone cannot catch. Confirms
+        // extract_tarball rejects it quickly and without ever holding the
+        // full decompressed entry in memory.
+        let huge = vec![0u8; (MAX_ENTRY_BYTES as usize) + (16 * 1024 * 1024)];
+        let tarball = build_tarball(&[("plugin.toml", VALID_MANIFEST), ("demo.wasm", &huge)]);
+        assert!(
+            (tarball.len() as u64) < MAX_TARBALL_BYTES / 4,
+            "fixture should compress far below the tarball size cap to prove this isn't caught by that check"
+        );
+        let started = std::time::Instant::now();
+        let result = extract_tarball(&tarball, "demo-plugin");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "rejection should be fast, not proportional to the decompressed size"
+        );
+        assert!(matches!(result, Err(RegistryError::MalformedArchive(_))));
+    }
+
+    #[test]
     fn extract_tarball_rejects_duplicate_entry_names() {
         let tarball = build_tarball(&[
             ("plugin.toml", VALID_MANIFEST),
@@ -554,7 +625,10 @@ max_output_bytes = 1024
         let index: RegistryIndex = serde_json::from_str(json).unwrap();
         assert_eq!(index.entries.len(), 1);
         assert_eq!(index.entries[0].id, "example-plugin");
-        assert_eq!(index.entries[0].signer_public_key.as_deref(), Some("cGxhY2Vob2xkZXItYmFzZTY0LWtleQ=="));
+        assert_eq!(
+            index.entries[0].signer_public_key.as_deref(),
+            Some("cGxhY2Vob2xkZXItYmFzZTY0LWtleQ==")
+        );
     }
 
     #[test]
@@ -604,7 +678,10 @@ max_output_bytes = 1024
     #[test]
     fn find_matches_by_exact_id_only() {
         let index = sample_index();
-        assert_eq!(index.find("waf-guard").map(|e| e.id.as_str()), Some("waf-guard"));
+        assert_eq!(
+            index.find("waf-guard").map(|e| e.id.as_str()),
+            Some("waf-guard")
+        );
         assert_eq!(index.find("waf"), None);
     }
 
@@ -642,8 +719,8 @@ max_output_bytes = 1024
     #[test]
     fn verify_signer_accepts_a_matching_declared_key() {
         let (extracted, signing_key) = signed_extracted_plugin();
-        let public_key_b64 =
-            base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
+        let public_key_b64 = base64::engine::general_purpose::STANDARD
+            .encode(signing_key.verifying_key().to_bytes());
         let result = verify_signer(&extracted, Some(&public_key_b64));
         assert_eq!(result.unwrap(), Some(public_key_b64));
     }

@@ -1,6 +1,11 @@
+use axum::body::Body;
+use axum::response::Response;
 use axum::{extract::State, http::StatusCode, routing::get, Router};
+use base64::Engine as _;
+use ed25519_dalek::SigningKey;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use rand::rngs::OsRng;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::io::Write as _;
@@ -92,6 +97,76 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+/// Like `spawn_mock_registry`, but lets the caller declare a
+/// `signer_public_key` for the index entry -- needed to exercise the
+/// signed-install path and a signer-key-mismatch rejection at the CLI
+/// level.
+async fn spawn_mock_registry_with_signer(
+    tarball: Vec<u8>,
+    sha256: String,
+    signer_public_key: Option<String>,
+) -> String {
+    let state = MockState {
+        tarball: Arc::new(tarball),
+    };
+    let index_json = json!({
+        "entries": [{
+            "id": "demo-plugin",
+            "display_name": "Demo",
+            "description": "A demo plugin for tests.",
+            "version": "1.0.0",
+            "download_url": "PLACEHOLDER/demo-plugin.tar.gz",
+            "sha256": sha256,
+            "signer_public_key": signer_public_key,
+        }]
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    let index_json = serde_json::to_string(&index_json)
+        .unwrap()
+        .replace("PLACEHOLDER", &base);
+
+    let app = Router::new()
+        .route(
+            "/index.json",
+            get(move || {
+                let body = index_json.clone();
+                async move { ([("content-type", "application/json")], body) }
+            }),
+        )
+        .route(
+            "/demo-plugin.tar.gz",
+            get(|State(state): State<MockState>| async move {
+                (StatusCode::OK, state.tarball.as_ref().clone())
+            }),
+        )
+        .with_state(state);
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("{base}/index.json")
+}
+
+/// Builds a real Ed25519 keypair, signs `MANIFEST` + the given wasm bytes
+/// with it, and returns a tarball containing `plugin.toml`, the module, and
+/// `plugin.sig`, alongside the raw signature TOML bytes (so a test can
+/// assert the installed file matches byte-for-byte) and the base64-encoded
+/// public key of the signer.
+fn build_signed_tarball(wasm_bytes: &[u8]) -> (Vec<u8>, Vec<u8>, String, SigningKey) {
+    let manifest = bearust::plugin_runtime::PluginManifest::from_toml(MANIFEST).unwrap();
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let signature = bearust::plugin_signing::sign(&manifest, wasm_bytes, &signing_key);
+    let sig_toml = toml::to_string(&signature).unwrap();
+    let sig_bytes = sig_toml.into_bytes();
+    let public_key_b64 =
+        base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
+    let tarball = build_tarball(&[
+        ("plugin.toml", MANIFEST),
+        ("demo.wasm", wasm_bytes),
+        ("plugin.sig", &sig_bytes),
+    ]);
+    (tarball, sig_bytes, public_key_b64, signing_key)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -322,6 +397,61 @@ async fn search_lists_matching_entries() {
     assert!(stdout.contains("demo-plugin"), "stdout was: {stdout}");
 }
 
+/// Regression test for the "unbounded read when Content-Length is absent"
+/// finding: `RegistryIndex::fetch`'s `content_length()` pre-check does
+/// nothing when the server never sends the header, so without a bounded
+/// read the whole (oversized) body would be buffered before any size check
+/// could fire. This server streams a chunked response with no
+/// Content-Length header at all, well past `MAX_INDEX_RESPONSE_BYTES` (1
+/// MiB), and the CLI must reject it quickly rather than hang trying to
+/// buffer it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_rejects_an_oversized_index_response_with_no_content_length_header() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let app = Router::new().route(
+        "/index.json",
+        get(|| async {
+            // 20 chunks of 128 KiB = 2.5 MiB, more than double
+            // MAX_INDEX_RESPONSE_BYTES, streamed with no known total length
+            // so axum cannot set Content-Length.
+            let chunk = vec![b'a'; 128 * 1024];
+            let stream = futures_util::stream::iter(
+                (0..20)
+                    .map(move |_| Ok::<_, std::io::Error>(axum::body::Bytes::from(chunk.clone()))),
+            );
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Body::from_stream(stream))
+                .unwrap()
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let index_url = format!("http://{addr}/index.json");
+
+    let started = std::time::Instant::now();
+    let output = Command::new(bearust_bin())
+        .args(["plugin", "search", "anything", "--registry-url", &index_url])
+        .output()
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        !output.status.success(),
+        "an oversized, Content-Length-less index response should be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("size limit"),
+        "expected a response-too-large error, got: {stderr}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "rejection should be prompt, not proportional to how much the server is willing to stream"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_reports_no_matches_without_failing() {
     let tarball = build_tarball(&[
@@ -345,4 +475,76 @@ async fn search_reports_no_matches_without_failing() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("no plugins match"), "stdout was: {stdout}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_writes_a_valid_signature_file_for_a_signed_plugin() {
+    let wasm_bytes = b"pretend-wasm-bytes".to_vec();
+    let (tarball, sig_bytes, public_key_b64, _signing_key) = build_signed_tarball(&wasm_bytes);
+    let checksum = sha256_hex(&tarball);
+    let index_url = spawn_mock_registry_with_signer(tarball, checksum, Some(public_key_b64)).await;
+
+    let plugins_dir = tempdir().unwrap();
+    let output = Command::new(bearust_bin())
+        .args(["plugin", "install", "demo-plugin", "--out"])
+        .arg(plugins_dir.path())
+        .args(["--registry-url", &index_url, "--yes"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let installed_dir = plugins_dir.path().join("demo-plugin");
+    assert!(installed_dir.join("plugin.toml").exists());
+    assert_eq!(
+        std::fs::read(installed_dir.join("demo.wasm")).unwrap(),
+        wasm_bytes
+    );
+    let installed_sig = installed_dir.join("plugin.sig");
+    assert!(installed_sig.exists(), "plugin.sig was not installed");
+    assert_eq!(
+        std::fs::read(&installed_sig).unwrap(),
+        sig_bytes,
+        "installed plugin.sig bytes must exactly match the tarball's"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_rejects_a_signer_key_mismatch_and_writes_nothing() {
+    let wasm_bytes = b"pretend-wasm-bytes".to_vec();
+    let (tarball, _sig_bytes, _actual_public_key_b64, _signing_key) =
+        build_signed_tarball(&wasm_bytes);
+    let checksum = sha256_hex(&tarball);
+    // A different, also validly generated key -- the index falsely declares
+    // this as the signer even though the archive is signed by another key.
+    let wrong_key = SigningKey::generate(&mut OsRng);
+    let wrong_public_key_b64 =
+        base64::engine::general_purpose::STANDARD.encode(wrong_key.verifying_key().to_bytes());
+    let index_url =
+        spawn_mock_registry_with_signer(tarball, checksum, Some(wrong_public_key_b64)).await;
+
+    let plugins_dir = tempdir().unwrap();
+    let output = Command::new(bearust_bin())
+        .args(["plugin", "install", "demo-plugin", "--out"])
+        .arg(plugins_dir.path())
+        .args(["--registry-url", &index_url, "--yes"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "install should fail on a signer key mismatch"
+    );
+    assert!(
+        !plugins_dir.path().join("demo-plugin").exists(),
+        "nothing should be written to the target directory on a signer mismatch"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("signer"),
+        "expected a signer-mismatch error, got: {stderr}"
+    );
 }
