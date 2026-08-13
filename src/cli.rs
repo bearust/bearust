@@ -68,6 +68,24 @@ pub enum PluginCommand {
         #[arg(long)]
         key: PathBuf,
     },
+    /// Searches the plugin registry index for plugins matching a query.
+    Search {
+        query: String,
+        #[arg(long)]
+        registry_url: Option<String>,
+    },
+    /// Downloads, verifies, and installs a plugin from the registry index.
+    Install {
+        id: String,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        #[arg(long)]
+        registry_url: Option<String>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -82,6 +100,8 @@ pub enum AppError {
     Server(String),
     #[error("plugin signing error: {0}")]
     PluginSigning(String),
+    #[error("plugin registry error: {0}")]
+    PluginRegistry(String),
 }
 
 pub fn run(cli: Cli) -> Result<(), AppError> {
@@ -614,6 +634,17 @@ fn plugin_command(action: PluginCommand) -> Result<(), AppError> {
     match action {
         PluginCommand::Keygen { out } => plugin_keygen(&out),
         PluginCommand::Sign { plugin_dir, key } => plugin_sign(&plugin_dir, &key),
+        PluginCommand::Search {
+            query,
+            registry_url,
+        } => plugin_search(&query, registry_url.as_deref()),
+        PluginCommand::Install {
+            id,
+            out,
+            yes,
+            force,
+            registry_url,
+        } => plugin_install(&id, &out, yes, force, registry_url.as_deref()),
     }
 }
 
@@ -697,5 +728,133 @@ fn plugin_sign(plugin_dir: &Path, key_path: &Path) -> Result<(), AppError> {
     let sig_path = plugin_dir.join("plugin.sig");
     std::fs::write(&sig_path, sig_toml).map_err(|e| AppError::PluginSigning(e.to_string()))?;
     println!("wrote {}", sig_path.display());
+    Ok(())
+}
+
+const DEFAULT_PLUGIN_REGISTRY_URL: &str =
+    "https://raw.githubusercontent.com/rizalord/bearust-plugin-index/main/index.json";
+
+fn resolve_registry_url(flag: Option<&str>) -> String {
+    if let Some(url) = flag {
+        return url.to_owned();
+    }
+    if let Ok(url) = std::env::var("BEARUST_PLUGIN_REGISTRY_URL") {
+        if !url.trim().is_empty() {
+            return url;
+        }
+    }
+    DEFAULT_PLUGIN_REGISTRY_URL.to_owned()
+}
+
+fn plugin_search(query: &str, registry_url: Option<&str>) -> Result<(), AppError> {
+    let url = resolve_registry_url(registry_url);
+    let client = reqwest::blocking::Client::new();
+    let index = crate::plugin_registry::RegistryIndex::fetch(&client, &url)
+        .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+    let results = index.search(query);
+    if results.is_empty() {
+        println!("no plugins match \"{query}\"");
+        return Ok(());
+    }
+    for entry in results {
+        println!("{}  v{}  {}", entry.id, entry.version, entry.description);
+    }
+    Ok(())
+}
+
+fn plugin_install(
+    id: &str,
+    plugins_directory: &Path,
+    yes: bool,
+    force: bool,
+    registry_url: Option<&str>,
+) -> Result<(), AppError> {
+    use crate::plugin_registry::{
+        download_and_verify, extract_tarball, verify_signer, RegistryIndex,
+    };
+
+    let url = resolve_registry_url(registry_url);
+    let client = reqwest::blocking::Client::new();
+    let index =
+        RegistryIndex::fetch(&client, &url).map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+    let entry = index.find(id).ok_or_else(|| {
+        AppError::PluginRegistry(
+            crate::plugin_registry::RegistryError::NotFound(id.to_owned()).to_string(),
+        )
+    })?;
+
+    let target_dir = plugins_directory.join(id);
+    if target_dir.exists() && !force {
+        return Err(AppError::PluginRegistry(format!(
+            "{} already exists -- pass --force to overwrite",
+            target_dir.display()
+        )));
+    }
+
+    let tarball =
+        download_and_verify(&client, entry).map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+    let extracted =
+        extract_tarball(&tarball, id).map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+    let signer = verify_signer(&extracted, entry.signer_public_key.as_deref())
+        .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+
+    println!(
+        "{}  v{}\ncapabilities: {}\nsigner: {}",
+        entry.id,
+        entry.version,
+        if extracted.manifest.capabilities.is_empty() {
+            "(none)".to_owned()
+        } else {
+            extracted.manifest.capabilities.join(", ")
+        },
+        signer.as_deref().unwrap_or("unsigned"),
+    );
+    if !yes {
+        print!("Install this plugin? [y/N]: ");
+        std::io::Write::flush(&mut std::io::stdout())
+            .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+        let answer = answer.trim().to_ascii_lowercase();
+        if answer != "y" && answer != "yes" {
+            println!("aborted");
+            return Ok(());
+        }
+    }
+
+    std::fs::create_dir_all(plugins_directory)
+        .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+    let temp_dir = plugins_directory.join(format!(".{id}.install-tmp"));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+    let write_result = (|| -> std::io::Result<()> {
+        std::fs::write(temp_dir.join("plugin.toml"), &extracted.manifest_bytes)?;
+        std::fs::write(
+            temp_dir.join(&extracted.manifest.module),
+            &extracted.wasm_bytes,
+        )?;
+        if let Some(signature_bytes) = &extracted.signature_bytes {
+            std::fs::write(temp_dir.join("plugin.sig"), signature_bytes)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(AppError::PluginRegistry(error.to_string()));
+    }
+
+    if target_dir.exists() {
+        std::fs::remove_dir_all(&target_dir)
+            .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+    }
+    std::fs::rename(&temp_dir, &target_dir).map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+
+    println!(
+        "installed {} to {} -- run `POST /api/plugins/reload` to load it",
+        id,
+        target_dir.display()
+    );
     Ok(())
 }

@@ -304,7 +304,6 @@ pub fn verify_signer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
     use std::io::Write as _;
