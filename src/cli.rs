@@ -49,6 +49,25 @@ pub enum Command {
         #[arg(long, default_value = "./bearust.pid")]
         pid_file: PathBuf,
     },
+    Plugin {
+        #[command(subcommand)]
+        action: PluginCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginCommand {
+    /// Generates a new Ed25519 signing keypair for signing plugins.
+    Keygen {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Signs a plugin directory's manifest + wasm module, writing plugin.sig.
+    Sign {
+        plugin_dir: PathBuf,
+        #[arg(long)]
+        key: PathBuf,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -61,6 +80,8 @@ pub enum AppError {
     Pid(#[from] reload::PidError),
     #[error("server error: {0}")]
     Server(String),
+    #[error("plugin signing error: {0}")]
+    PluginSigning(String),
 }
 
 pub fn run(cli: Cli) -> Result<(), AppError> {
@@ -79,6 +100,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
             config: path,
             json_logs,
         } => serve(path, json_logs),
+        Command::Plugin { action } => plugin_command(action),
     }
 }
 
@@ -586,4 +608,60 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
 
 fn is_sqlite_database_url(url: &str) -> bool {
     url.trim_start().to_ascii_lowercase().starts_with("sqlite:")
+}
+
+fn plugin_command(action: PluginCommand) -> Result<(), AppError> {
+    match action {
+        PluginCommand::Keygen { out } => plugin_keygen(&out),
+        PluginCommand::Sign { plugin_dir, key } => plugin_sign(&plugin_dir, &key),
+    }
+}
+
+fn plugin_keygen(out: &Path) -> Result<(), AppError> {
+    use base64::Engine as _;
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    std::fs::create_dir_all(out).map_err(|e| AppError::PluginSigning(e.to_string()))?;
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let key_path = out.join("signing.key");
+    std::fs::write(&key_path, signing_key.to_bytes())
+        .map_err(|e| AppError::PluginSigning(e.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| AppError::PluginSigning(e.to_string()))?;
+    }
+    let public_key =
+        base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
+    println!("{public_key}");
+    Ok(())
+}
+
+fn plugin_sign(plugin_dir: &Path, key_path: &Path) -> Result<(), AppError> {
+    use ed25519_dalek::SigningKey;
+
+    let key_bytes = std::fs::read(key_path).map_err(|e| AppError::PluginSigning(e.to_string()))?;
+    let key_bytes: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| AppError::PluginSigning("signing key has the wrong length".to_string()))?;
+    let signing_key = SigningKey::from_bytes(&key_bytes);
+
+    let manifest_path = plugin_dir.join("plugin.toml");
+    let manifest_bytes =
+        std::fs::read(&manifest_path).map_err(|e| AppError::PluginSigning(e.to_string()))?;
+    let manifest = crate::plugin_runtime::PluginManifest::from_toml(&manifest_bytes)
+        .map_err(|e| AppError::PluginSigning(e.to_string()))?;
+    let module_path = plugin_dir.join(&manifest.module);
+    let wasm_bytes =
+        std::fs::read(&module_path).map_err(|e| AppError::PluginSigning(e.to_string()))?;
+
+    let signature = crate::plugin_signing::sign(&manifest, &wasm_bytes, &signing_key);
+    let sig_toml =
+        toml::to_string(&signature).map_err(|e| AppError::PluginSigning(e.to_string()))?;
+    let sig_path = plugin_dir.join("plugin.sig");
+    std::fs::write(&sig_path, sig_toml).map_err(|e| AppError::PluginSigning(e.to_string()))?;
+    println!("wrote {}", sig_path.display());
+    Ok(())
 }
