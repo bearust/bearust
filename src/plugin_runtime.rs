@@ -26,6 +26,11 @@ pub const MAX_DISPLAY_NAME_LEN: usize = 128;
 pub const MAX_MODULE_NAME_LEN: usize = 128;
 pub const MAX_CAPABILITY_LEN: usize = 64;
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+/// A real `plugin.sig` is roughly 200 bytes (base64-encoded 32-byte key +
+/// 64-byte signature, plus TOML framing). 4 KiB is generous headroom while
+/// still bounding how much an oversized file dropped into a plugin
+/// directory can force a reload to read into memory.
+pub const MAX_SIGNATURE_BYTES: usize = 4096;
 const HEALTH_RESULT_BYTES: usize = std::mem::size_of::<i32>();
 /// `abi_version: 2` also writes the *input* JSON through the same
 /// `max_output_bytes` bound. The worst-case input is
@@ -200,6 +205,7 @@ pub enum PluginError {
     MalformedSignature,
     InvalidSignature,
     KeyMismatch,
+    TrustStoreUnavailable,
 }
 impl PluginError {
     pub fn code(&self) -> &'static str {
@@ -220,6 +226,7 @@ impl PluginError {
             Self::MalformedSignature => "malformed_signature",
             Self::InvalidSignature => "invalid_signature",
             Self::KeyMismatch => "key_mismatch",
+            Self::TrustStoreUnavailable => "trust_store_corrupt",
         }
     }
 }
@@ -1197,8 +1204,22 @@ fn resolve_trust(
     trust_store: &TrustStore,
 ) -> Result<String, PluginError> {
     let sig_path = plugin_dir.join("plugin.sig");
-    let sig_bytes = match fs::read(&sig_path) {
-        Ok(bytes) => bytes,
+    let sig_bytes = match fs::metadata(&sig_path) {
+        Ok(metadata) => {
+            // Reject anything that isn't a plain file (e.g. a FIFO planted
+            // at this path) before ever attempting to read it, so a reload
+            // can't block forever waiting on a reader/writer pair.
+            if !metadata.is_file() {
+                return Err(PluginError::MalformedSignature);
+            }
+            if metadata.len() > MAX_SIGNATURE_BYTES as u64 {
+                return Err(PluginError::MalformedSignature);
+            }
+            match fs::read(&sig_path) {
+                Ok(bytes) => bytes,
+                Err(_) => return Err(PluginError::Io),
+            }
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return if require_signature {
                 Err(PluginError::SignatureRequired)
@@ -1339,6 +1360,7 @@ fn sanitize_error_code(value: &str) -> Option<String> {
             | "malformed_signature"
             | "invalid_signature"
             | "key_mismatch"
+            | "trust_store_corrupt"
     );
     safe.then(|| value.to_owned())
 }
@@ -1550,8 +1572,8 @@ impl PluginManager {
         let mut summary = ReloadSummary::default();
         let mut fatal_existing_failure = false;
 
-        let trust_store =
-            TrustStore::load(directory.join("trusted-keys.json")).map_err(|_| PluginError::Io)?;
+        let trust_store = TrustStore::load(directory.join("trusted-keys.json"))
+            .map_err(|_| PluginError::TrustStoreUnavailable)?;
 
         for child in children {
             let manifest_path = child.path().join("plugin.toml");

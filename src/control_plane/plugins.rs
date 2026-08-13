@@ -87,7 +87,7 @@ fn plugin_error(error: PluginError) -> Response {
         | PluginError::FuelExhausted
         | PluginError::MemoryLimit
         | PluginError::Trap => (StatusCode::BAD_GATEWAY, "Plugin health check failed"),
-        PluginError::CompileFailed | PluginError::Io => (
+        PluginError::CompileFailed | PluginError::Io | PluginError::TrustStoreUnavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "Plugin runtime unavailable",
         ),

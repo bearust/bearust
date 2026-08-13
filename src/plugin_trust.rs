@@ -7,7 +7,15 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::VerifyingKey;
+use std::io::Write as _;
 use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
+
+/// A generous upper bound for `trusted-keys.json`: a JSON map of
+/// plugin-id-to-base64-key entries stays well under 1 MiB even with
+/// hundreds of pinned plugins. Anyone who can drop a plugin bundle into
+/// the plugins directory can also plant an oversized file at this path, so
+/// this bounds how much a reload is forced to read into memory.
+const MAX_TRUST_STORE_BYTES: u64 = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustDecision {
@@ -52,9 +60,29 @@ impl TrustStore {
     /// empty store (nothing has been pinned yet); a present-but-unparseable
     /// file is `Err(TrustStoreError::Corrupt)`.
     pub fn load(path: PathBuf) -> Result<Self, TrustStoreError> {
-        let pins = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<BTreeMap<String, String>>(&bytes)
-                .map_err(|_| TrustStoreError::Corrupt)?,
+        let pins = match std::fs::metadata(&path) {
+            Ok(metadata) => {
+                // Reject anything that isn't a plain file (e.g. a FIFO)
+                // before reading it, so a load can't block forever.
+                if !metadata.is_file() {
+                    return Err(TrustStoreError::Corrupt);
+                }
+                if metadata.len() > MAX_TRUST_STORE_BYTES {
+                    return Err(TrustStoreError::Corrupt);
+                }
+                let bytes = std::fs::read(&path).map_err(|_| TrustStoreError::Corrupt)?;
+                // A crash between writing the temp file and the atomic
+                // rename in `persist` can realistically leave a
+                // zero-length (or whitespace-only) file behind. Treat that
+                // the same as a missing file -- nothing pinned yet -- not
+                // as corruption that bricks all plugin loading.
+                if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+                    BTreeMap::new()
+                } else {
+                    serde_json::from_slice::<BTreeMap<String, String>>(&bytes)
+                        .map_err(|_| TrustStoreError::Corrupt)?
+                }
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(_) => return Err(TrustStoreError::Corrupt),
         };
@@ -97,7 +125,16 @@ impl TrustStore {
     fn persist(&self, pins: &BTreeMap<String, String>) -> Result<(), TrustStoreError> {
         let json = serde_json::to_vec_pretty(pins).map_err(|_| TrustStoreError::WriteFailed)?;
         let tmp_path = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, &json).map_err(|_| TrustStoreError::WriteFailed)?;
+        let mut file =
+            std::fs::File::create(&tmp_path).map_err(|_| TrustStoreError::WriteFailed)?;
+        file.write_all(&json)
+            .map_err(|_| TrustStoreError::WriteFailed)?;
+        // Make sure the temp file's contents are durable before it's
+        // atomically swapped into place -- otherwise a crash between the
+        // write and the rename (or shortly after) can leave a truncated or
+        // zero-length file behind.
+        file.sync_all().map_err(|_| TrustStoreError::WriteFailed)?;
+        drop(file);
         std::fs::rename(&tmp_path, &self.path).map_err(|_| TrustStoreError::WriteFailed)?;
         Ok(())
     }
@@ -223,6 +260,30 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("trusted-keys.json");
         std::fs::write(&path, b"{ not valid json").unwrap();
+        assert_eq!(TrustStore::load(path), Err(TrustStoreError::Corrupt));
+    }
+
+    #[test]
+    fn an_empty_file_loads_as_an_empty_store_not_as_corrupt() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trusted-keys.json");
+        std::fs::write(&path, b"").unwrap();
+        let store = TrustStore::load(path).unwrap();
+        let k = key();
+        assert_eq!(
+            store.check_or_pin("demo", &k).unwrap(),
+            TrustDecision::Trusted
+        );
+    }
+
+    #[test]
+    fn an_oversized_file_fails_to_load_as_corrupt() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trusted-keys.json");
+        // One byte over the cap, padded with whitespace so it would parse
+        // as an empty store if the size check were skipped.
+        let oversized = vec![b' '; MAX_TRUST_STORE_BYTES as usize + 1];
+        std::fs::write(&path, &oversized).unwrap();
         assert_eq!(TrustStore::load(path), Err(TrustStoreError::Corrupt));
     }
 }

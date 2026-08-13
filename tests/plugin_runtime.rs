@@ -2,6 +2,7 @@ use bearust::config::PluginConfig;
 use bearust::plugin_runtime::{
     module_digest, resolve_module_path, CompiledPlugin, HealthResult, PluginEngine, PluginError,
     PluginLimits, PluginManager, PluginManifest, PluginPolicy, ValidatedManifest,
+    MAX_SIGNATURE_BYTES,
 };
 use bearust::plugin_signing::sign;
 use ed25519_dalek::SigningKey;
@@ -2148,4 +2149,74 @@ fn a_malformed_signature_file_is_rejected() {
         manager.list()[0].last_error_code.as_deref(),
         Some("malformed_signature")
     );
+}
+
+#[test]
+fn an_oversized_signature_file_is_rejected_as_malformed_without_being_fully_read() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("signed-health-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/signed_health_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/signed_health_v2/signed_health_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("signed_health_v2.wasm"), &module).unwrap();
+    // One byte over the cap; content doesn't matter since the size check
+    // must reject it before any parsing is attempted.
+    let oversized = vec![b'a'; MAX_SIGNATURE_BYTES + 1];
+    fs::write(plugin.join("plugin.sig"), &oversized).unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    let summary = manager.reload_from_disk().unwrap();
+    assert_eq!(summary.loaded, 0);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(
+        manager.list()[0].last_error_code.as_deref(),
+        Some("malformed_signature")
+    );
+}
+
+#[test]
+fn a_corrupt_trust_store_fails_reload_with_a_distinct_error_code() {
+    let root = tempdir().unwrap();
+    let plugin = root.path().join("signed-health-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/signed_health_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/signed_health_v2/signed_health_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("signed_health_v2.wasm"), &module).unwrap();
+    let manifest_toml = include_str!("fixtures/plugins/signed_health_v2/plugin.toml");
+    let manifest = PluginManifest::from_toml(manifest_toml.as_bytes()).unwrap();
+    let signing_key = SigningKey::generate(&mut OsRng);
+    let signature = sign(&manifest, &module, &signing_key);
+    fs::write(
+        plugin.join("plugin.sig"),
+        toml::to_string(&signature).unwrap(),
+    )
+    .unwrap();
+    fs::write(root.path().join("trusted-keys.json"), b"{ not valid json").unwrap();
+
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    let error = manager.reload_from_disk().unwrap_err();
+    assert_eq!(error, PluginError::TrustStoreUnavailable);
+    assert_eq!(error.code(), "trust_store_corrupt");
 }

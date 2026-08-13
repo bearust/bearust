@@ -9,9 +9,15 @@
 
 use crate::plugin_runtime::{PluginLimits, PluginManifest};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+
+/// Domain-separation prefix mixed into the manifest digest before hashing.
+/// Ensures a signature over this specific signed-message format can never
+/// be replayed as a valid signature over some future different message
+/// format that happens to reuse the same author key.
+const SIGNING_CONTEXT: &[u8] = b"bearust-plugin-sig-v1";
 
 /// The subset of a manifest's fields that are security-relevant and
 /// therefore covered by a plugin's signature. `display_name` (cosmetic)
@@ -40,7 +46,10 @@ pub fn signing_message(manifest: &PluginManifest, wasm_bytes: &[u8]) -> [u8; 64]
     };
     let manifest_json =
         serde_json::to_vec(&fields).expect("SignedManifestFields always serializes");
-    let manifest_digest = Sha256::digest(&manifest_json);
+    let manifest_digest = Sha256::new()
+        .chain_update(SIGNING_CONTEXT)
+        .chain_update(&manifest_json)
+        .finalize();
     let wasm_digest = Sha256::digest(wasm_bytes);
     let mut message = [0u8; 64];
     message[..32].copy_from_slice(&manifest_digest);
@@ -107,7 +116,7 @@ pub fn verify(
     let signature = Signature::from_bytes(&sig_bytes);
     let message = signing_message(manifest, wasm_bytes);
     verifying_key
-        .verify(&message, &signature)
+        .verify_strict(&message, &signature)
         .map_err(|_| SignatureError::InvalidSignature)?;
     Ok(verifying_key)
 }

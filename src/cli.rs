@@ -631,17 +631,40 @@ fn plugin_keygen(out: &Path) -> Result<(), AppError> {
         use std::os::unix::fs::OpenOptionsExt;
         let mut file = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&key_path)
-            .map_err(|e| AppError::PluginSigning(e.to_string()))?;
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    AppError::PluginSigning(format!(
+                        "a signing key already exists at {} — remove it first if you intend to replace it",
+                        key_path.display()
+                    ))
+                } else {
+                    AppError::PluginSigning(e.to_string())
+                }
+            })?;
         file.write_all(&signing_key.to_bytes())
             .map_err(|e| AppError::PluginSigning(e.to_string()))?;
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(&key_path, signing_key.to_bytes())
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&key_path)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    AppError::PluginSigning(format!(
+                        "a signing key already exists at {} — remove it first if you intend to replace it",
+                        key_path.display()
+                    ))
+                } else {
+                    AppError::PluginSigning(e.to_string())
+                }
+            })?;
+        file.write_all(&signing_key.to_bytes())
             .map_err(|e| AppError::PluginSigning(e.to_string()))?;
     }
     let public_key =

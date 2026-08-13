@@ -85,9 +85,61 @@ manifest text, module bytes, runtime errors, request data, or secrets.
 
 Invalid configuration, compilation errors, traps, timeouts, fuel exhaustion,
 and memory limits disable/isolate the affected plugin. The proxy remains
-available and startup continues. Phase 13A has **no signature verification,
-registry, or remote download**; deploy only reviewed local modules and keep
-the directory read-only. The public SDK and traffic hooks are deferred to
-Phase 13B/13C; registry/signature enforcement is Phase 14 work.
+available and startup continues. Deploy only reviewed local modules; there is
+still no remote download or registry.
+
+### Plugin manifest signing and trust-on-first-use (Phase 14)
+
+Set `plugins.require_signature = true` to require every plugin directory to
+carry a valid `plugin.sig` (rejecting anything unsigned); leave it `false`
+(the default) to allow unsigned modules alongside signed ones:
+
+```toml
+[plugins]
+enabled = true
+directory = "/etc/bearust/plugins"
+require_signature = true
+max_plugins = 64
+max_module_bytes = 16777216
+max_memory_pages = 256
+max_fuel = 10000000
+invocation_timeout_ms = 1000
+max_output_bytes = 65536
+```
+
+Sign a reviewed plugin before shipping it to the plugin directory:
+
+```console
+$ bearust plugin keygen --out ./keys        # writes ./keys/signing.key (0600), prints the public key
+$ bearust plugin sign ./plugins/health-ok --key ./keys/signing.key
+```
+
+`plugin sign` writes `plugin.sig` alongside `plugin.toml` and the `.wasm`
+module. Keep `signing.key` off the deployed host entirely — sign in CI or on
+a workstation and ship only `plugin.toml`, the module, and `plugin.sig`.
+
+The first time BeaRust loads a signed plugin ID, it pins that plugin's
+public key into `<directory>/trusted-keys.json`. Every subsequent load must
+match the pinned key; a mismatch fails closed with `key_mismatch` in the
+plugin's `last_error_code` and in `plugin_startup_failed`/reload audit logs.
+Because the trust store is written at runtime, **the plugin directory cannot
+be fully read-only** if signing is in use — mount it read-write and owned
+only by the account running BeaRust, or pre-seed `trusted-keys.json`
+read-only with the expected pins and mount only that file read-only if you
+want to lock pinning down entirely.
+
+If you rotate a plugin's signing key on purpose, the next reload after the
+rotation logs `key_mismatch` — this is expected, not a compromise signal by
+itself. Recover by removing (or updating) that plugin's entry in
+`trusted-keys.json` on the host, then reload; the next load re-pins whatever
+key is now present. There is no API for this — it is a deliberate manual
+step so a rotation always leaves an operator-visible trace.
+
+Threat-model note: `trusted-keys.json` lives next to the plugin bundles it
+protects, so signing plus pinning defends against a tampered *distribution
+channel* (a corrupted artifact, a compromised mirror) — it does not defend
+against an attacker who already has write access to the plugins directory,
+since they could edit the pin file too. Directory ownership/permissions are
+still the primary control.
 
 JSON logs include event, level, timestamp, request identifiers, route/upstream context, and error category. Unhealthy TCP/HTTP backends are removed from selection; no healthy backend returns `503`, while a route/host miss returns `404`. For `404`, verify `Host`, path prefix, and pool. For `503`, inspect health addresses/paths and reachability from the container. Roll back by restoring the prior image tag and config, then restart or issue `SIGHUP`.

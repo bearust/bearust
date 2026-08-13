@@ -160,10 +160,73 @@ Security boundary: paths are canonicalized beneath the configured plugin
 directory; traversal, absolute paths, symlink escapes, unknown capabilities,
 WASI imports, and unbounded limits are rejected. Audit/realtime/metrics output
 is redacted and never contains module bytes, manifest contents, filesystem
-paths, runtime backtraces, request data, or secrets. Phase 13A intentionally has
-**no signature verification or remote trust decision**; install only reviewed
-local modules. The public SDK and traffic hooks are deferred to Phase 13B/13C,
-and registry distribution/signatures to Phase 14.
+paths, runtime backtraces, request data, or secrets. The public SDK and
+traffic hooks were delivered in Phase 13B–13G; manifest signing and
+trust-on-first-use pinning were added in Phase 14 (below). Registry
+distribution remains future work.
+
+### Phase 14 plugin manifest signing and trust-on-first-use
+
+Plugin signing is optional and off by default. Set `plugins.require_signature
+= true` to reject any plugin directory that lacks a valid `plugin.sig`; left
+`false` (the default), unsigned plugins still load but signed ones are still
+verified and pinned:
+
+```toml
+[plugins]
+enabled = true
+directory = "./plugins"
+require_signature = false
+max_plugins = 64
+max_module_bytes = 16777216       # 16 MiB
+max_memory_pages = 256            # 64 KiB per page
+max_fuel = 10000000
+invocation_timeout_ms = 1000
+max_output_bytes = 65536
+```
+
+A signed plugin directory adds one file next to `plugin.toml` and the
+module:
+
+```text
+plugins/
+└── health-ok/
+    ├── plugin.toml
+    ├── health_ok.wasm
+    └── plugin.sig
+```
+
+Generate a signing keypair and sign a plugin directory with the `bearust`
+CLI:
+
+```console
+$ bearust plugin keygen --out ./keys
+<base64 public key printed to stdout>
+$ bearust plugin sign ./plugins/health-ok --key ./keys/signing.key
+wrote ./plugins/health-ok/plugin.sig
+```
+
+`plugin keygen` writes `signing.key` with mode `0600` on Unix and refuses to
+overwrite an existing key at that path (on any platform) — remove the old
+key first if you intend to replace it. `plugin sign` reads the manifest and
+module, computes an Ed25519 signature over both, and writes `plugin.sig`.
+
+On load, a signature is checked cryptographically and then checked against
+`<plugins-directory>/trusted-keys.json`, a trust-on-first-use pin store: the
+first key seen for a given plugin ID is pinned automatically, and every
+later load must match that pinned key or the plugin fails closed with
+`key_mismatch`. If you legitimately rotate a plugin's signing key, remove
+(or edit) that plugin's entry in `trusted-keys.json` and reload — the next
+load re-pins whatever key is present. There is no API to rotate a pin
+remotely; it is a deliberate, manual operator action.
+
+Threat-model boundary: `trusted-keys.json` lives inside the same directory
+as the plugin bundles it protects, so this mechanism protects against a
+tampered *distribution channel* (a corrupted download, a compromised
+mirror) — it does **not** protect against an attacker who already has write
+access to the plugins directory, since they could edit or delete the pin
+file too. Ensure the plugins directory is owned and writable only by the
+account running BeaRust.
 
 ### Audit log API and viewer
 

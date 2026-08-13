@@ -84,10 +84,41 @@ The runtime supplies no WASI or host imports and rejects path traversal,
 symlink escapes, unknown capabilities, malformed ABI exports, and limits above
 the configured maxima. Errors are stable codes (`invalid_manifest`,
 `abi_mismatch`, `compile_failed`, `disabled`, `timeout`, `fuel_exhausted`,
-`memory_limit`, `trap`, `not_found`, `io_error`). A plugin failure never fails
-proxy requests or prevents normal startup. Phase 13A does not verify signatures
-or download modules; treat local modules as trusted reviewed inputs until the
-registry/signature work in Phase 14.
+`memory_limit`, `trap`, `not_found`, `io_error`, `signature_required`,
+`malformed_signature`, `invalid_signature`, `key_mismatch`,
+`trust_store_corrupt`). A plugin failure never fails proxy requests or
+prevents normal startup. There is still no remote download or registry;
+treat local modules as trusted reviewed inputs.
+
+### Plugin manifest signing and trust-on-first-use (Phase 14)
+
+To exercise signing locally, generate a keypair and sign the fixture plugin
+directory before pointing `[plugins].directory` at it:
+
+```bash
+bearust plugin keygen --out ./tmp-keys
+bearust plugin sign "$tmp_plugin" --key ./tmp-keys/signing.key
+```
+
+`bearust plugin keygen --out <dir>` writes `<dir>/signing.key` (mode `0600`
+on Unix) and prints the base64 public key to stdout; it refuses to run
+twice into the same directory (`create_new`, not truncate) so it can never
+silently clobber an existing key. `bearust plugin sign <plugin-dir> --key
+<key-path>` reads `plugin.toml` and the module, and writes `<plugin-dir>/plugin.sig`.
+
+Set `plugins.require_signature = true` to reject unsigned plugin
+directories outright; leave it `false` to let signed and unsigned plugins
+coexist (unsigned plugins load as `trust_status = "unsigned"`, signed ones
+as `"trusted"` once pinned). The trust store lives at
+`<plugins-directory>/trusted-keys.json` and pins the first key seen for
+each plugin ID; a later load with a different key for the same ID fails
+closed with `key_mismatch` rather than silently re-pinning. To simulate a
+legitimate key rotation while testing, remove that plugin's entry from
+`trusted-keys.json` and reload — see README.md and DEPLOY.md for the full
+recovery procedure and the threat-model boundary (the pin file lives next
+to the bundles it protects, so it defends the distribution channel, not
+against an attacker who already has write access to the plugins
+directory).
 
 ## Localization contribution workflow
 

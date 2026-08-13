@@ -77,3 +77,41 @@ max_output_bytes = 64
     let wasm_bytes = fs::read(plugin_dir.path().join("demo.wasm")).unwrap();
     assert!(verify(&manifest, &wasm_bytes, &signature).is_ok());
 }
+
+#[test]
+fn keygen_refuses_to_clobber_an_existing_key() {
+    let key_dir = tempdir().unwrap();
+    let first = Command::new(bearust_bin())
+        .args(["plugin", "keygen", "--out"])
+        .arg(key_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "first keygen failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let key_path = key_dir.path().join("signing.key");
+    let original_contents = fs::read(&key_path).unwrap();
+
+    let second = Command::new(bearust_bin())
+        .args(["plugin", "keygen", "--out"])
+        .arg(key_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        !second.status.success(),
+        "second keygen unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("already exists"),
+        "unexpected stderr: {stderr}"
+    );
+
+    let contents_after = fs::read(&key_path).unwrap();
+    assert_eq!(
+        original_contents, contents_after,
+        "the original signing key must be left untouched"
+    );
+}
