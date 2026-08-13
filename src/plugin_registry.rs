@@ -7,6 +7,8 @@
 //! `plugin_trust::TrustStore` the next time the operator reloads plugins.
 
 use crate::plugin_runtime::PluginManifest;
+use crate::plugin_signing::{self, PluginSignature};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -255,9 +257,56 @@ pub fn extract_tarball(bytes: &[u8], expected_id: &str) -> Result<ExtractedPlugi
     })
 }
 
+/// Cross-checks `extracted`'s embedded signature (if any) against what the
+/// index entry claimed. Returns the verified signer's base64 public key on
+/// success (`None` only for a genuinely unsigned plugin the index also
+/// didn't claim a signer for). This is the only place index metadata can
+/// abort an install on a *trust*-relevant mismatch -- everywhere else the
+/// index is just a catalog. It never pins a key: that remains
+/// `plugin_trust::TrustStore`'s job, run by the existing reload path.
+pub fn verify_signer(
+    extracted: &ExtractedPlugin,
+    declared_signer_public_key: Option<&str>,
+) -> Result<Option<String>, RegistryError> {
+    match (&extracted.signature_bytes, declared_signer_public_key) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(RegistryError::SignerKeyMismatch(
+            "index declares a signer but the archive has no plugin.sig".to_owned(),
+        )),
+        (Some(sig_bytes), declared) => {
+            let sig_str = std::str::from_utf8(sig_bytes).map_err(|e| {
+                RegistryError::SignerKeyMismatch(format!("plugin.sig is not valid UTF-8: {e}"))
+            })?;
+            let signature: PluginSignature = toml::from_str(sig_str).map_err(|e| {
+                RegistryError::SignerKeyMismatch(format!("plugin.sig does not parse: {e}"))
+            })?;
+            let verifying_key =
+                plugin_signing::verify(&extracted.manifest, &extracted.wasm_bytes, &signature)
+                    .map_err(|e| {
+                        RegistryError::SignerKeyMismatch(format!(
+                            "signature does not verify: {}",
+                            e.code()
+                        ))
+                    })?;
+            let actual_key_b64 = BASE64.encode(verifying_key.to_bytes());
+            if let Some(declared) = declared {
+                if declared != actual_key_b64 {
+                    return Err(RegistryError::SignerKeyMismatch(format!(
+                        "index declares signer {declared} but the archive is signed by {actual_key_b64}"
+                    )));
+                }
+            }
+            Ok(Some(actual_key_b64))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
     use std::io::Write as _;
 
     #[test]
@@ -572,5 +621,87 @@ max_output_bytes = 1024
         assert_eq!(results[0].id, "waf-guard");
 
         assert_eq!(index.search("nonexistent").len(), 0);
+    }
+
+    fn signed_extracted_plugin() -> (ExtractedPlugin, SigningKey) {
+        let manifest = PluginManifest::from_toml(VALID_MANIFEST).unwrap();
+        let wasm_bytes = b"pretend-wasm-bytes".to_vec();
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let signature = crate::plugin_signing::sign(&manifest, &wasm_bytes, &signing_key);
+        let signature_toml = toml::to_string(&signature).unwrap();
+        (
+            ExtractedPlugin {
+                manifest,
+                manifest_bytes: VALID_MANIFEST.to_vec(),
+                wasm_bytes,
+                signature_bytes: Some(signature_toml.into_bytes()),
+            },
+            signing_key,
+        )
+    }
+
+    #[test]
+    fn verify_signer_accepts_a_matching_declared_key() {
+        let (extracted, signing_key) = signed_extracted_plugin();
+        let public_key_b64 =
+            base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
+        let result = verify_signer(&extracted, Some(&public_key_b64));
+        assert_eq!(result.unwrap(), Some(public_key_b64));
+    }
+
+    #[test]
+    fn verify_signer_rejects_a_declared_key_that_does_not_match_the_real_signer() {
+        let (extracted, _signing_key) = signed_extracted_plugin();
+        let wrong_key = SigningKey::generate(&mut OsRng);
+        let wrong_public_key_b64 =
+            base64::engine::general_purpose::STANDARD.encode(wrong_key.verifying_key().to_bytes());
+        let result = verify_signer(&extracted, Some(&wrong_public_key_b64));
+        assert!(matches!(result, Err(RegistryError::SignerKeyMismatch(_))));
+    }
+
+    #[test]
+    fn verify_signer_accepts_a_signed_plugin_the_index_did_not_declare_a_signer_for() {
+        let (extracted, _signing_key) = signed_extracted_plugin();
+        let result = verify_signer(&extracted, None);
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn verify_signer_accepts_a_genuinely_unsigned_plugin() {
+        let manifest = PluginManifest::from_toml(VALID_MANIFEST).unwrap();
+        let extracted = ExtractedPlugin {
+            manifest,
+            manifest_bytes: VALID_MANIFEST.to_vec(),
+            wasm_bytes: b"pretend-wasm-bytes".to_vec(),
+            signature_bytes: None,
+        };
+        let result = verify_signer(&extracted, None);
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn verify_signer_rejects_a_declared_signer_when_the_archive_has_no_signature() {
+        let manifest = PluginManifest::from_toml(VALID_MANIFEST).unwrap();
+        let extracted = ExtractedPlugin {
+            manifest,
+            manifest_bytes: VALID_MANIFEST.to_vec(),
+            wasm_bytes: b"pretend-wasm-bytes".to_vec(),
+            signature_bytes: None,
+        };
+        let result = verify_signer(&extracted, Some("some-declared-key=="));
+        assert!(matches!(result, Err(RegistryError::SignerKeyMismatch(_))));
+    }
+
+    #[test]
+    fn verify_signer_rejects_a_malformed_signature_file() {
+        let manifest = PluginManifest::from_toml(VALID_MANIFEST).unwrap();
+        let extracted = ExtractedPlugin {
+            manifest,
+            manifest_bytes: VALID_MANIFEST.to_vec(),
+            wasm_bytes: b"pretend-wasm-bytes".to_vec(),
+            signature_bytes: Some(b"not valid toml".to_vec()),
+        };
+        let result = verify_signer(&extracted, None);
+        assert!(result.is_err());
     }
 }
