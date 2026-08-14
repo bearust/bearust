@@ -1,5 +1,7 @@
 use bearust::{
-    config::{Algorithm, BackendConfig, Config, HealthCheckKind, PoolConfig, RouteConfig, ServerConfig},
+    config::{
+        Algorithm, BackendConfig, Config, HealthCheckKind, PoolConfig, RouteConfig, ServerConfig,
+    },
     control_plane::{
         models::{WafAction, WafRule},
         repository,
@@ -121,18 +123,19 @@ fn empty_runtime_store() -> Arc<RuntimeStore> {
     Arc::new(RuntimeStore::new(snapshot))
 }
 
-fn self_signed_server_config() -> (quinn::ServerConfig, rustls_pki_types::CertificateDer<'static>) {
+fn self_signed_server_config() -> (
+    quinn::ServerConfig,
+    rustls_pki_types::CertificateDer<'static>,
+) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
     let cert_der = rustls_pki_types::CertificateDer::from(cert.cert.der().to_vec());
-    let key_der =
-        rustls_pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der()).unwrap();
+    let key_der = rustls_pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der()).unwrap();
     let mut tls_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert_der.clone()], key_der)
         .unwrap();
     tls_config.alpn_protocols = vec![b"h3".to_vec()];
-    let quic_config =
-        quinn::crypto::rustls::QuicServerConfig::try_from(tls_config).unwrap();
+    let quic_config = quinn::crypto::rustls::QuicServerConfig::try_from(tls_config).unwrap();
     (
         quinn::ServerConfig::with_crypto(Arc::new(quic_config)),
         cert_der,
@@ -146,8 +149,7 @@ fn client_config(cert_der: rustls_pki_types::CertificateDer<'static>) -> quinn::
         .with_root_certificates(roots)
         .with_no_client_auth();
     tls_config.alpn_protocols = vec![b"h3".to_vec()];
-    let quic_config =
-        quinn::crypto::rustls::QuicClientConfig::try_from(tls_config).unwrap();
+    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls_config).unwrap();
     quinn::ClientConfig::new(Arc::new(quic_config))
 }
 
@@ -169,8 +171,9 @@ async fn http3_listener_responds_to_a_real_h3_client() {
                 // (h3_quinn::Connection, h3::server::builder) the
                 // library function itself uses.
                 let h3_conn = h3_quinn::Connection::new(conn);
-                if let Ok(mut h3_conn) =
-                    h3::server::builder().build::<_, bytes::Bytes>(h3_conn).await
+                if let Ok(mut h3_conn) = h3::server::builder()
+                    .build::<_, bytes::Bytes>(h3_conn)
+                    .await
                 {
                     // Loop on accept() (as http3::handle_connection does)
                     // rather than returning immediately after the first
@@ -246,7 +249,10 @@ async fn http3_listener_responds_to_a_real_h3_client() {
 /// opposed to `self_signed_server_config`/`client_config` above, which
 /// build a raw `quinn::ServerConfig` for tests that call
 /// `h3::server::builder()` directly instead of the public `serve` fn).
-fn serve_tls_config() -> (Arc<rustls::ServerConfig>, rustls_pki_types::CertificateDer<'static>) {
+fn serve_tls_config() -> (
+    Arc<rustls::ServerConfig>,
+    rustls_pki_types::CertificateDer<'static>,
+) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
     let cert_der = rustls_pki_types::CertificateDer::from(cert.cert.der().to_vec());
     let key_der = rustls_pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der()).unwrap();

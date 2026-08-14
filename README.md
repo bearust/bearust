@@ -270,6 +270,42 @@ above. There is no `bearust plugin publish` command; contributing an
 entry to the community index is a pull request to that index's own
 repository, reviewed by its maintainers.
 
+### Phase 15 HTTP/3 listener
+
+BeaRust can optionally accept client-facing HTTP/3 (QUIC) connections
+alongside the existing Pingora-based HTTP/1.1/HTTP/2 listener. It is
+off by default and requires TLS to already be configured:
+
+```toml
+[server.tls]
+cert_path = "/etc/bearust/cert.pem"
+key_path = "/etc/bearust/key.pem"
+
+[server.http3]
+enabled = true
+bind = "0.0.0.0:443"   # UDP port; defaults shown here
+```
+
+Config validation rejects `server.http3.enabled = true` without
+`server.tls` configured — HTTP/3 always runs over QUIC's built-in TLS,
+so there is no way to serve it in plaintext. The H3 listener reuses the
+same certificate/key PEM files as the TCP/TLS listener, and (independent
+of that listener) evaluates every request against the same WAF rule
+engine and proxy host routing/load-balancing that the HTTP/1.1/HTTP/2
+path uses, producing byte-identical WAF block responses when a request
+is blocked.
+
+This is an initial, opt-in increment, not feature parity with the
+existing listener. Explicitly out of scope for now:
+
+- No rate limiting or bot protection/challenge evaluation on the H3 path.
+- No analytics recording for H3 requests.
+- No plugin-hook invocation on the H3 path.
+- No `Alt-Svc` header advertisement on the HTTP/1.1/HTTP/2 listener, so
+  clients do not automatically discover or upgrade to the H3 listener.
+- No HTTP/3 to the upstream/backend — forwarded requests to upstreams
+  still use HTTP/1.1 or HTTP/2, only the client-facing edge speaks H3.
+
 ### Audit log API and viewer
 
 Authenticated `admin`, `operator`, and `viewer` sessions can read the audit history through `GET /api/audit-logs`; unauthenticated requests are rejected. The dashboard exposes the same read-only view for every role. Results are newest first (`created_at DESC, id DESC`) and are returned as `{items, page, page_size, total}`.

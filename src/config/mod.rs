@@ -797,7 +797,10 @@ bind = "127.0.0.1:8443"
 {MINIMAL_ROUTABLE}"#
         );
         let result = Config::parse(&toml);
-        assert!(result.is_err(), "http3.enabled without server.tls must be rejected");
+        assert!(
+            result.is_err(),
+            "http3.enabled without server.tls must be rejected"
+        );
     }
 
     #[test]

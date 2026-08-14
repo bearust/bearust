@@ -598,6 +598,7 @@ An **incremental** approach, not a big-bang release. Each phase should be stable
 | **Phase 12 — AI Advisor** | Optional module based on external LLM |
 | **Phase 13 — Plugin System** | WASM runtime, SDK, initial hook points |
 | **Phase 14 — Plugin Ecosystem** | Community registry, signature verification, public contribution documentation |
+| **Phase 15 — HTTP/3** | Opt-in client-side HTTP/3 (QUIC) listener; WAF-parity, upstream H3, and full feature parity remain future increments |
 
 ### Phase 4C status: authenticated audit-log viewer
 
@@ -675,7 +676,7 @@ Phase 5.
 2. Community governance structure: who has merge rights, what is the review process for external contributions (including plugins)?
 3. Will there be a paid "Pro" edition in the future (additional enterprise features), or will all features remain free forever?
 4. Final GUI frontend framework (React vs Vue) — needs to be decided before Phase 3.
-5. HTTP/3 support target — included in v1 or deferred to a later release?
+5. ~~HTTP/3 support target — included in v1 or deferred to a later release?~~ **Resolved:** deferred out of v1, then delivered as an opt-in, off-by-default increment in Phase 15 (a separate QUIC listener alongside, not replacing, the existing HTTP/1.1/HTTP/2 path) — see `### Phase 15 status` below and `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`. WAF-parity feature coverage (rate limiting, bot protection, analytics, plugin hooks), `Alt-Svc` advertisement, and upstream H3 remain open for a future increment.
 6. Data privacy policy for the AI Advisor feature (default sensitive-data redaction: opt-in or opt-out?).
 7. Translation tooling/workflow for localization: a lightweight file-based approach (JSON/YAML per locale reviewed via PR) vs a dedicated translation management platform — to be decided before Phase 11.
 
@@ -1234,3 +1235,35 @@ plugin upgrade/version-management commands, and the index repository's
 own governance all remain out of scope; see
 `docs/superpowers/specs/2026-08-13-phase-14-plugin-registry-design.md`
 for the full rationale and follow-up increments.
+
+### Phase 15 status: HTTP/3 listener (increment 1)
+
+This increment adds an opt-in HTTP/3 (QUIC) listener that runs alongside
+-- not in place of -- the existing Pingora-based HTTP/1.1/HTTP/2
+listener. `server.http3.enabled` defaults to `false`; enabling it
+requires `server.tls` to already be configured, and config validation
+rejects the combination of `http3.enabled = true` with no TLS, since
+QUIC always carries its own TLS layer and there is no plaintext H3 mode.
+
+The listener is built on `quinn`/`rustls`, reuses the same certificate
+and key PEM files the TCP/TLS listener already validates, and installs
+the process-wide `rustls` crypto provider exactly once at `bearust
+serve` startup (`src/cli.rs`), independent of Pingora's own internal
+provider handling for the existing listener. Every H3 request is
+evaluated against the same WAF rule engine and routed to the same
+upstream backends (with the same load-balancing) that the existing
+proxy path uses, and a WAF block produces a byte-identical response to
+the HTTP/1.1/HTTP/2 path's block response. Shutdown is coordinated with
+the same bounded-timeout `tokio::watch`-based pattern already used for
+the other long-running tasks `serve_proxy` spawns.
+
+Deliberately out of scope for this increment: rate limiting, bot
+protection/challenge evaluation, and analytics recording on the H3
+path; plugin-hook invocation on the H3 path; `Alt-Svc` advertisement
+from the existing listener (so there is no automatic client discovery
+of/upgrade to H3 yet); and HTTP/3 to upstream backends (forwarded
+requests still use HTTP/1.1/HTTP/2 regardless of how the client
+connected). Full feature parity with the existing listener is expected
+across future increments, not this one; see
+`docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`
+for the full design rationale and non-goals.

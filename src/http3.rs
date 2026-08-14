@@ -11,12 +11,7 @@ use crate::config::TlsConfig;
 use crate::runtime::RuntimeStore;
 use crate::waf_store::WafStore;
 use bytes::Buf;
-use std::{
-    io,
-    net::SocketAddr,
-    path::Path,
-    sync::Arc,
-};
+use std::{io, net::SocketAddr, path::Path, sync::Arc};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -41,7 +36,9 @@ pub enum Http3Error {
 /// once during process startup (see `src/cli.rs`) -- this function does
 /// not call it itself, to avoid every call site racing to install a
 /// provider; it is a documented process-wide precondition instead.
-pub fn build_rustls_server_config(tls: &TlsConfig) -> Result<Arc<rustls::ServerConfig>, Http3Error> {
+pub fn build_rustls_server_config(
+    tls: &TlsConfig,
+) -> Result<Arc<rustls::ServerConfig>, Http3Error> {
     let certs = load_certs(&tls.cert_path)?;
     let key = load_key(&tls.key_path)?;
     let mut config = rustls::ServerConfig::builder()
@@ -66,11 +63,16 @@ fn load_key(path: &Path) -> Result<rustls_pki_types::PrivateKeyDer<'static>, Htt
     rustls_pemfile::private_key(&mut reader)
         .map_err(Http3Error::PrivateKey)?
         .ok_or_else(|| {
-            Http3Error::PrivateKey(io::Error::new(io::ErrorKind::InvalidData, "no private key found"))
+            Http3Error::PrivateKey(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "no private key found",
+            ))
         })
 }
 
-fn quinn_server_config(tls_config: Arc<rustls::ServerConfig>) -> Result<quinn::ServerConfig, Http3Error> {
+fn quinn_server_config(
+    tls_config: Arc<rustls::ServerConfig>,
+) -> Result<quinn::ServerConfig, Http3Error> {
     let quic_tls = quinn::crypto::rustls::QuicServerConfig::try_from((*tls_config).clone())
         .map_err(|_| Http3Error::InvalidTls)?;
     Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_tls)))
@@ -117,7 +119,11 @@ pub async fn serve(
     Ok(())
 }
 
-async fn handle_connection(conn: quinn::Connection, store: Arc<RuntimeStore>, waf: Option<Arc<WafStore>>) {
+async fn handle_connection(
+    conn: quinn::Connection,
+    store: Arc<RuntimeStore>,
+    waf: Option<Arc<WafStore>>,
+) {
     let h3_conn = h3_quinn::Connection::new(conn);
     let mut h3_conn: h3::server::Connection<_, bytes::Bytes> =
         match h3::server::builder().build(h3_conn).await {
@@ -255,7 +261,10 @@ async fn handle_request<S>(
     let target = format!(
         "http://{}{}",
         lease.address(),
-        req.uri().path_and_query().map(|p| p.as_str()).unwrap_or(&path)
+        req.uri()
+            .path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or(&path)
     );
     let client = reqwest::Client::new();
     let mut builder = client.request(

@@ -266,6 +266,13 @@ fn supervise_child(
 }
 
 fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result<(), AppError> {
+    // Installed once, process-wide, before any HTTP/3 TLS construction.
+    // `pingora-rustls` manages its own provider internally for the
+    // existing HTTP/1.1/HTTP/2 path, so this is only needed for the H3
+    // listener's `rustls`/`quinn` usage below.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
     crate::observability::init(json_logs, &filter)
         .map_err(|error| AppError::Server(error.to_string()))?;
@@ -415,6 +422,24 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let rate_limiter = control_state.rate_limiter.clone();
         let analytics = control_state.analytics.clone();
         let realtime = control_state.realtime.clone();
+        let (http3_shutdown_tx, http3_shutdown_rx) = tokio::sync::watch::channel(false);
+        let http3_task = if config.server.http3.enabled {
+            let tls = config
+                .server
+                .tls
+                .as_ref()
+                .expect("config validation already requires tls when http3.enabled");
+            let tls_config = crate::http3::build_rustls_server_config(tls)
+                .map_err(|e| AppError::Server(format!("HTTP/3 TLS setup: {e}")))?;
+            let bind = config.server.http3.bind;
+            let store = store.clone();
+            let waf = Some(waf_store.clone());
+            Some(tokio::spawn(async move {
+                let _ = crate::http3::serve(bind, tls_config, store, waf, http3_shutdown_rx).await;
+            }))
+        } else {
+            None
+        };
         let analytics_host_ids = crate::control_plane::repository::list_hosts(&control_state.db)
             .await
             .map_err(|e| AppError::Server(format!("load proxy hosts for analytics: {e}")))?
@@ -591,6 +616,14 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             .map_err(|error| AppError::Server(error.to_string()))?;
         reload_task.abort();
         control_task.abort();
+        let _ = http3_shutdown_tx.send(true);
+        if let Some(http3_task) = http3_task {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(config.server.graceful_shutdown_seconds),
+                http3_task,
+            )
+            .await;
+        }
         if let Some(fanout) = cluster_event_fanout {
             fanout.shutdown().await;
         }
