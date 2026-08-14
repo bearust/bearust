@@ -1,14 +1,18 @@
 use bearust::{
+    config::{Algorithm, BackendConfig, Config, HealthCheckKind, PoolConfig, RouteConfig, ServerConfig},
     control_plane::{
         models::{WafAction, WafRule},
         repository,
     },
     http3,
+    runtime::{RuntimeSnapshot, RuntimeStore},
     waf_store::WafStore,
 };
 use bytes::Buf;
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+mod support;
 
 /// Builds a `WafStore` whose snapshot blocks any request whose path
 /// contains `/blocked`, mirroring the exact construction pattern used by
@@ -36,6 +40,85 @@ async fn waf_store_blocking_path(needle: &str) -> WafStore {
 
 fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+/// Builds a `RuntimeStore` whose single "main" pool holds `backend_addr` as
+/// its only backend, routed to by host `host` for any path -- mirrors the
+/// `Config`/`RuntimeSnapshot::build` construction pattern used by
+/// `tests/proxy_http.rs`'s
+/// `local_pingora_service_routes_and_returns_503_without_healthy_backend`
+/// test rather than inventing a new one. The backend is marked healthy
+/// immediately (`RuntimeSnapshot::build` always starts backends unhealthy,
+/// same as that test works around) since these tests exercise
+/// `PoolState::select` succeeding, not health-check convergence.
+fn runtime_store_routing_to(host: &str, backend_addr: SocketAddr) -> Arc<RuntimeStore> {
+    let config = Config {
+        server: ServerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            control_bind: "127.0.0.1:0".parse().unwrap(),
+            control_database: "./target/test.sqlite".into(),
+            certificate_store: "./target/test-certs".into(),
+            graceful_shutdown_seconds: 1,
+            pid_file: "./target/test.pid".into(),
+            tls: None,
+            http3: Default::default(),
+            trusted_proxy_cidrs: Vec::new(),
+        },
+        health: Default::default(),
+        upstream_pools: vec![PoolConfig {
+            name: "main".into(),
+            algorithm: Algorithm::RoundRobin,
+            connect_timeout_seconds: 1,
+            request_timeout_seconds: 1,
+            backends: vec![BackendConfig {
+                address: backend_addr,
+                health_check: HealthCheckKind::Tcp,
+                health_path: None,
+            }],
+        }],
+        routes: vec![RouteConfig {
+            name: "default".into(),
+            host: host.into(),
+            path_prefix: "/".into(),
+            upstream_pool: "main".into(),
+        }],
+        rate_limit: Default::default(),
+        prometheus: Default::default(),
+        cluster: Default::default(),
+        plugins: Default::default(),
+    };
+    let snapshot = RuntimeSnapshot::build(config, None).unwrap();
+    let pool = snapshot.pool("main").unwrap();
+    pool.set_healthy(0.into(), true);
+    Arc::new(RuntimeStore::new(snapshot))
+}
+
+/// Builds an empty `RuntimeStore` (no pools, no routes) for tests where
+/// routing/forwarding is never reached (e.g. the WAF blocks the request
+/// first).
+fn empty_runtime_store() -> Arc<RuntimeStore> {
+    let config = Config {
+        server: ServerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            control_bind: "127.0.0.1:0".parse().unwrap(),
+            control_database: "./target/test.sqlite".into(),
+            certificate_store: "./target/test-certs".into(),
+            graceful_shutdown_seconds: 1,
+            pid_file: "./target/test.pid".into(),
+            tls: None,
+            http3: Default::default(),
+            trusted_proxy_cidrs: Vec::new(),
+        },
+        health: Default::default(),
+        upstream_pools: Vec::new(),
+        routes: Vec::new(),
+        rate_limit: Default::default(),
+        prometheus: Default::default(),
+        cluster: Default::default(),
+        plugins: Default::default(),
+    };
+    let snapshot = RuntimeSnapshot::build(config, None).unwrap();
+    Arc::new(RuntimeStore::new(snapshot))
 }
 
 fn self_signed_server_config() -> (quinn::ServerConfig, rustls_pki_types::CertificateDer<'static>) {
@@ -210,11 +293,12 @@ async fn http3_listener_blocks_a_request_the_waf_rule_engine_would_block() {
     install_crypto_provider();
 
     let waf = Arc::new(waf_store_blocking_path("/blocked").await);
+    let store = empty_runtime_store();
     let (tls_config, cert_der) = serve_tls_config();
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, Some(waf), shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Some(waf), shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -245,12 +329,18 @@ async fn http3_listener_blocks_a_request_the_waf_rule_engine_would_block() {
 async fn http3_listener_allows_a_request_the_waf_rule_engine_would_allow() {
     install_crypto_provider();
 
+    let backend = support::spawn_http_backend(
+        Arc::new(std::sync::atomic::AtomicU16::new(200)),
+        "backend-body",
+    )
+    .await;
     let waf = Arc::new(waf_store_blocking_path("/blocked").await);
+    let store = runtime_store_routing_to("localhost", backend.address);
     let (tls_config, cert_der) = serve_tls_config();
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, Some(waf), shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Some(waf), shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -272,7 +362,77 @@ async fn http3_listener_allows_a_request_the_waf_rule_engine_would_allow() {
             chunk.advance(n);
         }
     }
-    assert_eq!(body, b"ok");
+    assert_eq!(body, b"backend-body");
+    drive.abort();
+    server.abort();
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn http3_listener_forwards_an_allowed_request_to_the_resolved_backend() {
+    install_crypto_provider();
+
+    let backend = support::spawn_http_backend(
+        Arc::new(std::sync::atomic::AtomicU16::new(200)),
+        "resolved-backend-body",
+    )
+    .await;
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(bind, tls_config, store, None, shutdown_rx).await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/anything")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::OK);
+
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        while chunk.has_remaining() {
+            let n = chunk.remaining();
+            body.extend_from_slice(&chunk.chunk()[..n]);
+            chunk.advance(n);
+        }
+    }
+    assert_eq!(body, b"resolved-backend-body");
+    drive.abort();
+    server.abort();
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn http3_listener_returns_404_for_an_unmatched_host() {
+    install_crypto_provider();
+
+    let store = empty_runtime_store();
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(bind, tls_config, store, None, shutdown_rx).await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/anything")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::NOT_FOUND);
+
     drive.abort();
     server.abort();
 }

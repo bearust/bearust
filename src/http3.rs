@@ -8,6 +8,7 @@
 //! feature, no QUIC dependency, no QUIC source file anywhere in the crate).
 
 use crate::config::TlsConfig;
+use crate::runtime::RuntimeStore;
 use crate::waf_store::WafStore;
 use bytes::Buf;
 use std::{
@@ -86,6 +87,7 @@ fn quinn_server_config(tls_config: Arc<rustls::ServerConfig>) -> Result<quinn::S
 pub async fn serve(
     bind: SocketAddr,
     tls_config: Arc<rustls::ServerConfig>,
+    store: Arc<RuntimeStore>,
     waf: Option<Arc<WafStore>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Http3Error> {
@@ -97,9 +99,10 @@ pub async fn serve(
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
                 let waf = waf.clone();
+                let store = Arc::clone(&store);
                 tokio::spawn(async move {
                     if let Ok(conn) = incoming.await {
-                        handle_connection(conn, waf).await;
+                        handle_connection(conn, store, waf).await;
                     }
                 });
             }
@@ -114,7 +117,7 @@ pub async fn serve(
     Ok(())
 }
 
-async fn handle_connection(conn: quinn::Connection, waf: Option<Arc<WafStore>>) {
+async fn handle_connection(conn: quinn::Connection, store: Arc<RuntimeStore>, waf: Option<Arc<WafStore>>) {
     let h3_conn = h3_quinn::Connection::new(conn);
     let mut h3_conn: h3::server::Connection<_, bytes::Bytes> =
         match h3::server::builder().build(h3_conn).await {
@@ -129,8 +132,9 @@ async fn handle_connection(conn: quinn::Connection, waf: Option<Arc<WafStore>>) 
                     break;
                 };
                 let waf = waf.clone();
+                let store = Arc::clone(&store);
                 tokio::spawn(async move {
-                    handle_request(req, stream, waf).await;
+                    handle_request(req, stream, store, waf).await;
                 });
             }
             Ok(None) => break,
@@ -162,6 +166,7 @@ fn build_inspection_context(
 async fn handle_request<S>(
     req: http::Request<()>,
     mut stream: h3::server::RequestStream<S, bytes::Bytes>,
+    store: Arc<RuntimeStore>,
     waf: Option<Arc<WafStore>>,
 ) where
     S: h3::quic::BidiStream<bytes::Bytes>,
@@ -216,14 +221,82 @@ async fn handle_request<S>(
         }
     }
 
-    // Not blocked: Task 4 replaces this with real routing/forwarding.
-    let resp = http::Response::builder()
-        .status(http::StatusCode::OK)
-        .body(())
-        .expect("static response head is always valid");
-    let _ = stream.send_response(resp).await;
-    let _ = stream.send_data(bytes::Bytes::from_static(b"ok")).await;
-    let _ = stream.finish().await;
+    // Not blocked (or WAF not configured): route and forward.
+    let authority = req
+        .uri()
+        .authority()
+        .map(|a| a.as_str())
+        .or_else(|| {
+            req.headers()
+                .get(http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+        })
+        .unwrap_or_default();
+    let snapshot = store.load();
+    let Some((_route, pool)) = snapshot.route(authority, &path) else {
+        let resp = http::Response::builder()
+            .status(http::StatusCode::NOT_FOUND)
+            .body(())
+            .expect("static response head is always valid");
+        let _ = stream.send_response(resp).await;
+        let _ = stream.finish().await;
+        return;
+    };
+    let Some(lease) = pool.select(None) else {
+        let resp = http::Response::builder()
+            .status(http::StatusCode::BAD_GATEWAY)
+            .body(())
+            .expect("static response head is always valid");
+        let _ = stream.send_response(resp).await;
+        let _ = stream.finish().await;
+        return;
+    };
+
+    let target = format!(
+        "http://{}{}",
+        lease.address(),
+        req.uri().path_and_query().map(|p| p.as_str()).unwrap_or(&path)
+    );
+    let client = reqwest::Client::new();
+    let mut builder = client.request(
+        reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET),
+        &target,
+    );
+    for (name, value) in &headers {
+        builder = builder.header(name, value);
+    }
+    if !body.is_empty() {
+        builder = builder.body(body.clone());
+    }
+
+    match builder.send().await {
+        Ok(upstream_resp) => {
+            let status = http::StatusCode::from_u16(upstream_resp.status().as_u16())
+                .unwrap_or(http::StatusCode::BAD_GATEWAY);
+            let resp = http::Response::builder()
+                .status(status)
+                .body(())
+                .expect("static response head is always valid");
+            let _ = stream.send_response(resp).await;
+            let mut body_stream = upstream_resp.bytes_stream();
+            use futures_util::StreamExt as _;
+            while let Some(chunk) = body_stream.next().await {
+                let Ok(chunk) = chunk else { break };
+                if stream.send_data(chunk).await.is_err() {
+                    break;
+                }
+            }
+            let _ = stream.finish().await;
+        }
+        Err(_) => {
+            let resp = http::Response::builder()
+                .status(http::StatusCode::BAD_GATEWAY)
+                .body(())
+                .expect("static response head is always valid");
+            let _ = stream.send_response(resp).await;
+            let _ = stream.finish().await;
+        }
+    }
 }
 
 #[cfg(test)]
