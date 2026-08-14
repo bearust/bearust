@@ -11,7 +11,7 @@ const MAX_SEMANTIC_SIGNALS: usize = 8;
 const MAX_SEMANTIC_REASON_BYTES: usize = 96;
 const SEMANTIC_BLOCK_THRESHOLD: u16 = 8;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct InspectionContext {
     pub method: String,
     pub path: String,

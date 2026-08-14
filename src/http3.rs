@@ -8,6 +8,8 @@
 //! feature, no QUIC dependency, no QUIC source file anywhere in the crate).
 
 use crate::config::TlsConfig;
+use crate::waf_store::WafStore;
+use bytes::Buf;
 use std::{
     io,
     net::SocketAddr,
@@ -73,16 +75,18 @@ fn quinn_server_config(tls_config: Arc<rustls::ServerConfig>) -> Result<quinn::S
     Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_tls)))
 }
 
-/// Runs the HTTP/3 listener until `shutdown` fires. Every request
-/// currently receives a fixed `200 ok` response -- WAF evaluation and
-/// upstream routing are added in later tasks. Bounded, graceful:
-/// `shutdown` firing stops accepting new connections; in-flight
-/// connections are given until the endpoint is dropped to finish (the
-/// caller in `src/cli.rs`, from a later task, bounds this the same way
-/// it already bounds other spawned tasks' shutdown).
+/// Runs the HTTP/3 listener until `shutdown` fires. Every request is
+/// evaluated against the WAF rule engine (when `waf` is provided) before
+/// receiving a fixed `200 ok` response -- upstream routing is added in a
+/// later task. Bounded, graceful: `shutdown` firing stops accepting new
+/// connections; in-flight connections are given until the endpoint is
+/// dropped to finish (the caller in `src/cli.rs`, from a later task,
+/// bounds this the same way it already bounds other spawned tasks'
+/// shutdown).
 pub async fn serve(
     bind: SocketAddr,
     tls_config: Arc<rustls::ServerConfig>,
+    waf: Option<Arc<WafStore>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Http3Error> {
     let server_config = quinn_server_config(tls_config)?;
@@ -92,9 +96,10 @@ pub async fn serve(
         tokio::select! {
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
+                let waf = waf.clone();
                 tokio::spawn(async move {
                     if let Ok(conn) = incoming.await {
-                        handle_connection(conn).await;
+                        handle_connection(conn, waf).await;
                     }
                 });
             }
@@ -109,7 +114,7 @@ pub async fn serve(
     Ok(())
 }
 
-async fn handle_connection(conn: quinn::Connection) {
+async fn handle_connection(conn: quinn::Connection, waf: Option<Arc<WafStore>>) {
     let h3_conn = h3_quinn::Connection::new(conn);
     let mut h3_conn: h3::server::Connection<_, bytes::Bytes> =
         match h3::server::builder().build(h3_conn).await {
@@ -120,21 +125,123 @@ async fn handle_connection(conn: quinn::Connection) {
     loop {
         match h3_conn.accept().await {
             Ok(Some(resolver)) => {
-                let Ok((_req, mut stream)) = resolver.resolve_request().await else {
+                let Ok((req, stream)) = resolver.resolve_request().await else {
                     break;
                 };
+                let waf = waf.clone();
                 tokio::spawn(async move {
-                    let resp = http::Response::builder()
-                        .status(http::StatusCode::OK)
-                        .body(())
-                        .expect("static response head is always valid");
-                    let _ = stream.send_response(resp).await;
-                    let _ = stream.send_data(bytes::Bytes::from_static(b"ok")).await;
-                    let _ = stream.finish().await;
+                    handle_request(req, stream, waf).await;
                 });
             }
             Ok(None) => break,
             Err(_) => break,
         }
+    }
+}
+
+/// Maps a request's raw fields into the same `InspectionContext` shape
+/// `src/proxy.rs`'s HTTP/1.1/HTTP/2 path builds (see its `InspectionContext {
+/// ... }` construction around line 1048), so the same logical request
+/// produces the same WAF verdict regardless of which listener handled it.
+fn build_inspection_context(
+    method: &str,
+    path: &str,
+    query: &str,
+    headers: &[(String, String)],
+    body: Vec<u8>,
+) -> crate::waf::InspectionContext {
+    crate::waf::InspectionContext {
+        method: method.to_owned(),
+        path: path.to_owned(),
+        query: query.to_owned(),
+        headers: headers.to_vec(),
+        body,
+    }
+}
+
+async fn handle_request<S>(
+    req: http::Request<()>,
+    mut stream: h3::server::RequestStream<S, bytes::Bytes>,
+    waf: Option<Arc<WafStore>>,
+) where
+    S: h3::quic::BidiStream<bytes::Bytes>,
+{
+    let method = req.method().to_string();
+    let path = req.uri().path().to_owned();
+    let query = req.uri().query().unwrap_or_default().to_owned();
+    let headers: Vec<(String, String)> = req
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_owned(), value.to_owned()))
+        })
+        .collect();
+
+    // Single-phase evaluation (buffer the whole body up to
+    // MAX_INSPECTION_BODY_BYTES, then evaluate once): this task
+    // deliberately does not replicate src/proxy.rs's two-phase
+    // header-then-body optimization -- see this plan's Global Constraints.
+    let mut body = Vec::new();
+    while let Ok(Some(mut chunk)) = stream.recv_data().await {
+        if body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES {
+            break;
+        }
+        while chunk.has_remaining() && body.len() < crate::waf::MAX_INSPECTION_BODY_BYTES {
+            let take = chunk
+                .remaining()
+                .min(crate::waf::MAX_INSPECTION_BODY_BYTES - body.len());
+            body.extend_from_slice(&chunk.chunk()[..take]);
+            chunk.advance(take);
+        }
+    }
+
+    if let Some(waf) = &waf {
+        let snapshot = waf.snapshot();
+        let context = build_inspection_context(&method, &path, &query, &headers, body.clone());
+        let evaluation = crate::waf::evaluate(&snapshot, &context);
+        if evaluation.decision == crate::waf::WafDecision::Block {
+            let resp = http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(())
+                .expect("static response head is always valid");
+            let _ = stream.send_response(resp).await;
+            let _ = stream
+                .send_data(bytes::Bytes::from_static(b"Request blocked"))
+                .await;
+            let _ = stream.finish().await;
+            return;
+        }
+    }
+
+    // Not blocked: Task 4 replaces this with real routing/forwarding.
+    let resp = http::Response::builder()
+        .status(http::StatusCode::OK)
+        .body(())
+        .expect("static response head is always valid");
+    let _ = stream.send_response(resp).await;
+    let _ = stream.send_data(bytes::Bytes::from_static(b"ok")).await;
+    let _ = stream.finish().await;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn build_inspection_context_matches_the_http1_http2_paths_field_shape() {
+        let headers = vec![("x-test".to_owned(), "1".to_owned())];
+        let context =
+            super::build_inspection_context("GET", "/hello", "q=1", &headers, b"body".to_vec());
+        assert_eq!(
+            context,
+            crate::waf::InspectionContext {
+                method: "GET".to_owned(),
+                path: "/hello".to_owned(),
+                query: "q=1".to_owned(),
+                headers: vec![("x-test".to_owned(), "1".to_owned())],
+                body: b"body".to_vec(),
+            }
+        );
     }
 }
