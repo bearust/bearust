@@ -163,6 +163,8 @@ pub struct ServerConfig {
     pub pid_file: PathBuf,
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+    #[serde(default)]
+    pub http3: Http3Config,
     /// CIDRs whose forwarding headers may be used for client identity.
     #[serde(default)]
     pub trusted_proxy_cidrs: Vec<String>,
@@ -173,6 +175,30 @@ pub struct ServerConfig {
 pub struct TlsConfig {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Http3Config {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_http3_bind")]
+    pub bind: SocketAddr,
+}
+
+impl Default for Http3Config {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_http3_bind(),
+        }
+    }
+}
+
+fn default_http3_bind() -> SocketAddr {
+    "127.0.0.1:8443"
+        .parse()
+        .expect("valid default HTTP/3 bind address")
 }
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -499,6 +525,12 @@ impl Config {
                 return err("server.tls.key_path", "must not be empty");
             }
         }
+        if self.server.http3.enabled && self.server.tls.is_none() {
+            return err(
+                "server.http3.enabled",
+                "requires server.tls to be configured",
+            );
+        }
         for (name, value) in [
             ("health.interval_seconds", self.health.interval_seconds),
             ("health.timeout_seconds", self.health.timeout_seconds),
@@ -733,5 +765,51 @@ mod tests {
         )
         .unwrap();
         assert!(parsed.require_signature);
+    }
+
+    const MINIMAL_ROUTABLE: &str = r#"
+[[upstream_pools]]
+name = "api"
+algorithm = "round_robin"
+
+[[upstream_pools.backends]]
+address = "127.0.0.1:19001"
+health_check = "tcp"
+
+[[routes]]
+name = "api"
+host = "api.example.com"
+path_prefix = "/"
+upstream_pool = "api"
+"#;
+
+    #[test]
+    fn http3_enabled_without_tls_is_rejected() {
+        let toml = format!(
+            r#"
+[server]
+bind = "127.0.0.1:8080"
+control_bind = "127.0.0.1:8081"
+
+[server.http3]
+enabled = true
+bind = "127.0.0.1:8443"
+{MINIMAL_ROUTABLE}"#
+        );
+        let result = Config::parse(&toml);
+        assert!(result.is_err(), "http3.enabled without server.tls must be rejected");
+    }
+
+    #[test]
+    fn http3_disabled_by_default() {
+        let toml = format!(
+            r#"
+[server]
+bind = "127.0.0.1:8080"
+control_bind = "127.0.0.1:8081"
+{MINIMAL_ROUTABLE}"#
+        );
+        let config = Config::parse(&toml).unwrap();
+        assert!(!config.server.http3.enabled);
     }
 }
