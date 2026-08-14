@@ -757,18 +757,35 @@ fn plugin_search(query: &str, registry_url: Option<&str>) -> Result<(), AppError
         return Ok(());
     }
     for entry in results {
-        println!("{}  v{}  {}", entry.id, entry.version, entry.description);
+        println!(
+            "{}  v{}  {}",
+            sanitize_for_terminal(&entry.id),
+            sanitize_for_terminal(&entry.version),
+            sanitize_for_terminal(&entry.description)
+        );
     }
     Ok(())
 }
 
 /// Strips control characters (which could otherwise inject newlines or
 /// terminal escapes to visually spoof the confirmation summary an operator
-/// relies on) and caps the length of an index-sourced string before it is
-/// printed. The index is a catalog, not a trust source, so nothing in it
+/// relies on), plus the Unicode line/paragraph separators and bidi-control
+/// characters that `char::is_control()` does not classify as control
+/// characters but which many terminals still honor to reorder or break up
+/// displayed text, and caps the length of an index-sourced string before it
+/// is printed. The index is a catalog, not a trust source, so nothing in it
 /// should be able to affect what the operator sees on screen.
 fn sanitize_for_terminal(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).take(200).collect()
+    s.chars()
+        .filter(|c| {
+            !c.is_control()
+                && *c != '\u{2028}'
+                && *c != '\u{2029}'
+                && !('\u{202A}'..='\u{202E}').contains(c)
+                && !('\u{2066}'..='\u{2069}').contains(c)
+        })
+        .take(200)
+        .collect()
 }
 
 fn plugin_install(
@@ -782,7 +799,10 @@ fn plugin_install(
         download_and_verify, extract_tarball, verify_signer, RegistryIndex,
     };
 
-    if !crate::plugin_runtime::valid_id(id) {
+    if id.is_empty()
+        || id.len() > crate::plugin_runtime::MAX_ID_LEN
+        || !crate::plugin_runtime::valid_id(id)
+    {
         return Err(AppError::PluginRegistry(format!(
             "\"{id}\" is not a valid plugin id (lowercase letters, digits, and hyphens only)"
         )));

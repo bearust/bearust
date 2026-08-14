@@ -379,6 +379,39 @@ async fn install_reports_not_found_for_an_unknown_id() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_rejects_an_empty_id_before_any_network_call() {
+    // `plugin_runtime::valid_id("")` is vacuously true (its charset and
+    // no-leading/trailing-hyphen checks all hold on an empty string), so
+    // `plugin_install`'s id validation must also check for emptiness itself
+    // -- otherwise an empty id reaches the registry fetch before being
+    // caught only by the later defense-in-depth parent-directory assertion.
+    // Point `--registry-url` at a reserved, unroutable address (TEST-NET-1,
+    // RFC 5737) rather than a listening mock server: if validation ever
+    // regressed to allow a network call through, this would hang/time out
+    // or fail with a connection error instead of the fast, clean id-
+    // validation error message asserted below.
+    let plugins_dir = tempdir().unwrap();
+    let output = Command::new(bearust_bin())
+        .args(["plugin", "install", "", "--out"])
+        .arg(plugins_dir.path())
+        .args([
+            "--registry-url",
+            "http://192.0.2.1:9/index.json",
+            "--yes",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not a valid plugin id"),
+        "stderr was: {stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_lists_matching_entries() {
     let tarball = build_tarball(&[
         ("plugin.toml", MANIFEST),

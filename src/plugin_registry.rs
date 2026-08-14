@@ -138,6 +138,25 @@ const MAX_TARBALL_BYTES: u64 = 64 * 1024 * 1024;
 /// nowhere near a decompression bomb's blast radius.
 const MAX_ENTRY_BYTES: u64 = 32 * 1024 * 1024;
 
+/// A ceiling on the *sum* of decompressed bytes read across every entry in
+/// the archive, independent of the per-entry cap above. A legitimate plugin
+/// bundle never has more than three substantial entries (`plugin.toml`, one
+/// wasm module, an optional `plugin.sig`), so this is deliberately kept in
+/// the same ballpark as `MAX_ENTRY_BYTES` itself rather than some multiple
+/// of it scaled by an assumed entry count -- a tarball of many
+/// just-under-the-per-entry-cap entries would otherwise sail past a looser
+/// bound and still exhaust memory before the loop's later "unexpected file"
+/// check ever runs. Checked incrementally, entry by entry, so a hostile
+/// archive is rejected the moment the running total would exceed this, not
+/// after the whole loop finishes.
+const MAX_TOTAL_DECOMPRESSED_BYTES: u64 = MAX_ENTRY_BYTES + (8 * 1024 * 1024);
+
+/// A ceiling on the number of entries an archive may contain. A legitimate
+/// plugin bundle never has more than three (`plugin.toml`, one wasm module,
+/// an optional `plugin.sig`), so this also structurally blocks the "many
+/// small entries" attack shape regardless of the byte accounting above.
+const MAX_ARCHIVE_ENTRIES: usize = 8;
+
 pub fn download_and_verify(
     client: &reqwest::blocking::Client,
     entry: &RegistryEntry,
@@ -200,7 +219,15 @@ pub fn extract_tarball(bytes: &[u8], expected_id: &str) -> Result<ExtractedPlugi
     let entries = archive
         .entries()
         .map_err(|e| RegistryError::MalformedArchive(e.to_string()))?;
+    let mut entry_count: usize = 0;
+    let mut total_decompressed_bytes: u64 = 0;
     for entry in entries {
+        entry_count += 1;
+        if entry_count > MAX_ARCHIVE_ENTRIES {
+            return Err(RegistryError::MalformedArchive(format!(
+                "archive contains more than the {MAX_ARCHIVE_ENTRIES}-entry limit"
+            )));
+        }
         let mut entry = entry.map_err(|e| RegistryError::MalformedArchive(e.to_string()))?;
         if !entry.header().entry_type().is_file() {
             return Err(RegistryError::MalformedArchive(
@@ -233,13 +260,30 @@ pub fn extract_tarball(bytes: &[u8], expected_id: &str) -> Result<ExtractedPlugi
                 "archive entry \"{name}\" exceeds the {MAX_ENTRY_BYTES}-byte per-entry limit"
             )));
         }
+        // Bound the aggregate before doing any reading for this entry too --
+        // the header's declared size is untrusted, but rejecting on it up
+        // front (in addition to the bounded read below, which is the real
+        // defense against an understated header) avoids even attempting to
+        // buffer an entry once the running total is already known to be
+        // hostile.
+        if total_decompressed_bytes.saturating_add(entry.size()) > MAX_TOTAL_DECOMPRESSED_BYTES {
+            return Err(RegistryError::MalformedArchive(format!(
+                "archive's total decompressed size exceeds the {MAX_TOTAL_DECOMPRESSED_BYTES}-byte aggregate limit"
+            )));
+        }
+        // Cap this entry's read at whatever headroom remains in the
+        // aggregate budget (never more than MAX_ENTRY_BYTES), so a single
+        // entry's read can never itself blow past the aggregate ceiling no
+        // matter what the header claimed.
+        let remaining_budget = MAX_TOTAL_DECOMPRESSED_BYTES - total_decompressed_bytes;
+        let read_cap = MAX_ENTRY_BYTES.min(remaining_budget);
         let mut contents = Vec::new();
         entry
             .by_ref()
-            .take(MAX_ENTRY_BYTES)
+            .take(read_cap)
             .read_to_end(&mut contents)
             .map_err(|e| RegistryError::MalformedArchive(e.to_string()))?;
-        if contents.len() as u64 == MAX_ENTRY_BYTES {
+        if contents.len() as u64 == read_cap {
             // Either genuinely exactly at the cap, or -- far more likely for
             // a hostile archive -- silently truncated real data beyond it.
             // Confirm nothing more was left to read; if there was, reject
@@ -250,10 +294,13 @@ pub fn extract_tarball(bytes: &[u8], expected_id: &str) -> Result<ExtractedPlugi
                 .map_err(|e| RegistryError::MalformedArchive(e.to_string()))?;
             if more > 0 {
                 return Err(RegistryError::MalformedArchive(format!(
-                    "archive entry \"{name}\" exceeds the {MAX_ENTRY_BYTES}-byte per-entry limit"
+                    "archive entry \"{name}\" exceeds the {MAX_ENTRY_BYTES}-byte per-entry limit, \
+                     or the archive's total decompressed size exceeds the \
+                     {MAX_TOTAL_DECOMPRESSED_BYTES}-byte aggregate limit"
                 )));
             }
         }
+        total_decompressed_bytes += contents.len() as u64;
         if files.insert(name.clone(), contents).is_some() {
             return Err(RegistryError::MalformedArchive(format!(
                 "duplicate archive entry: {name}"
@@ -592,6 +639,40 @@ max_output_bytes = 1024
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "rejection should be fast, not proportional to the decompressed size"
+        );
+        assert!(matches!(result, Err(RegistryError::MalformedArchive(_))));
+    }
+
+    #[test]
+    fn extract_tarball_rejects_many_entries_each_under_the_per_entry_cap_but_over_in_aggregate() {
+        // Reproduces the re-reviewer's exact attack shape: many entries,
+        // each individually just under MAX_ENTRY_BYTES (so the per-entry
+        // cap alone doesn't catch any single one of them), whose sum vastly
+        // exceeds any reasonable plugin archive size. The old code only
+        // caught this via the "unexpected file in archive" check *after*
+        // the whole loop finished decompressing every entry -- this test
+        // confirms rejection now happens quickly, via the aggregate/entry-
+        // count bound, without the loop ever completing.
+        let per_entry = vec![0u8; (MAX_ENTRY_BYTES as usize) - 1024];
+        let mut files: Vec<(String, &[u8])> = vec![("plugin.toml".to_owned(), VALID_MANIFEST)];
+        let mut names = Vec::new();
+        for i in 0..64 {
+            names.push(format!("extra-{i}.bin"));
+        }
+        for name in &names {
+            files.push((name.clone(), &per_entry));
+        }
+        let files_ref: Vec<(&str, &[u8])> = files.iter().map(|(n, c)| (n.as_str(), *c)).collect();
+        let tarball = build_tarball(&files_ref);
+        assert!(
+            (tarball.len() as u64) < MAX_TARBALL_BYTES,
+            "fixture should compress under the tarball size cap, matching the re-reviewer's report"
+        );
+        let started = std::time::Instant::now();
+        let result = extract_tarball(&tarball, "demo-plugin");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "rejection should be fast and bounded, not proportional to the aggregate decompressed size"
         );
         assert!(matches!(result, Err(RegistryError::MalformedArchive(_))));
     }
