@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type AdvisorInsight, type AdvisorJobStatus, type AdvisorResult, type AdvisorWorkflow, type User } from "./api";
-import { Alert, Button, Card, SelectField, TextareaField } from "./ui";
+import { Alert, Button, Panel, SelectField, StatusBadge, TextareaField } from "./ui";
 
 const TERMINAL = new Set<AdvisorJobStatus>(["completed", "failed", "approved", "rejected", "expired"]);
 const SAFE_ERRORS = new Set(["advisor_disabled", "advisor_busy", "advisor_timeout", "advisor_provider_unavailable", "advisor_invalid_response", "advisor_response_too_large", "advisor_circuit_open", "advisor_invalid_request", "advisor_stale_draft", "advisor_expired"]);
@@ -28,5 +28,115 @@ export function AiAdvisorSection({ user, onChanged, refreshToken = 0 }: { user: 
   const canRequest = user.role === "admin" || user.role === "operator";
   const submit = async (event: FormEvent) => { event.preventDefault(); setLoading(true); setError(""); try { await api.startAiAnalysis({ workflow, ...(command ? { command } : {}) }); await load(); onChanged?.(); } catch (e) { setError(safeError(e)); } finally { setLoading(false); } };
   const decide = async (item: AdvisorInsight, decision: "approve" | "reject") => { setLoading(true); setError(""); try { if (decision === "approve") await api.approveAiDraft(item.job_id); else await api.rejectAiDraft(item.job_id); await load(); onChanged?.(); } catch (e) { const code = safeError(e); if (code === "advisor_stale_draft" || code === "advisor_expired") { blockedDrafts.current.add(item.job_id); setItems((current) => current.filter((entry) => entry.job_id !== item.job_id)); } setError(code); } finally { setLoading(false); } };
-  return <Card data-testid="ai-advisor-section"><div className="mb-4 flex flex-wrap items-center justify-between gap-3"><h2 className="text-xl font-semibold">{t("advisor.title")}</h2><Button aria-label={t("advisor.accessibility.refresh")} variant="secondary" onClick={() => void load()} disabled={loading}>{t("advisor.refresh")}</Button></div><p className="mb-4 text-sm text-muted">{t("advisor.redactionNotice")}</p>{canRequest && <form className="mb-6 grid gap-4 sm:grid-cols-[1fr_2fr_auto] sm:items-end" onSubmit={submit}><SelectField label={t("advisor.workflow")} value={workflow} onChange={(e) => setWorkflow(e.target.value as AdvisorWorkflow)}><option value="incident_explanation">{t("advisor.workflows.incident_explanation")}</option><option value="security_summary">{t("advisor.workflows.security_summary")}</option><option value="rule_tuning">{t("advisor.workflows.rule_tuning")}</option><option value="configuration_draft">{t("advisor.workflows.configuration_draft")}</option></SelectField><TextareaField label={t("advisor.command")} value={command} onChange={(e) => setCommand(e.target.value)} rows={2} /><Button type="submit" disabled={loading}>{loading ? t("advisor.loading") : t("advisor.start")}</Button></form>}{error && <Alert variant="danger">{t("advisor.errors." + error, { defaultValue: t("advisor.errors.generic") })}</Alert>}{items.length === 0 ? <p className="text-muted">{t("advisor.empty")}</p> : <div className="space-y-3">{items.map((item) => <article aria-label={t("advisor.accessibility.result")} className="rounded-md border border-border p-4" key={item.job_id}><div className="flex flex-wrap justify-between gap-2"><strong>{t("advisor.workflows." + item.workflow, { defaultValue: item.workflow })}</strong><span>{t("advisor.status." + item.status, { defaultValue: item.status })}</span></div><ResultView item={item} />{user.role === "admin" && item.workflow === "configuration_draft" && item.status === "completed" && <div className="mt-3 flex gap-2"><Button onClick={() => void decide(item, "approve")} disabled={loading}>{t("advisor.approve")}</Button><Button variant="danger" onClick={() => void decide(item, "reject")} disabled={loading}>{t("advisor.reject")}</Button></div>}</article>)}</div>}</Card>;
+  const statusTone = (status: AdvisorInsight["status"]) =>
+    status === "completed" || status === "approved"
+      ? "success"
+      : status === "failed" || status === "rejected" || status === "expired"
+        ? "danger"
+        : "warning";
+  return (
+    <Panel
+      data-testid="ai-advisor-section"
+      label={t("advisor.title")}
+      actions={
+        <Button
+          aria-label={t("advisor.accessibility.refresh")}
+          variant="secondary"
+          onClick={() => void load()}
+          disabled={loading}
+        >
+          {t("advisor.refresh")}
+        </Button>
+      }
+    >
+      <p className="mb-4 text-sm text-muted">{t("advisor.redactionNotice")}</p>
+      {canRequest && (
+        <form
+          className="mb-6 grid gap-4 sm:grid-cols-[1fr_2fr_auto] sm:items-end"
+          onSubmit={submit}
+        >
+          <SelectField
+            label={t("advisor.workflow")}
+            value={workflow}
+            onChange={(e) => setWorkflow(e.target.value as AdvisorWorkflow)}
+          >
+            <option value="incident_explanation">
+              {t("advisor.workflows.incident_explanation")}
+            </option>
+            <option value="security_summary">
+              {t("advisor.workflows.security_summary")}
+            </option>
+            <option value="rule_tuning">
+              {t("advisor.workflows.rule_tuning")}
+            </option>
+            <option value="configuration_draft">
+              {t("advisor.workflows.configuration_draft")}
+            </option>
+          </SelectField>
+          <TextareaField
+            label={t("advisor.command")}
+            value={command}
+            onChange={(e) => setCommand(e.target.value)}
+            rows={2}
+          />
+          <Button type="submit" disabled={loading}>
+            {loading ? t("advisor.loading") : t("advisor.start")}
+          </Button>
+        </form>
+      )}
+      {error && (
+        <Alert variant="danger">
+          {t("advisor.errors." + error, {
+            defaultValue: t("advisor.errors.generic"),
+          })}
+        </Alert>
+      )}
+      {items.length === 0 ? (
+        <p className="text-sm text-muted">{t("advisor.empty")}</p>
+      ) : (
+        <ul className="divide-y divide-border">
+          {items.map((item) => (
+            <li
+              aria-label={t("advisor.accessibility.result")}
+              className="py-3"
+              key={item.job_id}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <strong className="font-medium">
+                  {t("advisor.workflows." + item.workflow, {
+                    defaultValue: item.workflow,
+                  })}
+                </strong>
+                <StatusBadge tone={statusTone(item.status)}>
+                  {t("advisor.status." + item.status, {
+                    defaultValue: item.status,
+                  })}
+                </StatusBadge>
+              </div>
+              <ResultView item={item} />
+              {user.role === "admin" &&
+                item.workflow === "configuration_draft" &&
+                item.status === "completed" && (
+                  <div className="mt-3 flex gap-2">
+                    <Button
+                      onClick={() => void decide(item, "approve")}
+                      disabled={loading}
+                    >
+                      {t("advisor.approve")}
+                    </Button>
+                    <Button
+                      variant="danger"
+                      onClick={() => void decide(item, "reject")}
+                      disabled={loading}
+                    >
+                      {t("advisor.reject")}
+                    </Button>
+                  </div>
+                )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
 }

@@ -316,7 +316,18 @@
       "connected": "Connected",
       "disconnected": "Disconnected"
     },
-    "brand": "Bearust"
+    "brand": "Bearust",
+    "openMenu": "Open navigation menu",
+    "closeMenu": "Close navigation menu",
+    "accountMenu": "Account menu"
+  },
+  "nav": {
+    "proxyHosts": "Proxy Hosts",
+    "aiAdvisor": "AI Advisor",
+    "security": "Security",
+    "analytics": "Analytics",
+    "users": "Users & Roles",
+    "audit": "Audit Log"
   },
   "audit": {
     "title": "Audit Log",

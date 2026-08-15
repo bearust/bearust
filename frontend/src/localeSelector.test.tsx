@@ -50,6 +50,11 @@ describe('dashboard locale selector', () => {
       root.render(<I18nextProvider i18n={i18n}><ThemeProvider><App /><TranslationProbe /></ThemeProvider></I18nextProvider>);
     });
 
+    const menuTrigger = container.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
+    await act(async () => {
+      menuTrigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
     const select = container.querySelector<HTMLSelectElement>('select[aria-label="Language"]');
     expect(select).toBeTruthy();
     expect(select?.value).toBe('en');
@@ -78,7 +83,12 @@ describe('dashboard locale selector', () => {
       root.render(<I18nextProvider i18n={i18n}><ThemeProvider><App /><TranslationProbe /></ThemeProvider></I18nextProvider>);
     });
 
-    const select = container.querySelector<HTMLSelectElement>('header select');
+    const menuTrigger = container.querySelector<HTMLButtonElement>('header button[aria-haspopup="menu"]');
+    await act(async () => {
+      menuTrigger!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const select = container.querySelector<HTMLSelectElement>('header select[aria-label="言語"]');
     expect(select?.value).toBe('ja');
     expect(select?.getAttribute('aria-label')).toBe('言語');
     expect(select?.selectedOptions[0]?.textContent).toBe('日本語');

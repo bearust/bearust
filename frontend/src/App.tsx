@@ -46,17 +46,34 @@ import {
   LocalePreferenceProvider,
   useLocaleFormatters,
   useLocalePreference,
+  type Locale,
 } from "./i18n";
 import {
   Alert,
   Button,
-  Card,
   Field,
   LanguageSelect,
+  Menu,
+  MenuItem,
+  Panel,
   SelectField,
+  StatusBadge,
+  StatusLamp,
   TextareaField,
   ThemeSelect,
 } from "./ui";
+import {
+  IconAdvisor,
+  IconAudit,
+  IconChart,
+  IconChevronDown,
+  IconClose,
+  IconMenu,
+  IconRoute,
+  IconShield,
+  IconUserCircle,
+  IconUsers,
+} from "./icons";
 import { AiAdvisorSection } from "./aiAdvisor";
 import { useTranslation } from "react-i18next";
 
@@ -186,11 +203,15 @@ function Setup({ onDone }: { onDone: (u: User) => void }) {
     [token, setToken] = useState(""),
     [error, setError] = useState("");
   return (
-    <main className="min-h-screen bg-page px-4 py-8 text-foreground sm:px-6 lg:px-8">
-      <Card className="mx-auto max-w-lg">
-        <h1 className="mb-2 text-2xl font-semibold">{t("auth.setupTitle")}</h1>
+    <main className="flex min-h-screen items-center justify-center bg-page px-4 py-8 text-foreground sm:px-6 lg:px-8">
+      <Panel className="mx-auto w-full max-w-lg">
+        <div className="mb-2 flex items-center gap-2">
+          <StatusLamp tone="warning" />
+          <h1 className="text-2xl font-semibold">{t("auth.setupTitle")}</h1>
+        </div>
         <p className="mb-6 text-muted">{t("auth.setupDescription")}</p>
         <form
+          className="space-y-4"
           onSubmit={async (e) => {
             e.preventDefault();
             try {
@@ -220,7 +241,7 @@ function Setup({ onDone }: { onDone: (u: User) => void }) {
           {error && <Alert variant="danger">{error}</Alert>}
           <Button type="submit">{t("auth.createAccount")}</Button>
         </form>
-      </Card>
+      </Panel>
     </main>
   );
 }
@@ -230,35 +251,51 @@ function Login({ onDone }: { onDone: (u: User) => void }) {
     [password, setPassword] = useState(""),
     [error, setError] = useState("");
   return (
-    <main className="min-h-screen bg-page px-4 py-8 text-foreground sm:px-6 lg:px-8">
-      <Card className="mx-auto max-w-lg">
-        <h1 className="mb-6 text-2xl font-semibold">{t("auth.loginTitle")}</h1>
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            try {
-              onDone(await api.login({ email, password }));
-            } catch (x) {
-              setError(sanitizeError(x));
-            }
-          }}
-        >
-          <Field
-            label={t("common.email")}
-            type="email"
-            value={email}
-            onChange={(e: any) => setEmail(e.target.value)}
+    <main className="flex min-h-screen items-center justify-center bg-page px-4 py-8 text-foreground sm:px-6 lg:px-8">
+      <div className="w-full max-w-md">
+        <div className="mb-6 flex items-center justify-center gap-2.5">
+          <span
+            aria-hidden="true"
+            className="inline-block h-3 w-3 rounded-full bg-action"
           />
-          <Field
-            label={t("common.password")}
-            type="password"
-            value={password}
-            onChange={(e: any) => setPassword(e.target.value)}
-          />
-          {error && <Alert variant="danger">{error}</Alert>}
-          <Button type="submit">{t("auth.signIn")}</Button>
-        </form>
-      </Card>
+          <span className="font-display text-lg font-bold tracking-tight text-brand">
+            {t("dashboard.brand")}
+          </span>
+        </div>
+        <Panel>
+          <h1 className="mb-6 text-xl font-semibold">
+            {t("auth.loginTitle")}
+          </h1>
+          <form
+            className="space-y-4"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              try {
+                onDone(await api.login({ email, password }));
+              } catch (x) {
+                setError(sanitizeError(x));
+              }
+            }}
+          >
+            <Field
+              label={t("common.email")}
+              type="email"
+              value={email}
+              onChange={(e: any) => setEmail(e.target.value)}
+            />
+            <Field
+              label={t("common.password")}
+              type="password"
+              value={password}
+              onChange={(e: any) => setPassword(e.target.value)}
+            />
+            {error && <Alert variant="danger">{error}</Alert>}
+            <Button type="submit" className="w-full">
+              {t("auth.signIn")}
+            </Button>
+          </form>
+        </Panel>
+      </div>
     </main>
   );
 }
@@ -287,9 +324,9 @@ export function AcmeWizard({
   const invalid = hosts.some((h) => !validHostname(h, challenge));
   const missingToken = challenge === "cloudflare_dns01" && !token.trim();
   return (
-    <Card>
-      <h2 className="mb-4 text-xl font-semibold">{t("acme.title")}</h2>
+    <Panel label={t("acme.title")}>
       <form
+        className="grid gap-4 sm:grid-cols-2"
         onSubmit={async (e) => {
           e.preventDefault();
           if (invalid || missingToken || busy) return;
@@ -368,7 +405,7 @@ export function AcmeWizard({
           {busy ? t("acme.issuing") : t("acme.issue")}
         </Button>
       </form>
-    </Card>
+    </Panel>
   );
 }
 
@@ -433,9 +470,9 @@ export function CertificateTable({
     void refresh();
   }, []);
   return (
-    <Card>
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold">{t("certificates.title")}</h2>
+    <Panel
+      label={t("certificates.title")}
+      actions={
         <Button
           variant="secondary"
           onClick={() => void refresh()}
@@ -443,76 +480,72 @@ export function CertificateTable({
         >
           {refreshing ? t("common.refreshing") : t("common.refresh")}
         </Button>
-      </div>
+      }
+    >
       {error && <Alert variant="danger">{error}</Alert>}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <ul className="divide-y divide-border">
         {items.map((c) => (
-          <article
-            className="flex flex-col gap-2 rounded-md border border-border bg-surface-muted p-4"
-            key={c.id}
-          >
-            <strong className="font-semibold">{c.name}</strong>
-            <span className="text-sm text-muted">
-              {c.source} · {c.covered_hostnames.join(", ")}
-            </span>
-            <span className="text-sm text-muted">
-              {t("certificates.expires", { expiry: formatDate(c.expiry) })}
-            </span>
-            <span className="text-sm">
-              {t("certificates.status", {
-                status: c.active
-                  ? t("common.active")
-                  : t("certificates.inactive"),
-              })}
-              {c.acme &&
-                ` · ${t("certificates.renewal", { state: c.acme.renewal_state })}`}
-            </span>
-            {c.acme?.last_error_code && (
-              <span className="text-sm text-danger-foreground">
-                {t("certificates.lastError", {
-                  error: sanitizeError(c.acme.last_error_code),
-                })}
-              </span>
-            )}
-            <div>
-              {canWrite && (
-                <>
+          <li className="flex flex-wrap items-start justify-between gap-4 py-3" key={c.id}>
+            <div className="min-w-0 space-y-1">
+              <div className="flex items-center gap-2">
+                <StatusLamp tone={c.active ? "success" : "neutral"} />
+                <strong className="font-medium text-foreground">
+                  {c.name}
+                </strong>
+              </div>
+              <p className="font-mono text-xs text-muted">
+                {c.source} · {c.covered_hostnames.join(", ")}
+              </p>
+              <p className="text-sm text-muted">
+                {t("certificates.expires", { expiry: formatDate(c.expiry) })}
+                {c.acme &&
+                  ` · ${t("certificates.renewal", { state: c.acme.renewal_state })}`}
+              </p>
+              {c.acme?.last_error_code && (
+                <p className="text-sm text-danger">
+                  {t("certificates.lastError", {
+                    error: sanitizeError(c.acme.last_error_code),
+                  })}
+                </p>
+              )}
+            </div>
+            {canWrite && (
+              <div className="flex shrink-0 gap-2">
+                <Button
+                  variant="secondary"
+                  disabled={!!busy[c.id]}
+                  onClick={() =>
+                    void action(c.id, "renew", () =>
+                      api.renewCertificate(c.id),
+                    )
+                  }
+                >
+                  {busy[c.id] === "renew"
+                    ? t("certificates.renewing")
+                    : t("certificates.renew")}
+                </Button>
+                {!c.active && (
                   <Button
                     variant="secondary"
                     disabled={!!busy[c.id]}
                     onClick={() =>
-                      void action(c.id, "renew", () =>
-                        api.renewCertificate(c.id),
+                      void action(c.id, "activate", () =>
+                        api.activateCertificate(c.id),
                       )
                     }
                   >
-                    {busy[c.id] === "renew"
-                      ? t("certificates.renewing")
-                      : t("certificates.renew")}
+                    {busy[c.id] === "activate"
+                      ? t("certificates.activating")
+                      : t("certificates.activate")}
                   </Button>
-                  {!c.active && (
-                    <Button
-                      variant="secondary"
-                      disabled={!!busy[c.id]}
-                      onClick={() =>
-                        void action(c.id, "activate", () =>
-                          api.activateCertificate(c.id),
-                        )
-                      }
-                    >
-                      {busy[c.id] === "activate"
-                        ? t("certificates.activating")
-                        : t("certificates.activate")}
-                    </Button>
-                  )}
-                </>
-              )}
-            </div>
-          </article>
+                )}
+              </div>
+            )}
+          </li>
         ))}
-      </div>
-      {items.length === 0 && <p>{t("certificates.empty")}</p>}
-    </Card>
+      </ul>
+      {items.length === 0 && <p className="text-sm text-muted">{t("certificates.empty")}</p>}
+    </Panel>
   );
 }
 
@@ -556,9 +589,10 @@ export function UsersSection({
       .map((slug) => ({ slug, name: slug })),
   ];
   return (
-    <Card data-testid="users-section">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold">{t("users.title")}</h2>
+    <Panel
+      data-testid="users-section"
+      label={t("users.title")}
+      actions={
         <Button
           data-testid="users-refresh"
           variant="secondary"
@@ -566,7 +600,8 @@ export function UsersSection({
         >
           {t("common.refresh")}
         </Button>
-      </div>
+      }
+    >
       {(error || userErrorMessage) && (
         <Alert variant="danger">{error || userErrorMessage}</Alert>
       )}
@@ -610,7 +645,9 @@ export function UsersSection({
                     </SelectField>
                   </td>
                   <td>
-                    {item.disabled ? t("common.disabled") : t("common.active")}
+                    <StatusBadge tone={item.disabled ? "neutral" : "success"}>
+                      {item.disabled ? t("common.disabled") : t("common.active")}
+                    </StatusBadge>
                   </td>
                   <td>
                     {!self && (
@@ -719,7 +756,7 @@ export function UsersSection({
           {t("users.create")}
         </Button>
       </form>
-    </Card>
+    </Panel>
   );
 }
 
@@ -836,8 +873,7 @@ export function RolesSection({
       }))
       .filter((scope) => scope.proxy_host_ids.length);
   return (
-    <Card>
-      <h2 className="mb-4 text-xl font-semibold">{t("roles.title")}</h2>
+    <Panel label={t("roles.title")}>
       {error && <Alert variant="danger">{error}</Alert>}
       <div className="overflow-x-auto">
         <table className="min-w-full text-left text-sm">
@@ -1014,7 +1050,7 @@ export function RolesSection({
       <p className="mt-4 text-sm text-muted">
         {t("roles.available", { permissions: PERMISSIONS.join(", ") })}
       </p>
-    </Card>
+    </Panel>
   );
 }
 
@@ -1083,31 +1119,36 @@ export function WafSection({
     }
   };
   return (
-    <Card data-testid="waf-section">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="mr-auto text-xl font-semibold">{t("waf.title")}</h2>
-        <span
-          className="rounded-full border border-border px-3 py-1 text-sm"
-          data-testid="waf-mode"
-        >
-          {config?.mode === "block"
-            ? t("common.block")
-            : t("common.monitorOnly")}
-        </span>
-        {admin && (
-          <Button
-            variant="secondary"
-            disabled={busy || !config}
-            onClick={() => void changeMode()}
+    <Panel
+      data-testid="waf-section"
+      label={t("waf.title")}
+      actions={
+        <>
+          <StatusBadge
+            tone={config?.mode === "block" ? "danger" : "warning"}
           >
-            {config?.mode === "block"
-              ? t("common.monitorOnly")
-              : t("common.block")}
-          </Button>
-        )}
-      </div>
+            <span data-testid="waf-mode">
+              {config?.mode === "block"
+                ? t("common.block")
+                : t("common.monitorOnly")}
+            </span>
+          </StatusBadge>
+          {admin && (
+            <Button
+              variant="secondary"
+              disabled={busy || !config}
+              onClick={() => void changeMode()}
+            >
+              {config?.mode === "block"
+                ? t("common.monitorOnly")
+                : t("common.block")}
+            </Button>
+          )}
+        </>
+      }
+    >
       {error && <Alert variant="danger">{error}</Alert>}
-      <div className="mt-4 overflow-x-auto">
+      <div className="overflow-x-auto">
         <table className="min-w-full text-left text-sm">
           <thead>
             <tr>
@@ -1181,7 +1222,7 @@ export function WafSection({
           </div>
         </div>
       )}
-    </Card>
+    </Panel>
   );
 }
 
@@ -1273,8 +1314,7 @@ export function BotProtectionSection({
     domain.trim().length <= 253 &&
     !/\s/.test(domain);
   return (
-    <Card data-testid="bot-protection-section">
-      <h2 className="mb-2 text-xl font-semibold">{t("bot.title")}</h2>
+    <Panel data-testid="bot-protection-section" label={t("bot.title")}>
       <p className="mb-4 text-sm text-muted">{t("bot.description")}</p>
       {error && <Alert variant="danger">{error}</Alert>}
       {saved && <Alert variant="success">{t("bot.saved")}</Alert>}
@@ -1419,7 +1459,7 @@ export function BotProtectionSection({
           </Button>
         </form>
       </div>
-    </Card>
+    </Panel>
   );
 }
 
@@ -1492,18 +1532,18 @@ export function RateLimitSection({
     }
   };
   return (
-    <Card data-testid="rate-limit-section">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="mr-auto text-xl font-semibold">
-          {t("rateLimit.title")}
-        </h2>
-        <span className="rounded-full border border-border px-3 py-1 text-sm">
+    <Panel
+      data-testid="rate-limit-section"
+      label={t("rateLimit.title")}
+      actions={
+        <StatusBadge tone={config?.action === "block" ? "danger" : "warning"}>
           {config?.action === "block"
             ? t("common.block")
             : t("common.monitorOnly")}
-        </span>
-      </div>
-      <p className="mt-2 text-sm text-muted">{t("rateLimit.description")}</p>
+        </StatusBadge>
+      }
+    >
+      <p className="mb-4 text-sm text-muted">{t("rateLimit.description")}</p>
       {error && <Alert variant="danger">{error}</Alert>}
       {saved && <Alert variant="success">{t("rateLimit.saved")}</Alert>}
       <form
@@ -1563,7 +1603,7 @@ export function RateLimitSection({
           </Button>
         )}
       </form>
-    </Card>
+    </Panel>
   );
 }
 
@@ -1658,15 +1698,17 @@ export function AnalyticsSection({
     : [];
   const latencyMax = Math.max(...latency.map(([, value]) => value ?? 0), 1);
   return (
-    <Card data-testid="analytics-section">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="mr-auto text-xl font-semibold">
-          {t("analytics.title")}
-        </h2>
-        <span className="text-sm text-muted">{t("analytics.description")}</span>
-      </div>
+    <Panel
+      data-testid="analytics-section"
+      label={t("analytics.title")}
+      actions={
+        <span className="text-sm text-muted">
+          {t("analytics.description")}
+        </span>
+      }
+    >
       <div
-        className="mt-4 grid gap-4 sm:grid-cols-3"
+        className="grid gap-4 sm:grid-cols-3"
         role="group"
         aria-label={t("analytics.filters")}
       >
@@ -1838,7 +1880,7 @@ export function AnalyticsSection({
           </div>
         </>
       )}
-    </Card>
+    </Panel>
   );
 }
 
@@ -1891,21 +1933,21 @@ export function BaselineSection({
   }, [refreshToken, host, window]);
 
   return (
-    <Card data-testid="baseline-section">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="mr-auto text-xl font-semibold">{t("baseline.title")}</h2>
-        {snapshot?.status === "warming_up" ? (
-          <span className="rounded-full bg-amber-500/20 px-3 py-1 text-xs text-amber-500 font-medium">
-            {t("baseline.warming")}
-          </span>
-        ) : (
-          <span className="rounded-full bg-emerald-500/20 px-3 py-1 text-xs text-emerald-500 font-medium">
-            {t("baseline.ready")}
-          </span>
-        )}
-      </div>
-      <p className="mt-2 text-sm text-muted">{t("baseline.description")}</p>
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+    <Panel
+      data-testid="baseline-section"
+      label={t("baseline.title")}
+      actions={
+        <StatusBadge
+          tone={snapshot?.status === "warming_up" ? "warning" : "success"}
+        >
+          {snapshot?.status === "warming_up"
+            ? t("baseline.warming")
+            : t("baseline.ready")}
+        </StatusBadge>
+      }
+    >
+      <p className="mb-4 text-sm text-muted">{t("baseline.description")}</p>
+      <div className="grid gap-4 sm:grid-cols-2">
         <SelectField
           id="baseline-proxy-host"
           label={t("common.proxyHost")}
@@ -1997,7 +2039,7 @@ export function BaselineSection({
           </div>
         </div>
       )}
-    </Card>
+    </Panel>
   );
 }
 
@@ -2062,15 +2104,15 @@ export function AnomalySection({
   };
 
   return (
-    <Card data-testid="anomaly-section">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="mr-auto text-xl font-semibold">{t("anomaly.title")}</h2>
-        <span className="rounded-full border border-border px-3 py-1 text-xs text-muted">
-          {t("common.monitorOnly")}
-        </span>
-      </div>
-      <p className="mt-2 text-sm text-muted">{t("anomaly.description")}</p>
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+    <Panel
+      data-testid="anomaly-section"
+      label={t("anomaly.title")}
+      actions={
+        <StatusBadge tone="neutral">{t("common.monitorOnly")}</StatusBadge>
+      }
+    >
+      <p className="mb-4 text-sm text-muted">{t("anomaly.description")}</p>
+      <div className="grid gap-4 sm:grid-cols-2">
         <SelectField
           id="anomaly-proxy-host"
           label={t("common.proxyHost")}
@@ -2134,17 +2176,17 @@ export function AnomalySection({
                     {t(anomalyRuleKey(item.rule))}
                   </td>
                   <td>
-                    <span
-                      className={`inline-block rounded px-2 py-0.5 text-xs font-semibold ${
+                    <StatusBadge
+                      tone={
                         item.severity === "critical"
-                          ? "bg-rose-500/20 text-rose-500"
+                          ? "danger"
                           : item.severity === "warning"
-                            ? "bg-amber-500/20 text-amber-500"
-                            : "bg-blue-500/20 text-blue-500"
-                      }`}
+                            ? "warning"
+                            : "info"
+                      }
                     >
                       {t(anomalySeverityKey(item.severity))}
-                    </span>
+                    </StatusBadge>
                   </td>
                   <td>
                     {formatNumber(item.score, {
@@ -2174,7 +2216,7 @@ export function AnomalySection({
           </table>
         </div>
       )}
-    </Card>
+    </Panel>
   );
 }
 
@@ -2284,19 +2326,20 @@ export function AdaptiveTuningSection({
   };
 
   return (
-    <Card data-testid="adaptive-tuning-section">
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="mr-auto text-xl font-semibold">{t("tuning.title")}</h2>
-        <span
-          className={`rounded-full px-3 py-1 text-xs font-medium ${
+    <Panel
+      data-testid="adaptive-tuning-section"
+      label={t("tuning.title")}
+      actions={
+        <StatusBadge
+          tone={
             emergencyDisabled
-              ? "bg-rose-500/20 text-rose-500"
+              ? "danger"
               : policy.mode === "enforce"
-                ? "bg-emerald-500/20 text-emerald-500"
+                ? "success"
                 : policy.mode === "recommend"
-                  ? "bg-blue-500/20 text-blue-500"
-                  : "bg-amber-500/20 text-amber-500"
-          }`}
+                  ? "info"
+                  : "warning"
+          }
         >
           {emergencyDisabled
             ? t("tuning.emergencyDisabled")
@@ -2305,15 +2348,16 @@ export function AdaptiveTuningSection({
               : policy.mode === "recommend"
                 ? t("tuning.recommendationsOnly")
                 : t("tuning.monitorDefault")}
-        </span>
-      </div>
-      <p className="mt-2 text-sm text-muted">{t("tuning.description")}</p>
+        </StatusBadge>
+      }
+    >
+      <p className="mb-4 text-sm text-muted">{t("tuning.description")}</p>
 
       {error && <Alert variant="danger">{error}</Alert>}
       {success && <Alert variant="success">{success}</Alert>}
 
       <form
-        className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4"
+        className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"
         onSubmit={(e) => void savePolicy(e)}
       >
         <SelectField
@@ -2427,13 +2471,13 @@ export function AdaptiveTuningSection({
                     <td>{rec.reason}</td>
                     <td>
                       {rec.applied ? (
-                        <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-500">
+                        <StatusBadge tone="success">
                           {t("tuning.applied")}
-                        </span>
+                        </StatusBadge>
                       ) : (
-                        <span className="rounded bg-amber-500/20 px-2 py-0.5 text-xs text-amber-500">
+                        <StatusBadge tone="warning">
                           {t("tuning.pending")}
-                        </span>
+                        </StatusBadge>
                       )}
                     </td>
                     <td>
@@ -2461,7 +2505,7 @@ export function AdaptiveTuningSection({
           </div>
         )}
       </div>
-    </Card>
+    </Panel>
   );
 }
 
@@ -2516,8 +2560,8 @@ export function BotChallengePage({
     }
   };
   return (
-    <main className="min-h-screen bg-page px-4 py-8 text-foreground">
-      <Card className="mx-auto max-w-lg">
+    <main className="flex min-h-screen items-center justify-center bg-page px-4 py-8 text-foreground">
+      <Panel className="mx-auto w-full max-w-lg">
         <h1 className="mb-2 text-2xl font-semibold">{t("bot.quickCheck")}</h1>
         <p className="mb-6 text-muted">{t("bot.quickCheckDescription")}</p>
         {error && <Alert variant="danger">{error}</Alert>}
@@ -2536,8 +2580,131 @@ export function BotChallengePage({
         >
           {t("bot.anotherChallenge")}
         </Button>
-      </Card>
+      </Panel>
     </main>
+  );
+}
+
+const NAV_GROUPS = [
+  { id: "hosts", labelKey: "nav.proxyHosts", Icon: IconRoute, adminOnly: false },
+  { id: "advisor", labelKey: "nav.aiAdvisor", Icon: IconAdvisor, adminOnly: false },
+  { id: "security", labelKey: "nav.security", Icon: IconShield, adminOnly: false },
+  { id: "analytics", labelKey: "nav.analytics", Icon: IconChart, adminOnly: false },
+  { id: "users", labelKey: "nav.users", Icon: IconUsers, adminOnly: true },
+  { id: "audit", labelKey: "nav.audit", Icon: IconAudit, adminOnly: false },
+] as const;
+
+type NavId = (typeof NAV_GROUPS)[number]["id"];
+
+function SidebarNav({
+  activeView,
+  onSelect,
+  isAdmin,
+  onClose,
+}: {
+  activeView: NavId;
+  onSelect: (id: NavId) => void;
+  isAdmin: boolean;
+  onClose?: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <div className="flex items-center justify-between gap-2 border-b border-border px-5 py-4">
+        <span className="flex items-center gap-2.5">
+          <span
+            aria-hidden="true"
+            className="inline-block h-2.5 w-2.5 rounded-full bg-action"
+          />
+          <span className="font-display text-lg font-bold tracking-tight text-brand">
+            {t("dashboard.brand")}
+          </span>
+        </span>
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("dashboard.closeMenu")}
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-control)] text-muted hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus lg:hidden"
+          >
+            <IconClose className="h-5 w-5" />
+          </button>
+        )}
+      </div>
+      <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4" aria-label={t("dashboard.brand")}>
+        {NAV_GROUPS.filter((group) => !group.adminOnly || isAdmin).map(
+          (group) => {
+            const active = activeView === group.id;
+            const Icon = group.Icon;
+            return (
+              <button
+                key={group.id}
+                type="button"
+                onClick={() => onSelect(group.id)}
+                aria-current={active ? "page" : undefined}
+                className={`flex min-h-11 w-full items-center gap-3 rounded-full px-4 py-2.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus ${
+                  active
+                    ? "bg-action/12 text-action"
+                    : "text-muted hover:bg-surface-muted hover:text-foreground"
+                }`}
+              >
+                <Icon className="h-5 w-5 shrink-0" />
+                {t(group.labelKey)}
+              </button>
+            );
+          },
+        )}
+      </nav>
+    </>
+  );
+}
+
+function UserMenu({
+  user,
+  locale,
+  setLocale,
+  onLogout,
+}: {
+  user: User;
+  locale: Locale;
+  setLocale: (locale: Locale) => void;
+  onLogout: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Menu
+      trigger={(triggerProps) => (
+        <button
+          type="button"
+          {...triggerProps}
+          aria-label={t("dashboard.accountMenu")}
+          className="flex min-h-11 items-center gap-2 rounded-full border border-border-strong bg-transparent px-3 py-2 text-sm text-foreground hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+        >
+          <IconUserCircle className="h-5 w-5 text-muted" />
+          <span className="hidden max-w-40 truncate font-mono text-xs text-muted sm:inline">
+            {user.email}
+          </span>
+          <IconChevronDown className="h-3.5 w-3.5 text-muted" />
+        </button>
+      )}
+    >
+      <div className="border-b border-border px-4 py-3">
+        <p className="truncate text-sm font-medium text-foreground">
+          {user.email}
+        </p>
+        <p className="mt-0.5 font-mono text-xs uppercase tracking-[0.08em] text-muted">
+          {displayRole(t, user.role)}
+        </p>
+      </div>
+      <div
+        className="space-y-3 border-b border-border px-4 py-3"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <ThemeSelect className="w-full" />
+        <LanguageSelect value={locale} onChange={setLocale} />
+      </div>
+      <MenuItem onClick={onLogout}>{t("auth.signOut")}</MenuItem>
+    </Menu>
   );
 }
 
@@ -2574,6 +2741,8 @@ function Dashboard({
   });
   const auditReloadRef = useRef<(() => void) | null>(null);
   const canWrite = user.role !== "viewer";
+  const [activeView, setActiveView] = useState<NavId>("hosts");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const loadHosts = async () => {
     try {
       setHosts(await api.hosts());
@@ -2653,205 +2822,291 @@ function Dashboard({
   useEffect(() => {
     void refresh();
   }, []);
+  const realtimeTone =
+    realtimeStatus === "connected"
+      ? "success"
+      : realtimeStatus === "connecting"
+        ? "warning"
+        : "danger";
+  const activeLabelKey =
+    NAV_GROUPS.find((group) => group.id === activeView)?.labelKey ??
+    "dashboard.brand";
   return (
-    <main className="min-h-screen bg-page px-4 py-6 text-foreground sm:px-6 lg:px-8">
-      <header className="mx-auto mb-6 flex max-w-7xl flex-wrap items-center gap-4 border-b border-border pb-4">
-        <h1 className="mr-auto text-2xl font-bold text-brand">
-          {t("dashboard.brand")}
-        </h1>
-        <span className="text-sm text-muted">
-          {user.email} ({displayRole(t, user.role)})
-        </span>
-        <LanguageSelect
-          value={locale}
-          onChange={(nextLocale) => void setLocale(nextLocale)}
+    <div className="flex min-h-screen bg-page text-foreground">
+      <aside className="hidden border-r border-border bg-surface lg:flex lg:w-64 lg:shrink-0 lg:flex-col">
+        <SidebarNav
+          activeView={activeView}
+          onSelect={setActiveView}
+          isAdmin={user.role === "admin"}
         />
-        <ThemeSelect />
-        <Button variant="secondary" onClick={onLogout}>
-          {t("auth.signOut")}
-        </Button>
-        <span
-          className="text-sm text-muted"
-          aria-label={t("dashboard.realtimeStatus")}
-        >
-          {t("dashboard.realtime", {
-            status: t(`dashboard.realtimeStates.${realtimeStatus}`),
-          })}
-        </span>
-      </header>
-      <div className="mx-auto grid max-w-7xl gap-6">
-        {error && <Alert variant="danger">{error}</Alert>}
-        <AiAdvisorSection user={user} refreshToken={aiAdvisorRefresh} onChanged={() => void refresh()} />
-        <CertificateTable user={user} onChanged={() => void refresh()} />
-        <WafSection user={user} refreshToken={wafRefresh} />
-        <BotProtectionSection user={user} refreshToken={wafRefresh} />
-        <RateLimitSection user={user} refreshToken={wafRefresh} />
-        <AnalyticsSection hosts={hosts} refreshToken={analyticsRefresh} />
-        <BaselineSection hosts={hosts} refreshToken={baselineRefresh} />
-        <AnomalySection
-          user={user}
-          hosts={hosts}
-          refreshToken={anomalyRefresh}
-        />
-        <AdaptiveTuningSection
-          user={user}
-          hosts={hosts}
-          refreshToken={adaptiveTuningRefresh}
-        />
-        {canWrite && (
-          <AcmeWizard canWrite={canWrite} onIssued={() => void refresh()} />
-        )}
-        <Card>
-          <h2 className="mb-4 text-xl font-semibold">
-            {t("proxyHosts.title")}
-          </h2>
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-left text-sm">
-              <thead>
-                <tr>
-                  <th>{t("common.name")}</th>
-                  <th>{t("common.domain")}</th>
-                  <th>{t("proxyHosts.upstream")}</th>
-                  <th>{t("proxyHosts.tls")}</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {hosts.map((h) => (
-                  <tr key={h.id}>
-                    <td>{h.name}</td>
-                    <td>{h.domain}</td>
-                    <td>
-                      {h.upstream_host}:{h.upstream_port}
-                    </td>
-                    <td>{h.tls_mode}</td>
-                    <td>
-                      {canWrite && (
-                        <Button
-                          variant="danger"
-                          onClick={() => api.deleteHost(h.id).then(refresh)}
-                        >
-                          {t("common.delete")}
-                        </Button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {canWrite && (
-            <form
-              className="mt-6 grid gap-4 sm:grid-cols-2"
-              onSubmit={async (e) => {
-                e.preventDefault();
-                try {
-                  await api.createHost(form);
-                  setForm({
-                    ...form,
-                    name: "",
-                    domain: "",
-                    upstream_host: "",
-                    certificate_id: null,
-                  });
-                  void refresh();
-                } catch (x) {
-                  setError(sanitizeError(x));
-                }
+      </aside>
+      {mobileNavOpen && (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <div
+            aria-hidden="true"
+            onClick={() => setMobileNavOpen(false)}
+            className="absolute inset-0 bg-page/80 backdrop-blur-sm"
+          />
+          <aside className="absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col border-r border-border bg-surface">
+            <SidebarNav
+              activeView={activeView}
+              onSelect={(id) => {
+                setActiveView(id);
+                setMobileNavOpen(false);
               }}
+              isAdmin={user.role === "admin"}
+              onClose={() => setMobileNavOpen(false)}
+            />
+          </aside>
+        </div>
+      )}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="sticky top-0 z-10 bg-panel shadow-[var(--shadow-appbar)]">
+          <div className="flex items-center gap-2 px-4 py-3 sm:gap-3 sm:px-6 lg:px-8">
+            <button
+              type="button"
+              onClick={() => setMobileNavOpen(true)}
+              aria-label={t("dashboard.openMenu")}
+              className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full text-muted hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus lg:hidden"
             >
-              <h3>{t("proxyHosts.add")}</h3>
-              <Field
-                label={t("common.name")}
-                value={form.name}
-                onChange={(e: any) =>
-                  setForm({ ...form, name: e.target.value })
-                }
-              />
-              <Field
-                label={t("common.domain")}
-                value={form.domain}
-                onChange={(e: any) =>
-                  setForm({ ...form, domain: e.target.value })
-                }
-              />
-              <Field
-                label={t("proxyHosts.upstreamHost")}
-                value={form.upstream_host}
-                onChange={(e: any) =>
-                  setForm({ ...form, upstream_host: e.target.value })
-                }
-              />
-              <Field
-                label={t("proxyHosts.port")}
-                type="number"
-                min="1"
-                max="65535"
-                value={form.upstream_port}
-                onChange={(e: any) =>
-                  setForm({ ...form, upstream_port: Number(e.target.value) })
-                }
-              />
-              <SelectField
-                label={t("proxyHosts.tlsMode")}
-                value={form.tls_mode}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    tls_mode: e.target.value,
-                    certificate_id:
-                      e.target.value === "disabled"
-                        ? null
-                        : form.certificate_id,
-                  })
-                }
-              >
-                <option value="disabled">{t("proxyHosts.tlsDisabled")}</option>
-                <option value="http">{t("proxyHosts.http")}</option>
-                <option value="https">{t("proxyHosts.https")}</option>
-              </SelectField>
-              {form.tls_mode !== "disabled" && (
-                <SelectField
-                  label={t("proxyHosts.certificate")}
-                  value={form.certificate_id ?? ""}
-                  onChange={(e) =>
-                    setForm({
-                      ...form,
-                      certificate_id: e.target.value
-                        ? Number(e.target.value)
-                        : null,
-                    })
-                  }
-                  required
+              <IconMenu className="h-5 w-5" />
+            </button>
+            <h1 className="mr-auto min-w-0 truncate font-display text-base font-semibold tracking-tight text-foreground sm:text-lg">
+              {t(activeLabelKey)}
+            </h1>
+            <div className="hidden sm:block">
+              <StatusBadge tone={realtimeTone}>
+                <span aria-label={t("dashboard.realtimeStatus")}>
+                  {t("dashboard.realtime", {
+                    status: t(`dashboard.realtimeStates.${realtimeStatus}`),
+                  })}
+                </span>
+              </StatusBadge>
+            </div>
+            <UserMenu
+              user={user}
+              locale={locale}
+              setLocale={(nextLocale) => void setLocale(nextLocale)}
+              onLogout={onLogout}
+            />
+          </div>
+          <div className="border-t border-border px-4 py-2 sm:hidden">
+            <StatusBadge tone={realtimeTone}>
+              <span aria-label={t("dashboard.realtimeStatus")}>
+                {t("dashboard.realtime", {
+                  status: t(`dashboard.realtimeStates.${realtimeStatus}`),
+                })}
+              </span>
+            </StatusBadge>
+          </div>
+        </header>
+        <div className="mx-auto grid w-full max-w-6xl gap-6 px-4 py-6 sm:px-6 lg:px-8">
+          {error && <Alert variant="danger">{error}</Alert>}
+          <div hidden={activeView !== "advisor"} className="grid gap-6">
+            <AiAdvisorSection
+              user={user}
+              refreshToken={aiAdvisorRefresh}
+              onChanged={() => void refresh()}
+            />
+          </div>
+          <div hidden={activeView !== "security"} className="grid gap-6">
+            <WafSection user={user} refreshToken={wafRefresh} />
+            <BotProtectionSection user={user} refreshToken={wafRefresh} />
+            <RateLimitSection user={user} refreshToken={wafRefresh} />
+          </div>
+          <div hidden={activeView !== "analytics"} className="grid gap-6">
+            <AnalyticsSection hosts={hosts} refreshToken={analyticsRefresh} />
+            <BaselineSection hosts={hosts} refreshToken={baselineRefresh} />
+            <AnomalySection
+              user={user}
+              hosts={hosts}
+              refreshToken={anomalyRefresh}
+            />
+            <AdaptiveTuningSection
+              user={user}
+              hosts={hosts}
+              refreshToken={adaptiveTuningRefresh}
+            />
+          </div>
+          <div hidden={activeView !== "hosts"} className="grid gap-6">
+            {canWrite && (
+              <AcmeWizard canWrite={canWrite} onIssued={() => void refresh()} />
+            )}
+            <Panel
+              label={t("proxyHosts.title")}
+              actions={
+                <span className="font-mono text-xs text-muted">
+                  {hosts.length}
+                </span>
+              }
+            >
+              <div className="overflow-x-auto">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>{t("common.name")}</th>
+                      <th>{t("common.domain")}</th>
+                      <th>{t("proxyHosts.upstream")}</th>
+                      <th>{t("proxyHosts.tls")}</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {hosts.map((h) => (
+                      <tr key={h.id}>
+                        <td className="font-medium">{h.name}</td>
+                        <td className="font-mono text-sm">{h.domain}</td>
+                        <td className="font-mono text-sm text-muted">
+                          {h.upstream_host}:{h.upstream_port}
+                        </td>
+                        <td>
+                          <StatusBadge
+                            tone={h.tls_mode === "disabled" ? "neutral" : "success"}
+                          >
+                            {h.tls_mode}
+                          </StatusBadge>
+                        </td>
+                        <td>
+                          {canWrite && (
+                            <Button
+                              variant="danger"
+                              onClick={() => api.deleteHost(h.id).then(refresh)}
+                            >
+                              {t("common.delete")}
+                            </Button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {canWrite && (
+                <form
+                  className="mt-6 grid gap-4 border-t border-border pt-6 sm:grid-cols-2"
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    try {
+                      await api.createHost(form);
+                      setForm({
+                        ...form,
+                        name: "",
+                        domain: "",
+                        upstream_host: "",
+                        certificate_id: null,
+                      });
+                      void refresh();
+                    } catch (x) {
+                      setError(sanitizeError(x));
+                    }
+                  }}
                 >
-                  <option value="">{t("proxyHosts.selectCertificate")}</option>
-                  {certs.map((c) => (
-                    <option value={c.id} key={c.id}>
-                      {c.name} ({c.covered_hostnames.join(", ")})
+                  <h3>{t("proxyHosts.add")}</h3>
+                  <Field
+                    label={t("common.name")}
+                    value={form.name}
+                    onChange={(e: any) =>
+                      setForm({ ...form, name: e.target.value })
+                    }
+                  />
+                  <Field
+                    label={t("common.domain")}
+                    value={form.domain}
+                    onChange={(e: any) =>
+                      setForm({ ...form, domain: e.target.value })
+                    }
+                  />
+                  <Field
+                    label={t("proxyHosts.upstreamHost")}
+                    value={form.upstream_host}
+                    onChange={(e: any) =>
+                      setForm({ ...form, upstream_host: e.target.value })
+                    }
+                  />
+                  <Field
+                    label={t("proxyHosts.port")}
+                    type="number"
+                    min="1"
+                    max="65535"
+                    value={form.upstream_port}
+                    onChange={(e: any) =>
+                      setForm({
+                        ...form,
+                        upstream_port: Number(e.target.value),
+                      })
+                    }
+                  />
+                  <SelectField
+                    label={t("proxyHosts.tlsMode")}
+                    value={form.tls_mode}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        tls_mode: e.target.value,
+                        certificate_id:
+                          e.target.value === "disabled"
+                            ? null
+                            : form.certificate_id,
+                      })
+                    }
+                  >
+                    <option value="disabled">
+                      {t("proxyHosts.tlsDisabled")}
                     </option>
-                  ))}
-                </SelectField>
+                    <option value="http">{t("proxyHosts.http")}</option>
+                    <option value="https">{t("proxyHosts.https")}</option>
+                  </SelectField>
+                  {form.tls_mode !== "disabled" && (
+                    <SelectField
+                      label={t("proxyHosts.certificate")}
+                      value={form.certificate_id ?? ""}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          certificate_id: e.target.value
+                            ? Number(e.target.value)
+                            : null,
+                        })
+                      }
+                      required
+                    >
+                      <option value="">
+                        {t("proxyHosts.selectCertificate")}
+                      </option>
+                      {certs.map((c) => (
+                        <option value={c.id} key={c.id}>
+                          {c.name} ({c.covered_hostnames.join(", ")})
+                        </option>
+                      ))}
+                    </SelectField>
+                  )}
+                  <Button type="submit">{t("proxyHosts.addHost")}</Button>
+                </form>
               )}
-              <Button type="submit">{t("proxyHosts.addHost")}</Button>
-            </form>
-          )}
-        </Card>
-        <UsersSection
-          user={user}
-          users={users}
-          roles={roles}
-          userErrorMessage={usersError}
-          onChanged={() => void refresh()}
-        />
-        <RolesSection
-          user={user}
-          roles={roles}
-          hosts={hosts}
-          onChanged={() => void refresh()}
-        />
-        <AuditLogSection user={user} reloadRef={auditReloadRef} />
+            </Panel>
+            <CertificateTable user={user} onChanged={() => void refresh()} />
+          </div>
+          <div hidden={activeView !== "users"} className="grid gap-6">
+            <UsersSection
+              user={user}
+              users={users}
+              roles={roles}
+              userErrorMessage={usersError}
+              onChanged={() => void refresh()}
+            />
+            <RolesSection
+              user={user}
+              roles={roles}
+              hosts={hosts}
+              onChanged={() => void refresh()}
+            />
+          </div>
+          <div hidden={activeView !== "audit"} className="grid gap-6">
+            <AuditLogSection user={user} reloadRef={auditReloadRef} />
+          </div>
+        </div>
       </div>
-    </main>
+    </div>
   );
 }
 function AppContent() {
@@ -2984,9 +3239,9 @@ export function AuditLogSection({
   }, [event, q, actorId, from, to]);
   const hasNext = page * pageSize < total;
   return (
-    <Card>
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold">{t("audit.title")}</h2>
+    <Panel
+      label={t("audit.title")}
+      actions={
         <Button
           variant="secondary"
           onClick={() => void load()}
@@ -2994,7 +3249,8 @@ export function AuditLogSection({
         >
           {loading ? t("common.refreshing") : t("common.refresh")}
         </Button>
-      </div>
+      }
+    >
       <div className="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <Field
           label={t("audit.event")}
@@ -3076,6 +3332,6 @@ export function AuditLogSection({
           {t("common.next")}
         </Button>
       </div>
-    </Card>
+    </Panel>
   );
 }
