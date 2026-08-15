@@ -3227,6 +3227,32 @@ async fn setup_initialize(
     match repository::insert_initial_admin(&s.db, &email, &hash).await {
         Ok(Some(u)) => {
             audit::record_state(&s, Some(u.id), "setup_completed", "admin_created").await;
+            // Mirrors auth::login's session creation: the operator who just
+            // completed setup expects to land in the dashboard already
+            // authenticated, the same way a freshly created account would
+            // in any normal signup flow. A session-creation failure here
+            // doesn't undo the admin account that was just created --
+            // that's the important side effect -- so this still returns
+            // 201 with the user, just without a session cookie; the
+            // operator can log in separately in that rare case.
+            let token = Uuid::new_v4().to_string();
+            let exp = (Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
+            if repository::create_session(&s.db, u.id, &auth::token_hash(&token), &exp)
+                .await
+                .is_ok()
+            {
+                s.realtime.publish("sessions.changed");
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    axum::http::header::SET_COOKIE,
+                    format!(
+                        "bearust_session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=86400"
+                    )
+                    .parse()
+                    .unwrap(),
+                );
+                return (StatusCode::CREATED, headers, Json(u)).into_response();
+            }
             (StatusCode::CREATED, Json(u)).into_response()
         }
         Ok(None) => (
