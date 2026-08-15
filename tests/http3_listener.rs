@@ -1,5 +1,8 @@
 use bearust::{
     analytics::{AnalyticsCollector, AnalyticsFilter},
+    bot_challenge::ChallengeService,
+    bot_protection::{BotConfig, BotMode, BotRule},
+    bot_store::BotStore,
     config::{
         Algorithm, BackendConfig, Config, HealthCheckKind, PoolConfig, RouteConfig, ServerConfig,
     },
@@ -8,7 +11,7 @@ use bearust::{
         repository,
     },
     http3,
-    http3::{AnalyticsContext, RateLimitContext},
+    http3::{AnalyticsContext, BotContext, RateLimitContext},
     rate_limit::{RateLimitAction, RateLimitPolicy},
     rate_limit_store::{IpNetSet, RateLimiterStore},
     runtime::{RuntimeSnapshot, RuntimeStore},
@@ -369,7 +372,17 @@ async fn http3_listener_blocks_a_request_the_waf_rule_engine_would_block() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, Some(waf), None, None, shutdown_rx).await;
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            http3::Http3Options {
+                waf: Some(waf),
+                ..Default::default()
+            },
+            shutdown_rx,
+        )
+        .await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -411,7 +424,17 @@ async fn http3_listener_allows_a_request_the_waf_rule_engine_would_allow() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, Some(waf), None, None, shutdown_rx).await;
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            http3::Http3Options {
+                waf: Some(waf),
+                ..Default::default()
+            },
+            shutdown_rx,
+        )
+        .await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -453,7 +476,7 @@ async fn http3_listener_forwards_an_allowed_request_to_the_resolved_backend() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, None, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Default::default(), shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -490,7 +513,7 @@ async fn http3_listener_returns_404_for_an_unmatched_host() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, None, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Default::default(), shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -596,7 +619,7 @@ async fn http3_listener_reasserts_host_and_rebuilds_x_forwarded_for_defeating_a_
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, None, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Default::default(), shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -672,7 +695,7 @@ async fn http3_listener_rejects_an_oversized_body_with_413_and_never_contacts_th
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, None, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Default::default(), shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -715,7 +738,7 @@ async fn http3_listener_returns_502_when_the_upstream_connection_fails() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, None, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Default::default(), shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -748,7 +771,17 @@ async fn http3_listener_waf_block_never_reaches_the_backend() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, Some(waf), None, None, shutdown_rx).await;
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            http3::Http3Options {
+                waf: Some(waf),
+                ..Default::default()
+            },
+            shutdown_rx,
+        )
+        .await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -822,9 +855,10 @@ async fn http3_listener_records_an_analytics_event_for_an_allowed_request() {
             bind,
             tls_config,
             store,
-            None,
-            Some(analytics),
-            None,
+            http3::Http3Options {
+                analytics: Some(analytics),
+                ..Default::default()
+            },
             shutdown_rx,
         )
         .await;
@@ -880,9 +914,11 @@ async fn http3_listener_records_a_waf_block_analytics_event_with_zero_backend_re
             bind,
             tls_config,
             store,
-            Some(waf),
-            Some(analytics),
-            None,
+            http3::Http3Options {
+                waf: Some(waf),
+                analytics: Some(analytics),
+                ..Default::default()
+            },
             shutdown_rx,
         )
         .await;
@@ -950,9 +986,10 @@ async fn http3_listener_blocks_a_rate_limited_request_in_block_mode() {
             bind,
             tls_config,
             store,
-            None,
-            None,
-            Some(rate_limit),
+            http3::Http3Options {
+                rate_limit: Some(rate_limit),
+                ..Default::default()
+            },
             shutdown_rx,
         )
         .await;
@@ -1021,9 +1058,10 @@ async fn http3_listener_allows_a_rate_limited_request_in_monitor_mode() {
             bind,
             tls_config,
             store,
-            None,
-            None,
-            Some(rate_limit),
+            http3::Http3Options {
+                rate_limit: Some(rate_limit),
+                ..Default::default()
+            },
             shutdown_rx,
         )
         .await;
@@ -1050,5 +1088,235 @@ async fn http3_listener_allows_a_rate_limited_request_in_monitor_mode() {
         2,
         "monitor mode must never block a request, even over the limit"
     );
+    backend.shutdown().await;
+}
+
+/// Fixed test key for `ChallengeService`/`BotConfig::fingerprint_key`,
+/// mirroring the exact string used by `tests/proxy_bot.rs`'s fixtures --
+/// only needs to be consistent between the store and the service.
+const BOT_TEST_FINGERPRINT_KEY: &[u8] = b"http3-listener-test-key";
+
+/// Builds a `BotStore` whose single rule (`ua_missing`, weight 100,
+/// threshold 1 -- mirroring `tests/proxy_bot.rs`'s fixture) fires for any
+/// request missing a `User-Agent` header, which every H3 client in this
+/// test file's `connect_h3_client` sends none of, in `mode`.
+async fn bot_store_with_missing_ua_rule(mode: BotMode) -> BotStore {
+    let db = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&db).await.unwrap();
+    repository::update_bot_config(
+        &db,
+        &BotConfig {
+            mode,
+            threshold: 1,
+            ttl_seconds: 300,
+            fingerprint_key: BOT_TEST_FINGERPRINT_KEY.to_vec(),
+        },
+    )
+    .await
+    .unwrap();
+    repository::insert_bot_rule(&db, &BotRule::signal("ua_missing", 100))
+        .await
+        .unwrap();
+    BotStore::load(&db).await.unwrap()
+}
+
+#[tokio::test]
+async fn http3_listener_blocks_a_bot_detected_request_in_block_mode() {
+    install_crypto_provider();
+
+    let backend = spawn_counting_backend("should-never-be-seen").await;
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let bot = Arc::new(BotContext {
+        store: Arc::new(bot_store_with_missing_ua_rule(BotMode::Block).await),
+        challenges: None,
+    });
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            http3::Http3Options {
+                bot: Some(bot),
+                ..Default::default()
+            },
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/anything")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        while chunk.has_remaining() {
+            let n = chunk.remaining();
+            body.extend_from_slice(&chunk.chunk()[..n]);
+            chunk.advance(n);
+        }
+    }
+    assert_eq!(body, b"Request blocked");
+
+    drive.abort();
+    server.abort();
+    assert_eq!(backend.request_count(), 0);
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn http3_listener_challenges_a_bot_detected_request_in_challenge_mode() {
+    install_crypto_provider();
+
+    let backend = spawn_counting_backend("should-never-be-seen").await;
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let bot = Arc::new(BotContext {
+        store: Arc::new(bot_store_with_missing_ua_rule(BotMode::Challenge).await),
+        challenges: Some(Arc::new(
+            ChallengeService::from_key(BOT_TEST_FINGERPRINT_KEY.to_vec()).unwrap(),
+        )),
+    });
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            http3::Http3Options {
+                bot: Some(bot),
+                ..Default::default()
+            },
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/anything")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "application/json"
+    );
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        while chunk.has_remaining() {
+            let n = chunk.remaining();
+            body.extend_from_slice(&chunk.chunk()[..n]);
+            chunk.advance(n);
+        }
+    }
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["challenge_url"]
+        .as_str()
+        .unwrap()
+        .starts_with("/bot-challenge?fingerprint_prefix="));
+
+    drive.abort();
+    server.abort();
+    assert_eq!(backend.request_count(), 0);
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn http3_listener_allows_a_challenge_triggering_request_with_valid_clearance() {
+    install_crypto_provider();
+
+    let backend = support::spawn_http_backend(
+        Arc::new(std::sync::atomic::AtomicU16::new(200)),
+        "cleared-backend-body",
+    )
+    .await;
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let bot_store = bot_store_with_missing_ua_rule(BotMode::Challenge).await;
+    let challenges =
+        Arc::new(ChallengeService::from_key(BOT_TEST_FINGERPRINT_KEY.to_vec()).unwrap());
+
+    // Compute the same fingerprint the server will derive for this exact
+    // request (no headers, method GET, path /anything) so a real clearance
+    // token can be issued for it ahead of time, mirroring how a real client
+    // would present a token obtained from a prior /bot-challenge round trip.
+    let snapshot = bearust::bot_protection::compile_snapshot(
+        BotConfig {
+            mode: BotMode::Challenge,
+            threshold: 1,
+            ttl_seconds: 300,
+            fingerprint_key: BOT_TEST_FINGERPRINT_KEY.to_vec(),
+        },
+        vec![BotRule::signal("ua_missing", 100)],
+    )
+    .unwrap();
+    let inspection = bearust::bot_protection::BotInspectionContext::new(
+        "GET",
+        "/anything",
+        vec![("host".to_string(), "localhost".to_string())],
+    );
+    let evaluation = bearust::bot_protection::evaluate(&snapshot, &inspection);
+    let clearance = challenges
+        .issue_clearance(&evaluation.fingerprint, bearust::bot_challenge::unix_now())
+        .unwrap();
+
+    let bot = Arc::new(BotContext {
+        store: Arc::new(bot_store),
+        challenges: Some(challenges),
+    });
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            http3::Http3Options {
+                bot: Some(bot),
+                ..Default::default()
+            },
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/anything")
+        .header("cookie", format!("bearust_bot_clear={clearance}"))
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::OK);
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        while chunk.has_remaining() {
+            let n = chunk.remaining();
+            body.extend_from_slice(&chunk.chunk()[..n]);
+            chunk.advance(n);
+        }
+    }
+    assert_eq!(body, b"cleared-backend-body");
+
+    drive.abort();
+    server.abort();
     backend.shutdown().await;
 }

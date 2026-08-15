@@ -8,8 +8,12 @@
 //! feature, no QUIC dependency, no QUIC source file anywhere in the crate).
 
 use crate::analytics::AnalyticsCollector;
+use crate::bot_challenge::{unix_now, ChallengeService};
+use crate::bot_protection::{evaluate as evaluate_bot, BotAction, BotInspectionContext};
+use crate::bot_store::BotStore;
 use crate::config::TlsConfig;
 use crate::observability::validated_request_id;
+use crate::proxy::cookie_value;
 use crate::rate_limit::{Decision as RateLimitDecision, RateLimitAction, RateLimitKey};
 use crate::rate_limit_store::{client_ip, IpNetSet, RateLimiterStore};
 use crate::runtime::RuntimeStore;
@@ -86,6 +90,40 @@ pub struct RateLimitContext {
     pub trusted_proxies: Arc<IpNetSet>,
 }
 
+/// Bundles what's needed to apply bot protection to an H3 request, mirroring
+/// `BeaRustProxy`'s `bot`/`challenges` fields (`src/proxy.rs`) without
+/// requiring any Pingora type.
+pub struct BotContext {
+    pub store: Arc<BotStore>,
+    pub challenges: Option<Arc<ChallengeService>>,
+}
+
+/// The bot-inspection header allow-list, identical to `src/proxy.rs`'s
+/// `request_filter` (see its `matches!(name.as_str(), ...)` filter) --
+/// keeping this list in sync matters: it bounds what `BotInspectionContext`
+/// ever sees, the same way the WAF path's own header normalization is
+/// bounded.
+const BOT_INSPECTION_HEADERS: [&str; 6] = [
+    "user-agent",
+    "accept",
+    "accept-language",
+    "sec-ch-ua",
+    "x-forwarded-for",
+    "host",
+];
+
+/// The optional feature contexts `serve` accepts, bundled into one struct so
+/// the public function signature doesn't grow one parameter per feature.
+/// Each field independently defaults (via `Default`) to `None`, meaning that
+/// feature is disabled for the listener.
+#[derive(Default)]
+pub struct Http3Options {
+    pub waf: Option<Arc<WafStore>>,
+    pub analytics: Option<Arc<AnalyticsContext>>,
+    pub rate_limit: Option<Arc<RateLimitContext>>,
+    pub bot: Option<Arc<BotContext>>,
+}
+
 /// Everything `handle_connection`/`handle_request` need that's invariant
 /// across every connection and request the listener handles -- bundled into
 /// one `Arc` (built once in `serve`) so it can be cheaply cloned per
@@ -96,6 +134,19 @@ struct HandlerState {
     client: Arc<reqwest::Client>,
     analytics: Option<Arc<AnalyticsContext>>,
     rate_limit: Option<Arc<RateLimitContext>>,
+    bot: Option<Arc<BotContext>>,
+}
+
+/// The security-relevant flags for one completion event, mirroring
+/// `analytics_security_counters`'s four positional bools (`src/proxy.rs`)
+/// as a named bundle so callers don't have to track four bare `bool`s by
+/// position.
+#[derive(Default, Clone, Copy)]
+struct SecurityFlags {
+    waf_blocked: bool,
+    bot_blocked: bool,
+    bot_challenge: bool,
+    rate_limited: bool,
 }
 
 /// Records one completion event, reusing `src/proxy.rs`'s pure
@@ -104,24 +155,25 @@ struct HandlerState {
 /// against `AnalyticsContext::host_ids` to find the proxy host id -- `None`
 /// or an unmapped host falls back to id `0`, matching
 /// `BeaRustProxy::record_completion`'s behavior when a request never
-/// resolved a route. `bot`/`bot_challenge` are always `false` here: neither
-/// hook exists on the H3 path yet (see the Phase 15 PRD status for the
-/// current scope). A `None` `analytics` context (analytics disabled) is a
+/// resolved a route. A `None` `analytics` context (analytics disabled) is a
 /// no-op.
 fn record_analytics_event(
     analytics: &Option<Arc<AnalyticsContext>>,
     host: Option<&str>,
     status: u16,
     start: Instant,
-    waf_blocked: bool,
-    rate_limited: bool,
+    security: SecurityFlags,
 ) {
     let Some(analytics) = analytics else { return };
     let proxy_host_id = host
         .and_then(|host| analytics.host_ids.get(host).copied())
         .unwrap_or(0);
-    let security =
-        crate::proxy::analytics_security_counters(waf_blocked, false, false, rate_limited);
+    let security = crate::proxy::analytics_security_counters(
+        security.waf_blocked,
+        security.bot_blocked,
+        security.bot_challenge,
+        security.rate_limited,
+    );
     analytics.collector.record(crate::proxy::completion_event(
         proxy_host_id,
         status,
@@ -200,9 +252,7 @@ pub async fn serve(
     bind: SocketAddr,
     tls_config: Arc<rustls::ServerConfig>,
     store: Arc<RuntimeStore>,
-    waf: Option<Arc<WafStore>>,
-    analytics: Option<Arc<AnalyticsContext>>,
-    rate_limit: Option<Arc<RateLimitContext>>,
+    options: Http3Options,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Http3Error> {
     let server_config = quinn_server_config(tls_config)?;
@@ -213,10 +263,11 @@ pub async fn serve(
         .map_err(Http3Error::HttpClient)?;
     let state = Arc::new(HandlerState {
         store,
-        waf,
+        waf: options.waf,
         client: Arc::new(client),
-        analytics,
-        rate_limit,
+        analytics: options.analytics,
+        rate_limit: options.rate_limit,
+        bot: options.bot,
     });
 
     loop {
@@ -463,8 +514,7 @@ async fn handle_request<S>(
             downstream_host.as_deref(),
             413,
             start,
-            false,
-            false,
+            SecurityFlags::default(),
         );
         return;
     }
@@ -488,8 +538,102 @@ async fn handle_request<S>(
                 downstream_host.as_deref(),
                 403,
                 start,
-                true,
-                false,
+                SecurityFlags {
+                    waf_blocked: true,
+                    ..SecurityFlags::default()
+                },
+            );
+            return;
+        }
+    }
+
+    // Bot protection, mirroring src/proxy.rs's precedence: evaluated after
+    // the WAF header-stage block (which always wins if it fires) and before
+    // routing. `BotInspectionContext::new`/`evaluate_bot` are reused
+    // directly from src/bot_protection.rs -- pure, no Pingora type.
+    if let Some(bot) = &state.bot {
+        let bot_headers: Vec<(String, String)> = headers
+            .iter()
+            .filter(|(name, _)| {
+                BOT_INSPECTION_HEADERS
+                    .iter()
+                    .any(|allowed| name.eq_ignore_ascii_case(allowed))
+            })
+            .cloned()
+            .collect();
+        // Trusted crawler bypass is intentionally deferred until a signed
+        // ingress marker is implemented, matching src/proxy.rs -- client
+        // headers never verify origin.
+        let inspection = BotInspectionContext::new(&method, &path, bot_headers);
+        let bot_snapshot = bot.store.snapshot();
+        let mut evaluation = evaluate_bot(&bot_snapshot, &inspection);
+        let valid_clearance = req
+            .headers()
+            .get("cookie")
+            .and_then(|value| value.to_str().ok())
+            .and_then(cookie_value)
+            .and_then(|token| {
+                bot.challenges.as_ref().and_then(|service| {
+                    service
+                        .verify_clearance(token, &evaluation.fingerprint, unix_now())
+                        .ok()
+                })
+            })
+            .is_some();
+        if valid_clearance && evaluation.action == BotAction::Challenge {
+            evaluation.action = BotAction::Allow;
+        }
+        if evaluation.action != BotAction::Allow {
+            bot.store.record_detection(&evaluation);
+            tracing::info!(event="bot_detection", request_id=%request_id, action=?evaluation.action, score=evaluation.score, trusted=evaluation.trusted, categories=?evaluation.categories, fingerprint_prefix=%evaluation.fingerprint.chars().take(16).collect::<String>());
+        }
+        if evaluation.action == BotAction::Block {
+            let resp = http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(())
+                .expect("static response head is always valid");
+            let _ = stream.send_response(resp).await;
+            let _ = stream
+                .send_data(bytes::Bytes::from_static(b"Request blocked"))
+                .await;
+            let _ = stream.finish().await;
+            record_analytics_event(
+                &state.analytics,
+                downstream_host.as_deref(),
+                403,
+                start,
+                SecurityFlags {
+                    bot_blocked: true,
+                    ..SecurityFlags::default()
+                },
+            );
+            return;
+        }
+        if evaluation.action == BotAction::Challenge {
+            let prefix: String = evaluation.fingerprint.chars().take(16).collect();
+            let body = serde_json::to_vec(&serde_json::json!({
+                "challenge_url": format!("/bot-challenge?fingerprint_prefix={prefix}"),
+                "fingerprint_prefix": prefix,
+            }))
+            .unwrap_or_else(|_| b"Challenge required".to_vec());
+            let resp = http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .header("cache-control", "no-store")
+                .header("content-type", "application/json")
+                .body(())
+                .expect("static response head is always valid");
+            let _ = stream.send_response(resp).await;
+            let _ = stream.send_data(bytes::Bytes::from(body)).await;
+            let _ = stream.finish().await;
+            record_analytics_event(
+                &state.analytics,
+                downstream_host.as_deref(),
+                403,
+                start,
+                SecurityFlags {
+                    bot_challenge: true,
+                    ..SecurityFlags::default()
+                },
             );
             return;
         }
@@ -510,8 +654,7 @@ async fn handle_request<S>(
             downstream_host.as_deref(),
             404,
             start,
-            false,
-            false,
+            SecurityFlags::default(),
         );
         return;
     };
@@ -559,8 +702,10 @@ async fn handle_request<S>(
                     Some(route.host.as_str()),
                     429,
                     start,
-                    false,
-                    true,
+                    SecurityFlags {
+                        rate_limited: true,
+                        ..SecurityFlags::default()
+                    },
                 );
                 return;
             }
@@ -579,8 +724,7 @@ async fn handle_request<S>(
             Some(route.host.as_str()),
             502,
             start,
-            false,
-            false,
+            SecurityFlags::default(),
         );
         return;
     };
@@ -642,8 +786,7 @@ async fn handle_request<S>(
                 Some(route.host.as_str()),
                 status.as_u16(),
                 start,
-                false,
-                false,
+                SecurityFlags::default(),
             );
         }
         Err(_) => {
@@ -658,8 +801,7 @@ async fn handle_request<S>(
                 Some(route.host.as_str()),
                 502,
                 start,
-                false,
-                false,
+                SecurityFlags::default(),
             );
         }
     }

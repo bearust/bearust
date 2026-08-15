@@ -451,27 +451,26 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                 .map_err(|e| AppError::Server(format!("HTTP/3 TLS setup: {e}")))?;
             let bind = config.server.http3.bind;
             let store = store.clone();
-            let waf = Some(waf_store.clone());
-            let http3_analytics = Some(Arc::new(crate::http3::AnalyticsContext {
-                collector: analytics.clone(),
-                host_ids: Arc::new(analytics_host_ids.clone()),
-                changed: Some(analytics_changed.clone()),
-            }));
-            let http3_rate_limit = Some(Arc::new(crate::http3::RateLimitContext {
-                limiter: rate_limiter.clone(),
-                trusted_proxies: Arc::new(trusted_proxies.clone()),
-            }));
+            let http3_options = crate::http3::Http3Options {
+                waf: Some(waf_store.clone()),
+                analytics: Some(Arc::new(crate::http3::AnalyticsContext {
+                    collector: analytics.clone(),
+                    host_ids: Arc::new(analytics_host_ids.clone()),
+                    changed: Some(analytics_changed.clone()),
+                })),
+                rate_limit: Some(Arc::new(crate::http3::RateLimitContext {
+                    limiter: rate_limiter.clone(),
+                    trusted_proxies: Arc::new(trusted_proxies.clone()),
+                })),
+                bot: Some(Arc::new(crate::http3::BotContext {
+                    store: bot_store.clone(),
+                    challenges: Some(challenge_service.clone()),
+                })),
+            };
             Some(tokio::spawn(async move {
-                if let Err(error) = crate::http3::serve(
-                    bind,
-                    tls_config,
-                    store,
-                    waf,
-                    http3_analytics,
-                    http3_rate_limit,
-                    http3_shutdown_rx,
-                )
-                .await
+                if let Err(error) =
+                    crate::http3::serve(bind, tls_config, store, http3_options, http3_shutdown_rx)
+                        .await
                 {
                     tracing::error!(event = "http3_listener_stopped", error = %error);
                 }

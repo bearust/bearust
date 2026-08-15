@@ -1265,7 +1265,8 @@ how the client connected). Full feature parity with the existing
 listener is expected across future increments, not this one; see
 `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`
 for the full design rationale and non-goals. (Analytics recording
-shipped in increment 3, and rate limiting in increment 4, below.)
+shipped in increment 3, rate limiting in increment 4, and bot
+protection/challenge evaluation in increment 5, below.)
 
 ### Phase 15 status: Alt-Svc advertisement (increment 2)
 
@@ -1298,11 +1299,9 @@ WAF block, unmatched-route 404, no-healthy-backend or upstream-failure
 502, and the successful forward), each carrying accurate status,
 latency, and the resolved proxy host id, so H3 traffic now appears in
 the existing analytics dashboard and `GET /api/analytics` surfaces
-alongside HTTP/1.1/HTTP/2 traffic. Bot-block and bot-challenge security
-dimensions are always recorded as zero for H3 requests, since bot
-protection doesn't exist on this path yet (see the increment 1 status
-above); rate-limited is recorded accurately as of increment 4, below.
-No other behavior changes.
+alongside HTTP/1.1/HTTP/2 traffic. Rate-limited is recorded accurately
+as of increment 4, and bot-block/bot-challenge as of increment 5,
+below. No other behavior changes.
 
 ### Phase 15 status: rate limiting on the H3 path (increment 4)
 
@@ -1331,3 +1330,37 @@ per-connection state -- runtime store, WAF store, HTTP client,
 analytics context, rate-limit context -- were bundled into one
 `Arc<HandlerState>`, cloned once per connection/request instead of once
 per field. Internal refactor only; no behavior change.)
+
+### Phase 15 status: bot protection and challenge evaluation on the H3 path (increment 5)
+
+Increment 5 applies the same bot-risk policy, rule evaluator, and
+challenge/clearance flow (Phase 7B) the HTTP/1.1/HTTP/2 path already
+enforces to H3 requests, reusing `src/bot_protection.rs`'s
+`BotInspectionContext::new`/`evaluate`, `src/bot_challenge.rs`'s
+`ChallengeService::verify_clearance`/`unix_now`, and `src/proxy.rs`'s
+`cookie_value` (bumped to `pub`) directly -- all pure, no Pingora type.
+A new `http3::BotContext` (bot-store handle, optional challenge
+service) is bundled into the existing `http3::Http3Options` struct
+(introduced this increment to keep `serve`'s own parameter count under
+the same clippy lint the `HandlerState` bundling addressed in
+increment 4 -- each `Http3Options` field independently defaults to
+`None`/disabled).
+
+Evaluation happens after the WAF header-stage-equivalent block (which
+still wins if it fires, matching `src/proxy.rs`'s precedence) and
+before routing, using the same 6-header allow-list
+(`user-agent`/`accept`/`accept-language`/`sec-ch-ua`/`x-forwarded-for`/`host`)
+and `cookie` clearance check. A detected request in `block` mode gets a
+`403` response byte-identical to the HTTP/1.1/HTTP/2 path's (body
+`Request blocked`) without ever reaching the backend; in `challenge`
+mode it gets the same `403` JSON body (`challenge_url`,
+`fingerprint_prefix`) with `Cache-Control: no-store`; either way the
+same `bot_detection` tracing event and `BotStore::record_detection`
+call fire. A request presenting a valid clearance cookie for its
+computed fingerprint has a `Challenge` verdict downgraded to `Allow`,
+identical to the existing listener. Both outcomes are recorded in
+analytics with the corresponding `bot_blocked`/`bot_challenge` flag
+(the four per-event security flags were bundled into a small
+`SecurityFlags` struct this increment, for the same
+too-many-arguments reason as `Http3Options`). No other behavior
+changes.

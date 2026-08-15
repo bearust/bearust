@@ -1615,7 +1615,7 @@ impl ProxyHttp for BeaRustProxy {
     }
 }
 
-fn cookie_value(header: &str) -> Option<&str> {
+pub fn cookie_value(header: &str) -> Option<&str> {
     header
         .split(';')
         .map(str::trim)

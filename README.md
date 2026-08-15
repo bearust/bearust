@@ -315,12 +315,18 @@ byte-identical `429 Rate limit exceeded` response (with `Retry-After`
 and `Cache-Control: no-store`) without ever reaching the backend;
 `monitor` mode records the event but never blocks.
 
+The same bot-protection evaluator and challenge/clearance flow the
+HTTP/1.1/HTTP/2 path uses also applies to H3 requests, evaluated after
+the WAF (which still wins if it blocks) and before routing: a detected
+request in `block` mode gets a byte-identical `403 Request blocked`
+response without ever reaching the backend, and in `challenge` mode
+gets the same `403` JSON challenge body (`challenge_url`,
+`fingerprint_prefix`) as the existing listener; a request presenting a
+valid clearance cookie for its fingerprint passes straight through.
+
 This is an initial, opt-in increment, not feature parity with the
 existing listener. Explicitly out of scope for now:
 
-- No bot protection/challenge evaluation on the H3 path (so its
-  analytics dimensions — bot blocks, bot challenges — are always
-  recorded as zero for H3 requests today).
 - No plugin-hook invocation on the H3 path.
 - No HTTP/3 to the upstream/backend — forwarded requests to upstreams
   still use HTTP/1.1 or HTTP/2, only the client-facing edge speaks H3.
