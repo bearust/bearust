@@ -466,6 +466,8 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                     store: bot_store.clone(),
                     challenges: Some(challenge_service.clone()),
                 })),
+                plugin_manager: Some(control_state.plugin_manager.clone()),
+                plugin_notify: Some(plugin_notify_sink.clone()),
             };
             Some(tokio::spawn(async move {
                 if let Err(error) =

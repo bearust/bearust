@@ -324,10 +324,21 @@ gets the same `403` JSON challenge body (`challenge_url`,
 `fingerprint_prefix`) as the existing listener; a request presenting a
 valid clearance cookie for its fingerprint passes straight through.
 
+Four of the plugin system's hooks also run on the H3 path: `waf.detect`
+(can escalate — never downgrade — the WAF's decision), `notify.waf_block`
+(fires on every H3 WAF block, same as the existing listener),
+`transform.request` (can rewrite outbound request headers; `Host`/
+`X-Forwarded-For`/`X-Request-Id` are still reasserted unconditionally
+afterward, so a transform plugin can never drop or spoof them), and
+`balance.select` (can pick which backend serves the request, validated
+against the pool's healthy candidates, falling back to the normal
+selection algorithm on any failure). `transform.response` does not run
+on the H3 path yet.
+
 This is an initial, opt-in increment, not feature parity with the
 existing listener. Explicitly out of scope for now:
 
-- No plugin-hook invocation on the H3 path.
+- No `transform.response` plugin hook on the H3 path.
 - No HTTP/3 to the upstream/backend — forwarded requests to upstreams
   still use HTTP/1.1 or HTTP/2, only the client-facing edge speaks H3.
 

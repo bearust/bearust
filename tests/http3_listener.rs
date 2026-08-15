@@ -4,7 +4,8 @@ use bearust::{
     bot_protection::{BotConfig, BotMode, BotRule},
     bot_store::BotStore,
     config::{
-        Algorithm, BackendConfig, Config, HealthCheckKind, PoolConfig, RouteConfig, ServerConfig,
+        Algorithm, BackendConfig, Config, HealthCheckKind, PluginConfig, PoolConfig, RouteConfig,
+        ServerConfig,
     },
     control_plane::{
         models::{WafAction, WafRule},
@@ -12,12 +13,15 @@ use bearust::{
     },
     http3,
     http3::{AnalyticsContext, BotContext, RateLimitContext},
+    plugin_notify::NotificationSink,
+    plugin_runtime::PluginManager,
     rate_limit::{RateLimitAction, RateLimitPolicy},
     rate_limit_store::{IpNetSet, RateLimiterStore},
     runtime::{RuntimeSnapshot, RuntimeStore},
     waf_store::WafStore,
 };
 use bytes::Buf;
+use std::fs;
 use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -160,6 +164,63 @@ fn runtime_store_routing_to(host: &str, backend_addr: SocketAddr) -> Arc<Runtime
     let snapshot = RuntimeSnapshot::build(config, None).unwrap();
     let pool = snapshot.pool("main").unwrap();
     pool.set_healthy(0.into(), true);
+    Arc::new(RuntimeStore::new(snapshot))
+}
+
+/// Like `runtime_store_routing_to`, but the "main" pool holds two backends
+/// (`first` at index 0, `second` at index 1) -- for the `balance.select`
+/// test, whose fixture plugin always picks `backend_id: 0`.
+fn runtime_store_routing_to_two_backends(
+    host: &str,
+    first: SocketAddr,
+    second: SocketAddr,
+) -> Arc<RuntimeStore> {
+    let config = Config {
+        server: ServerConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            control_bind: "127.0.0.1:0".parse().unwrap(),
+            control_database: "./target/test.sqlite".into(),
+            certificate_store: "./target/test-certs".into(),
+            graceful_shutdown_seconds: 1,
+            pid_file: "./target/test.pid".into(),
+            tls: None,
+            http3: Default::default(),
+            trusted_proxy_cidrs: Vec::new(),
+        },
+        health: Default::default(),
+        upstream_pools: vec![PoolConfig {
+            name: "main".into(),
+            algorithm: Algorithm::RoundRobin,
+            connect_timeout_seconds: 1,
+            request_timeout_seconds: 1,
+            backends: vec![
+                BackendConfig {
+                    address: first,
+                    health_check: HealthCheckKind::Tcp,
+                    health_path: None,
+                },
+                BackendConfig {
+                    address: second,
+                    health_check: HealthCheckKind::Tcp,
+                    health_path: None,
+                },
+            ],
+        }],
+        routes: vec![RouteConfig {
+            name: "default".into(),
+            host: host.into(),
+            path_prefix: "/".into(),
+            upstream_pool: "main".into(),
+        }],
+        rate_limit: Default::default(),
+        prometheus: Default::default(),
+        cluster: Default::default(),
+        plugins: Default::default(),
+    };
+    let snapshot = RuntimeSnapshot::build(config, None).unwrap();
+    let pool = snapshot.pool("main").unwrap();
+    pool.set_healthy(0.into(), true);
+    pool.set_healthy(1.into(), true);
     Arc::new(RuntimeStore::new(snapshot))
 }
 
@@ -1319,4 +1380,341 @@ async fn http3_listener_allows_a_challenge_triggering_request_with_valid_clearan
     drive.abort();
     server.abort();
     backend.shutdown().await;
+}
+
+/// Loads the checked-in `waf_detect_v2` fixture (always returns
+/// `{"decision":"block","category":"custom_detector","score":10}`,
+/// ignoring its input -- see `tests/fixtures/plugins/waf_detect_v2/README.md`)
+/// into a fresh `PluginManager`, mirroring `src/proxy.rs`'s own
+/// `waf_detector_manager` test helper.
+fn waf_detect_plugin_manager() -> Arc<PluginManager> {
+    let root = tempfile::tempdir().unwrap();
+    let plugin = root.path().join("waf-detect-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/waf_detect_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/waf_detect_v2/waf_detect_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("waf_detect_v2.wasm"), &module).unwrap();
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    manager.reload_from_disk().unwrap();
+    manager
+}
+
+/// Loads the checked-in `transform_request_v2` fixture (always returns the
+/// fixed header list `[["x-transformed","yes"]]`, ignoring its input -- see
+/// `tests/fixtures/plugins/transform_request_v2/README.md`).
+fn transform_request_plugin_manager() -> Arc<PluginManager> {
+    let root = tempfile::tempdir().unwrap();
+    let plugin = root.path().join("transform-request-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/transform_request_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/transform_request_v2/transform_request_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("transform_request_v2.wasm"), &module).unwrap();
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    manager.reload_from_disk().unwrap();
+    manager
+}
+
+/// Loads the checked-in `balance_select_v2` fixture (always returns
+/// `{"backend_id":0}`, ignoring its input -- see
+/// `tests/fixtures/plugins/balance_select_v2/README.md`).
+fn balance_select_plugin_manager() -> Arc<PluginManager> {
+    let root = tempfile::tempdir().unwrap();
+    let plugin = root.path().join("balance-select-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/balance_select_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/balance_select_v2/balance_select_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("balance_select_v2.wasm"), &module).unwrap();
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    manager.reload_from_disk().unwrap();
+    manager
+}
+
+/// Loads the checked-in `notify_sink_v2` fixture (always returns status `0`,
+/// ignoring its input -- see `tests/fixtures/plugins/notify_sink_v2/README.md`).
+fn notify_sink_plugin_manager() -> Arc<PluginManager> {
+    let root = tempfile::tempdir().unwrap();
+    let plugin = root.path().join("notify-sink-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/notify_sink_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/notify_sink_v2/notify_sink_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("notify_sink_v2.wasm"), &module).unwrap();
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        ..PluginConfig::default()
+    });
+    manager.reload_from_disk().unwrap();
+    manager
+}
+
+#[tokio::test]
+async fn http3_listener_escalates_an_otherwise_allowed_request_via_waf_detect_plugin() {
+    install_crypto_provider();
+
+    let backend = spawn_counting_backend("should-never-be-seen").await;
+    let store = runtime_store_routing_to("localhost", backend.address);
+    // A fresh WafStore (migrated, no custom block rule) defaults to
+    // monitor-only mode, so the built-in rule engine alone would allow
+    // this ordinary request -- only the waf.detect plugin's fixed block
+    // verdict should cause the 403 this test asserts.
+    let db = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&db).await.unwrap();
+    let waf = Arc::new(WafStore::load(&db).await.unwrap());
+    let plugin_manager = waf_detect_plugin_manager();
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            http3::Http3Options {
+                waf: Some(waf),
+                plugin_manager: Some(plugin_manager),
+                ..Default::default()
+            },
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/harmless")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        while chunk.has_remaining() {
+            let n = chunk.remaining();
+            body.extend_from_slice(&chunk.chunk()[..n]);
+            chunk.advance(n);
+        }
+    }
+    assert_eq!(body, b"Request blocked");
+
+    drive.abort();
+    server.abort();
+    assert_eq!(backend.request_count(), 0);
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn http3_listener_applies_a_transform_request_plugin_while_preserving_forced_headers() {
+    install_crypto_provider();
+
+    let backend = spawn_header_capturing_backend().await;
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let plugin_manager = transform_request_plugin_manager();
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            http3::Http3Options {
+                plugin_manager: Some(plugin_manager),
+                ..Default::default()
+            },
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/anything")
+        .header("x-original", "should-be-dropped")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::OK);
+    while stream.recv_data().await.unwrap().is_some() {}
+
+    drive.abort();
+    server.abort();
+
+    let received = backend.captured.lock().unwrap().clone().unwrap();
+    backend.shutdown().await;
+    // The plugin's fixed output wholesale-replaces the header list with
+    // only x-transformed -- proving the transform actually ran and its
+    // output reached the upstream request.
+    assert!(received.contains(&("x-transformed".to_string(), "yes".to_string())));
+    assert!(!received.iter().any(|(name, _)| name == "x-original"));
+    // Host must still be the trusted value, forced back on unconditionally
+    // *after* the transform runs, exactly like Host/X-Forwarded-For/
+    // X-Request-Id are in src/proxy.rs -- otherwise a transform plugin that
+    // drops or spoofs Host would reach the upstream unchecked.
+    assert_eq!(
+        received
+            .iter()
+            .find(|(name, _)| name == "host")
+            .map(|(_, value)| value.as_str()),
+        Some("localhost")
+    );
+    assert!(received.iter().any(|(name, _)| name == "x-forwarded-for"));
+    assert!(received.iter().any(|(name, _)| name == "x-request-id"));
+}
+
+#[tokio::test]
+async fn http3_listener_uses_a_balance_select_plugins_chosen_backend() {
+    install_crypto_provider();
+
+    let chosen = spawn_counting_backend("chosen-backend").await;
+    let other = spawn_counting_backend("other-backend").await;
+    // Index 0 must be `chosen` for this test to actually exercise the
+    // fixture's fixed `{"backend_id":0}` pick -- both are otherwise
+    // interchangeable round-robin candidates.
+    let store = runtime_store_routing_to_two_backends("localhost", chosen.address, other.address);
+    let plugin_manager = balance_select_plugin_manager();
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            http3::Http3Options {
+                plugin_manager: Some(plugin_manager),
+                ..Default::default()
+            },
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/anything")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::OK);
+    while stream.recv_data().await.unwrap().is_some() {}
+
+    drive.abort();
+    server.abort();
+    assert_eq!(chosen.request_count(), 1);
+    assert_eq!(other.request_count(), 0);
+    chosen.shutdown().await;
+    other.shutdown().await;
+}
+
+#[tokio::test]
+async fn http3_listener_notifies_a_waf_block_sink_plugin() {
+    install_crypto_provider();
+
+    let waf = Arc::new(waf_store_blocking_path("/blocked").await);
+    let store = empty_runtime_store();
+    let plugin_manager = notify_sink_plugin_manager();
+    let plugin_notify = NotificationSink::spawn(Arc::clone(&plugin_manager));
+    let metrics_manager = Arc::clone(&plugin_manager);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            http3::Http3Options {
+                waf: Some(waf),
+                plugin_manager: Some(plugin_manager),
+                plugin_notify: Some(plugin_notify),
+                ..Default::default()
+            },
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/blocked")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+    while stream.recv_data().await.unwrap().is_some() {}
+
+    drive.abort();
+    server.abort();
+
+    // The notification worker runs off the request's own call stack (a
+    // bounded channel + background task, matching src/proxy.rs's existing
+    // notify.waf_block behavior), so poll its Prometheus-rendered metrics
+    // rather than asserting immediately.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        if metrics_manager
+            .metrics()
+            .render_prometheus()
+            .contains("bearust_plugins_notify_invocations_total 1")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "notify.waf_block sink was not invoked within 1s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }

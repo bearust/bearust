@@ -1265,8 +1265,9 @@ how the client connected). Full feature parity with the existing
 listener is expected across future increments, not this one; see
 `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`
 for the full design rationale and non-goals. (Analytics recording
-shipped in increment 3, rate limiting in increment 4, and bot
-protection/challenge evaluation in increment 5, below.)
+shipped in increment 3, rate limiting in increment 4, bot
+protection/challenge evaluation in increment 5, and four of the five
+plugin hooks in increment 6, below.)
 
 ### Phase 15 status: Alt-Svc advertisement (increment 2)
 
@@ -1364,3 +1365,47 @@ analytics with the corresponding `bot_blocked`/`bot_challenge` flag
 `SecurityFlags` struct this increment, for the same
 too-many-arguments reason as `Http3Options`). No other behavior
 changes.
+
+### Phase 15 status: request-side and notification plugin hooks on the H3 path (increment 6)
+
+Increment 6 wires four of the plugin system's five hooks (Phase
+13C/13D/13E/13G) into the H3 path; `transform.response` (Phase 13F)
+is deferred to a later increment, since it requires switching H3's
+response forwarding from live streaming to conditional buffering --
+a materially larger change than the other four.
+
+`waf.detect` and `notify.waf_block` reuse `src/proxy.rs`'s
+`apply_waf_detector`/`emit_waf_telemetry` directly (both already pure,
+no Pingora type, bumped to `pub`): `apply_waf_detector` runs
+immediately after the rule engine's own `evaluate`, and can only
+escalate its decision, never downgrade it; `emit_waf_telemetry` then
+unconditionally records `WafStore::record_detection`, the existing
+`waf_detection` tracing event, and (if a `notify.waf_block`-declaring
+plugin is enabled) the notification-sink event -- all in one reused
+call, run once per request since H3's single-phase WAF evaluation has
+no two-phase double-emit risk to guard against, unlike
+`src/proxy.rs`'s `ctx.waf_telemetry_emitted` flag.
+
+`transform.request` and `balance.select` both take a Pingora
+`RequestHeader` in `src/proxy.rs` (`apply_transform_plugin`,
+`apply_load_balancer_plugin`), so aren't directly reusable; `src/http3.rs`
+mirrors their wire-shape-building and invocation logic against its own
+`Vec<(String, String)>` header representation instead, reusing the
+now-`pub` `bounded_metadata`/`MAX_BALANCE_CANDIDATES`/
+`is_valid_transform_headers` helpers `src/proxy.rs` already exposed.
+`transform.request` runs on the outgoing (upstream-bound) header copy,
+*before* the existing hop-by-hop/content-length stripping and
+`Host`/`X-Forwarded-For`/`X-Request-Id` forcing -- so a transform
+plugin can rewrite any other header, but those three (plus
+`content-length`/`transfer-encoding`/`connection`/`upgrade`) are
+unconditionally reasserted or stripped afterward regardless of what it
+returns, the same protection `src/proxy.rs`'s `PROTECTED_FRAMING_HEADERS`
+provides, without needing to reimplement that list. `balance.select`
+runs at the pool-selection point: the plugin's pick is validated via
+`PoolState::select_specific` exactly as `src/proxy.rs` does, falling
+back to the normal `pool.select(None)` on any failure (no plugin
+configured, disabled, a trap, an invalid pick, ...).
+
+`Http3Options`/`HandlerState` each gained `plugin_manager`/
+`plugin_notify` fields (`None` when plugins are disabled for the
+listener). No other behavior changes.

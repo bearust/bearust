@@ -13,6 +13,8 @@ use crate::bot_protection::{evaluate as evaluate_bot, BotAction, BotInspectionCo
 use crate::bot_store::BotStore;
 use crate::config::TlsConfig;
 use crate::observability::validated_request_id;
+use crate::plugin_notify::NotificationSink;
+use crate::plugin_runtime::PluginManager;
 use crate::proxy::cookie_value;
 use crate::rate_limit::{Decision as RateLimitDecision, RateLimitAction, RateLimitKey};
 use crate::rate_limit_store::{client_ip, IpNetSet, RateLimiterStore};
@@ -122,6 +124,8 @@ pub struct Http3Options {
     pub analytics: Option<Arc<AnalyticsContext>>,
     pub rate_limit: Option<Arc<RateLimitContext>>,
     pub bot: Option<Arc<BotContext>>,
+    pub plugin_manager: Option<Arc<PluginManager>>,
+    pub plugin_notify: Option<Arc<NotificationSink>>,
 }
 
 /// Everything `handle_connection`/`handle_request` need that's invariant
@@ -135,6 +139,8 @@ struct HandlerState {
     analytics: Option<Arc<AnalyticsContext>>,
     rate_limit: Option<Arc<RateLimitContext>>,
     bot: Option<Arc<BotContext>>,
+    plugin_manager: Option<Arc<PluginManager>>,
+    plugin_notify: Option<Arc<NotificationSink>>,
 }
 
 /// The security-relevant flags for one completion event, mirroring
@@ -268,6 +274,8 @@ pub async fn serve(
         analytics: options.analytics,
         rate_limit: options.rate_limit,
         bot: options.bot,
+        plugin_manager: options.plugin_manager,
+        plugin_notify: options.plugin_notify,
     });
 
     loop {
@@ -452,6 +460,197 @@ fn append_forwarded_for(headers: &mut Vec<(String, String)>, client_addr: Socket
     set_header(headers, "x-forwarded-proto", "https".to_owned());
 }
 
+/// Converts this request's bounded metadata into the wire shape a
+/// `balance.select` plugin receives, mirroring `src/proxy.rs`'s
+/// `load_balance_request` (which takes a Pingora `RequestHeader` and so
+/// isn't directly reusable here) against this module's own
+/// `(method, path, query, headers)` fields via the same shared
+/// `bounded_metadata` budget-tracking helper. Pure and side-effect free.
+fn load_balance_request(
+    pool: &crate::balancer::PoolState,
+    method: &str,
+    path: &str,
+    query: &str,
+    headers: &[(String, String)],
+    excluded: Option<crate::balancer::BackendId>,
+) -> bearust_plugin_sdk::LoadBalanceRequest {
+    let mut remaining = crate::waf::MAX_NORMALIZED_METADATA_BYTES;
+    let method = crate::proxy::bounded_metadata(method, &mut remaining);
+    let path = crate::proxy::bounded_metadata(path, &mut remaining);
+    let query = crate::proxy::bounded_metadata(query, &mut remaining);
+    let headers = headers
+        .iter()
+        .take(crate::waf::MAX_NORMALIZED_HEADERS)
+        .map(|(name, value)| {
+            (
+                crate::proxy::bounded_metadata(name, &mut remaining),
+                crate::proxy::bounded_metadata(value, &mut remaining),
+            )
+        })
+        .collect();
+    let backends = pool
+        .candidates()
+        .into_iter()
+        .take(crate::proxy::MAX_BALANCE_CANDIDATES)
+        .map(|snapshot| bearust_plugin_sdk::BackendCandidate {
+            id: snapshot.id.index() as u64,
+            address: snapshot.address.to_string(),
+            healthy: snapshot.healthy,
+            inflight: snapshot.inflight as u32,
+        })
+        .collect();
+    bearust_plugin_sdk::LoadBalanceRequest {
+        pool: pool.name().to_string(),
+        method,
+        path,
+        query,
+        headers,
+        backends,
+        excluded_backend_id: excluded.map(|id| id.index() as u64),
+    }
+}
+
+/// Runs the registered `balance.select` plugin (if any), mirroring
+/// `src/proxy.rs`'s `apply_load_balancer_plugin` (same fail-open error
+/// handling, same `pool.select_specific` validation of the plugin's pick)
+/// against this module's own request fields instead of a Pingora
+/// `RequestHeader`.
+async fn apply_load_balancer_plugin(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    pool: &Arc<crate::balancer::PoolState>,
+    method: &str,
+    path: &str,
+    query: &str,
+    headers: &[(String, String)],
+    excluded: Option<crate::balancer::BackendId>,
+) -> Option<crate::balancer::BackendLease> {
+    let manager = plugin_manager?;
+    let selector = manager.balance_select_plugin()?;
+    let metrics = manager.metrics();
+    metrics.record_balance_invocation();
+    let request = load_balance_request(pool, method, path, query, headers, excluded);
+    let outcome = tokio::task::spawn_blocking(move || selector.balance_select(&request)).await;
+    match outcome {
+        Ok(Ok(result)) => {
+            let Ok(index) = usize::try_from(result.backend_id) else {
+                tracing::warn!(
+                    event = "balance_select_failed",
+                    reason = "backend_id_out_of_range"
+                );
+                metrics.record_balance_failure();
+                return None;
+            };
+            match pool.select_specific(index.into(), excluded) {
+                Some(lease) => {
+                    metrics.record_balance_applied();
+                    Some(lease)
+                }
+                None => {
+                    tracing::warn!(
+                        event = "balance_select_failed",
+                        reason = "invalid_backend_id"
+                    );
+                    metrics.record_balance_failure();
+                    None
+                }
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(event = "balance_select_failed", reason = error.code());
+            metrics.record_balance_failure();
+            None
+        }
+        Err(_join_error) => {
+            tracing::warn!(event = "balance_select_failed", reason = "join_error");
+            metrics.record_balance_failure();
+            None
+        }
+    }
+}
+
+/// Converts this request's outgoing headers into the wire shape a
+/// `transform.request` plugin receives, mirroring `src/proxy.rs`'s
+/// `transform_request` (Pingora `RequestHeader`, not reusable here)
+/// against this module's own `Vec<(String, String)>` headers.
+fn transform_request(
+    method: &str,
+    path: &str,
+    query: &str,
+    headers: &[(String, String)],
+) -> bearust_plugin_sdk::TransformRequest {
+    let mut remaining = crate::waf::MAX_NORMALIZED_METADATA_BYTES;
+    let method = crate::proxy::bounded_metadata(method, &mut remaining);
+    let path = crate::proxy::bounded_metadata(path, &mut remaining);
+    let query = crate::proxy::bounded_metadata(query, &mut remaining);
+    let headers = headers
+        .iter()
+        .take(crate::waf::MAX_NORMALIZED_HEADERS)
+        .map(|(name, value)| {
+            (
+                crate::proxy::bounded_metadata(name, &mut remaining),
+                crate::proxy::bounded_metadata(value, &mut remaining),
+            )
+        })
+        .collect();
+    bearust_plugin_sdk::TransformRequest {
+        method,
+        path,
+        query,
+        headers,
+    }
+}
+
+/// Runs the registered `transform.request` plugin (if any) against
+/// `outgoing_headers` and, on success, wholesale-replaces them with the
+/// plugin's response -- mirroring `src/proxy.rs`'s `apply_transform_plugin`
+/// (Pingora `RequestHeader`, not reusable here). Unlike `src/proxy.rs`,
+/// this does not need to separately protect framing headers
+/// (`content-length`/`transfer-encoding`/`connection`/`upgrade`): the
+/// caller applies this *before* `strip_hop_by_hop_headers` and the
+/// content-length strip that already run unconditionally afterward, so
+/// those steps provide the same protection for free regardless of what a
+/// transform plugin returns. Fails open on every error class, matching
+/// `apply_transform_plugin`.
+async fn apply_transform_request_plugin(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    method: &str,
+    path: &str,
+    query: &str,
+    outgoing_headers: &mut Vec<(String, String)>,
+) {
+    let Some(manager) = plugin_manager else {
+        return;
+    };
+    let Some(transformer) = manager.transform_plugin() else {
+        return;
+    };
+    let metrics = manager.metrics();
+    metrics.record_transform_invocation();
+    let input = transform_request(method, path, query, outgoing_headers);
+    let outcome = tokio::task::spawn_blocking(move || transformer.transform(&input)).await;
+    match outcome {
+        Ok(Ok(response)) if crate::proxy::is_valid_transform_headers(&response.headers) => {
+            *outgoing_headers = response.headers;
+            metrics.record_transform_applied();
+        }
+        Ok(Ok(_)) => {
+            tracing::warn!(
+                event = "transform_request_failed",
+                reason = "output_bounds_exceeded"
+            );
+            metrics.record_transform_failure();
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(event = "transform_request_failed", reason = error.code());
+            metrics.record_transform_failure();
+        }
+        Err(_join_error) => {
+            tracing::warn!(event = "transform_request_failed", reason = "join_error");
+            metrics.record_transform_failure();
+        }
+    }
+}
+
 async fn handle_request<S>(
     req: http::Request<()>,
     mut stream: h3::server::RequestStream<S, bytes::Bytes>,
@@ -523,6 +722,21 @@ async fn handle_request<S>(
         let snapshot = waf.snapshot();
         let context = build_inspection_context(&method, &path, &query, &headers, body.clone());
         let evaluation = crate::waf::evaluate(&snapshot, &context);
+        // waf.detect: reused directly from src/proxy.rs (pure, no Pingora
+        // type) -- can only escalate the decision, never downgrade it.
+        let evaluation =
+            crate::proxy::apply_waf_detector(state.plugin_manager.as_ref(), &context, evaluation)
+                .await;
+        // notify.waf_block + WafStore::record_detection + the existing
+        // waf_detection tracing event, all in one reused call. Single-phase
+        // evaluation here means this can run unconditionally, unlike
+        // src/proxy.rs's two-phase ctx.waf_telemetry_emitted guard.
+        crate::proxy::emit_waf_telemetry(
+            &request_id,
+            waf,
+            &evaluation,
+            state.plugin_notify.as_deref(),
+        );
         if evaluation.decision == crate::waf::WafDecision::Block {
             let resp = http::Response::builder()
                 .status(http::StatusCode::FORBIDDEN)
@@ -712,7 +926,25 @@ async fn handle_request<S>(
         }
     }
 
-    let Some(lease) = pool.select(None) else {
+    // balance.select: mirrors src/proxy.rs's precedence -- try the plugin's
+    // pick first (validated via pool.select_specific), falling back to
+    // pool.select(None) on any failure (no plugin, disabled, trap, invalid
+    // pick, ...), exactly as apply_load_balancer_plugin's caller does.
+    let lease = match apply_load_balancer_plugin(
+        state.plugin_manager.as_ref(),
+        &pool,
+        &method,
+        &path,
+        &query,
+        &headers,
+        None,
+    )
+    .await
+    {
+        Some(lease) => Some(lease),
+        None => pool.select(None),
+    };
+    let Some(lease) = lease else {
         let resp = http::Response::builder()
             .status(http::StatusCode::BAD_GATEWAY)
             .body(())
@@ -738,17 +970,31 @@ async fn handle_request<S>(
             .unwrap_or(&path)
     );
 
-    // Never forward client headers verbatim: strip hop-by-hop headers (I4),
-    // drop the client's own `content-length` (its buffered body is what
-    // will actually be sent -- `reqwest` computes the correct length itself
-    // from the body it is given, so an unmodified, possibly-mismatched
-    // client value must not travel along), rebuild `X-Forwarded-For` from
-    // the real peer address (C2), and stamp a validated `X-Request-Id`.
-    // `host` was already forced to the trusted value by
-    // `build_request_headers` above.
+    // Never forward client headers verbatim: apply transform.request (if
+    // any) first, then strip hop-by-hop headers (I4), drop the client's own
+    // `content-length` (its buffered body is what will actually be sent --
+    // `reqwest` computes the correct length itself from the body it is
+    // given, so an unmodified, possibly-mismatched client value must not
+    // travel along), rebuild `X-Forwarded-For` from the real peer address
+    // (C2), and stamp a validated `X-Request-Id`. `host` was already forced
+    // to the trusted value by `build_request_headers` above, and -- like
+    // content-length/connection/upgrade -- is reasserted unconditionally
+    // below regardless of what a transform.request plugin returned.
     let mut outgoing_headers = headers.clone();
+    apply_transform_request_plugin(
+        state.plugin_manager.as_ref(),
+        &method,
+        &path,
+        &query,
+        &mut outgoing_headers,
+    )
+    .await;
     strip_hop_by_hop_headers(&mut outgoing_headers);
     outgoing_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-length"));
+    outgoing_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("host"));
+    if let Some(host) = downstream_host.as_deref() {
+        outgoing_headers.push(("host".to_owned(), host.to_owned()));
+    }
     append_forwarded_for(&mut outgoing_headers, remote_addr);
     set_header(&mut outgoing_headers, "x-request-id", request_id);
 

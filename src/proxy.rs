@@ -331,7 +331,7 @@ const MAX_WAF_DETECT_BODY_BYTES: usize = 2048;
 /// budget-tracking shape of `crate::waf::normalize_context`'s private
 /// `normalize_metadata` closure, applied here to the raw (non-normalized)
 /// text a `waf.detect` plugin receives.
-fn bounded_metadata(value: &str, remaining: &mut usize) -> String {
+pub fn bounded_metadata(value: &str, remaining: &mut usize) -> String {
     let cap = (*remaining).min(crate::waf::MAX_NORMALIZED_FIELD_BYTES);
     let mut end = value.len().min(cap);
     while end > 0 && !value.is_char_boundary(end) {
@@ -385,7 +385,7 @@ fn waf_detect_request(context: &InspectionContext) -> bearust_plugin_sdk::WafDet
 /// exhaustion, a malformed verdict, or a `spawn_blocking` join failure all
 /// return `evaluation` unchanged (after counting a failure metric where
 /// applicable).
-async fn apply_waf_detector(
+pub async fn apply_waf_detector(
     plugin_manager: Option<&Arc<PluginManager>>,
     context: &InspectionContext,
     evaluation: Evaluation,
@@ -483,7 +483,7 @@ const PROTECTED_FRAMING_HEADERS: [&str; 4] = [
 /// transform is rejected (see `apply_transform_plugin`), not partially
 /// truncated, so a plugin can't silently have some of its intended headers
 /// dropped without warning.
-fn is_valid_transform_headers(headers: &[(String, String)]) -> bool {
+pub fn is_valid_transform_headers(headers: &[(String, String)]) -> bool {
     headers.len() <= crate::waf::MAX_NORMALIZED_HEADERS
         && headers.iter().all(|(name, value)| {
             name.len() <= crate::waf::MAX_NORMALIZED_FIELD_BYTES
@@ -766,7 +766,7 @@ fn apply_transform_response_plugin(
 /// many entries -- an operator-scale bound (pool size), not an
 /// attacker-controlled one, but bounded defensively all the same, the same
 /// way `MAX_NORMALIZED_HEADERS` bounds header count.
-const MAX_BALANCE_CANDIDATES: usize = 128;
+pub const MAX_BALANCE_CANDIDATES: usize = 128;
 
 /// Converts a pool's current candidate snapshot and the downstream
 /// request's bounded metadata into the wire shape a `balance.select`
@@ -915,7 +915,7 @@ fn reassert_protected_request_headers(
     let _ = request.insert_header("X-Request-Id", request_id.to_owned());
 }
 
-fn emit_waf_telemetry(
+pub fn emit_waf_telemetry(
     request_id: &str,
     waf: &WafStore,
     evaluation: &Evaluation,
