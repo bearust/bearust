@@ -34,7 +34,6 @@ function SetupPage() {
               e.preventDefault();
               try {
                 await api.setup({ email, password, setup_token: token });
-                // @ts-expect-error -- "/" becomes a valid route once the dashboard index route lands in a later task.
                 void navigate({ to: "/" });
               } catch (x) {
                 setError(sanitizeError(x));

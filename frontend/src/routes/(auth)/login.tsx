@@ -37,7 +37,6 @@ function LoginPage() {
                 e.preventDefault();
                 try {
                   await api.login({ email, password });
-                  // @ts-expect-error -- "/" becomes a valid route once the dashboard index route lands in a later task.
                   void navigate({ to: "/" });
                 } catch (x) {
                   setError(sanitizeError(x));
