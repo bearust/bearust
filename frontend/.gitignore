@@ -2,3 +2,4 @@ node_modules/
 dist/
 *.tsbuildinfo
 test-results/
+src/routeTree.gen.ts
