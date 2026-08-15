@@ -1,4 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { ChevronsUpDown, LogOut } from "lucide-react";
 import { api } from "@/api";
@@ -20,6 +21,7 @@ export function NavUser() {
   const { t } = useTranslation();
   const { isMobile } = useSidebar();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const user = useAuthStore((s) => s.user);
   const { mode, setMode } = useTheme();
   const { locale, setLocale } = useLocalePreference();
@@ -79,6 +81,7 @@ export function NavUser() {
               onClick={() => {
                 void api.logout().catch(() => undefined).finally(() => {
                   useAuthStore.getState().reset();
+                  queryClient.removeQueries({ queryKey: ["me"] });
                   void navigate({ to: "/login" });
                 });
               }}
