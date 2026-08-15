@@ -1013,10 +1013,34 @@ async fn handle_request<S>(
         Ok(upstream_resp) => {
             let status = http::StatusCode::from_u16(upstream_resp.status().as_u16())
                 .unwrap_or(http::StatusCode::BAD_GATEWAY);
-            let resp = http::Response::builder()
-                .status(status)
-                .body(())
-                .expect("static response head is always valid");
+            // Forward every response header the upstream sent, except
+            // hop-by-hop ones (RFC 9110 §7.6.1, same HOP_BY_HOP_HEADERS list
+            // used on the request side): these describe the semantics of
+            // the listener<->upstream leg (plain HTTP/1.1/HTTP/2 over
+            // reqwest), not the end-to-end response, so blindly forwarding
+            // them to the H3 client would be incorrect. `content-length`
+            // survives here since the body below streams the upstream's
+            // exact bytes verbatim.
+            let mut resp_builder = http::Response::builder().status(status);
+            for (name, value) in upstream_resp.headers() {
+                if HOP_BY_HOP_HEADERS
+                    .iter()
+                    .any(|hop| name.as_str().eq_ignore_ascii_case(hop))
+                {
+                    continue;
+                }
+                resp_builder = resp_builder.header(name, value);
+            }
+            // Falls back to a headerless response of the same status on the
+            // rare chance re-inserting an already-valid header into a fresh
+            // builder somehow fails -- never worth panicking a request task
+            // over a header-forwarding edge case.
+            let resp = resp_builder.body(()).unwrap_or_else(|_| {
+                http::Response::builder()
+                    .status(status)
+                    .body(())
+                    .expect("status-only response head is always valid")
+            });
             let _ = stream.send_response(resp).await;
             let mut body_stream = upstream_resp.bytes_stream();
             use futures_util::StreamExt as _;

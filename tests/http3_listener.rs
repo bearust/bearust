@@ -550,6 +550,12 @@ async fn http3_listener_forwards_an_allowed_request_to_the_resolved_backend() {
     stream.finish().await.unwrap();
     let resp = stream.recv_response().await.unwrap();
     assert_eq!(resp.status(), http::StatusCode::OK);
+    // The backend's own response header must survive to the H3 client --
+    // axum sets this for a plain (StatusCode, &str) handler response.
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "text/plain; charset=utf-8"
+    );
 
     let mut body = Vec::new();
     while let Some(mut chunk) = stream.recv_data().await.unwrap() {

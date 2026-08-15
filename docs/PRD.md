@@ -1257,6 +1257,16 @@ the HTTP/1.1/HTTP/2 path's block response. Shutdown is coordinated with
 the same bounded-timeout `tokio::watch`-based pattern already used for
 the other long-running tasks `serve_proxy` spawns.
 
+**Bug fixed during increment 6's work:** the successful-forward response
+path only ever carried the upstream's status code to the H3 client --
+every response header (`Content-Type`, `Cache-Control`, `Set-Cookie`,
+CORS headers, etc.) was silently dropped, undetected because no test
+asserted a backend-set header actually reached the H3 client. Every
+upstream response header is now forwarded except hop-by-hop ones (the
+same `HOP_BY_HOP_HEADERS` list already applied request-side); a
+`resolved_backend`-style integration test now asserts a real header
+(`Content-Type`) survives end to end.
+
 Deliberately out of scope for this increment: rate limiting, bot
 protection/challenge evaluation, and analytics recording on the H3
 path; plugin-hook invocation on the H3 path; and HTTP/3 to upstream
