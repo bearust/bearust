@@ -21,6 +21,10 @@ describe("Setup route", () => {
     await act(async () => {
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
-    expect(element.textContent).toContain("Invalid setup token");
+    // The real `sanitizeError` (from `@/App`) translates known server
+    // messages/codes into a user-facing string rather than surfacing the
+    // raw `Error.message` — "Invalid setup token" maps to
+    // errors.authInvalidSetupToken.
+    expect(element.textContent).toContain("The setup token is invalid.");
   });
 });

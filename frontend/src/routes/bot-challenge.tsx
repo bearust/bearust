@@ -30,6 +30,7 @@ function BotChallengePage() {
     [complete, setComplete] = useState(false);
 
   useEffect(() => {
+    setError("");
     if (!fingerprint) {
       setError(t("errors.challengeContext"));
       return;

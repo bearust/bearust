@@ -2,6 +2,7 @@ import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { api } from "@/api";
+import { sanitizeError } from "@/App";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -10,10 +11,6 @@ import { Label } from "@/components/ui/label";
 export const Route = createFileRoute("/(auth)/setup")({
   component: SetupPage,
 });
-
-function sanitizeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function SetupPage() {
   const { t } = useTranslation();
