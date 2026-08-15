@@ -13,9 +13,10 @@ export const Route = createFileRoute("/_authenticated")({
     if (!status.initialized) throw redirect({ to: "/setup" });
 
     try {
-      const user = await context.queryClient.fetchQuery({
+      const user = await context.queryClient.ensureQueryData({
         queryKey: ["me"],
         queryFn: api.me,
+        staleTime: 30_000,
       });
       useAuthStore.getState().setUser(user);
       return { user };
