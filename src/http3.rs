@@ -433,6 +433,42 @@ fn strip_hop_by_hop_headers(headers: &mut Vec<(String, String)>) {
     });
 }
 
+/// Builds the response head sent to the H3 client: `status` plus every
+/// `upstream_headers` entry except hop-by-hop ones (RFC 9110 §7.6.1 -- these
+/// describe the listener<->upstream leg, not the end-to-end response) and,
+/// when `strip_content_length` is set, `content-length` too (the body a
+/// `transform.response` plugin returns is a different length than the
+/// upstream declared, so the stale value must not travel along -- H3's
+/// stream-close framing doesn't depend on it either way). Falls back to a
+/// headerless response of the same status on the rare chance re-inserting
+/// an already-valid header into a fresh builder somehow fails -- never
+/// worth panicking a request task over a header-forwarding edge case.
+fn downstream_response_head(
+    status: http::StatusCode,
+    upstream_headers: &http::HeaderMap,
+    strip_content_length: bool,
+) -> http::Response<()> {
+    let mut builder = http::Response::builder().status(status);
+    for (name, value) in upstream_headers {
+        if HOP_BY_HOP_HEADERS
+            .iter()
+            .any(|hop| name.as_str().eq_ignore_ascii_case(hop))
+        {
+            continue;
+        }
+        if strip_content_length && name.as_str().eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        builder = builder.header(name, value);
+    }
+    builder.body(()).unwrap_or_else(|_| {
+        http::Response::builder()
+            .status(status)
+            .body(())
+            .expect("status-only response head is always valid")
+    })
+}
+
 /// Reimplementation of `observability::append_forwarded_for`'s logic
 /// against the plain `Vec<(String, String)>` header representation this
 /// module uses (that function operates on a Pingora `RequestHeader`, which
@@ -1013,44 +1049,87 @@ async fn handle_request<S>(
         Ok(upstream_resp) => {
             let status = http::StatusCode::from_u16(upstream_resp.status().as_u16())
                 .unwrap_or(http::StatusCode::BAD_GATEWAY);
-            // Forward every response header the upstream sent, except
-            // hop-by-hop ones (RFC 9110 §7.6.1, same HOP_BY_HOP_HEADERS list
-            // used on the request side): these describe the semantics of
-            // the listener<->upstream leg (plain HTTP/1.1/HTTP/2 over
-            // reqwest), not the end-to-end response, so blindly forwarding
-            // them to the H3 client would be incorrect. `content-length`
-            // survives here since the body below streams the upstream's
-            // exact bytes verbatim.
-            let mut resp_builder = http::Response::builder().status(status);
-            for (name, value) in upstream_resp.headers() {
-                if HOP_BY_HOP_HEADERS
-                    .iter()
-                    .any(|hop| name.as_str().eq_ignore_ascii_case(hop))
-                {
-                    continue;
-                }
-                resp_builder = resp_builder.header(name, value);
-            }
-            // Falls back to a headerless response of the same status on the
-            // rare chance re-inserting an already-valid header into a fresh
-            // builder somehow fails -- never worth panicking a request task
-            // over a header-forwarding edge case.
-            let resp = resp_builder.body(()).unwrap_or_else(|_| {
-                http::Response::builder()
-                    .status(status)
-                    .body(())
-                    .expect("status-only response head is always valid")
-            });
-            let _ = stream.send_response(resp).await;
-            let mut body_stream = upstream_resp.bytes_stream();
             use futures_util::StreamExt as _;
-            while let Some(chunk) = body_stream.next().await {
-                let Ok(chunk) = chunk else { break };
-                if stream.send_data(chunk).await.is_err() {
-                    break;
+
+            // transform.response: reuses src/proxy.rs's pure
+            // response_transform_eligible (same conditions
+            // should_buffer_response_for_transform checks, extracted so
+            // this module can call them against reqwest's headers/status
+            // directly) and apply_transform_response_plugin (pure,
+            // synchronous, no Pingora type). Eligible responses are fully
+            // buffered up to RESPONSE_BODY_TRANSFORM_CAP_BYTES *before*
+            // anything is sent to the client -- unlike src/proxy.rs, H3
+            // doesn't need a chunked-vs-content-length framing trick, since
+            // stream closure (not a length header) marks the end of the
+            // body either way.
+            let content_type = upstream_resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok());
+            let content_encoding = upstream_resp
+                .headers()
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok());
+            let eligible = crate::proxy::response_transform_eligible(
+                state.plugin_manager.as_ref(),
+                method == "HEAD",
+                status,
+                content_type,
+                content_encoding,
+            );
+
+            if eligible {
+                let upstream_headers = upstream_resp.headers().clone();
+                let mut body_stream = upstream_resp.bytes_stream();
+                let mut buffer = Vec::new();
+                let mut oversized = false;
+                while let Some(chunk) = body_stream.next().await {
+                    let Ok(chunk) = chunk else { break };
+                    if buffer.len() + chunk.len() > crate::proxy::RESPONSE_BODY_TRANSFORM_CAP_BYTES
+                    {
+                        buffer.extend_from_slice(&chunk);
+                        oversized = true;
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk);
                 }
+                if oversized {
+                    // Fail open: forward untransformed. The buffered prefix
+                    // plus the remaining live chunks together are exactly
+                    // the upstream's original bytes, so its content-length
+                    // (if any) is still correct.
+                    let resp = downstream_response_head(status, &upstream_headers, false);
+                    let _ = stream.send_response(resp).await;
+                    let _ = stream.send_data(bytes::Bytes::from(buffer)).await;
+                    while let Some(chunk) = body_stream.next().await {
+                        let Ok(chunk) = chunk else { break };
+                        if stream.send_data(chunk).await.is_err() {
+                            break;
+                        }
+                    }
+                } else {
+                    let transformed = crate::proxy::apply_transform_response_plugin(
+                        state.plugin_manager.as_ref(),
+                        status.as_u16(),
+                        buffer,
+                    );
+                    let resp = downstream_response_head(status, &upstream_headers, true);
+                    let _ = stream.send_response(resp).await;
+                    let _ = stream.send_data(bytes::Bytes::from(transformed)).await;
+                }
+                let _ = stream.finish().await;
+            } else {
+                let resp = downstream_response_head(status, upstream_resp.headers(), false);
+                let _ = stream.send_response(resp).await;
+                let mut body_stream = upstream_resp.bytes_stream();
+                while let Some(chunk) = body_stream.next().await {
+                    let Ok(chunk) = chunk else { break };
+                    if stream.send_data(chunk).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = stream.finish().await;
             }
-            let _ = stream.finish().await;
             record_analytics_event(
                 &state.analytics,
                 Some(route.host.as_str()),

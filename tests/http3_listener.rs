@@ -1724,3 +1724,161 @@ async fn http3_listener_notifies_a_waf_block_sink_plugin() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
+
+/// Loads the checked-in `transform_response_v2` fixture (always returns the
+/// fixed body `hello`, ignoring its input -- see
+/// `tests/fixtures/plugins/transform_response_v2/README.md`). The host
+/// ceiling (`PluginConfig::max_output_bytes`) is raised to 2 MiB, mirroring
+/// `src/proxy.rs`'s own `transform_response_manager` test helper -- the
+/// fixture's declared `max_output_bytes` (1.5 MiB, per its `plugin.toml`)
+/// exceeds the default 64 KiB ceiling.
+fn transform_response_plugin_manager() -> Arc<PluginManager> {
+    let root = tempfile::tempdir().unwrap();
+    let plugin = root.path().join("transform-response-v2");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        include_str!("fixtures/plugins/transform_response_v2/plugin.toml"),
+    )
+    .unwrap();
+    let module = wat::parse_str(include_str!(
+        "fixtures/plugins/transform_response_v2/transform_response_v2.wat"
+    ))
+    .unwrap();
+    fs::write(plugin.join("transform_response_v2.wasm"), &module).unwrap();
+    let manager = PluginManager::new(PluginConfig {
+        enabled: true,
+        directory: root.path().to_path_buf(),
+        max_output_bytes: 2 * 1024 * 1024,
+        ..PluginConfig::default()
+    });
+    manager.reload_from_disk().unwrap();
+    manager
+}
+
+// transform.response uses tokio::task::block_in_place internally
+// (src/proxy.rs's apply_transform_response_plugin), which panics on a
+// current-thread runtime -- the default #[tokio::test] flavor. Matches
+// src/proxy.rs's own a_successful_response_transform_replaces_the_body
+// test, and the real multi-thread runtime bearust serve always runs on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http3_listener_transforms_an_eligible_response_body() {
+    install_crypto_provider();
+
+    let backend = support::spawn_http_backend(
+        Arc::new(std::sync::atomic::AtomicU16::new(200)),
+        "original-backend-body",
+    )
+    .await;
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let plugin_manager = transform_response_plugin_manager();
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            http3::Http3Options {
+                plugin_manager: Some(plugin_manager),
+                ..Default::default()
+            },
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/anything")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::OK);
+    // The stale upstream content-length (22 bytes, for
+    // "original-backend-body") must not survive the transform to a
+    // different-length body.
+    assert!(resp.headers().get("content-length").is_none());
+
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        while chunk.has_remaining() {
+            let n = chunk.remaining();
+            body.extend_from_slice(&chunk.chunk()[..n]);
+            chunk.advance(n);
+        }
+    }
+    assert_eq!(body, b"hello");
+
+    drive.abort();
+    server.abort();
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn http3_listener_fails_open_and_streams_unmodified_for_an_oversized_response() {
+    install_crypto_provider();
+
+    // One byte past RESPONSE_BODY_TRANSFORM_CAP_BYTES (1 MiB), so buffering
+    // aborts partway through and the fail-open path is exercised.
+    let large_body: &'static str = Box::leak(
+        vec![b'x'; 1024 * 1024 + 1]
+            .into_iter()
+            .map(|b| b as char)
+            .collect::<String>()
+            .into_boxed_str(),
+    );
+    let backend =
+        support::spawn_http_backend(Arc::new(std::sync::atomic::AtomicU16::new(200)), large_body)
+            .await;
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let plugin_manager = transform_response_plugin_manager();
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            http3::Http3Options {
+                plugin_manager: Some(plugin_manager),
+                ..Default::default()
+            },
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/anything")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::OK);
+
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        while chunk.has_remaining() {
+            let n = chunk.remaining();
+            body.extend_from_slice(&chunk.chunk()[..n]);
+            chunk.advance(n);
+        }
+    }
+    // Fail-open: the original, untransformed body reaches the client in
+    // full -- not the fixture's fixed "hello" output, and not truncated.
+    assert_eq!(body.len(), large_body.len());
+    assert_eq!(body, large_body.as_bytes());
+
+    drive.abort();
+    server.abort();
+    backend.shutdown().await;
+}

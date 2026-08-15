@@ -581,7 +581,7 @@ async fn apply_transform_plugin(
 /// instead. Bounds per-request proxy memory from a single large upstream
 /// response; matches the design spec's chosen cap for BeaRust's typical
 /// API/JSON/HTML traffic.
-const RESPONSE_BODY_TRANSFORM_CAP_BYTES: usize = 1024 * 1024;
+pub const RESPONSE_BODY_TRANSFORM_CAP_BYTES: usize = 1024 * 1024;
 
 /// Advertises this listener's own HTTP/3 endpoint to the client by inserting
 /// `Alt-Svc: <alt_svc>` into every response, when the HTTP/3 listener is
@@ -622,42 +622,78 @@ fn should_buffer_response_for_transform(
     method: &http::Method,
     response: &ResponseHeader,
 ) -> bool {
+    let content_type = response
+        .headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok());
+    let content_encoding = response
+        .headers
+        .get("content-encoding")
+        .and_then(|value| value.to_str().ok());
+    response_transform_eligible(
+        plugin_manager,
+        method == http::Method::HEAD,
+        response.status,
+        content_type,
+        content_encoding,
+    )
+}
+
+/// The pure eligibility conditions `should_buffer_response_for_transform`
+/// checks, extracted so `src/http3.rs` can reuse them directly against its
+/// own `reqwest::Response` fields instead of a Pingora `ResponseHeader`.
+/// Every one of the following must hold:
+///
+/// - a plugin is enabled and currently declaring `transform.response`;
+/// - `Content-Encoding` is absent, empty, or `identity` -- a plugin would
+///   otherwise receive opaque compressed bytes it cannot meaningfully
+///   transform, and could be misused to launder a compressed payload past
+///   any future response inspection;
+/// - the status is not informational (`1xx`, which includes `101 Switching
+///   Protocols`): an upgraded connection's frames arrive through this same
+///   body filter as `HttpTask::UpgradedBody`, and buffering them would
+///   swallow WebSocket traffic instead of streaming it;
+/// - the status is neither `204 No Content` nor `304 Not Modified`, which
+///   carry no body at all -- stripping their framing headers is pointless;
+/// - the downstream request method is not `HEAD`, whose response describes
+///   what a `GET` would return but carries no body, so its `Content-Length`
+///   is meaningful to size-probing clients and must be left intact;
+/// - `Content-Type` is not `text/event-stream` (case-insensitive): a
+///   long-lived stream's events would be withheld until the 1 MiB buffer
+///   cap or the connection's end, defeating the point of streaming.
+pub fn response_transform_eligible(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    is_head: bool,
+    status: http::StatusCode,
+    content_type: Option<&str>,
+    content_encoding: Option<&str>,
+) -> bool {
     let Some(manager) = plugin_manager else {
         return false;
     };
     if manager.transform_response_plugin().is_none() {
         return false;
     }
-    if method == http::Method::HEAD {
+    if is_head {
         return false;
     }
-    let status = response.status;
     if status.is_informational()
         || status == http::StatusCode::NO_CONTENT
         || status == http::StatusCode::NOT_MODIFIED
     {
         return false;
     }
-    if response
-        .headers
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(';')
-                .next()
-                .unwrap_or(value)
-                .trim()
-                .eq_ignore_ascii_case("text/event-stream")
-        })
-    {
+    if content_type.is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .unwrap_or(value)
+            .trim()
+            .eq_ignore_ascii_case("text/event-stream")
+    }) {
         return false;
     }
-    match response
-        .headers
-        .get("content-encoding")
-        .and_then(|value| value.to_str().ok())
-    {
+    match content_encoding {
         None => true,
         Some(value) => value.is_empty() || value.eq_ignore_ascii_case("identity"),
     }
@@ -704,7 +740,7 @@ fn accumulate_response_chunk(ctx: &mut RequestContext, chunk: &[u8]) -> Option<V
 /// `catch_unwind` below, so it degrades to fail-open plus a failure
 /// counter rather than crashing, but the capability would be effectively
 /// disabled and would need a `spawn_blocking`-style offload instead.
-fn apply_transform_response_plugin(
+pub fn apply_transform_response_plugin(
     plugin_manager: Option<&Arc<PluginManager>>,
     status: u16,
     body: Vec<u8>,

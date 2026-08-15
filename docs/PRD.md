@@ -1276,8 +1276,9 @@ listener is expected across future increments, not this one; see
 `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`
 for the full design rationale and non-goals. (Analytics recording
 shipped in increment 3, rate limiting in increment 4, bot
-protection/challenge evaluation in increment 5, and four of the five
-plugin hooks in increment 6, below.)
+protection/challenge evaluation in increment 5, four of the five
+plugin hooks in increment 6, and the fifth (`transform.response`) in
+increment 7, below.)
 
 ### Phase 15 status: Alt-Svc advertisement (increment 2)
 
@@ -1419,3 +1420,44 @@ configured, disabled, a trap, an invalid pick, ...).
 `Http3Options`/`HandlerState` each gained `plugin_manager`/
 `plugin_notify` fields (`None` when plugins are disabled for the
 listener). No other behavior changes.
+
+### Phase 15 status: response transform plugin hook on the H3 path (increment 7)
+
+Increment 7 completes plugin-hook parity by wiring `transform.response`
+(Phase 13F) into the H3 path -- the fifth and final hook. Its
+eligibility check (plugin enabled and declaring the capability;
+`Content-Encoding` absent/identity; status not informational/`204`/
+`304`; method not `HEAD`; `Content-Type` not `text/event-stream`) is
+extracted from `src/proxy.rs`'s `should_buffer_response_for_transform`
+into a new pure `response_transform_eligible` function (bumped `pub`
+alongside `RESPONSE_BODY_TRANSFORM_CAP_BYTES` and
+`apply_transform_response_plugin`, all reused directly -- none take a
+Pingora type), so `should_buffer_response_for_transform` itself is now
+a thin wrapper with no behavior change.
+
+Unlike `src/proxy.rs` (which must juggle `response_filter`/
+`response_body_filter` across two separate `ProxyHttp` callbacks and a
+chunked-encoding framing workaround, since headers reach the wire
+before the transform's outcome is known), `src/http3.rs` handles a
+whole response in one function scope: an eligible response is fully
+buffered up to the 1 MiB cap *before* anything is sent to the H3
+client. If it fits, the buffer is transformed and sent as a single
+chunk with `content-length` stripped (H3 doesn't need it for framing
+-- stream closure marks the end of the body either way, so there's no
+equivalent of `src/proxy.rs`'s forced-chunked-encoding workaround to
+begin with). If it overflows the cap, buffering aborts and the
+listener fails open: the buffered prefix plus the remaining live
+upstream chunks are exactly the original bytes, so the original
+`content-length` (if any) stays valid and the plugin is never invoked.
+Every other response header still forwards via the existing
+hop-by-hop-stripping logic. No other behavior changes.
+
+**Test-authoring note:** `apply_transform_response_plugin` uses
+`tokio::task::block_in_place` internally, which panics on a
+current-thread Tokio runtime -- the default `#[tokio::test]` flavor.
+The real `bearust serve` process always runs on a multi-thread
+runtime (see the increment 1 design's crypto-provider note and
+`src/proxy.rs`'s own equivalent test), so the new H3 transform.response
+test uses `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`,
+matching `src/proxy.rs`'s `a_successful_response_transform_replaces_the_body`
+test exactly.
