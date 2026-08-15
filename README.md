@@ -307,12 +307,20 @@ HTTP/1.1/HTTP/2 path feeds (status code, latency, proxy host, and WAF
 block counts), so they appear in the existing analytics dashboard and
 `GET /api/analytics` surfaces alongside HTTP/1.1/HTTP/2 traffic.
 
+The same rate limiter and live policy the HTTP/1.1/HTTP/2 path uses
+also applies to H3 requests: once a request's route resolves, its
+client IP (respecting `server.trusted_proxy_cidrs`) and the route's
+policy are evaluated, and an over-limit request in `block` mode gets a
+byte-identical `429 Rate limit exceeded` response (with `Retry-After`
+and `Cache-Control: no-store`) without ever reaching the backend;
+`monitor` mode records the event but never blocks.
+
 This is an initial, opt-in increment, not feature parity with the
 existing listener. Explicitly out of scope for now:
 
-- No rate limiting or bot protection/challenge evaluation on the H3 path
-  (so their analytics dimensions — bot blocks, bot challenges, rate
-  limited — are always recorded as zero for H3 requests today).
+- No bot protection/challenge evaluation on the H3 path (so its
+  analytics dimensions — bot blocks, bot challenges — are always
+  recorded as zero for H3 requests today).
 - No plugin-hook invocation on the H3 path.
 - No HTTP/3 to the upstream/backend — forwarded requests to upstreams
   still use HTTP/1.1 or HTTP/2, only the client-facing edge speaks H3.

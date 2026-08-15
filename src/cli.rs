@@ -434,6 +434,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                 realtime.publish("analytics.changed");
             })
         };
+        let trusted_proxies = IpNetSet::new(config.server.trusted_proxy_cidrs.iter().map(String::as_str));
         let (http3_shutdown_tx, http3_shutdown_rx) = tokio::sync::watch::channel(false);
         let http3_alt_svc = config
             .server
@@ -456,6 +457,10 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                 host_ids: Arc::new(analytics_host_ids.clone()),
                 changed: Some(analytics_changed.clone()),
             }));
+            let http3_rate_limit = Some(Arc::new(crate::http3::RateLimitContext {
+                limiter: rate_limiter.clone(),
+                trusted_proxies: Arc::new(trusted_proxies.clone()),
+            }));
             Some(tokio::spawn(async move {
                 if let Err(error) = crate::http3::serve(
                     bind,
@@ -463,6 +468,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                     store,
                     waf,
                     http3_analytics,
+                    http3_rate_limit,
                     http3_shutdown_rx,
                 )
                 .await
@@ -495,7 +501,6 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                 );
             }
         }
-        let trusted_proxies = IpNetSet::new(config.server.trusted_proxy_cidrs.iter().map(String::as_str));
         let control_listener = tokio::net::TcpListener::bind(config.server.control_bind).await
             .map_err(|e| AppError::Server(format!("control plane bind: {e}")))?;
         let control_router = crate::control_plane::router_with_metrics(

@@ -1265,7 +1265,7 @@ how the client connected). Full feature parity with the existing
 listener is expected across future increments, not this one; see
 `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`
 for the full design rationale and non-goals. (Analytics recording
-shipped in increment 3, below.)
+shipped in increment 3, and rate limiting in increment 4, below.)
 
 ### Phase 15 status: Alt-Svc advertisement (increment 2)
 
@@ -1298,7 +1298,36 @@ WAF block, unmatched-route 404, no-healthy-backend or upstream-failure
 502, and the successful forward), each carrying accurate status,
 latency, and the resolved proxy host id, so H3 traffic now appears in
 the existing analytics dashboard and `GET /api/analytics` surfaces
-alongside HTTP/1.1/HTTP/2 traffic. Bot-block, bot-challenge, and
-rate-limited security dimensions are always recorded as zero for H3
-requests, since neither hook exists on this path yet (see the increment
-1 status above). No other behavior changes.
+alongside HTTP/1.1/HTTP/2 traffic. Bot-block and bot-challenge security
+dimensions are always recorded as zero for H3 requests, since bot
+protection doesn't exist on this path yet (see the increment 1 status
+above); rate-limited is recorded accurately as of increment 4, below.
+No other behavior changes.
+
+### Phase 15 status: rate limiting on the H3 path (increment 4)
+
+Increment 4 applies the same live rate-limit policy and token-bucket
+store (Phase 7C) the HTTP/1.1/HTTP/2 path already enforces to H3
+requests, reusing `src/rate_limit_store.rs`'s `client_ip` directly --
+it already takes `http::HeaderMap`, the exact type `h3`'s
+`req.headers()` already is, so no adaptation was needed -- and
+`src/proxy.rs`'s `route_key`/`emit_rate_limit_telemetry` pure helpers
+(bumped to `pub` for reuse, no behavior change). A new
+`http3::RateLimitContext` (limiter handle, trusted-proxy CIDR set) is
+threaded through `serve` → `handle_connection` → `handle_request`
+alongside the existing WAF/analytics parameters -- `None` when rate
+limiting is unavailable. Evaluation happens once the WAF has passed and
+a route has resolved, before backend selection, mirroring
+`src/proxy.rs`'s own precedence order. An over-limit request in `block`
+mode gets a `429` response byte-identical to the HTTP/1.1/HTTP/2 path's
+(`Retry-After`, `Cache-Control: no-store`, body `Rate limit exceeded`)
+without ever reaching the backend, and is recorded in analytics with
+`rate_limited: true`; `monitor` mode records the same telemetry but
+never blocks, matching existing behavior. No other behavior changes.
+
+(While threading this and the analytics context through
+`handle_request`, its five separate parameters for the invariant
+per-connection state -- runtime store, WAF store, HTTP client,
+analytics context, rate-limit context -- were bundled into one
+`Arc<HandlerState>`, cloned once per connection/request instead of once
+per field. Internal refactor only; no behavior change.)

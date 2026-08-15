@@ -942,7 +942,7 @@ fn emit_waf_telemetry(
     }
 }
 
-fn emit_rate_limit_telemetry(
+pub fn emit_rate_limit_telemetry(
     request_id: &str,
     decision: &RateLimitDecision,
     action: RateLimitAction,
@@ -962,7 +962,7 @@ fn emit_rate_limit_telemetry(
     }
 }
 
-fn route_key(route: &ResolvedRoute) -> i64 {
+pub fn route_key(route: &ResolvedRoute) -> i64 {
     // Stable, non-sensitive identity for the configured proxy host.  The
     // control-plane proxy-host id can replace this hash once it is wired into
     // the runtime snapshot; paths deliberately do not participate so all

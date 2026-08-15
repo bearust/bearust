@@ -8,7 +8,9 @@ use bearust::{
         repository,
     },
     http3,
-    http3::AnalyticsContext,
+    http3::{AnalyticsContext, RateLimitContext},
+    rate_limit::{RateLimitAction, RateLimitPolicy},
+    rate_limit_store::{IpNetSet, RateLimiterStore},
     runtime::{RuntimeSnapshot, RuntimeStore},
     waf_store::WafStore,
 };
@@ -367,7 +369,7 @@ async fn http3_listener_blocks_a_request_the_waf_rule_engine_would_block() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, Some(waf), None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Some(waf), None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -409,7 +411,7 @@ async fn http3_listener_allows_a_request_the_waf_rule_engine_would_allow() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, Some(waf), None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Some(waf), None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -451,7 +453,7 @@ async fn http3_listener_forwards_an_allowed_request_to_the_resolved_backend() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, None, None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -488,7 +490,7 @@ async fn http3_listener_returns_404_for_an_unmatched_host() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, None, None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -594,7 +596,7 @@ async fn http3_listener_reasserts_host_and_rebuilds_x_forwarded_for_defeating_a_
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, None, None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -670,7 +672,7 @@ async fn http3_listener_rejects_an_oversized_body_with_413_and_never_contacts_th
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, None, None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -713,7 +715,7 @@ async fn http3_listener_returns_502_when_the_upstream_connection_fails() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, None, None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -746,7 +748,7 @@ async fn http3_listener_waf_block_never_reaches_the_backend() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, Some(waf), None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Some(waf), None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -816,7 +818,16 @@ async fn http3_listener_records_an_analytics_event_for_an_allowed_request() {
         changed: None,
     });
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, Some(analytics), shutdown_rx).await;
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            None,
+            Some(analytics),
+            None,
+            shutdown_rx,
+        )
+        .await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -871,6 +882,7 @@ async fn http3_listener_records_a_waf_block_analytics_event_with_zero_backend_re
             store,
             Some(waf),
             Some(analytics),
+            None,
             shutdown_rx,
         )
         .await;
@@ -900,4 +912,143 @@ async fn http3_listener_records_a_waf_block_analytics_event_with_zero_backend_re
     assert_eq!(summary.requests, 1);
     assert_eq!(summary.status_4xx, 1);
     assert_eq!(summary.waf_blocks, 1);
+}
+
+/// Builds a `RateLimiterStore` whose global policy has capacity `1` and the
+/// minimum valid refill rate (`0.001`/s, per `rate_limit::MIN_REFILL_PER_SECOND`)
+/// -- the first request in a test always succeeds (consumes the single
+/// token), and a second request sent immediately after is deterministically
+/// over the limit, since real elapsed time between two local H3 requests
+/// never approaches the ~1000s it would take to refill one token.
+fn rate_limiter_with_capacity_one(action: RateLimitAction) -> Arc<RateLimiterStore> {
+    let store = RateLimiterStore::new(16, std::time::Duration::from_secs(60));
+    store.set_policy(RateLimitPolicy {
+        enabled: true,
+        action,
+        capacity: 1,
+        refill_per_second: 0.001,
+        ..RateLimitPolicy::default()
+    });
+    Arc::new(store)
+}
+
+#[tokio::test]
+async fn http3_listener_blocks_a_rate_limited_request_in_block_mode() {
+    install_crypto_provider();
+
+    let backend = spawn_counting_backend("should-never-be-seen").await;
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let rate_limit = Arc::new(RateLimitContext {
+        limiter: rate_limiter_with_capacity_one(RateLimitAction::Block),
+        trusted_proxies: Arc::new(IpNetSet::new(Vec::<String>::new())),
+    });
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            None,
+            None,
+            Some(rate_limit),
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+
+    // First request consumes the single token and must succeed.
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/first")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::OK);
+    while stream.recv_data().await.unwrap().is_some() {}
+
+    // Second request, sent immediately after, is over the limit.
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/second")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert!(resp.headers().get("retry-after").is_some());
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        while chunk.has_remaining() {
+            let n = chunk.remaining();
+            body.extend_from_slice(&chunk.chunk()[..n]);
+            chunk.advance(n);
+        }
+    }
+    assert_eq!(body, b"Rate limit exceeded");
+
+    drive.abort();
+    server.abort();
+    assert_eq!(
+        backend.request_count(),
+        1,
+        "only the first, non-limited request should have reached the backend"
+    );
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn http3_listener_allows_a_rate_limited_request_in_monitor_mode() {
+    install_crypto_provider();
+
+    let backend = spawn_counting_backend("still-served").await;
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let rate_limit = Arc::new(RateLimitContext {
+        limiter: rate_limiter_with_capacity_one(RateLimitAction::Monitor),
+        trusted_proxies: Arc::new(IpNetSet::new(Vec::<String>::new())),
+    });
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            None,
+            None,
+            Some(rate_limit),
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    for path in ["/first", "/second"] {
+        let req = http::Request::builder()
+            .method("GET")
+            .uri(format!("https://localhost{path}"))
+            .body(())
+            .unwrap();
+        let mut stream = send_request.send_request(req).await.unwrap();
+        stream.finish().await.unwrap();
+        let resp = stream.recv_response().await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        while stream.recv_data().await.unwrap().is_some() {}
+    }
+
+    drive.abort();
+    server.abort();
+    assert_eq!(
+        backend.request_count(),
+        2,
+        "monitor mode must never block a request, even over the limit"
+    );
+    backend.shutdown().await;
 }
