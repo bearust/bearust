@@ -12,6 +12,7 @@ describe("Setup route", () => {
   });
 
   it("submits the setup form and shows a server error inline", async () => {
+    vi.spyOn(api, "status").mockResolvedValue({ initialized: false });
     vi.spyOn(api, "setup").mockRejectedValue(
       Object.assign(new Error("Invalid setup token"), { status: 400 }),
     );
@@ -26,5 +27,11 @@ describe("Setup route", () => {
     // raw `Error.message` — "Invalid setup token" maps to
     // errors.authInvalidSetupToken.
     expect(element.textContent).toContain("The setup token is invalid.");
+  });
+
+  it("redirects to /login when setup is already completed", async () => {
+    vi.spyOn(api, "status").mockResolvedValue({ initialized: true });
+    const { router } = await renderRoute([SetupRoute], "/setup");
+    expect(router.state.location.pathname).toBe("/login");
   });
 });

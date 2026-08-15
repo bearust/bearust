@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { api } from "@/api";
 import { sanitizeError } from "@/lib/errors";
@@ -9,6 +9,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export const Route = createFileRoute("/(auth)/setup")({
+  beforeLoad: async ({ context }) => {
+    const status = await context.queryClient.fetchQuery({
+      queryKey: ["setup-status"],
+      queryFn: api.status,
+      staleTime: Infinity,
+    });
+    if (status.initialized) throw redirect({ to: "/login" });
+  },
   component: SetupPage,
 });
 
