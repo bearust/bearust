@@ -598,7 +598,7 @@ An **incremental** approach, not a big-bang release. Each phase should be stable
 | **Phase 12 — AI Advisor** | Optional module based on external LLM |
 | **Phase 13 — Plugin System** | WASM runtime, SDK, initial hook points |
 | **Phase 14 — Plugin Ecosystem** | Community registry, signature verification, public contribution documentation |
-| **Phase 15 — HTTP/3** | Opt-in client-side HTTP/3 (QUIC) listener; WAF-parity, upstream H3, and full feature parity remain future increments |
+| **Phase 15 — HTTP/3** | Opt-in client-side HTTP/3 (QUIC) listener with full WAF-parity feature coverage (analytics, rate limiting, bot protection, all five plugin hooks). Upstream H3 deliberately not implemented (unstable dependency, near-zero real-world applicability) |
 
 ### Phase 4C status: authenticated audit-log viewer
 
@@ -676,7 +676,7 @@ Phase 5.
 2. Community governance structure: who has merge rights, what is the review process for external contributions (including plugins)?
 3. Will there be a paid "Pro" edition in the future (additional enterprise features), or will all features remain free forever?
 4. Final GUI frontend framework (React vs Vue) — needs to be decided before Phase 3.
-5. ~~HTTP/3 support target — included in v1 or deferred to a later release?~~ **Resolved:** deferred out of v1, then delivered as an opt-in, off-by-default increment in Phase 15 (a separate QUIC listener alongside, not replacing, the existing HTTP/1.1/HTTP/2 path) — see `### Phase 15 status` below and `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`. `Alt-Svc` advertisement shipped in increment 2 (see `### Phase 15 status: Alt-Svc advertisement` below). WAF-parity feature coverage (rate limiting, bot protection, analytics, plugin hooks) and upstream H3 remain open for future increments.
+5. ~~HTTP/3 support target — included in v1 or deferred to a later release?~~ **Resolved:** deferred out of v1, then delivered as an opt-in, off-by-default increment in Phase 15 (a separate QUIC listener alongside, not replacing, the existing HTTP/1.1/HTTP/2 path) — see `### Phase 15 status` below and `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`. Phase 15 is now complete: `Alt-Svc` advertisement, analytics, rate limiting, bot protection/challenge evaluation, and all five plugin hooks (`waf.detect`, `notify.waf_block`, `transform.request`, `balance.select`, `transform.response`) all run on the H3 path, matching the existing HTTP/1.1/HTTP/2 listener's behavior. Upstream HTTP/3 (forwarding requests from BeaRust to backends over H3) was investigated and deliberately **not** implemented — see `### Phase 15 status: upstream HTTP/3 (not implemented)` below for the rationale.
 6. Data privacy policy for the AI Advisor feature (default sensitive-data redaction: opt-in or opt-out?).
 7. Translation tooling/workflow for localization: a lightweight file-based approach (JSON/YAML per locale reviewed via PR) vs a dedicated translation management platform — to be decided before Phase 11.
 
@@ -1461,3 +1461,32 @@ runtime (see the increment 1 design's crypto-provider note and
 test uses `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`,
 matching `src/proxy.rs`'s `a_successful_response_transform_replaces_the_body`
 test exactly.
+
+### Phase 15 status: upstream HTTP/3 (not implemented)
+
+Forwarding requests from BeaRust to its own backends over HTTP/3
+(rather than the HTTP/1.1/HTTP/2 `reqwest` client the H3 listener
+already uses) was investigated and deliberately not implemented, after
+a feasibility spike against a real scratch build confirmed two blocking
+concerns:
+
+- `reqwest`'s `http3` feature only compiles with the
+  `RUSTFLAGS='--cfg reqwest_unstable'` environment variable set --
+  `reqwest` explicitly excludes it from semver guarantees, meaning its
+  API can change or break on any patch release, which is not an
+  acceptable foundation for a production dependency.
+- It would also require switching `reqwest`'s TLS backend to
+  `rustls-tls`; the rest of the codebase's `reqwest` usage (AI Advisor,
+  the plugin registry client) is on `native-tls`, so this would need
+  its own separate investigation into whether the two backends can
+  safely coexist in one dependency tree.
+
+Beyond the technical risk, the real-world value is close to zero: HTTP/3
+is overwhelmingly a client-facing/edge protocol, and essentially no
+backend origin servers speak it. BeaRust's upstream connections are
+also currently always plaintext `http://`; HTTP/3 requires TLS, so
+supporting it would additionally require backend TLS+QUIC termination
+-- a materially larger architecture change in service of a capability
+almost no real deployment could use. This is recorded here as a
+deliberate, permanent non-goal rather than a deferred increment; see
+Open Question 5 in §15.

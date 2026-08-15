@@ -338,11 +338,15 @@ the same 1 MiB cap the existing listener uses — before anything is
 sent to the client; an oversized body fails open and streams
 unmodified rather than being truncated or dropped).
 
-This is an initial, opt-in increment, not feature parity with the
-existing listener. Explicitly out of scope for now:
-
-- No HTTP/3 to the upstream/backend — forwarded requests to upstreams
-  still use HTTP/1.1 or HTTP/2, only the client-facing edge speaks H3.
+This gives the H3 listener full WAF/analytics/rate-limiting/bot-
+protection/plugin-hook parity with the existing HTTP/1.1/HTTP/2
+listener. Forwarded requests to upstream backends still always use
+HTTP/1.1 or HTTP/2 — only the client-facing edge speaks H3. Upstream
+HTTP/3 was investigated and deliberately not implemented: `reqwest`'s
+`http3` feature is unstable (excluded from semver guarantees) and
+essentially no real backend origin servers speak HTTP/3 in the first
+place, so the risk isn't worth the near-zero real-world value; see
+`docs/PRD.md`'s Phase 15 status for the full rationale.
 
 ### Audit log API and viewer
 
