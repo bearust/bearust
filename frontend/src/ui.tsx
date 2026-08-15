@@ -32,7 +32,7 @@ export function Button({
     primary:
       "border border-action bg-action text-action-foreground shadow-[var(--shadow-1)] hover:bg-action-hover hover:border-action-hover hover:shadow-[var(--shadow-2)]",
     secondary:
-      "border border-border-strong bg-transparent text-foreground hover:bg-surface-muted hover:border-muted",
+      "border border-border-strong bg-transparent text-foreground hover:bg-surface-muted hover:border-legacy-muted",
     danger:
       "border border-danger bg-transparent text-danger hover:bg-danger-surface",
   };
@@ -103,7 +103,7 @@ export function StatusLamp({
     warning: "bg-warning",
     danger: "bg-danger",
     info: "bg-info",
-    neutral: "bg-muted",
+    neutral: "bg-legacy-muted",
   };
   return (
     <span
@@ -126,7 +126,7 @@ export function StatusBadge({
     warning: "bg-warning-surface text-warning-foreground",
     danger: "bg-danger-surface text-danger-foreground",
     info: "bg-info-surface text-info-foreground",
-    neutral: "bg-surface-muted text-muted",
+    neutral: "bg-surface-muted text-legacy-muted",
   };
   return (
     <span
@@ -162,7 +162,7 @@ export function Field({
     undefined;
   return (
     <div className="space-y-1.5">
-      <label htmlFor={inputId} className="block text-xs font-medium text-muted">
+      <label htmlFor={inputId} className="block text-xs font-medium text-legacy-muted">
         {label}
       </label>
       <input
@@ -170,10 +170,10 @@ export function Field({
         id={inputId}
         aria-invalid={error ? true : props["aria-invalid"]}
         aria-describedby={describedBy}
-        className={`min-h-11 w-full rounded-[var(--radius-control)] border border-border-strong bg-page px-3 py-2 text-foreground placeholder:text-muted transition-colors hover:border-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:border-focus ${className}`}
+        className={`min-h-11 w-full rounded-[var(--radius-control)] border border-border-strong bg-page px-3 py-2 text-foreground placeholder:text-legacy-muted transition-colors hover:border-legacy-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:border-focus ${className}`}
       />
       {hint && (
-        <p id={hintId} className="text-sm text-muted">
+        <p id={hintId} className="text-sm text-legacy-muted">
           {hint}
         </p>
       )}
@@ -205,19 +205,19 @@ export function SelectField({
   const hintId = hint ? `${selectId}-hint` : undefined;
   return (
     <div className="space-y-1.5">
-      <label htmlFor={selectId} className="block text-xs font-medium text-muted">
+      <label htmlFor={selectId} className="block text-xs font-medium text-legacy-muted">
         {label}
       </label>
       <select
         {...props}
         id={selectId}
         aria-describedby={hintId}
-        className={`min-h-11 w-full rounded-[var(--radius-control)] border border-border-strong bg-page px-3 py-2 text-foreground transition-colors hover:border-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:border-focus ${className}`}
+        className={`min-h-11 w-full rounded-[var(--radius-control)] border border-border-strong bg-page px-3 py-2 text-foreground transition-colors hover:border-legacy-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:border-focus ${className}`}
       >
         {children}
       </select>
       {hint && (
-        <p id={hintId} className="text-sm text-muted">
+        <p id={hintId} className="text-sm text-legacy-muted">
           {hint}
         </p>
       )}
@@ -242,14 +242,14 @@ export function TextareaField({
     <div className="space-y-1.5">
       <label
         htmlFor={textareaId}
-        className="block text-xs font-medium text-muted"
+        className="block text-xs font-medium text-legacy-muted"
       >
         {label}
       </label>
       <textarea
         {...props}
         id={textareaId}
-        className={`min-h-11 w-full rounded-[var(--radius-control)] border border-border-strong bg-page px-3 py-2 font-mono text-foreground placeholder:text-muted transition-colors hover:border-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:border-focus ${className}`}
+        className={`min-h-11 w-full rounded-[var(--radius-control)] border border-border-strong bg-page px-3 py-2 font-mono text-foreground placeholder:text-legacy-muted transition-colors hover:border-legacy-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:border-focus ${className}`}
       />
     </div>
   );
@@ -383,7 +383,7 @@ export function ThemeSelect({
     props.onChange?.(event);
   };
   return (
-    <label className="inline-flex min-h-11 items-center gap-2 text-xs text-muted">
+    <label className="inline-flex min-h-11 items-center gap-2 text-xs text-legacy-muted">
       <span>{t("theme.label")}</span>
       <select
         {...props}
@@ -410,7 +410,7 @@ export function LanguageSelect({
   const { t } = useTranslation();
   const label = t("language.label");
   return (
-    <label className="inline-flex min-h-11 items-center gap-2 text-xs text-muted">
+    <label className="inline-flex min-h-11 items-center gap-2 text-xs text-legacy-muted">
       <span>{label}</span>
       <select
         aria-label={label}

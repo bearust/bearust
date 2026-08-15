@@ -8,7 +8,6 @@ import {
 import {
   api,
   AcmeRequest,
-  ApiError,
   AuditLogItem,
   AuditLogQuery,
   Certificate,
@@ -80,53 +79,21 @@ import {
 } from "./icons";
 import { AiAdvisorSection } from "./aiAdvisor";
 import { useTranslation } from "react-i18next";
+import {
+  SERVER_ERROR_KEYS,
+  SERVER_MESSAGE_KEYS,
+  errorDetails,
+  serverErrorKey,
+  sanitizeError,
+} from "./lib/errors";
 
 void initI18n();
 
-export const SERVER_ERROR_KEYS: Record<string, string> = {
-  invalid_credentials: "errors.authInvalidCredentials",
-  rate_limited: "errors.authRateLimited",
-  invalid_setup_token: "errors.authInvalidSetupToken",
-  already_initialized: "errors.authAlreadyInitialized",
-  unauthorized: "errors.unauthorized",
-  forbidden: "errors.forbidden",
-  invalid_input: "errors.invalidInput",
-  not_found: "errors.notFound",
-  conflict: "errors.conflict",
-  duplicate_domain: "errors.duplicateDomain",
-  duplicate_email: "errors.duplicateEmail",
-  last_admin: "errors.lastAdmin",
-  self_mutation: "errors.selfMutation",
-};
-
-export const SERVER_MESSAGE_KEYS: Record<string, string> = {
-  "Invalid email or password": "errors.authInvalidCredentials",
-  "Too many authentication attempts": "errors.authRateLimited",
-  "Invalid setup token": "errors.authInvalidSetupToken",
-  "Setup has already completed": "errors.authAlreadyInitialized",
-  "Authentication required": "errors.unauthorized",
-  "Invalid locale": "errors.invalidInput",
-};
-
-type ErrorDetails = Pick<Partial<ApiError>, "code" | "status"> & { message?: string };
-
-function errorDetails(error: unknown): ErrorDetails {
-  if (!error || typeof error !== "object") return {};
-  const candidate = error as { code?: unknown; status?: unknown; message?: unknown };
-  return {
-    code: typeof candidate.code === "string" ? candidate.code : undefined,
-    status: typeof candidate.status === "number" ? candidate.status : undefined,
-    message: typeof candidate.message === "string" ? candidate.message : undefined,
-  };
-}
-
-function serverErrorKey(error: unknown): string | undefined {
-  const { code, message } = errorDetails(error);
-  return (code && SERVER_ERROR_KEYS[code]) || (message && SERVER_MESSAGE_KEYS[message]);
-}
-
-export const sanitizeError = (error: unknown) =>
-  i18n.t(serverErrorKey(error) ?? "errors.generic");
+// SERVER_ERROR_KEYS, SERVER_MESSAGE_KEYS, and sanitizeError now live in
+// ./lib/errors so the new TanStack Router shell (routes/(auth)/login.tsx,
+// setup.tsx) doesn't have to import from this file. Re-exported here so
+// existing tests that import them from "./App" keep working unchanged.
+export { SERVER_ERROR_KEYS, SERVER_MESSAGE_KEYS, sanitizeError };
 
 export const BUILTIN_ROLE_KEYS: Record<string, string> = {
   admin: "roles.builtin.admin",
@@ -213,7 +180,7 @@ function Setup({ onDone }: { onDone: (u: User) => void }) {
           <StatusLamp tone="warning" />
           <h1 className="text-2xl font-semibold">{t("auth.setupTitle")}</h1>
         </div>
-        <p className="mb-6 text-muted">{t("auth.setupDescription")}</p>
+        <p className="mb-6 text-legacy-muted">{t("auth.setupDescription")}</p>
         <form
           className="space-y-4"
           onSubmit={async (e) => {
@@ -497,10 +464,10 @@ export function CertificateTable({
                   {c.name}
                 </strong>
               </div>
-              <p className="font-mono text-xs text-muted">
+              <p className="font-mono text-xs text-legacy-muted">
                 {c.source} · {c.covered_hostnames.join(", ")}
               </p>
-              <p className="text-sm text-muted">
+              <p className="text-sm text-legacy-muted">
                 {t("certificates.expires", { expiry: formatDate(c.expiry) })}
                 {c.acme &&
                   ` · ${t("certificates.renewal", { state: c.acme.renewal_state })}`}
@@ -548,7 +515,7 @@ export function CertificateTable({
           </li>
         ))}
       </ul>
-      {items.length === 0 && <p className="text-sm text-muted">{t("certificates.empty")}</p>}
+      {items.length === 0 && <p className="text-sm text-legacy-muted">{t("certificates.empty")}</p>}
     </Panel>
   );
 }
@@ -1051,7 +1018,7 @@ export function RolesSection({
           {t("roles.create")}
         </Button>
       </form>
-      <p className="mt-4 text-sm text-muted">
+      <p className="mt-4 text-sm text-legacy-muted">
         {t("roles.available", { permissions: PERMISSIONS.join(", ") })}
       </p>
     </Panel>
@@ -1290,7 +1257,7 @@ export function BotProtectionSection({
     !/\s/.test(domain);
   return (
     <Panel data-testid="bot-protection-section" label={t("bot.title")}>
-      <p className="mb-4 text-sm text-muted">{t("bot.description")}</p>
+      <p className="mb-4 text-sm text-legacy-muted">{t("bot.description")}</p>
       {error && <Alert variant="danger">{error}</Alert>}
       {saved && <Alert variant="success">{t("bot.saved")}</Alert>}
       <form
@@ -1518,7 +1485,7 @@ export function RateLimitSection({
         </StatusBadge>
       }
     >
-      <p className="mb-4 text-sm text-muted">{t("rateLimit.description")}</p>
+      <p className="mb-4 text-sm text-legacy-muted">{t("rateLimit.description")}</p>
       {error && <Alert variant="danger">{error}</Alert>}
       {saved && <Alert variant="success">{t("rateLimit.saved")}</Alert>}
       <form
@@ -1677,7 +1644,7 @@ export function AnalyticsSection({
       data-testid="analytics-section"
       label={t("analytics.title")}
       actions={
-        <span className="text-sm text-muted">
+        <span className="text-sm text-legacy-muted">
           {t("analytics.description")}
         </span>
       }
@@ -1714,20 +1681,20 @@ export function AnalyticsSection({
         />
       </div>
       {loading && (
-        <p role="status" className="mt-4 text-muted">
+        <p role="status" className="mt-4 text-legacy-muted">
           {t("analytics.loading")}
         </p>
       )}
       {!loading && error && <Alert variant="danger">{error}</Alert>}
       {!loading && !error && summary && summary.requests === 0 && (
-        <p className="mt-4 text-muted">{t("analytics.empty")}</p>
+        <p className="mt-4 text-legacy-muted">{t("analytics.empty")}</p>
       )}
       {!loading && !error && summary && summary.requests > 0 && (
         <>
           <div className="mt-5 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
             {cards.map(([label, value]) => (
               <div key={label} className="rounded border border-border p-3">
-                <div className="text-xs text-muted">{label}</div>
+                <div className="text-xs text-legacy-muted">{label}</div>
                 <div className="text-xl font-semibold">{value}</div>
               </div>
             ))}
@@ -1763,7 +1730,7 @@ export function AnalyticsSection({
                         </span>
                       </div>
                       <div
-                        className="h-2 rounded bg-muted/20"
+                        className="h-2 rounded bg-legacy-muted/20"
                         role="progressbar"
                         aria-label={t("analytics.latency", { label })}
                         aria-valuemin={0}
@@ -1798,7 +1765,7 @@ export function AnalyticsSection({
                   [t("analytics.rateLimited"), summary.rate_limited],
                 ].map(([label, value]) => (
                   <div key={label} className="rounded border border-border p-3">
-                    <dt className="text-xs text-muted">{label}</dt>
+                    <dt className="text-xs text-legacy-muted">{label}</dt>
                     <dd className="text-xl font-semibold">
                       {formatNumber(value as number, { maximumFractionDigits: 0 })}
                     </dd>
@@ -1921,7 +1888,7 @@ export function BaselineSection({
         </StatusBadge>
       }
     >
-      <p className="mb-4 text-sm text-muted">{t("baseline.description")}</p>
+      <p className="mb-4 text-sm text-legacy-muted">{t("baseline.description")}</p>
       <div className="grid gap-4 sm:grid-cols-2">
         <SelectField
           id="baseline-proxy-host"
@@ -1948,7 +1915,7 @@ export function BaselineSection({
         </SelectField>
       </div>
       {loading && (
-        <p role="status" className="mt-4 text-muted">
+        <p role="status" className="mt-4 text-legacy-muted">
           {t("baseline.loading")}
         </p>
       )}
@@ -1956,7 +1923,7 @@ export function BaselineSection({
       {!loading && !error && snapshot && (
         <div className="mt-5 grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
           <div className="rounded border border-border p-3">
-            <div className="text-xs text-muted">{t("baseline.reqPerSec")}</div>
+            <div className="text-xs text-legacy-muted">{t("baseline.reqPerSec")}</div>
             <div className="text-xl font-semibold">
               {formatNumber(snapshot.metrics.req_per_sec, {
                 minimumFractionDigits: 2,
@@ -1965,7 +1932,7 @@ export function BaselineSection({
             </div>
           </div>
           <div className="rounded border border-border p-3">
-            <div className="text-xs text-muted">{t("baseline.errorRate")}</div>
+            <div className="text-xs text-legacy-muted">{t("baseline.errorRate")}</div>
             <div className="text-xl font-semibold">
               {formatNumber(snapshot.metrics.error_rate_percent / 100, {
                 style: "percent",
@@ -1975,7 +1942,7 @@ export function BaselineSection({
             </div>
           </div>
           <div className="rounded border border-border p-3">
-            <div className="text-xs text-muted">{t("baseline.p50Latency")}</div>
+            <div className="text-xs text-legacy-muted">{t("baseline.p50Latency")}</div>
             <div className="text-xl font-semibold">
               {snapshot.metrics.p50_ms == null
                 ? t("common.notAvailable")
@@ -1987,7 +1954,7 @@ export function BaselineSection({
             </div>
           </div>
           <div className="rounded border border-border p-3">
-            <div className="text-xs text-muted">{t("baseline.p95Latency")}</div>
+            <div className="text-xs text-legacy-muted">{t("baseline.p95Latency")}</div>
             <div className="text-xl font-semibold">
               {snapshot.metrics.p95_ms == null
                 ? t("common.notAvailable")
@@ -1999,7 +1966,7 @@ export function BaselineSection({
             </div>
           </div>
           <div className="rounded border border-border p-3">
-            <div className="text-xs text-muted">
+            <div className="text-xs text-legacy-muted">
               {t("baseline.securityBlocks")}
             </div>
             <div className="text-xl font-semibold">
@@ -2086,7 +2053,7 @@ export function AnomalySection({
         <StatusBadge tone="neutral">{t("common.monitorOnly")}</StatusBadge>
       }
     >
-      <p className="mb-4 text-sm text-muted">{t("anomaly.description")}</p>
+      <p className="mb-4 text-sm text-legacy-muted">{t("anomaly.description")}</p>
       <div className="grid gap-4 sm:grid-cols-2">
         <SelectField
           id="anomaly-proxy-host"
@@ -2116,13 +2083,13 @@ export function AnomalySection({
         </SelectField>
       </div>
       {loading && (
-        <p role="status" className="mt-4 text-muted">
+        <p role="status" className="mt-4 text-legacy-muted">
           {t("anomaly.loading")}
         </p>
       )}
       {!loading && error && <Alert variant="danger">{error}</Alert>}
       {!loading && !error && anomalies.length === 0 && (
-        <p className="mt-4 text-muted">{t("anomaly.empty")}</p>
+        <p className="mt-4 text-legacy-muted">{t("anomaly.empty")}</p>
       )}
       {!loading && !error && anomalies.length > 0 && (
         <div className="mt-4 overflow-x-auto">
@@ -2180,7 +2147,7 @@ export function AnomalySection({
                       </Button>
                     )}
                     {item.acknowledged && (
-                      <span className="text-xs text-muted">
+                      <span className="text-xs text-legacy-muted">
                         {t("anomaly.acknowledged")}
                       </span>
                     )}
@@ -2326,7 +2293,7 @@ export function AdaptiveTuningSection({
         </StatusBadge>
       }
     >
-      <p className="mb-4 text-sm text-muted">{t("tuning.description")}</p>
+      <p className="mb-4 text-sm text-legacy-muted">{t("tuning.description")}</p>
 
       {error && <Alert variant="danger">{error}</Alert>}
       {success && <Alert variant="success">{success}</Alert>}
@@ -2411,12 +2378,12 @@ export function AdaptiveTuningSection({
           {t("tuning.recommendations")}
         </h3>
         {loading && (
-          <p role="status" className="text-muted">
+          <p role="status" className="text-legacy-muted">
             {t("tuning.loading")}
           </p>
         )}
         {!loading && recommendations.length === 0 && (
-          <p className="text-muted text-sm">{t("tuning.empty")}</p>
+          <p className="text-legacy-muted text-sm">{t("tuning.empty")}</p>
         )}
         {!loading && recommendations.length > 0 && (
           <div className="overflow-x-auto">
@@ -2538,7 +2505,7 @@ export function BotChallengePage({
     <main className="flex min-h-screen items-center justify-center bg-page px-4 py-8 text-foreground">
       <Panel className="mx-auto w-full max-w-lg">
         <h1 className="mb-2 text-2xl font-semibold">{t("bot.quickCheck")}</h1>
-        <p className="mb-6 text-muted">{t("bot.quickCheckDescription")}</p>
+        <p className="mb-6 text-legacy-muted">{t("bot.quickCheckDescription")}</p>
         {error && <Alert variant="danger">{error}</Alert>}
         {complete ? (
           <Alert variant="success">{t("bot.verificationComplete")}</Alert>
@@ -2600,7 +2567,7 @@ function SidebarNav({
             type="button"
             onClick={onClose}
             aria-label={t("dashboard.closeMenu")}
-            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-control)] text-muted hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus lg:hidden"
+            className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-[var(--radius-control)] text-legacy-muted hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus lg:hidden"
           >
             <IconClose className="h-5 w-5" />
           </button>
@@ -2620,7 +2587,7 @@ function SidebarNav({
                 className={`flex min-h-11 w-full items-center gap-3 rounded-full px-4 py-2.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus ${
                   active
                     ? "bg-action/12 text-action"
-                    : "text-muted hover:bg-surface-muted hover:text-foreground"
+                    : "text-legacy-muted hover:bg-surface-muted hover:text-foreground"
                 }`}
               >
                 <Icon className="h-5 w-5 shrink-0" />
@@ -2655,11 +2622,11 @@ function UserMenu({
           aria-label={t("dashboard.accountMenu")}
           className="flex min-h-11 items-center gap-2 rounded-full border border-border-strong bg-transparent px-3 py-2 text-sm text-foreground hover:bg-surface-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus"
         >
-          <IconUserCircle className="h-5 w-5 text-muted" />
-          <span className="hidden max-w-40 truncate font-mono text-xs text-muted sm:inline">
+          <IconUserCircle className="h-5 w-5 text-legacy-muted" />
+          <span className="hidden max-w-40 truncate font-mono text-xs text-legacy-muted sm:inline">
             {user.email}
           </span>
-          <IconChevronDown className="h-3.5 w-3.5 text-muted" />
+          <IconChevronDown className="h-3.5 w-3.5 text-legacy-muted" />
         </button>
       )}
     >
@@ -2667,7 +2634,7 @@ function UserMenu({
         <p className="truncate text-sm font-medium text-foreground">
           {user.email}
         </p>
-        <p className="mt-0.5 font-mono text-xs uppercase tracking-[0.08em] text-muted">
+        <p className="mt-0.5 font-mono text-xs uppercase tracking-[0.08em] text-legacy-muted">
           {displayRole(t, user.role)}
         </p>
       </div>
@@ -2842,7 +2809,7 @@ function Dashboard({
               type="button"
               onClick={() => setMobileNavOpen(true)}
               aria-label={t("dashboard.openMenu")}
-              className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full text-muted hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus lg:hidden"
+              className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full text-legacy-muted hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus lg:hidden"
             >
               <IconMenu className="h-5 w-5" />
             </button>
@@ -2910,7 +2877,7 @@ function Dashboard({
             <Panel
               label={t("proxyHosts.title")}
               actions={
-                <span className="font-mono text-xs text-muted">
+                <span className="font-mono text-xs text-legacy-muted">
                   {hosts.length}
                 </span>
               }
@@ -2931,7 +2898,7 @@ function Dashboard({
                       <tr key={h.id}>
                         <td className="font-medium">{h.name}</td>
                         <td className="font-mono text-sm">{h.domain}</td>
-                        <td className="font-mono text-sm text-muted">
+                        <td className="font-mono text-sm text-legacy-muted">
                           {h.upstream_host}:{h.upstream_port}
                         </td>
                         <td>

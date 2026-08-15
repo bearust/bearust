@@ -15,7 +15,7 @@ function ResultView({ item }: { item: AdvisorInsight }) {
   const { t } = useTranslation(); const result = item.redacted_result;
   if (isDraft(result)) return <div className="mt-2 space-y-1"><p>{result.summary}</p><dl className="grid grid-cols-2 gap-x-3 text-sm"><dt>{t("advisor.diff.from")}</dt><dd>{t("advisor.diff.redacted")}</dd><dt>{t("advisor.diff.to")}</dt><dd>{t("advisor.diff.modes." + result.mode)}</dd></dl></div>;
   if (isInsight(result)) return <div className="mt-2 space-y-1"><p>{result.summary}</p><p className="text-sm">{t("advisor.result.severity")}: {t("advisor.severities." + result.severity)} · {t("advisor.result.score")}: {result.score}</p><p className="text-sm">{t("advisor.result.signals")}: {result.signals.join(", ")}</p></div>;
-  return <p className="mt-2 text-sm text-muted">{t("advisor.result.unavailable")}</p>;
+  return <p className="mt-2 text-sm text-legacy-muted">{t("advisor.result.unavailable")}</p>;
 }
 
 export function AiAdvisorSection({ user, onChanged, refreshToken = 0 }: { user: User; onChanged?: () => void; refreshToken?: number }) {
@@ -49,7 +49,7 @@ export function AiAdvisorSection({ user, onChanged, refreshToken = 0 }: { user: 
         </Button>
       }
     >
-      <p className="mb-4 text-sm text-muted">{t("advisor.redactionNotice")}</p>
+      <p className="mb-4 text-sm text-legacy-muted">{t("advisor.redactionNotice")}</p>
       {canRequest && (
         <form
           className="mb-6 grid gap-4 sm:grid-cols-[1fr_2fr_auto] sm:items-end"
@@ -92,7 +92,7 @@ export function AiAdvisorSection({ user, onChanged, refreshToken = 0 }: { user: 
         </Alert>
       )}
       {items.length === 0 ? (
-        <p className="text-sm text-muted">{t("advisor.empty")}</p>
+        <p className="text-sm text-legacy-muted">{t("advisor.empty")}</p>
       ) : (
         <ul className="divide-y divide-border">
           {items.map((item) => (

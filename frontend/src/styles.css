@@ -158,14 +158,24 @@
   --color-panel-muted: var(--color-panel-muted);
   --color-text: var(--color-text);
   --color-text-muted: var(--color-text-muted);
-  --color-border: var(--color-border);
+  /* --color-foreground / --color-border are intentionally NOT
+     re-registered here: their values are identical to theme.css's
+     shadcn tokens of the same name in both light and dark, so letting
+     theme.css's @theme inline block be the sole registrant avoids a
+     Tailwind theme-key collision without changing anything this
+     Material layer renders (see DESIGN.md / final-review Finding 2). */
   --color-border-strong: var(--color-border-strong);
   --color-focus: var(--color-focus);
   --color-focus-offset: var(--color-focus-offset);
   --color-surface: var(--color-surface);
   --color-surface-muted: var(--color-surface-muted);
-  --color-foreground: var(--color-foreground);
-  --color-muted: var(--color-muted);
+  /* --color-muted collides with shadcn's --color-muted (theme.css),
+     but the two are semantically inverted here: this Material layer
+     uses it for muted TEXT, shadcn/ui expects a muted SURFACE. Register
+     it under a namespaced key instead so both token systems keep their
+     own value; App.tsx/ui.tsx now consume it via the *-legacy-muted
+     utilities. */
+  --color-legacy-muted: var(--color-muted);
   --color-action: var(--color-action);
   --color-action-hover: var(--color-action-hover);
   --color-action-foreground: var(--color-action-foreground);
