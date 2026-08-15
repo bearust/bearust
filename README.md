@@ -302,11 +302,17 @@ port), so compliant clients can discover and upgrade to H3 for
 subsequent requests. The header is omitted entirely when HTTP/3 is
 disabled.
 
+H3 requests are recorded into the same analytics collector the
+HTTP/1.1/HTTP/2 path feeds (status code, latency, proxy host, and WAF
+block counts), so they appear in the existing analytics dashboard and
+`GET /api/analytics` surfaces alongside HTTP/1.1/HTTP/2 traffic.
+
 This is an initial, opt-in increment, not feature parity with the
 existing listener. Explicitly out of scope for now:
 
-- No rate limiting or bot protection/challenge evaluation on the H3 path.
-- No analytics recording for H3 requests.
+- No rate limiting or bot protection/challenge evaluation on the H3 path
+  (so their analytics dimensions — bot blocks, bot challenges, rate
+  limited — are always recorded as zero for H3 requests today).
 - No plugin-hook invocation on the H3 path.
 - No HTTP/3 to the upstream/backend — forwarded requests to upstreams
   still use HTTP/1.1 or HTTP/2, only the client-facing edge speaks H3.

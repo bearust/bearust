@@ -1,4 +1,5 @@
 use bearust::{
+    analytics::{AnalyticsCollector, AnalyticsFilter},
     config::{
         Algorithm, BackendConfig, Config, HealthCheckKind, PoolConfig, RouteConfig, ServerConfig,
     },
@@ -7,6 +8,7 @@ use bearust::{
         repository,
     },
     http3,
+    http3::AnalyticsContext,
     runtime::{RuntimeSnapshot, RuntimeStore},
     waf_store::WafStore,
 };
@@ -365,7 +367,7 @@ async fn http3_listener_blocks_a_request_the_waf_rule_engine_would_block() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, Some(waf), shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Some(waf), None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -407,7 +409,7 @@ async fn http3_listener_allows_a_request_the_waf_rule_engine_would_allow() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, Some(waf), shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Some(waf), None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -449,7 +451,7 @@ async fn http3_listener_forwards_an_allowed_request_to_the_resolved_backend() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -486,7 +488,7 @@ async fn http3_listener_returns_404_for_an_unmatched_host() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -592,7 +594,7 @@ async fn http3_listener_reasserts_host_and_rebuilds_x_forwarded_for_defeating_a_
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -668,7 +670,7 @@ async fn http3_listener_rejects_an_oversized_body_with_413_and_never_contacts_th
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -711,7 +713,7 @@ async fn http3_listener_returns_502_when_the_upstream_connection_fails() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, None, shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, None, None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -744,7 +746,7 @@ async fn http3_listener_waf_block_never_reaches_the_backend() {
     let bind = reserve_udp_addr();
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
-        let _ = http3::serve(bind, tls_config, store, Some(waf), shutdown_rx).await;
+        let _ = http3::serve(bind, tls_config, store, Some(waf), None, shutdown_rx).await;
     });
 
     let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
@@ -788,4 +790,114 @@ fn build_rustls_server_config_reads_the_configured_cert_and_key() {
     };
     let result = http3::build_rustls_server_config(&tls);
     assert!(result.is_ok(), "{:?}", result.err());
+}
+
+#[tokio::test]
+async fn http3_listener_records_an_analytics_event_for_an_allowed_request() {
+    install_crypto_provider();
+
+    let backend = support::spawn_http_backend(
+        Arc::new(std::sync::atomic::AtomicU16::new(200)),
+        "analytics-backend-body",
+    )
+    .await;
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let collector = Arc::new(AnalyticsCollector::default());
+    let host_ids = Arc::new(std::collections::HashMap::from([(
+        "localhost".to_string(),
+        42i64,
+    )]));
+    let analytics = Arc::new(AnalyticsContext {
+        collector: collector.clone(),
+        host_ids,
+        changed: None,
+    });
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(bind, tls_config, store, None, Some(analytics), shutdown_rx).await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/anything")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::OK);
+    while stream.recv_data().await.unwrap().is_some() {}
+
+    drive.abort();
+    server.abort();
+    backend.shutdown().await;
+
+    let summary = collector.summary(AnalyticsFilter {
+        proxy_host_id: Some(42),
+        ..Default::default()
+    });
+    assert_eq!(summary.requests, 1);
+    assert_eq!(summary.status_2xx, 1);
+    assert_eq!(summary.waf_blocks, 0);
+}
+
+#[tokio::test]
+async fn http3_listener_records_a_waf_block_analytics_event_with_zero_backend_requests() {
+    install_crypto_provider();
+
+    let backend = spawn_counting_backend("should-never-be-seen").await;
+    let waf = Arc::new(waf_store_blocking_path("/blocked").await);
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let collector = Arc::new(AnalyticsCollector::default());
+    let host_ids = Arc::new(std::collections::HashMap::from([(
+        "localhost".to_string(),
+        7i64,
+    )]));
+    let analytics = Arc::new(AnalyticsContext {
+        collector: collector.clone(),
+        host_ids,
+        changed: None,
+    });
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(
+            bind,
+            tls_config,
+            store,
+            Some(waf),
+            Some(analytics),
+            shutdown_rx,
+        )
+        .await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/blocked")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+    while stream.recv_data().await.unwrap().is_some() {}
+
+    drive.abort();
+    server.abort();
+    assert_eq!(backend.request_count(), 0);
+    backend.shutdown().await;
+
+    let summary = collector.summary(AnalyticsFilter {
+        proxy_host_id: Some(7),
+        ..Default::default()
+    });
+    assert_eq!(summary.requests, 1);
+    assert_eq!(summary.status_4xx, 1);
+    assert_eq!(summary.waf_blocks, 1);
 }

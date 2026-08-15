@@ -422,6 +422,18 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let rate_limiter = control_state.rate_limiter.clone();
         let analytics = control_state.analytics.clone();
         let realtime = control_state.realtime.clone();
+        let analytics_host_ids = crate::control_plane::repository::list_hosts(&control_state.db)
+            .await
+            .map_err(|e| AppError::Server(format!("load proxy hosts for analytics: {e}")))?
+            .into_iter()
+            .filter_map(|host| crate::router::normalize_host(&host.domain).map(|domain| (domain, host.id)))
+            .collect::<HashMap<_, _>>();
+        let analytics_changed: Arc<dyn Fn() + Send + Sync> = {
+            let realtime = realtime.clone();
+            Arc::new(move || {
+                realtime.publish("analytics.changed");
+            })
+        };
         let (http3_shutdown_tx, http3_shutdown_rx) = tokio::sync::watch::channel(false);
         let http3_alt_svc = config
             .server
@@ -439,9 +451,21 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             let bind = config.server.http3.bind;
             let store = store.clone();
             let waf = Some(waf_store.clone());
+            let http3_analytics = Some(Arc::new(crate::http3::AnalyticsContext {
+                collector: analytics.clone(),
+                host_ids: Arc::new(analytics_host_ids.clone()),
+                changed: Some(analytics_changed.clone()),
+            }));
             Some(tokio::spawn(async move {
-                if let Err(error) =
-                    crate::http3::serve(bind, tls_config, store, waf, http3_shutdown_rx).await
+                if let Err(error) = crate::http3::serve(
+                    bind,
+                    tls_config,
+                    store,
+                    waf,
+                    http3_analytics,
+                    http3_shutdown_rx,
+                )
+                .await
                 {
                     tracing::error!(event = "http3_listener_stopped", error = %error);
                 }
@@ -449,12 +473,6 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         } else {
             None
         };
-        let analytics_host_ids = crate::control_plane::repository::list_hosts(&control_state.db)
-            .await
-            .map_err(|e| AppError::Server(format!("load proxy hosts for analytics: {e}")))?
-            .into_iter()
-            .filter_map(|host| crate::router::normalize_host(&host.domain).map(|domain| (domain, host.id)))
-            .collect::<HashMap<_, _>>();
         let rate_policy = RateLimitPolicy {
             enabled: config.rate_limit.enabled,
             action: match config.rate_limit.action { config::RateLimitAction::Block => crate::rate_limit::RateLimitAction::Block, config::RateLimitAction::Monitor => crate::rate_limit::RateLimitAction::Monitor },
@@ -523,7 +541,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let ready_path = std::env::var_os("BEARUST_UPGRADE_READY").map(PathBuf::from);
         let mut proxy_handler = crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store).with_bot_store(bot_store, challenge_service)
                 .with_analytics(analytics)
-                .with_analytics_changed_notifier(Arc::new(move || { realtime.publish("analytics.changed"); }))
+                .with_analytics_changed_notifier(analytics_changed)
                 .with_analytics_host_ids(analytics_host_ids)
                 .with_baseline(control_state.baseline.clone())
                 .with_anomaly(control_state.anomaly.clone())

@@ -1264,7 +1264,8 @@ backends (forwarded requests still use HTTP/1.1/HTTP/2 regardless of
 how the client connected). Full feature parity with the existing
 listener is expected across future increments, not this one; see
 `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`
-for the full design rationale and non-goals.
+for the full design rationale and non-goals. (Analytics recording
+shipped in increment 3, below.)
 
 ### Phase 15 status: Alt-Svc advertisement (increment 2)
 
@@ -1279,3 +1280,25 @@ BeaRust's own H3 offer is meaningful to it). The header is omitted
 entirely when HTTP/3 is disabled — `BeaRustProxy`'s `http3_alt_svc`
 field defaults to `None` and existing deployments are unaffected. No
 other behavior changes; this is a single additive response header.
+
+### Phase 15 status: analytics recording on the H3 path (increment 3)
+
+Increment 3 wires H3 requests into the same process-local analytics
+collector (Phase 8) the HTTP/1.1/HTTP/2 path already feeds, reusing its
+pure `completion_event`/`analytics_security_counters` helpers
+(`src/proxy.rs`) directly -- neither takes a Pingora type, so both are
+callable as-is from `src/http3.rs`. A new `http3::AnalyticsContext`
+(collector handle, a normalized-host-to-proxy-host-id map built once at
+startup, and the realtime-dashboard change notifier) is threaded
+through `serve` → `handle_connection` → `handle_request` alongside the
+existing `store`/`waf`/`client` parameters, `None` when analytics is
+unavailable. One completion event is recorded at every
+response-terminating point in the request handler (oversized-body 413,
+WAF block, unmatched-route 404, no-healthy-backend or upstream-failure
+502, and the successful forward), each carrying accurate status,
+latency, and the resolved proxy host id, so H3 traffic now appears in
+the existing analytics dashboard and `GET /api/analytics` surfaces
+alongside HTTP/1.1/HTTP/2 traffic. Bot-block, bot-challenge, and
+rate-limited security dimensions are always recorded as zero for H3
+requests, since neither hook exists on this path yet (see the increment
+1 status above). No other behavior changes.

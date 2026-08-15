@@ -7,12 +7,20 @@
 //! against `pingora-core` 0.8.1's own source and Cargo.toml: no `quic`/`h3`
 //! feature, no QUIC dependency, no QUIC source file anywhere in the crate).
 
+use crate::analytics::AnalyticsCollector;
 use crate::config::TlsConfig;
 use crate::observability::validated_request_id;
 use crate::runtime::RuntimeStore;
 use crate::waf_store::WafStore;
 use bytes::Buf;
-use std::{io, net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    io,
+    net::SocketAddr,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -55,6 +63,51 @@ const HOP_BY_HOP_HEADERS: [&str; 8] = [
     "te",
     "trailers",
 ];
+
+/// Bundles what's needed to record a completion event for an H3 request,
+/// mirroring `BeaRustProxy::record_completion`'s dependencies
+/// (`src/proxy.rs`) without requiring any Pingora type: `host_ids` maps a
+/// normalized proxy-host name to its analytics id (built once at startup,
+/// same as `BeaRustProxy::analytics_host_ids`), and `changed` is the
+/// realtime-dashboard notifier, invoked after every recorded event.
+pub struct AnalyticsContext {
+    pub collector: Arc<AnalyticsCollector>,
+    pub host_ids: Arc<HashMap<String, i64>>,
+    pub changed: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+/// Records one completion event, reusing `src/proxy.rs`'s pure
+/// `completion_event`/`analytics_security_counters` helpers (they take no
+/// Pingora type, so they're directly callable here). `host` is looked up
+/// against `AnalyticsContext::host_ids` to find the proxy host id -- `None`
+/// or an unmapped host falls back to id `0`, matching
+/// `BeaRustProxy::record_completion`'s behavior when a request never
+/// resolved a route. `bot`/`bot_challenge`/`rate_limited` are always `false`
+/// here: neither hook exists on the H3 path yet (see the Phase 15 PRD
+/// status for the current scope). A `None` `analytics` context (analytics
+/// disabled) is a no-op.
+fn record_analytics_event(
+    analytics: &Option<Arc<AnalyticsContext>>,
+    host: Option<&str>,
+    status: u16,
+    start: Instant,
+    waf_blocked: bool,
+) {
+    let Some(analytics) = analytics else { return };
+    let proxy_host_id = host
+        .and_then(|host| analytics.host_ids.get(host).copied())
+        .unwrap_or(0);
+    let security = crate::proxy::analytics_security_counters(waf_blocked, false, false, false);
+    analytics.collector.record(crate::proxy::completion_event(
+        proxy_host_id,
+        status,
+        start.elapsed().as_millis() as u64,
+        security,
+    ));
+    if let Some(changed) = &analytics.changed {
+        changed();
+    }
+}
 
 /// Builds the `rustls::ServerConfig` `quinn` needs, from the same
 /// cert/key PEM files the Pingora TLS listener already validates and
@@ -124,6 +177,7 @@ pub async fn serve(
     tls_config: Arc<rustls::ServerConfig>,
     store: Arc<RuntimeStore>,
     waf: Option<Arc<WafStore>>,
+    analytics: Option<Arc<AnalyticsContext>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Http3Error> {
     let server_config = quinn_server_config(tls_config)?;
@@ -142,6 +196,7 @@ pub async fn serve(
                 let waf = waf.clone();
                 let store = Arc::clone(&store);
                 let client = Arc::clone(&client);
+                let analytics = analytics.clone();
                 // NOTE (known gap, not fixed here): there is no bound on the
                 // number of concurrent connections or, within a connection,
                 // concurrent request streams -- every accepted connection and
@@ -152,7 +207,7 @@ pub async fn serve(
                 // scope.
                 tokio::spawn(async move {
                     if let Ok(conn) = incoming.await {
-                        handle_connection(conn, store, waf, client).await;
+                        handle_connection(conn, store, waf, client, analytics).await;
                     }
                 });
             }
@@ -181,6 +236,7 @@ async fn handle_connection(
     store: Arc<RuntimeStore>,
     waf: Option<Arc<WafStore>>,
     client: Arc<reqwest::Client>,
+    analytics: Option<Arc<AnalyticsContext>>,
 ) {
     // The real QUIC peer address -- never client-suppliable, unlike any
     // header -- used for X-Forwarded-For attribution (see C2 in the review
@@ -202,8 +258,9 @@ async fn handle_connection(
                 let waf = waf.clone();
                 let store = Arc::clone(&store);
                 let client = Arc::clone(&client);
+                let analytics = analytics.clone();
                 tokio::spawn(async move {
-                    handle_request(req, stream, store, waf, client, remote_addr).await;
+                    handle_request(req, stream, store, waf, client, remote_addr, analytics).await;
                 });
             }
             Ok(None) => break,
@@ -333,9 +390,11 @@ async fn handle_request<S>(
     waf: Option<Arc<WafStore>>,
     client: Arc<reqwest::Client>,
     remote_addr: SocketAddr,
+    analytics: Option<Arc<AnalyticsContext>>,
 ) where
     S: h3::quic::BidiStream<bytes::Bytes>,
 {
+    let start = Instant::now();
     let method = req.method().to_string();
     let path = req.uri().path().to_owned();
     let query = req.uri().query().unwrap_or_default().to_owned();
@@ -378,6 +437,7 @@ async fn handle_request<S>(
             .send_data(bytes::Bytes::from_static(b"Payload Too Large"))
             .await;
         let _ = stream.finish().await;
+        record_analytics_event(&analytics, downstream_host.as_deref(), 413, start, false);
         return;
     }
 
@@ -395,6 +455,7 @@ async fn handle_request<S>(
                 .send_data(bytes::Bytes::from_static(b"Request blocked"))
                 .await;
             let _ = stream.finish().await;
+            record_analytics_event(&analytics, downstream_host.as_deref(), 403, start, true);
             return;
         }
     }
@@ -402,13 +463,14 @@ async fn handle_request<S>(
     // Not blocked (or WAF not configured): route and forward.
     let authority = downstream_host.as_deref().unwrap_or_default();
     let snapshot = store.load();
-    let Some((_route, pool)) = snapshot.route(authority, &path) else {
+    let Some((route, pool)) = snapshot.route(authority, &path) else {
         let resp = http::Response::builder()
             .status(http::StatusCode::NOT_FOUND)
             .body(())
             .expect("static response head is always valid");
         let _ = stream.send_response(resp).await;
         let _ = stream.finish().await;
+        record_analytics_event(&analytics, downstream_host.as_deref(), 404, start, false);
         return;
     };
     let Some(lease) = pool.select(None) else {
@@ -418,6 +480,7 @@ async fn handle_request<S>(
             .expect("static response head is always valid");
         let _ = stream.send_response(resp).await;
         let _ = stream.finish().await;
+        record_analytics_event(&analytics, Some(route.host.as_str()), 502, start, false);
         return;
     };
 
@@ -480,6 +543,13 @@ async fn handle_request<S>(
                 }
             }
             let _ = stream.finish().await;
+            record_analytics_event(
+                &analytics,
+                Some(route.host.as_str()),
+                status.as_u16(),
+                start,
+                false,
+            );
         }
         Err(_) => {
             let resp = http::Response::builder()
@@ -488,6 +558,7 @@ async fn handle_request<S>(
                 .expect("static response head is always valid");
             let _ = stream.send_response(resp).await;
             let _ = stream.finish().await;
+            record_analytics_event(&analytics, Some(route.host.as_str()), 502, start, false);
         }
     }
 }
