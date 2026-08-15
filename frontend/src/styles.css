@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "./styles/theme.css";
 /* Latin + Latin Extended only: shipped locales are en/id/ja, and ja's
    kanji/kana fall back to the platform's own CJK font regardless --
    these two subsets cover every glyph these faces are actually asked to
