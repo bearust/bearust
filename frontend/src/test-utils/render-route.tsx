@@ -10,6 +10,7 @@ import {
 } from "@tanstack/react-router";
 import { I18nextProvider } from "react-i18next";
 import { i18n, initI18n } from "@/i18n";
+import { ThemeProvider } from "@/theme";
 // Side-effect import: TanStack Router's file-route generator wires each
 // `createFileRoute(...)` export's real `path`/`getParentRoute` via
 // `Route.update(...)` inside this generated module. Route modules imported
@@ -52,7 +53,9 @@ export async function renderRoute(routes: AnyRoute[], initialPath: string) {
     root.render(
       <QueryClientProvider client={queryClient}>
         <I18nextProvider i18n={i18n}>
-          <RouterProvider router={router} />
+          <ThemeProvider>
+            <RouterProvider router={router} />
+          </ThemeProvider>
         </I18nextProvider>
       </QueryClientProvider>,
     );

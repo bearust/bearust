@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi, afterEach } from "vitest";
+import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
 import { api } from "@/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { renderRoute } from "@/test-utils/render-route";
@@ -15,8 +15,21 @@ const childRoute = createRoute({
 });
 
 describe("_authenticated route guard", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: false,
+        media: "",
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      })),
+    );
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     useAuthStore.getState().reset();
     document.body.innerHTML = "";
   });
