@@ -12,9 +12,70 @@ use bearust::{
 };
 use bytes::Buf;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 mod support;
+
+/// A minimal HTTP backend that counts every request it receives, for tests
+/// that must assert the upstream was (or was not) contacted at all -- e.g.
+/// C3's "an oversized body is rejected with 413 and the upstream receives
+/// zero requests", and I7(b)'s strengthened WAF-block-reaches-zero-requests
+/// assertion. Deliberately a small local helper (not added to
+/// `tests/support/mod.rs`) since this task's scope is limited to
+/// `tests/http3_listener.rs`.
+struct CountingBackend {
+    address: SocketAddr,
+    count: Arc<AtomicUsize>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl CountingBackend {
+    fn request_count(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+async fn spawn_counting_backend(body: &'static str) -> CountingBackend {
+    use axum::{extract::State, response::IntoResponse, routing::any, Router};
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    async fn handler(
+        State((count, body)): State<(Arc<AtomicUsize>, &'static str)>,
+    ) -> impl IntoResponse {
+        count.fetch_add(1, Ordering::SeqCst);
+        (axum::http::StatusCode::OK, body)
+    }
+
+    let app = Router::new()
+        .fallback(any(handler))
+        .with_state((count.clone(), body));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    CountingBackend {
+        address,
+        count,
+        shutdown: Some(tx),
+    }
+}
 
 /// Builds a `WafStore` whose snapshot blocks any request whose path
 /// contains `/blocked`, mirroring the exact construction pattern used by
@@ -441,6 +502,270 @@ async fn http3_listener_returns_404_for_an_unmatched_host() {
 
     drive.abort();
     server.abort();
+}
+
+/// Headers captured from a single request, shared between the backend
+/// handler and the test asserting on them.
+type CapturedHeaders = Arc<std::sync::Mutex<Option<Vec<(String, String)>>>>;
+
+/// A backend that captures the headers of the last request it received, for
+/// C2's spoofing-defeat test (need to see exactly what reached upstream).
+struct HeaderCapturingBackend {
+    address: SocketAddr,
+    captured: CapturedHeaders,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl HeaderCapturingBackend {
+    async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+async fn spawn_header_capturing_backend() -> HeaderCapturingBackend {
+    use axum::{extract::State, http::HeaderMap, response::IntoResponse, routing::any, Router};
+
+    let captured: CapturedHeaders = Arc::new(std::sync::Mutex::new(None));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    async fn handler(
+        State(captured): State<CapturedHeaders>,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        let pairs = headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_owned(), value.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        *captured.lock().unwrap() = Some(pairs);
+        (axum::http::StatusCode::OK, "captured")
+    }
+
+    let app = Router::new()
+        .fallback(any(handler))
+        .with_state(captured.clone());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    HeaderCapturingBackend {
+        address,
+        captured,
+        shutdown: Some(tx),
+    }
+}
+
+/// C2 regression test: a client that sends a spoofed `X-Forwarded-For`
+/// claiming an internal-looking address must not have it survive to the
+/// upstream unchanged -- `X-Forwarded-For` must have the real QUIC peer
+/// address appended as the final, authoritative hop. Also confirms `Host`
+/// reaching the upstream is exactly the real `:authority` the client
+/// connected with (this listener's `h3` client library itself refuses to
+/// send a conflicting regular `host` header alongside `:authority` --
+/// `send_request` fails outright with "Failed to build request headers" if
+/// attempted -- so a compliant h3 client cannot even construct the
+/// Host-header half of this spoofing attempt; that half of C2 is instead
+/// covered directly by the `build_request_headers_prefers_authority_over_a_spoofed_host_header`
+/// unit test in `src/http3.rs`, which exercises the server-side parsing
+/// logic against a raw `http::Request` with both fields set, bypassing the
+/// client library's validation the way a non-compliant/malicious client
+/// could).
+#[tokio::test]
+async fn http3_listener_reasserts_host_and_rebuilds_x_forwarded_for_defeating_a_spoofing_client() {
+    install_crypto_provider();
+
+    let backend = spawn_header_capturing_backend().await;
+    let store = runtime_store_routing_to("victim.example", backend.address);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(bind, tls_config, store, None, shutdown_rx).await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://victim.example/anything")
+        // Spoof attempt: claims to already be forwarded from an internal
+        // address, hoping downstream IP-based logic trusts it.
+        .header("x-forwarded-for", "10.0.0.1")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::OK);
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        while chunk.has_remaining() {
+            let n = chunk.remaining();
+            body.extend_from_slice(&chunk.chunk()[..n]);
+            chunk.advance(n);
+        }
+    }
+    drive.abort();
+    server.abort();
+
+    let captured = backend
+        .captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend must have received exactly one request");
+    let host = captured
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map(|(_, value)| value.clone());
+    assert_eq!(
+        host.as_deref(),
+        Some("victim.example"),
+        "Host reaching the upstream must be exactly the real :authority -- got {host:?}"
+    );
+    let xff = captured
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-forwarded-for"))
+        .map(|(_, value)| value.clone())
+        .expect("x-forwarded-for must be present");
+    assert!(
+        xff.starts_with("10.0.0.1, 127.0.0.1"),
+        "XFF must keep the client's claimed chain but append the real peer address as the last, authoritative hop -- got {xff:?}"
+    );
+    let request_id = captured
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-request-id"))
+        .map(|(_, value)| value.clone());
+    assert!(
+        request_id.is_some_and(|id| !id.is_empty()),
+        "x-request-id must always be stamped"
+    );
+    backend.shutdown().await;
+}
+
+/// C3 regression test: a body larger than `waf::MAX_INSPECTION_BODY_BYTES`
+/// must be rejected outright (413) rather than silently truncated and
+/// forwarded -- and, critically, the upstream backend must never see any
+/// part of an oversized request.
+#[tokio::test]
+async fn http3_listener_rejects_an_oversized_body_with_413_and_never_contacts_the_backend() {
+    install_crypto_provider();
+
+    let backend = spawn_counting_backend("should-never-be-seen").await;
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(bind, tls_config, store, None, shutdown_rx).await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("POST")
+        .uri("https://localhost/upload")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    let oversized = vec![b'a'; bearust::waf::MAX_INSPECTION_BODY_BYTES + 4096];
+    let _ = stream.send_data(bytes::Bytes::from(oversized)).await;
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::PAYLOAD_TOO_LARGE);
+
+    drive.abort();
+    server.abort();
+    assert_eq!(
+        backend.request_count(),
+        0,
+        "an oversized body must be rejected before the upstream is ever contacted"
+    );
+    backend.shutdown().await;
+}
+
+/// I7(a): a route that resolves to a healthy-marked backend nobody is
+/// actually listening on must surface as 502, not hang or panic.
+#[tokio::test]
+async fn http3_listener_returns_502_when_the_upstream_connection_fails() {
+    install_crypto_provider();
+
+    // Reserve then immediately release a TCP port -- nothing listens on it,
+    // so any connection attempt fails fast with connection-refused.
+    let backend_addr = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap()
+    };
+    let store = runtime_store_routing_to("localhost", backend_addr);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(bind, tls_config, store, None, shutdown_rx).await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/anything")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::BAD_GATEWAY);
+
+    drive.abort();
+    server.abort();
+}
+
+/// I7(b), strengthened: a request the WAF blocks must never reach the
+/// upstream backend, verified via a real backend with a request counter
+/// (the pre-existing WAF-block test only proved this indirectly, by using
+/// a `RuntimeStore` with no routes at all).
+#[tokio::test]
+async fn http3_listener_waf_block_never_reaches_the_backend() {
+    install_crypto_provider();
+
+    let backend = spawn_counting_backend("should-never-be-seen").await;
+    let waf = Arc::new(waf_store_blocking_path("/blocked").await);
+    let store = runtime_store_routing_to("localhost", backend.address);
+    let (tls_config, cert_der) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(async move {
+        let _ = http3::serve(bind, tls_config, store, Some(waf), shutdown_rx).await;
+    });
+
+    let (drive, mut send_request) = connect_h3_client(bind, cert_der).await;
+    let req = http::Request::builder()
+        .method("GET")
+        .uri("https://localhost/blocked")
+        .body(())
+        .unwrap();
+    let mut stream = send_request.send_request(req).await.unwrap();
+    stream.finish().await.unwrap();
+    let resp = stream.recv_response().await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::FORBIDDEN);
+
+    drive.abort();
+    server.abort();
+    assert_eq!(
+        backend.request_count(),
+        0,
+        "a WAF-blocked request must never reach the upstream backend"
+    );
+    backend.shutdown().await;
 }
 
 #[test]

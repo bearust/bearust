@@ -8,10 +8,11 @@
 //! feature, no QUIC dependency, no QUIC source file anywhere in the crate).
 
 use crate::config::TlsConfig;
+use crate::observability::validated_request_id;
 use crate::runtime::RuntimeStore;
 use crate::waf_store::WafStore;
 use bytes::Buf;
-use std::{io, net::SocketAddr, path::Path, sync::Arc};
+use std::{io, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -24,7 +25,36 @@ pub enum Http3Error {
     InvalidTls,
     #[error("HTTP/3 UDP socket could not be bound")]
     Bind(#[source] io::Error),
+    #[error("HTTP/3 upstream HTTP client could not be constructed")]
+    HttpClient(#[source] reqwest::Error),
 }
+
+/// Request timeout applied to every upstream `reqwest` request the H3
+/// listener makes. There is no single global constant for this in the
+/// codebase -- `PoolConfig::request_timeout_seconds` is configured per
+/// upstream pool (see `src/config/mod.rs`) and threaded into Pingora's own
+/// peer options in `src/proxy.rs` -- so this picks a value consistent with
+/// that config's typical default (30s, see e.g. the fixture pools in
+/// `src/proxy.rs`'s tests) rather than inventing an unrelated number.
+const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Hop-by-hop headers (RFC 9110 §7.6.1) that must never be forwarded
+/// verbatim by a proxy -- they describe the semantics of one specific
+/// connection (this H3 client<->listener leg), not the end-to-end request,
+/// and blindly copying them to the upstream `reqwest` connection is
+/// incorrect (e.g. a client-supplied `Connection`/`Upgrade` could attempt to
+/// influence the listener<->upstream leg, which is plain HTTP/1.1 over
+/// `reqwest` and shares none of the H3 stream's framing).
+const HOP_BY_HOP_HEADERS: [&str; 8] = [
+    "connection",
+    "keep-alive",
+    "transfer-encoding",
+    "upgrade",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+];
 
 /// Builds the `rustls::ServerConfig` `quinn` needs, from the same
 /// cert/key PEM files the Pingora TLS listener already validates and
@@ -79,13 +109,16 @@ fn quinn_server_config(
 }
 
 /// Runs the HTTP/3 listener until `shutdown` fires. Every request is
-/// evaluated against the WAF rule engine (when `waf` is provided) before
-/// receiving a fixed `200 ok` response -- upstream routing is added in a
-/// later task. Bounded, graceful: `shutdown` firing stops accepting new
-/// connections; in-flight connections are given until the endpoint is
-/// dropped to finish (the caller in `src/cli.rs`, from a later task,
-/// bounds this the same way it already bounds other spawned tasks'
-/// shutdown).
+/// evaluated against the WAF rule engine (when `waf` is provided), routed
+/// and load-balanced the same way the HTTP/1.1/HTTP/2 path is, and
+/// forwarded upstream. Bounded, graceful: `shutdown` firing stops accepting
+/// new connections, then `endpoint.wait_idle()` gives already-accepted
+/// connections a chance to finish their in-flight streams before the
+/// endpoint is hard-closed. The caller (`serve_proxy` in `src/cli.rs`)
+/// bounds the whole of this function's execution by wrapping the task join
+/// in `tokio::time::timeout(graceful_shutdown_seconds)`, so a connection
+/// that never goes idle cannot hang shutdown forever -- it just stops being
+/// awaited once the timeout elapses.
 pub async fn serve(
     bind: SocketAddr,
     tls_config: Arc<rustls::ServerConfig>,
@@ -95,6 +128,12 @@ pub async fn serve(
 ) -> Result<(), Http3Error> {
     let server_config = quinn_server_config(tls_config)?;
     let endpoint = quinn::Endpoint::server(server_config, bind).map_err(Http3Error::Bind)?;
+    let client = Arc::new(
+        reqwest::Client::builder()
+            .timeout(UPSTREAM_REQUEST_TIMEOUT)
+            .build()
+            .map_err(Http3Error::HttpClient)?,
+    );
 
     loop {
         tokio::select! {
@@ -102,19 +141,37 @@ pub async fn serve(
                 let Some(incoming) = incoming else { break };
                 let waf = waf.clone();
                 let store = Arc::clone(&store);
+                let client = Arc::clone(&client);
+                // NOTE (known gap, not fixed here): there is no bound on the
+                // number of concurrent connections or, within a connection,
+                // concurrent request streams -- every accepted connection and
+                // every resolved request is spawned unconditionally. Admission
+                // control / concurrency limits for this listener are left as
+                // future work; this comment documents the gap rather than
+                // attempting to fix it, since doing so is out of this task's
+                // scope.
                 tokio::spawn(async move {
                     if let Ok(conn) = incoming.await {
-                        handle_connection(conn, store, waf).await;
+                        handle_connection(conn, store, waf, client).await;
                     }
                 });
             }
-            _ = shutdown.changed() => {
-                if *shutdown.borrow() {
-                    break;
+            result = shutdown.changed() => {
+                match result {
+                    Ok(()) => {
+                        if *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                    // The `watch::Sender` was dropped without ever sending a
+                    // final `true` -- treat that the same as an explicit
+                    // shutdown signal instead of looping on an `Err` forever.
+                    Err(_) => break,
                 }
             }
         }
     }
+    endpoint.wait_idle().await;
     endpoint.close(0u32.into(), b"shutdown");
     Ok(())
 }
@@ -123,7 +180,12 @@ async fn handle_connection(
     conn: quinn::Connection,
     store: Arc<RuntimeStore>,
     waf: Option<Arc<WafStore>>,
+    client: Arc<reqwest::Client>,
 ) {
+    // The real QUIC peer address -- never client-suppliable, unlike any
+    // header -- used for X-Forwarded-For attribution (see C2 in the review
+    // this module was hardened against).
+    let remote_addr = conn.remote_address();
     let h3_conn = h3_quinn::Connection::new(conn);
     let mut h3_conn: h3::server::Connection<_, bytes::Bytes> =
         match h3::server::builder().build(h3_conn).await {
@@ -139,8 +201,9 @@ async fn handle_connection(
                 };
                 let waf = waf.clone();
                 let store = Arc::clone(&store);
+                let client = Arc::clone(&client);
                 tokio::spawn(async move {
-                    handle_request(req, stream, store, waf).await;
+                    handle_request(req, stream, store, waf, client, remote_addr).await;
                 });
             }
             Ok(None) => break,
@@ -169,18 +232,42 @@ fn build_inspection_context(
     }
 }
 
-async fn handle_request<S>(
-    req: http::Request<()>,
-    mut stream: h3::server::RequestStream<S, bytes::Bytes>,
-    store: Arc<RuntimeStore>,
-    waf: Option<Arc<WafStore>>,
-) where
-    S: h3::quic::BidiStream<bytes::Bytes>,
-{
-    let method = req.method().to_string();
-    let path = req.uri().path().to_owned();
-    let query = req.uri().query().unwrap_or_default().to_owned();
-    let headers: Vec<(String, String)> = req
+/// Derives the trusted `Host` value for a request. Unlike HTTP/1.1, where
+/// `Host` is an ordinary header, HTTP/3 carries request authority in the
+/// `:authority` pseudo-header, which the `http`/`h3` crates surface via
+/// `req.uri().authority()` rather than as a regular header entry --
+/// `req.headers()` will *not* contain a `host` entry for a normal H3
+/// request. `:authority` is preferred here (it is the protocol-level source
+/// of truth); an explicit `host` regular header is only consulted as a
+/// fallback for the rare case a request has no authority at all, mirroring
+/// how `src/proxy.rs`'s HTTP/1.1 path has exactly one source (`Host`) to
+/// trust. Preferring `:authority` also means an attacker-supplied ordinary
+/// `host` header sent alongside a legitimate `:authority` can never win.
+fn downstream_host(req: &http::Request<()>) -> Option<String> {
+    req.uri()
+        .authority()
+        .map(|authority| authority.as_str().to_owned())
+        .or_else(|| {
+            req.headers()
+                .get(http::header::HOST)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        })
+}
+
+/// Builds the header list used for both WAF inspection and upstream
+/// forwarding: every regular header the client sent, with `host` always
+/// forced to the trusted `downstream_host` value (removed entirely if there
+/// is none) -- never a client-suppliable value. This is what closes C1 (WAF
+/// rules matching on `host` previously never saw an HTTP/3 request's
+/// authority at all) and half of C2 (a spoofed `host` regular header can
+/// never reach the upstream, since it is unconditionally replaced here
+/// rather than merely filled in when absent).
+fn build_request_headers(
+    req: &http::Request<()>,
+    downstream_host: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = req
         .headers()
         .iter()
         .filter_map(|(name, value)| {
@@ -190,23 +277,108 @@ async fn handle_request<S>(
                 .map(|value| (name.as_str().to_owned(), value.to_owned()))
         })
         .collect();
+    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("host"));
+    if let Some(host) = downstream_host {
+        headers.push(("host".to_owned(), host.to_owned()));
+    }
+    headers
+}
+
+/// Replaces every existing occurrence of `name` (case-insensitively) with a
+/// single entry holding `value`.
+fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
+    headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+    headers.push((name.to_owned(), value));
+}
+
+fn strip_hop_by_hop_headers(headers: &mut Vec<(String, String)>) {
+    headers.retain(|(name, _)| {
+        !HOP_BY_HOP_HEADERS
+            .iter()
+            .any(|hop| name.eq_ignore_ascii_case(hop))
+    });
+}
+
+/// Reimplementation of `observability::append_forwarded_for`'s logic
+/// against the plain `Vec<(String, String)>` header representation this
+/// module uses (that function operates on a Pingora `RequestHeader`, which
+/// is not reusable here). Appends the *real* QUIC peer address -- never a
+/// client-suppliable value -- to whatever `X-Forwarded-For` chain the
+/// client already presented, closing the other half of C2 (a spoofed
+/// `X-Forwarded-For` can extend the chain it's already in, but can never
+/// impersonate the final, real hop).
+fn append_forwarded_for(headers: &mut Vec<(String, String)>, client_addr: SocketAddr) {
+    let client_ip = client_addr.ip().to_string();
+    let existing = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("x-forwarded-for"))
+        .map(|(_, value)| value.clone());
+    let value = match existing {
+        Some(existing) => format!("{existing}, {client_ip}"),
+        None => client_ip,
+    };
+    set_header(headers, "x-forwarded-for", value);
+    // This listener never negotiates anything but HTTP/3 over TLS (see
+    // `build_rustls_server_config`'s ALPN restriction), so unlike
+    // `observability::append_forwarded_for` (which hardcodes "http" for a
+    // listener that may or may not be TLS-terminated), "https" is always
+    // correct here.
+    set_header(headers, "x-forwarded-proto", "https".to_owned());
+}
+
+async fn handle_request<S>(
+    req: http::Request<()>,
+    mut stream: h3::server::RequestStream<S, bytes::Bytes>,
+    store: Arc<RuntimeStore>,
+    waf: Option<Arc<WafStore>>,
+    client: Arc<reqwest::Client>,
+    remote_addr: SocketAddr,
+) where
+    S: h3::quic::BidiStream<bytes::Bytes>,
+{
+    let method = req.method().to_string();
+    let path = req.uri().path().to_owned();
+    let query = req.uri().query().unwrap_or_default().to_owned();
+    let downstream_host = downstream_host(&req);
+    let headers = build_request_headers(&req, downstream_host.as_deref());
 
     // Single-phase evaluation (buffer the whole body up to
     // MAX_INSPECTION_BODY_BYTES, then evaluate once): this task
     // deliberately does not replicate src/proxy.rs's two-phase
     // header-then-body optimization -- see this plan's Global Constraints.
+    //
+    // Bodies larger than the cap are rejected outright (413) rather than
+    // silently truncated: forwarding a truncated buffer upstream while the
+    // client's original (larger) `content-length` header traveled along
+    // unmodified would corrupt the request framing at the upstream. This
+    // loop stops reading as soon as it can prove there is more data than
+    // fits in the cap, so an oversized body is never buffered in full.
     let mut body = Vec::new();
-    while let Ok(Some(mut chunk)) = stream.recv_data().await {
-        if body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES {
-            break;
-        }
-        while chunk.has_remaining() && body.len() < crate::waf::MAX_INSPECTION_BODY_BYTES {
+    let mut oversized = false;
+    'read: while let Ok(Some(mut chunk)) = stream.recv_data().await {
+        while chunk.has_remaining() {
+            if body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES {
+                oversized = true;
+                break 'read;
+            }
             let take = chunk
                 .remaining()
                 .min(crate::waf::MAX_INSPECTION_BODY_BYTES - body.len());
             body.extend_from_slice(&chunk.chunk()[..take]);
             chunk.advance(take);
         }
+    }
+    if oversized {
+        let resp = http::Response::builder()
+            .status(http::StatusCode::PAYLOAD_TOO_LARGE)
+            .body(())
+            .expect("static response head is always valid");
+        let _ = stream.send_response(resp).await;
+        let _ = stream
+            .send_data(bytes::Bytes::from_static(b"Payload Too Large"))
+            .await;
+        let _ = stream.finish().await;
+        return;
     }
 
     if let Some(waf) = &waf {
@@ -228,16 +400,7 @@ async fn handle_request<S>(
     }
 
     // Not blocked (or WAF not configured): route and forward.
-    let authority = req
-        .uri()
-        .authority()
-        .map(|a| a.as_str())
-        .or_else(|| {
-            req.headers()
-                .get(http::header::HOST)
-                .and_then(|v| v.to_str().ok())
-        })
-        .unwrap_or_default();
+    let authority = downstream_host.as_deref().unwrap_or_default();
     let snapshot = store.load();
     let Some((_route, pool)) = snapshot.route(authority, &path) else {
         let resp = http::Response::builder()
@@ -266,12 +429,33 @@ async fn handle_request<S>(
             .map(|p| p.as_str())
             .unwrap_or(&path)
     );
-    let client = reqwest::Client::new();
+
+    let request_id = validated_request_id(
+        headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("x-request-id"))
+            .map(|(_, value)| value.as_bytes()),
+    );
+
+    // Never forward client headers verbatim: strip hop-by-hop headers (I4),
+    // drop the client's own `content-length` (its buffered body is what
+    // will actually be sent -- `reqwest` computes the correct length itself
+    // from the body it is given, so an unmodified, possibly-mismatched
+    // client value must not travel along), rebuild `X-Forwarded-For` from
+    // the real peer address (C2), and stamp a validated `X-Request-Id`.
+    // `host` was already forced to the trusted value by
+    // `build_request_headers` above.
+    let mut outgoing_headers = headers.clone();
+    strip_hop_by_hop_headers(&mut outgoing_headers);
+    outgoing_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-length"));
+    append_forwarded_for(&mut outgoing_headers, remote_addr);
+    set_header(&mut outgoing_headers, "x-request-id", request_id);
+
     let mut builder = client.request(
         reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET),
         &target,
     );
-    for (name, value) in &headers {
+    for (name, value) in &outgoing_headers {
         builder = builder.header(name, value);
     }
     if !body.is_empty() {
@@ -310,6 +494,8 @@ async fn handle_request<S>(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn build_inspection_context_matches_the_http1_http2_paths_field_shape() {
         let headers = vec![("x-test".to_owned(), "1".to_owned())];
@@ -324,6 +510,229 @@ mod tests {
                 headers: vec![("x-test".to_owned(), "1".to_owned())],
                 body: b"body".to_vec(),
             }
+        );
+    }
+
+    /// C1 regression test: a well-formed HTTP/3 request carries its
+    /// authority in `:authority` (surfaced via `req.uri().authority()`),
+    /// never as a `host` regular header. Confirms `downstream_host` reads
+    /// it, and that `build_request_headers` -- the function that feeds both
+    /// `build_inspection_context` and upstream forwarding -- actually
+    /// inserts it as `host`, so a WAF rule matching on `host` sees the same
+    /// value it would for an equivalent HTTP/1.1 request's real `Host`
+    /// header.
+    #[test]
+    fn build_request_headers_derives_host_from_authority_when_no_host_header_is_present() {
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/path")
+            .body(())
+            .unwrap();
+
+        assert_eq!(downstream_host(&req).as_deref(), Some("example.com"));
+
+        let headers = build_request_headers(&req, downstream_host(&req).as_deref());
+        assert_eq!(headers, vec![("host".to_owned(), "example.com".to_owned())]);
+    }
+
+    /// A request with no authority at all falls back to an explicit `host`
+    /// regular header, if the client sent one.
+    #[test]
+    fn build_request_headers_falls_back_to_an_explicit_host_header_without_authority() {
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/path")
+            .header("host", "fallback.example")
+            .body(())
+            .unwrap();
+
+        assert_eq!(downstream_host(&req).as_deref(), Some("fallback.example"));
+        let headers = build_request_headers(&req, downstream_host(&req).as_deref());
+        assert_eq!(
+            headers,
+            vec![("host".to_owned(), "fallback.example".to_owned())]
+        );
+    }
+
+    /// C1/C2 spoofing regression: a client that sends both a legitimate
+    /// `:authority` *and* an attacker-controlled `host` regular header must
+    /// never have the regular header win -- `:authority` is the
+    /// protocol-level source of truth and always wins.
+    #[test]
+    fn build_request_headers_prefers_authority_over_a_spoofed_host_header() {
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("https://real.example/path")
+            .header("host", "attacker.example")
+            .body(())
+            .unwrap();
+
+        let host = downstream_host(&req);
+        assert_eq!(host.as_deref(), Some("real.example"));
+        let headers = build_request_headers(&req, host.as_deref());
+        assert_eq!(
+            headers,
+            vec![("host".to_owned(), "real.example".to_owned())]
+        );
+    }
+
+    #[test]
+    fn build_request_headers_removes_host_entirely_when_there_is_none() {
+        let req = http::Request::builder()
+            .method("GET")
+            .uri("/path")
+            .body(())
+            .unwrap();
+        assert_eq!(downstream_host(&req), None);
+        let headers = build_request_headers(&req, None);
+        assert!(headers.is_empty());
+    }
+
+    /// C2 regression: `append_forwarded_for` appends the real peer address
+    /// to an existing (client-suppliable) chain rather than replacing it,
+    /// matching `observability::append_forwarded_for`'s semantics, and sets
+    /// `x-forwarded-proto` unconditionally to `https`.
+    #[test]
+    fn append_forwarded_for_appends_the_real_peer_address_to_an_existing_chain() {
+        let mut headers = vec![("x-forwarded-for".to_owned(), "203.0.113.9".to_owned())];
+        append_forwarded_for(&mut headers, "198.51.100.7:12345".parse().unwrap());
+        assert_eq!(
+            headers
+                .iter()
+                .find(|(n, _)| n == "x-forwarded-for")
+                .unwrap()
+                .1,
+            "203.0.113.9, 198.51.100.7"
+        );
+        assert_eq!(
+            headers
+                .iter()
+                .find(|(n, _)| n == "x-forwarded-proto")
+                .unwrap()
+                .1,
+            "https"
+        );
+    }
+
+    /// C2 regression: a spoofed `X-Forwarded-For` sent by the client cannot
+    /// impersonate the real peer address -- it can only be a prefix in the
+    /// chain, with the real address always appended last.
+    #[test]
+    fn append_forwarded_for_defeats_a_spoofed_forwarded_for_header() {
+        let mut headers = vec![(
+            "x-forwarded-for".to_owned(),
+            "10.0.0.1".to_owned(), // attacker-supplied, claims to be internal
+        )];
+        let real_client: SocketAddr = "203.0.113.55:9999".parse().unwrap();
+        append_forwarded_for(&mut headers, real_client);
+        let value = headers
+            .iter()
+            .find(|(n, _)| n == "x-forwarded-for")
+            .unwrap()
+            .1
+            .clone();
+        // The attacker's claimed value is preserved as a prior hop (as any
+        // XFF chain would preserve upstream proxies), but the real,
+        // untrusted-by-the-client address is always the last, authoritative
+        // entry -- downstream IP-based logic that reads the last hop is not
+        // fooled.
+        assert_eq!(value, "10.0.0.1, 203.0.113.55");
+        assert_ne!(value, "10.0.0.1");
+    }
+
+    #[test]
+    fn strip_hop_by_hop_headers_removes_every_documented_hop_by_hop_header() {
+        let mut headers = vec![
+            ("connection".to_owned(), "keep-alive".to_owned()),
+            ("keep-alive".to_owned(), "timeout=5".to_owned()),
+            ("transfer-encoding".to_owned(), "chunked".to_owned()),
+            ("upgrade".to_owned(), "websocket".to_owned()),
+            ("proxy-authenticate".to_owned(), "Basic".to_owned()),
+            ("proxy-authorization".to_owned(), "Basic abc".to_owned()),
+            ("te".to_owned(), "trailers".to_owned()),
+            ("trailers".to_owned(), "x-checksum".to_owned()),
+            ("x-kept".to_owned(), "yes".to_owned()),
+        ];
+        strip_hop_by_hop_headers(&mut headers);
+        assert_eq!(headers, vec![("x-kept".to_owned(), "yes".to_owned())]);
+    }
+
+    /// I7(c) / C1 parity test: builds two logically-equivalent requests --
+    /// one the way `src/proxy.rs`'s real HTTP/1.1/HTTP/2
+    /// `request_filter` builds its `InspectionContext` (from a
+    /// `pingora_http::RequestHeader`, whose `Host` is an ordinary header --
+    /// see `src/proxy.rs` around line 1048), the other via this module's
+    /// `downstream_host` + `build_request_headers` +
+    /// `build_inspection_context` (from an `http::Request` whose authority
+    /// lives in `:authority`, not a `host` header) -- and asserts the
+    /// resulting `InspectionContext`s agree on method, path, query, and
+    /// (crucially) the `host` header a WAF rule would match against. This
+    /// is the specific test category that would have caught C1: without
+    /// the authority-to-host derivation, the HTTP/3-built context would
+    /// have no `host` header at all while the HTTP/1.1-built one does.
+    #[test]
+    fn h1_and_h3_inspection_contexts_agree_on_host_method_path_and_query_for_equivalent_requests() {
+        // HTTP/1.1/HTTP/2 path: mirrors src/proxy.rs's request_filter
+        // InspectionContext construction (method/path/query/headers filter,
+        // empty body) field-for-field, from a pingora_http::RequestHeader
+        // carrying an ordinary `Host` header -- the only source of
+        // authority HTTP/1.1 has.
+        let mut header = pingora_http::RequestHeader::build("GET", b"/hello?x=1", None).unwrap();
+        header.insert_header("host", "example.com").unwrap();
+        header.insert_header("x-test", "1").unwrap();
+        let h1_context = crate::waf::InspectionContext {
+            method: header.method.as_str().to_owned(),
+            path: header.uri.path().to_owned(),
+            query: header.uri.query().unwrap_or_default().to_owned(),
+            headers: header
+                .headers
+                .iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (name.as_str().to_owned(), value.to_owned()))
+                })
+                .collect(),
+            body: Vec::new(),
+        };
+
+        // HTTP/3 path: an equivalent request whose authority lives in
+        // `:authority` (no `host` regular header at all -- the normal shape
+        // for a real H3 client), run through this module's own
+        // construction path.
+        let h3_req = http::Request::builder()
+            .method("GET")
+            .uri("https://example.com/hello?x=1")
+            .header("x-test", "1")
+            .body(())
+            .unwrap();
+        let h3_headers = build_request_headers(&h3_req, downstream_host(&h3_req).as_deref());
+        let h3_context = build_inspection_context(
+            h3_req.method().as_str(),
+            h3_req.uri().path(),
+            h3_req.uri().query().unwrap_or_default(),
+            &h3_headers,
+            Vec::new(),
+        );
+
+        assert_eq!(h1_context.method, h3_context.method);
+        assert_eq!(h1_context.path, h3_context.path);
+        assert_eq!(h1_context.query, h3_context.query);
+        let h1_host = h1_context
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+            .map(|(_, value)| value.clone());
+        let h3_host = h3_context
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+            .map(|(_, value)| value.clone());
+        assert_eq!(h1_host, Some("example.com".to_owned()));
+        assert_eq!(
+            h1_host, h3_host,
+            "a WAF rule matching on `host` must see the same value regardless of protocol"
         );
     }
 }

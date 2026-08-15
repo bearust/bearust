@@ -435,7 +435,11 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             let store = store.clone();
             let waf = Some(waf_store.clone());
             Some(tokio::spawn(async move {
-                let _ = crate::http3::serve(bind, tls_config, store, waf, http3_shutdown_rx).await;
+                if let Err(error) =
+                    crate::http3::serve(bind, tls_config, store, waf, http3_shutdown_rx).await
+                {
+                    tracing::error!(event = "http3_listener_stopped", error = %error);
+                }
             }))
         } else {
             None
