@@ -283,7 +283,7 @@ key_path = "/etc/bearust/key.pem"
 
 [server.http3]
 enabled = true
-bind = "0.0.0.0:443"   # UDP port; defaults shown here
+bind = "0.0.0.0:443"   # UDP port; default is 127.0.0.1:8443
 ```
 
 Config validation rejects `server.http3.enabled = true` without
@@ -295,14 +295,19 @@ engine and proxy host routing/load-balancing that the HTTP/1.1/HTTP/2
 path uses, producing byte-identical WAF block responses when a request
 is blocked.
 
+When `server.http3.enabled` is `true`, the existing HTTP/1.1/HTTP/2
+listener advertises the H3 endpoint on every response via an `Alt-Svc:
+h3=":<port>"; ma=86400` header (`<port>` is `server.http3.bind`'s UDP
+port), so compliant clients can discover and upgrade to H3 for
+subsequent requests. The header is omitted entirely when HTTP/3 is
+disabled.
+
 This is an initial, opt-in increment, not feature parity with the
 existing listener. Explicitly out of scope for now:
 
 - No rate limiting or bot protection/challenge evaluation on the H3 path.
 - No analytics recording for H3 requests.
 - No plugin-hook invocation on the H3 path.
-- No `Alt-Svc` header advertisement on the HTTP/1.1/HTTP/2 listener, so
-  clients do not automatically discover or upgrade to the H3 listener.
 - No HTTP/3 to the upstream/backend — forwarded requests to upstreams
   still use HTTP/1.1 or HTTP/2, only the client-facing edge speaks H3.
 

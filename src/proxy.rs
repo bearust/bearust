@@ -109,6 +109,7 @@ pub struct BeaRustProxy {
     pub anomaly: Option<Arc<crate::anomaly::AnomalyDetector>>,
     pub plugin_notify: Option<Arc<crate::plugin_notify::NotificationSink>>,
     pub plugin_manager: Option<Arc<PluginManager>>,
+    pub http3_alt_svc: Option<String>,
 }
 
 impl BeaRustProxy {
@@ -129,6 +130,7 @@ impl BeaRustProxy {
             anomaly: None,
             plugin_notify: None,
             plugin_manager: None,
+            http3_alt_svc: None,
         }
     }
     pub fn with_challenge_store(mut self, challenges: Http01Store) -> Self {
@@ -191,6 +193,13 @@ impl BeaRustProxy {
     }
     pub fn with_plugin_manager(mut self, manager: Arc<PluginManager>) -> Self {
         self.plugin_manager = Some(manager);
+        self
+    }
+    /// `value` is the full `Alt-Svc` header value (e.g. `h3=":8443"; ma=86400`),
+    /// precomputed once at startup from `Http3Config`. `None` (the default)
+    /// means the HTTP/3 listener is disabled and no header is added.
+    pub fn with_http3_alt_svc(mut self, value: String) -> Self {
+        self.http3_alt_svc = Some(value);
         self
     }
 
@@ -573,6 +582,19 @@ async fn apply_transform_plugin(
 /// response; matches the design spec's chosen cap for BeaRust's typical
 /// API/JSON/HTML traffic.
 const RESPONSE_BODY_TRANSFORM_CAP_BYTES: usize = 1024 * 1024;
+
+/// Advertises this listener's own HTTP/3 endpoint to the client by inserting
+/// `Alt-Svc: <alt_svc>` into every response, when the HTTP/3 listener is
+/// enabled (`alt_svc` is `Some`). This replaces (rather than merges with)
+/// any `Alt-Svc` the upstream sent, since the client is talking to
+/// BeaRust's own TLS frontend, not directly to the upstream -- an
+/// upstream's own alternative-service offer is meaningless to it. A `None`
+/// `alt_svc` (HTTP/3 disabled) leaves the response untouched.
+fn apply_http3_alt_svc_header(response: &mut ResponseHeader, alt_svc: Option<&str>) {
+    if let Some(alt_svc) = alt_svc {
+        let _ = response.insert_header("alt-svc", alt_svc);
+    }
+}
 
 /// Whether `response`'s body should be buffered for a `transform.response`
 /// plugin. Every one of the following must hold; the check is pure and
@@ -1437,6 +1459,7 @@ impl ProxyHttp for BeaRustProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        apply_http3_alt_svc_header(upstream_response, self.http3_alt_svc.as_deref());
         let method = session.req_header().method.clone();
         if should_buffer_response_for_transform(
             self.plugin_manager.as_ref(),
@@ -1609,8 +1632,8 @@ fn error_status(error: &pingora_core::Error) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::{
-        accumulate_response_chunk, apply_load_balancer_plugin, apply_transform_plugin,
-        apply_transform_response_plugin, apply_waf_detector, error_status,
+        accumulate_response_chunk, apply_http3_alt_svc_header, apply_load_balancer_plugin,
+        apply_transform_plugin, apply_transform_response_plugin, apply_waf_detector, error_status,
         invoke_analytics_changed, is_valid_transform_headers, load_balance_request,
         reassert_protected_request_headers, should_buffer_response_for_transform, waf_block_event,
         RequestContext, RESPONSE_BODY_TRANSFORM_CAP_BYTES,
@@ -2181,6 +2204,40 @@ mod tests {
 
     fn sample_response_header(status: u16) -> ResponseHeader {
         ResponseHeader::build(status, None).unwrap()
+    }
+
+    #[test]
+    fn alt_svc_header_is_inserted_when_http3_is_enabled() {
+        let mut response = sample_response_header(200);
+        apply_http3_alt_svc_header(&mut response, Some("h3=\":8443\"; ma=86400"));
+        assert_eq!(
+            response
+                .headers
+                .get("alt-svc")
+                .and_then(|v| v.to_str().ok()),
+            Some("h3=\":8443\"; ma=86400")
+        );
+    }
+
+    #[test]
+    fn alt_svc_header_is_absent_when_http3_is_disabled() {
+        let mut response = sample_response_header(200);
+        apply_http3_alt_svc_header(&mut response, None);
+        assert!(response.headers.get("alt-svc").is_none());
+    }
+
+    #[test]
+    fn alt_svc_header_replaces_an_upstream_sent_value() {
+        let mut response = sample_response_header(200);
+        response.insert_header("alt-svc", "h3-29=\":443\"").unwrap();
+        apply_http3_alt_svc_header(&mut response, Some("h3=\":8443\"; ma=86400"));
+        assert_eq!(
+            response
+                .headers
+                .get("alt-svc")
+                .and_then(|v| v.to_str().ok()),
+            Some("h3=\":8443\"; ma=86400")
+        );
     }
 
     #[test]

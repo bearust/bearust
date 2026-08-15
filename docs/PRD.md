@@ -676,7 +676,7 @@ Phase 5.
 2. Community governance structure: who has merge rights, what is the review process for external contributions (including plugins)?
 3. Will there be a paid "Pro" edition in the future (additional enterprise features), or will all features remain free forever?
 4. Final GUI frontend framework (React vs Vue) — needs to be decided before Phase 3.
-5. ~~HTTP/3 support target — included in v1 or deferred to a later release?~~ **Resolved:** deferred out of v1, then delivered as an opt-in, off-by-default increment in Phase 15 (a separate QUIC listener alongside, not replacing, the existing HTTP/1.1/HTTP/2 path) — see `### Phase 15 status` below and `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`. WAF-parity feature coverage (rate limiting, bot protection, analytics, plugin hooks), `Alt-Svc` advertisement, and upstream H3 remain open for a future increment.
+5. ~~HTTP/3 support target — included in v1 or deferred to a later release?~~ **Resolved:** deferred out of v1, then delivered as an opt-in, off-by-default increment in Phase 15 (a separate QUIC listener alongside, not replacing, the existing HTTP/1.1/HTTP/2 path) — see `### Phase 15 status` below and `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`. `Alt-Svc` advertisement shipped in increment 2 (see `### Phase 15 status: Alt-Svc advertisement` below). WAF-parity feature coverage (rate limiting, bot protection, analytics, plugin hooks) and upstream H3 remain open for future increments.
 6. Data privacy policy for the AI Advisor feature (default sensitive-data redaction: opt-in or opt-out?).
 7. Translation tooling/workflow for localization: a lightweight file-based approach (JSON/YAML per locale reviewed via PR) vs a dedicated translation management platform — to be decided before Phase 11.
 
@@ -1259,11 +1259,23 @@ the other long-running tasks `serve_proxy` spawns.
 
 Deliberately out of scope for this increment: rate limiting, bot
 protection/challenge evaluation, and analytics recording on the H3
-path; plugin-hook invocation on the H3 path; `Alt-Svc` advertisement
-from the existing listener (so there is no automatic client discovery
-of/upgrade to H3 yet); and HTTP/3 to upstream backends (forwarded
-requests still use HTTP/1.1/HTTP/2 regardless of how the client
-connected). Full feature parity with the existing listener is expected
-across future increments, not this one; see
+path; plugin-hook invocation on the H3 path; and HTTP/3 to upstream
+backends (forwarded requests still use HTTP/1.1/HTTP/2 regardless of
+how the client connected). Full feature parity with the existing
+listener is expected across future increments, not this one; see
 `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`
 for the full design rationale and non-goals.
+
+### Phase 15 status: Alt-Svc advertisement (increment 2)
+
+Increment 2 closes the client-discovery gap increment 1 deliberately
+left open: when `server.http3.enabled` is `true`, the existing
+HTTP/1.1/HTTP/2 listener's `response_filter` inserts an `Alt-Svc:
+h3=":<port>"; ma=86400` header (`<port>` taken from `server.http3.bind`,
+computed once at startup) into every response, replacing rather than
+merging with any `Alt-Svc` the upstream itself sent (the client is
+talking to BeaRust's own TLS frontend, not the upstream, so only
+BeaRust's own H3 offer is meaningful to it). The header is omitted
+entirely when HTTP/3 is disabled — `BeaRustProxy`'s `http3_alt_svc`
+field defaults to `None` and existing deployments are unaffected. No
+other behavior changes; this is a single additive response header.

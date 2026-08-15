@@ -423,6 +423,11 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let analytics = control_state.analytics.clone();
         let realtime = control_state.realtime.clone();
         let (http3_shutdown_tx, http3_shutdown_rx) = tokio::sync::watch::channel(false);
+        let http3_alt_svc = config
+            .server
+            .http3
+            .enabled
+            .then(|| format!("h3=\":{}\"; ma=86400", config.server.http3.bind.port()));
         let http3_task = if config.server.http3.enabled {
             let tls = config
                 .server
@@ -516,8 +521,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         server_config.graceful_shutdown_timeout_seconds =
             Some(config.server.graceful_shutdown_seconds);
         let ready_path = std::env::var_os("BEARUST_UPGRADE_READY").map(PathBuf::from);
-        let mut service = proxy::http_service(
-            crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store).with_bot_store(bot_store, challenge_service)
+        let mut proxy_handler = crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store).with_bot_store(bot_store, challenge_service)
                 .with_analytics(analytics)
                 .with_analytics_changed_notifier(Arc::new(move || { realtime.publish("analytics.changed"); }))
                 .with_analytics_host_ids(analytics_host_ids)
@@ -527,9 +531,11 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                 .with_plugin_manager(control_state.plugin_manager.clone())
                 .with_rate_limiter(rate_limiter)
                 .with_rate_limit_policy(rate_policy)
-                .with_trusted_proxies(trusted_proxies),
-            &server.configuration,
-        );
+                .with_trusted_proxies(trusted_proxies);
+        if let Some(alt_svc) = http3_alt_svc {
+            proxy_handler = proxy_handler.with_http3_alt_svc(alt_svc);
+        }
+        let mut service = proxy::http_service(proxy_handler, &server.configuration);
         if let Some(tls_config) = &config.server.tls {
             let tls = crate::tls::settings(tls_config)
                 .map_err(|error| AppError::Server(error.to_string()))?;
