@@ -178,11 +178,15 @@ fn serve_exits_promptly_on_sigterm() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("bearust.toml");
     let pid = temp.path().join("bearust.pid");
+    let database = temp.path().join("control.sqlite");
+    let certificates = temp.path().join("certificates");
     let text = include_str!("fixtures/valid.toml").replace(
         "bind = \"127.0.0.1:18080\"",
         &format!(
-            "bind = \"127.0.0.1:18180\"\ngraceful_shutdown_seconds = 1\npid_file = \"{}\"",
-            pid.display()
+            "bind = \"127.0.0.1:18180\"\ncontrol_database = \"{}\"\ncertificate_store = \"{}\"\ngraceful_shutdown_seconds = 1\npid_file = \"{}\"",
+            database.display(),
+            certificates.display(),
+            pid.display(),
         ),
     );
     std::fs::write(&config, text).unwrap();
@@ -190,6 +194,7 @@ fn serve_exits_promptly_on_sigterm() {
         Command::new(bearust_executable())
             .args(["serve", "--config"])
             .arg(&config)
+            .env("DATABASE_URL", "sqlite::memory:")
             .spawn()
             .unwrap(),
     );
@@ -230,9 +235,13 @@ fn sigterm_drains_active_request_and_stops_accepting() {
     let temp = tempfile::tempdir().unwrap();
     let config = temp.path().join("bearust.toml");
     let pid = temp.path().join("bearust.pid");
+    let database = temp.path().join("control.sqlite");
+    let certificates = temp.path().join("certificates");
     let config_text = format!(
         r#"[server]
 bind = "{proxy_address}"
+control_database = "{}"
+certificate_store = "{}"
 graceful_shutdown_seconds = 1
 pid_file = "{}"
 
@@ -259,6 +268,8 @@ host = "api.example.com"
 path_prefix = "/"
 upstream_pool = "api"
 "#,
+        database.display(),
+        certificates.display(),
         pid.display(),
         backend.address
     );
@@ -267,6 +278,7 @@ upstream_pool = "api"
         Command::new(bearust_executable())
             .args(["serve", "--config"])
             .arg(&config)
+            .env("DATABASE_URL", "sqlite::memory:")
             .spawn()
             .unwrap(),
     );

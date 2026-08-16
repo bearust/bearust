@@ -144,10 +144,12 @@ fn runtime_store_routing_to(host: &str, backend_addr: SocketAddr) -> Arc<Runtime
             algorithm: Algorithm::RoundRobin,
             connect_timeout_seconds: 1,
             request_timeout_seconds: 1,
+            passive_health: false,
             backends: vec![BackendConfig {
                 address: backend_addr,
                 health_check: HealthCheckKind::Tcp,
                 health_path: None,
+                weight: 1,
             }],
         }],
         routes: vec![RouteConfig {
@@ -193,16 +195,19 @@ fn runtime_store_routing_to_two_backends(
             algorithm: Algorithm::RoundRobin,
             connect_timeout_seconds: 1,
             request_timeout_seconds: 1,
+            passive_health: false,
             backends: vec![
                 BackendConfig {
                     address: first,
                     health_check: HealthCheckKind::Tcp,
                     health_path: None,
+                    weight: 1,
                 },
                 BackendConfig {
                     address: second,
                     health_check: HealthCheckKind::Tcp,
                     health_path: None,
+                    weight: 1,
                 },
             ],
         }],

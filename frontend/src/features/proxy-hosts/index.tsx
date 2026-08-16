@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import {
   Ellipsis,
   KeyRound,
+  LockKeyhole,
   Pencil,
   Plus,
   RefreshCw,
@@ -12,7 +13,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { api, type AcmeRequest, type Certificate, type Host } from "@/api";
+import { api, type AcmeRequest, type Certificate, type Host, type ProxyHostAuth } from "@/api";
 import { DEMO_MODE } from "@/lib/demo";
 import { sanitizeError } from "@/lib/errors";
 import { useRealtimeRefresh } from "@/hooks/use-realtime-refresh";
@@ -40,6 +41,13 @@ type HostForm = {
   enabled: boolean;
 };
 
+type AuthForm = {
+  enabled: boolean;
+  realm: string;
+  username: string;
+  password: string;
+};
+
 const emptyForm: HostForm = {
   name: "",
   domain: "",
@@ -49,6 +57,8 @@ const emptyForm: HostForm = {
   certificate_id: "",
   enabled: true,
 };
+
+const emptyAuthForm: AuthForm = { enabled: false, realm: "BeaRust protected host", username: "", password: "" };
 
 const demoHosts: Host[] = [
   { id: 1, name: "Public API", domain: "api.bearust.local", upstream_host: "api-pool", upstream_port: 8080, tls_mode: "letsencrypt", certificate_id: 1, enabled: true },
@@ -69,6 +79,10 @@ export function ProxyHosts() {
   const [certificates, setCertificates] = useState<Certificate[]>(DEMO_MODE ? demoCertificates : []);
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authHost, setAuthHost] = useState<Host | null>(null);
+  const [auth, setAuth] = useState<ProxyHostAuth | null>(null);
+  const [authForm, setAuthForm] = useState<AuthForm>(emptyAuthForm);
   const [certificateOpen, setCertificateOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -134,6 +148,52 @@ export function ProxyHosts() {
     });
     setError("");
     setOpen(true);
+  };
+
+  const openAuth = async (host: Host) => {
+    setAuthHost(host);
+    setAuthForm(emptyAuthForm);
+    setError("");
+    setAuthOpen(true);
+    if (DEMO_MODE) {
+      setAuth({ host_id: host.id, enabled: false, realm: emptyAuthForm.realm, username: "", updated_at: "" });
+      return;
+    }
+    try {
+      const next = await api.hostAuth(host.id);
+      setAuth(next);
+      setAuthForm({ enabled: next.enabled, realm: next.realm, username: next.username, password: "" });
+    } catch (exception) {
+      setAuthOpen(false);
+      setError(sanitizeError(exception));
+    }
+  };
+
+  const submitAuth = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!authHost) return;
+    if (authForm.enabled && (!authForm.username.trim() || (!auth?.enabled && !authForm.password))) {
+      setError("Enabled host authentication requires a username and a new password.");
+      return;
+    }
+    if (authForm.password && authForm.password.length < 12) {
+      setError("Host authentication passwords must be at least 12 characters.");
+      return;
+    }
+    setBusy(`auth-${authHost.id}`);
+    setError("");
+    try {
+      const payload = { enabled: authForm.enabled, realm: authForm.realm.trim(), username: authForm.username.trim(), ...(authForm.password ? { password: authForm.password } : {}) };
+      if (DEMO_MODE) setAuth({ host_id: authHost.id, enabled: payload.enabled, realm: payload.realm, username: payload.username, updated_at: new Date().toISOString() });
+      else setAuth(await api.updateHostAuth(authHost.id, payload));
+      setAuthForm((current) => ({ ...current, password: "" }));
+      setAuthOpen(false);
+      toast.success("Host authentication updated");
+    } catch (exception) {
+      setError(sanitizeError(exception));
+    } finally {
+      setBusy(null);
+    }
   };
 
   const submitHost = async (event: FormEvent) => {
@@ -290,7 +350,7 @@ export function ProxyHosts() {
         </CardHeader>
         <CardContent>
           {loading ? <LoadingRows /> : <Table><TableHeader><TableRow><TableHead>Host</TableHead><TableHead>Domain</TableHead><TableHead>Upstream</TableHead><TableHead>TLS</TableHead><TableHead>Status</TableHead><TableHead className="w-10"><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader><TableBody>
-            {visibleHosts.map((host) => <TableRow key={host.id}><TableCell><div className="font-medium">{host.name}</div><div className="text-xs text-muted-foreground">{host.enabled ? "Enabled" : "Disabled"}</div></TableCell><TableCell className="font-mono text-xs">{host.domain}</TableCell><TableCell className="font-mono text-xs text-muted-foreground">{host.upstream_host}:{host.upstream_port}</TableCell><TableCell><Badge variant="secondary">{host.tls_mode === "disabled" ? "Off" : host.tls_mode}</Badge></TableCell><TableCell><StatusBadge status={host.enabled ? "healthy" : "warning"}>{host.enabled ? "Healthy" : "Disabled"}</StatusBadge></TableCell><TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label={`Actions for ${host.name}`}><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => openEdit(host)} disabled={!canWrite}><Pencil />Edit host</DropdownMenuItem><DropdownMenuItem onClick={() => setCertificateOpen(true)} disabled={!canWrite}><KeyRound />Issue certificate</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onClick={() => removeHost(host)} disabled={!canWrite || busy === `delete-${host.id}`}><Trash2 />Delete host</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow>)}
+            {visibleHosts.map((host) => <TableRow key={host.id}><TableCell><div className="font-medium">{host.name}</div><div className="text-xs text-muted-foreground">{host.enabled ? "Enabled" : "Disabled"}</div></TableCell><TableCell className="font-mono text-xs">{host.domain}</TableCell><TableCell className="font-mono text-xs text-muted-foreground">{host.upstream_host}:{host.upstream_port}</TableCell><TableCell><Badge variant="secondary">{host.tls_mode === "disabled" ? "Off" : host.tls_mode}</Badge></TableCell><TableCell><StatusBadge status={host.enabled ? "healthy" : "warning"}>{host.enabled ? "Healthy" : "Disabled"}</StatusBadge></TableCell><TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label={`Actions for ${host.name}`}><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => openEdit(host)} disabled={!canWrite}><Pencil />Edit host</DropdownMenuItem><DropdownMenuItem onClick={() => void openAuth(host)} disabled={!canWrite}><LockKeyhole />Host authentication</DropdownMenuItem><DropdownMenuItem onClick={() => setCertificateOpen(true)} disabled={!canWrite}><KeyRound />Issue certificate</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onClick={() => removeHost(host)} disabled={!canWrite || busy === `delete-${host.id}`}><Trash2 />Delete host</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow>)}
           </TableBody></Table>}
           {!loading && visibleHosts.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">No proxy hosts match your search.</div>}
         </CardContent>
@@ -314,6 +374,7 @@ export function ProxyHosts() {
         pending={busy != null}
         onConfirm={() => void confirmRemoveHost()}
       />
+      <Dialog open={authOpen} onOpenChange={setAuthOpen}><DialogContent><DialogHeader><DialogTitle>Host authentication</DialogTitle><DialogDescription>{authHost ? `Protect ${authHost.domain} with a per-host Basic authentication challenge.` : "Protect this host with a per-host Basic authentication challenge."}</DialogDescription></DialogHeader><form id="host-auth-form" className="space-y-4" onSubmit={(event) => void submitAuth(event)}><label className="flex items-center gap-3 text-sm"><input type="checkbox" checked={authForm.enabled} onChange={(event) => setAuthForm({ ...authForm, enabled: event.target.checked })} disabled={!canWrite || busy != null} className="size-4 accent-primary" />Require authentication before routing</label><Field id="auth-realm" label="Realm" value={authForm.realm} onChange={(value) => setAuthForm({ ...authForm, realm: value })} placeholder="BeaRust protected host" /><Field id="auth-username" label="Username" value={authForm.username} onChange={(value) => setAuthForm({ ...authForm, username: value })} placeholder="service-user" /><Field id="auth-password" label={auth?.enabled ? "New password (optional)" : "Password"} type="password" value={authForm.password} onChange={(value) => setAuthForm({ ...authForm, password: value })} placeholder="At least 12 characters" /></form><DialogFooter><Button type="button" variant="outline" onClick={() => setAuthOpen(false)}>Cancel</Button><Button type="submit" form="host-auth-form" disabled={!canWrite || busy === `auth-${authHost?.id}`}><LockKeyhole />Save authentication</Button></DialogFooter></DialogContent></Dialog>
     </Main>
   );
 }

@@ -1,4 +1,6 @@
-use bearust::analytics::{AnalyticsCollector, AnalyticsEvent, AnalyticsFilter, SecurityCounters};
+use bearust::analytics::{
+    AnalyticsCollector, AnalyticsDimensionEvent, AnalyticsEvent, AnalyticsFilter, SecurityCounters,
+};
 use chrono::{TimeZone, Utc};
 
 fn event(host: i64, minute: i64, status: u16, latency: u64) -> AnalyticsEvent {
@@ -9,6 +11,41 @@ fn event(host: i64, minute: i64, status: u16, latency: u64) -> AnalyticsEvent {
         latency_ms: latency,
         security: SecurityCounters::default(),
     }
+}
+
+#[test]
+fn dimensions_roll_up_bandwidth_and_top_lists() {
+    let c = AnalyticsCollector::new(2);
+    c.record_with_dimensions(
+        event(1, 10, 200, 12),
+        AnalyticsDimensionEvent {
+            endpoint: Some("/api/orders".into()),
+            upstream: Some("10.0.0.1:8080".into()),
+            attacker_ip: Some("203.0.113.7".into()),
+            bytes: 512,
+            attack_type: Some("waf".into()),
+        },
+    );
+    c.record_with_dimensions(
+        event(1, 10, 403, 20),
+        AnalyticsDimensionEvent {
+            endpoint: Some("/api/orders".into()),
+            upstream: Some("10.0.0.1:8080".into()),
+            attacker_ip: Some("203.0.113.7".into()),
+            bytes: 256,
+            attack_type: Some("waf".into()),
+        },
+    );
+
+    let dimensions = c.dimensions(AnalyticsFilter {
+        proxy_host_id: Some(1),
+        ..Default::default()
+    });
+    assert_eq!(dimensions.bandwidth_bytes, 768);
+    assert_eq!(dimensions.top_endpoints[0].key, "/api/orders");
+    assert_eq!(dimensions.top_endpoints[0].count, 2);
+    assert_eq!(dimensions.top_attacker_ips[0].key, "203.0.113.7");
+    assert_eq!(dimensions.attack_types[0].key, "waf");
 }
 
 #[test]

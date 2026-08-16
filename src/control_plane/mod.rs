@@ -81,6 +81,8 @@ pub struct AppState {
     pub acme: Arc<dyn AcmeService>,
     pub realtime: Arc<realtime::RealtimeHub>,
     pub waf: Arc<WafStore>,
+    pub ip_security: Arc<crate::security_policy::IpSecurityStore>,
+    pub host_auth: Arc<crate::security_policy::HostAuthStore>,
     pub bot: Arc<BotStore>,
     pub challenges: Arc<ChallengeService>,
     /// Shared live limiter state used by both control-plane updates and the
@@ -338,6 +340,16 @@ pub async fn build_state(
     let db = repository::connect(database_url).await?;
     repository::migrate(&db).await?;
     let waf = Arc::new(WafStore::load(&db).await.map_err(sqlx::Error::Protocol)?);
+    let ip_security = Arc::new(
+        crate::security_policy::IpSecurityStore::load(&db)
+            .await
+            .map_err(sqlx::Error::Protocol)?,
+    );
+    let host_auth = Arc::new(
+        crate::security_policy::HostAuthStore::load(&db)
+            .await
+            .map_err(sqlx::Error::Protocol)?,
+    );
     let bot = Arc::new(BotStore::load(&db).await.map_err(sqlx::Error::Protocol)?);
     let certificates = CertificateStore::new(certificate_root)
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
@@ -379,6 +391,10 @@ pub async fn build_state(
         .unwrap_or(false);
     let adaptive_tuning = Arc::new(crate::adaptive_tuning::AdaptiveTuningEngine::default());
     adaptive_tuning.set_emergency_disabled(emergency_disabled);
+    let analytics = Arc::new(AnalyticsCollector::default());
+    if let Ok(retention) = repository::get_analytics_retention(&db).await {
+        analytics.set_retention_minutes(retention.retention_minutes as usize);
+    }
 
     if let Ok(host_configs) = repository::list_host_rate_limit_configs(&db).await {
         for (host_id, cfg) in host_configs {
@@ -417,10 +433,12 @@ pub async fn build_state(
         acme: Arc::new(CertificateAcmeAdapter::new(certificate_acme)),
         realtime,
         waf,
+        ip_security,
+        host_auth,
         bot,
         challenges,
         rate_limiter,
-        analytics: Arc::new(AnalyticsCollector::default()),
+        analytics,
         baseline: Arc::new(crate::baseline::BaselineCollector::default()),
         anomaly: Arc::new(crate::anomaly::AnomalyDetector::default()),
         adaptive_tuning,
@@ -513,6 +531,11 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         )
         .route("/api/analytics/summary", get(analytics_summary))
         .route("/api/analytics/timeseries", get(analytics_timeseries))
+        .route("/api/analytics/dimensions", get(analytics_dimensions))
+        .route(
+            "/api/analytics/retention",
+            get(get_analytics_retention).patch(update_analytics_retention),
+        )
         .route("/api/analytics/baseline", get(analytics_baseline))
         .route("/api/analytics/anomalies", get(list_anomalies))
         .route(
@@ -555,6 +578,18 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route("/api/waf/rules/import", post(import_waf_rules))
         .route("/api/waf/rules/export", get(export_waf_rules))
         .route(
+            "/api/waf/feedback",
+            get(list_waf_feedback).post(create_waf_feedback),
+        )
+        .route(
+            "/api/ip-security/rules",
+            get(list_ip_security_rules).post(create_ip_security_rule),
+        )
+        .route(
+            "/api/ip-security/rules/{id}",
+            axum::routing::patch(update_ip_security_rule).delete(delete_ip_security_rule),
+        )
+        .route(
             "/api/bot/config",
             get(get_bot_config).patch(update_bot_config),
         )
@@ -587,6 +622,10 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route(
             "/api/proxy-hosts/{id}",
             get(get_host).patch(update_host).delete(remove_host),
+        )
+        .route(
+            "/api/proxy-hosts/{id}/auth",
+            get(get_host_auth).put(update_host_auth),
         )
         .route(
             "/api/load-balancer",
@@ -1283,6 +1322,316 @@ async fn get_waf_config(State(s): State<AppState>, h: HeaderMap) -> impl IntoRes
             "Database unavailable",
         ),
     }
+}
+
+async fn list_ip_security_rules(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
+    if let Err(response) = require_role_admin(&s, &h).await {
+        return response;
+    }
+    match repository::list_ip_security_rules(&s.db).await {
+        Ok(rules) => Json(rules).into_response(),
+        Err(_) => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
+    }
+}
+
+async fn create_ip_security_rule(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    input: Result<Json<IpSecurityRuleCreate>, JsonRejection>,
+) -> impl IntoResponse {
+    let actor = match require_role_admin(&s, &h).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    let Json(input) = match input {
+        Ok(value) => value,
+        Err(_) => {
+            return user_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "Invalid IP security rule",
+            )
+        }
+    };
+    if !crate::security_policy::valid_cidr(&input.cidr)
+        || input.cidr.len() > 64
+        || input.score < -100_000
+        || input.score > 100_000
+        || input.country_code.as_deref().is_some_and(|country| {
+            country.len() > 8 || country.chars().any(|ch| !ch.is_ascii_alphanumeric())
+        })
+    {
+        return user_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Invalid IP security rule",
+        );
+    }
+    let rule = IpSecurityRule {
+        id: 0,
+        cidr: input.cidr.trim().to_owned(),
+        action: input.action,
+        score: input.score,
+        country_code: input
+            .country_code
+            .map(|country| country.to_ascii_uppercase()),
+        enabled: input.enabled,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let id = match repository::insert_ip_security_rule(&s.db, &rule).await {
+        Ok(id) => id,
+        Err(_) => {
+            return user_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "Unable to save IP security rule",
+            )
+        }
+    };
+    if s.ip_security.reload(&s.db).await.is_err() {
+        return user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "reload_failed",
+            "Unable to activate IP security policy",
+        );
+    }
+    audit::record_state(
+        &s,
+        Some(actor.id),
+        "ip_security_rule_created",
+        &format!("rule_id={id}"),
+    )
+    .await;
+    s.realtime.publish("security.changed");
+    match repository::list_ip_security_rules(&s.db).await {
+        Ok(rules) => rules.into_iter().find(|item| item.id == id).map_or_else(
+            || {
+                user_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "database_error",
+                    "Database unavailable",
+                )
+            },
+            |item| (StatusCode::CREATED, Json(item)).into_response(),
+        ),
+        Err(_) => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
+    }
+}
+
+async fn update_ip_security_rule(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<i64>,
+    input: Result<Json<IpSecurityRulePatch>, JsonRejection>,
+) -> impl IntoResponse {
+    let actor = match require_role_admin(&s, &h).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    let Json(input) = match input {
+        Ok(value) => value,
+        Err(_) => {
+            return user_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "Invalid IP security rule",
+            )
+        }
+    };
+    let mut rule = match repository::list_ip_security_rules(&s.db).await {
+        Ok(rules) => match rules.into_iter().find(|item| item.id == id) {
+            Some(rule) => rule,
+            None => {
+                return user_error(
+                    StatusCode::NOT_FOUND,
+                    "not_found",
+                    "IP security rule not found",
+                )
+            }
+        },
+        Err(_) => {
+            return user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Database unavailable",
+            )
+        }
+    };
+    if let Some(cidr) = input.cidr {
+        rule.cidr = cidr.trim().to_owned();
+    }
+    if let Some(action) = input.action {
+        rule.action = action;
+    }
+    if let Some(score) = input.score {
+        rule.score = score;
+    }
+    if let Some(country) = input.country_code {
+        rule.country_code = country.map(|value| value.to_ascii_uppercase());
+    }
+    if let Some(enabled) = input.enabled {
+        rule.enabled = enabled;
+    }
+    if !crate::security_policy::valid_cidr(&rule.cidr)
+        || rule.cidr.len() > 64
+        || rule.score < -100_000
+        || rule.score > 100_000
+        || rule.country_code.as_deref().is_some_and(|country| {
+            country.len() > 8 || country.chars().any(|ch| !ch.is_ascii_alphanumeric())
+        })
+    {
+        return user_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Invalid IP security rule",
+        );
+    }
+    if repository::update_ip_security_rule(&s.db, id, &rule)
+        .await
+        .is_err()
+        || s.ip_security.reload(&s.db).await.is_err()
+    {
+        return user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "reload_failed",
+            "Unable to activate IP security policy",
+        );
+    }
+    audit::record_state(
+        &s,
+        Some(actor.id),
+        "ip_security_rule_updated",
+        &format!("rule_id={id}"),
+    )
+    .await;
+    s.realtime.publish("security.changed");
+    Json(rule).into_response()
+}
+
+async fn delete_ip_security_rule(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let actor = match require_role_admin(&s, &h).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match repository::delete_ip_security_rule(&s.db, id).await {
+        Ok(0) => user_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "IP security rule not found",
+        ),
+        Ok(_) => {
+            if s.ip_security.reload(&s.db).await.is_err() {
+                return user_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "reload_failed",
+                    "Unable to activate IP security policy",
+                );
+            }
+            audit::record_state(
+                &s,
+                Some(actor.id),
+                "ip_security_rule_deleted",
+                &format!("rule_id={id}"),
+            )
+            .await;
+            s.realtime.publish("security.changed");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(_) => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
+    }
+}
+
+async fn list_waf_feedback(State(s): State<AppState>, h: HeaderMap) -> impl IntoResponse {
+    if let Err(response) = require_role_admin(&s, &h).await {
+        return response;
+    }
+    match repository::list_waf_feedback(&s.db, 200).await {
+        Ok(feedback) => Json(feedback).into_response(),
+        Err(_) => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
+    }
+}
+
+async fn create_waf_feedback(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    input: Result<Json<WafFeedbackCreate>, JsonRejection>,
+) -> impl IntoResponse {
+    let actor = match require_role_admin(&s, &h).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    let Json(input) = match input {
+        Ok(value) => value,
+        Err(_) => {
+            return user_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "Invalid WAF feedback",
+            )
+        }
+    };
+    if !matches!(input.label.as_str(), "false_positive" | "true_positive")
+        || input.note.len() > 1024
+        || input
+            .request_id
+            .as_deref()
+            .is_some_and(|value| value.len() > 128)
+    {
+        return user_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Invalid WAF feedback",
+        );
+    }
+    let feedback = match repository::insert_waf_feedback(
+        &s.db,
+        Some(actor.id),
+        input.request_id.as_deref(),
+        input.rule_id,
+        &input.label,
+        &input.note,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => {
+            return user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Database unavailable",
+            )
+        }
+    };
+    audit::record_state(
+        &s,
+        Some(actor.id),
+        "waf_feedback_created",
+        &format!("feedback_id={}", feedback.id),
+    )
+    .await;
+    s.realtime.publish("security.changed");
+    (StatusCode::CREATED, Json(feedback)).into_response()
 }
 async fn require_rate_limit_admin(s: &AppState, h: &HeaderMap) -> Result<User, Response> {
     let user = current(s, h)
@@ -3530,12 +3879,15 @@ fn analytics_filter(q: AnalyticsQuery) -> Result<AnalyticsFilter, ()> {
             .map_err(|_| ())?
             .map(|v| v.with_timezone(&Utc));
     if q.proxy_host_id.is_some_and(|id| id <= 0)
-        || q.limit.unwrap_or(0) > crate::analytics::DEFAULT_MAX_BUCKETS
+        || q.limit.unwrap_or(0) > crate::analytics::MAX_RETENTION_BUCKETS
     {
         return Err(());
     }
     if let (Some(a), Some(b)) = (from, to) {
-        if a > b || b.signed_duration_since(a) > chrono::Duration::hours(24) {
+        if a > b
+            || b.signed_duration_since(a)
+                > chrono::Duration::minutes(crate::analytics::MAX_RETENTION_BUCKETS as i64)
+        {
             return Err(());
         }
     }
@@ -3620,6 +3972,94 @@ async fn analytics_timeseries(
         return r;
     }
     Json(s.analytics.timeseries(q)).into_response()
+}
+
+async fn analytics_dimensions(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    RawQuery(raw): RawQuery,
+) -> Response {
+    let q = match parse_analytics_query(raw).and_then(analytics_filter) {
+        Ok(v) => v,
+        Err(_) => {
+            return user_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "Invalid analytics query",
+            )
+        }
+    };
+    if let Err(r) = require_analytics_read(&s, &h, q.proxy_host_id).await {
+        return r;
+    }
+    Json(s.analytics.dimensions(q)).into_response()
+}
+
+async fn get_analytics_retention(State(s): State<AppState>, h: HeaderMap) -> Response {
+    if let Err(response) = require_analytics_read(&s, &h, None).await {
+        return response;
+    }
+    match repository::get_analytics_retention(&s.db).await {
+        Ok(config) => Json(config).into_response(),
+        Err(_) => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
+    }
+}
+
+async fn update_analytics_retention(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    input: Result<Json<AnalyticsRetentionPatch>, JsonRejection>,
+) -> Response {
+    let actor = match require_role_admin(&s, &h).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    let Json(input) = match input {
+        Ok(value) => value,
+        Err(_) => {
+            return user_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "Invalid analytics retention",
+            )
+        }
+    };
+    if !(crate::analytics::MIN_RETENTION_BUCKETS as u32
+        ..=crate::analytics::MAX_RETENTION_BUCKETS as u32)
+        .contains(&input.retention_minutes)
+    {
+        return user_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Retention must be between 60 and 10080 minutes",
+        );
+    }
+    let config = match repository::update_analytics_retention(&s.db, input.retention_minutes).await
+    {
+        Ok(config) => config,
+        Err(_) => {
+            return user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Database unavailable",
+            )
+        }
+    };
+    s.analytics
+        .set_retention_minutes(config.retention_minutes as usize);
+    audit::record_state(
+        &s,
+        Some(actor.id),
+        "analytics_retention_updated",
+        &format!("retention_minutes={}", config.retention_minutes),
+    )
+    .await;
+    s.realtime.publish("analytics.changed");
+    Json(config).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -4516,6 +4956,171 @@ async fn get_host(
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
+
+async fn get_host_auth(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let user = match current(&s, &h).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !authorize(
+        &s.db,
+        &user,
+        Permission::ProxyHostsRead,
+        ResourceContext::ProxyHost(id),
+    )
+    .await
+    .unwrap_or(false)
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match repository::get_host_auth(&s.db, id).await {
+        Ok(Some(auth)) => Json(auth).into_response(),
+        Ok(None) => Json(ProxyHostAuth {
+            host_id: id,
+            enabled: false,
+            realm: "BeaRust protected host".into(),
+            username: String::new(),
+            updated_at: String::new(),
+        })
+        .into_response(),
+        Err(_) => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
+    }
+}
+
+async fn update_host_auth(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<i64>,
+    input: Result<Json<ProxyHostAuthPatch>, JsonRejection>,
+) -> impl IntoResponse {
+    let user = match current(&s, &h).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !authorize(
+        &s.db,
+        &user,
+        Permission::ProxyHostsWrite,
+        ResourceContext::ProxyHost(id),
+    )
+    .await
+    .unwrap_or(false)
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if repository::get_host(&s.db, id)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Json(input) = match input {
+        Ok(value) => value,
+        Err(_) => {
+            return user_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "Invalid host authentication configuration",
+            )
+        }
+    };
+    let current = match repository::get_host_auth_record(&s.db, id).await {
+        Ok(value) => value,
+        Err(_) => {
+            return user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Database unavailable",
+            )
+        }
+    };
+    let enabled = input
+        .enabled
+        .unwrap_or_else(|| current.as_ref().is_some_and(|auth| auth.enabled));
+    let realm = input
+        .realm
+        .or_else(|| current.as_ref().map(|auth| auth.realm.clone()))
+        .unwrap_or_else(|| "BeaRust protected host".into())
+        .trim()
+        .to_owned();
+    let username = input
+        .username
+        .or_else(|| current.as_ref().map(|auth| auth.username.clone()))
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let mut password_hash = current
+        .as_ref()
+        .map(|auth| auth.password_hash.clone())
+        .unwrap_or_default();
+    if let Some(password) = input.password {
+        if password.len() < 12 || password.len() > 512 {
+            return user_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "Password must be 12-512 characters",
+            );
+        }
+        password_hash = match auth::hash_password(&password) {
+            Ok(hash) => hash,
+            Err(_) => {
+                return user_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "hashing_error",
+                    "Unable to store host authentication secret",
+                )
+            }
+        };
+    }
+    if realm.is_empty()
+        || realm.len() > 128
+        || username.len() > 128
+        || (enabled && (username.is_empty() || password_hash.is_empty()))
+    {
+        return user_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Enabled host authentication requires a username and password",
+        );
+    }
+    if repository::upsert_host_auth(&s.db, id, enabled, &realm, &username, &password_hash)
+        .await
+        .is_err()
+        || s.host_auth.reload(&s.db).await.is_err()
+    {
+        return user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "reload_failed",
+            "Unable to activate host authentication",
+        );
+    }
+    audit::record_state(
+        &s,
+        Some(user.id),
+        "proxy_host_auth_updated",
+        &format!("host_id={id};enabled={enabled}"),
+    )
+    .await;
+    s.realtime.publish("proxy_hosts.changed");
+    match repository::get_host_auth(&s.db, id).await {
+        Ok(Some(auth)) => Json(auth).into_response(),
+        _ => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
+    }
+}
 async fn create_host(
     State(s): State<AppState>,
     h: HeaderMap,
@@ -5112,8 +5717,16 @@ fn load_balancer_snapshot(runtime: &crate::runtime::RuntimeStore) -> LoadBalance
                         address: backend.address.to_string(),
                         health_check: backend.health_check,
                         health_path: backend.health_path.clone(),
+                        weight: backend.weight,
                         healthy: candidate.is_some_and(|value| value.healthy),
                         inflight: candidate.map_or(0, |value| value.inflight),
+                        response_time_ewma_ms: snapshot
+                            .pool(&config.name)
+                            .and_then(|pool| pool.response_ewma_ms(index.into())),
+                        passive_failures: snapshot
+                            .pool(&config.name)
+                            .and_then(|pool| pool.passive_failures(index.into()))
+                            .unwrap_or(0),
                     }
                 })
                 .collect();
@@ -5122,6 +5735,9 @@ fn load_balancer_snapshot(runtime: &crate::runtime::RuntimeStore) -> LoadBalance
                 algorithm: config.algorithm,
                 connect_timeout_seconds: config.connect_timeout_seconds,
                 request_timeout_seconds: config.request_timeout_seconds,
+                passive_health: snapshot
+                    .pool(&config.name)
+                    .is_some_and(|pool| pool.passive_health()),
                 backends,
             }
         })
@@ -5134,11 +5750,14 @@ fn load_balancer_snapshot(runtime: &crate::runtime::RuntimeStore) -> LoadBalance
             algorithms: vec![
                 "round_robin".into(),
                 "least_connections".into(),
+                "weighted".into(),
+                "ip_hash".into(),
+                "adaptive_weight".into(),
                 "plugin".into(),
             ],
             health_checks: vec!["tcp".into(), "http".into()],
-            passive_health: false,
-            adaptive_weighting: false,
+            passive_health: true,
+            adaptive_weighting: true,
         },
     }
 }

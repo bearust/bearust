@@ -1,13 +1,16 @@
 use crate::{
     acme::{lookup_http01_for_host, Http01Store},
-    analytics::{AnalyticsCollector, AnalyticsEvent, SecurityCounters},
+    analytics::{AnalyticsCollector, AnalyticsDimensionEvent, AnalyticsEvent, SecurityCounters},
     balancer::{BackendId, BackendLease},
     bot_challenge::{unix_now, ChallengeService},
     bot_protection::{evaluate as evaluate_bot, BotAction, BotEvaluation, BotInspectionContext},
     bot_store::BotStore,
     observability::{append_forwarded_for, classify_error, log_request, validated_request_id},
     plugin_runtime::PluginManager,
-    rate_limit::{Decision as RateLimitDecision, RateLimitAction, RateLimitKey, RateLimitPolicy},
+    rate_limit::{
+        Decision as RateLimitDecision, RateLimitAction, RateLimitKey, RateLimitKeyScope,
+        RateLimitPolicy,
+    },
     rate_limit_store::{client_ip, IpNetSet, RateLimiterStore},
     router::{normalize_host, ResolvedRoute},
     runtime::{RuntimeSnapshot, RuntimeStore},
@@ -37,6 +40,7 @@ pub struct RequestContext {
     pub excluded_backend: Option<BackendId>,
     pub completion_logged: bool,
     pub analytics_logged: bool,
+    pub load_balancer_result_recorded: bool,
     pub waf_body: Vec<u8>,
     pub waf_buffering: bool,
     pub waf_pending_suffix: Vec<u8>,
@@ -72,6 +76,7 @@ impl Default for RequestContext {
             excluded_backend: None,
             completion_logged: false,
             analytics_logged: false,
+            load_balancer_result_recorded: false,
             waf_body: Vec::new(),
             waf_buffering: true,
             waf_pending_suffix: Vec::new(),
@@ -97,6 +102,8 @@ pub struct BeaRustProxy {
     pub runtime: Arc<RuntimeStore>,
     pub http01: Http01Store,
     pub waf: Option<Arc<WafStore>>,
+    pub ip_security: Option<Arc<crate::security_policy::IpSecurityStore>>,
+    pub host_auth: Option<Arc<crate::security_policy::HostAuthStore>>,
     pub bot: Option<Arc<BotStore>>,
     pub challenges: Option<Arc<ChallengeService>>,
     pub rate_limiter: Option<Arc<RateLimiterStore>>,
@@ -118,6 +125,8 @@ impl BeaRustProxy {
             runtime,
             http01: Http01Store::default(),
             waf: None,
+            ip_security: None,
+            host_auth: None,
             bot: None,
             challenges: None,
             rate_limiter: None,
@@ -139,6 +148,20 @@ impl BeaRustProxy {
     }
     pub fn with_waf_store(mut self, waf: Arc<WafStore>) -> Self {
         self.waf = Some(waf);
+        self
+    }
+    pub fn with_ip_security_store(
+        mut self,
+        store: Arc<crate::security_policy::IpSecurityStore>,
+    ) -> Self {
+        self.ip_security = Some(store);
+        self
+    }
+    pub fn with_host_auth_store(
+        mut self,
+        store: Arc<crate::security_policy::HostAuthStore>,
+    ) -> Self {
+        self.host_auth = Some(store);
         self
     }
     pub fn with_bot_store(mut self, bot: Arc<BotStore>, challenges: Arc<ChallengeService>) -> Self {
@@ -209,12 +232,6 @@ impl BeaRustProxy {
         ctx: &mut RequestContext,
         status_hint: Option<u16>,
     ) {
-        if ctx.analytics_logged {
-            return;
-        }
-        let Some(analytics) = &self.analytics else {
-            return;
-        };
         let status_code = status_hint
             .or_else(|| {
                 session
@@ -222,6 +239,24 @@ impl BeaRustProxy {
                     .map(|response| response.status.as_u16())
             })
             .unwrap_or(0);
+        let latency_ms = ctx.start.elapsed().as_millis() as u64;
+        if !ctx.load_balancer_result_recorded {
+            if let (Some(snapshot), Some(route), Some(lease)) =
+                (&ctx.snapshot, &ctx.route, &ctx.lease)
+            {
+                if let Some(pool) = snapshot.pool(&route.upstream_pool) {
+                    pool.record_result(lease.id(), status_code, latency_ms);
+                }
+            }
+            ctx.load_balancer_result_recorded = true;
+        }
+        if ctx.analytics_logged {
+            return;
+        }
+        let Some(analytics) = &self.analytics else {
+            ctx.analytics_logged = true;
+            return;
+        };
         let security = analytics_security_counters(
             ctx.waf_blocked,
             ctx.bot_blocked,
@@ -236,12 +271,58 @@ impl BeaRustProxy {
             .as_ref()
             .and_then(|route| self.analytics_host_ids.get(&route.host).copied())
             .unwrap_or(0);
-        analytics.record(completion_event(
-            proxy_host_id,
-            status_code,
-            ctx.start.elapsed().as_millis() as u64,
-            security,
-        ));
+        let endpoint = Some(session.req_header().uri.path().to_owned());
+        let upstream = ctx.lease.as_ref().map(|lease| lease.address().to_string());
+        let response_bytes = session
+            .response_written()
+            .and_then(|response| response.headers.get("content-length"))
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let attacker_ip = if ctx.waf_blocked
+            || ctx.bot_blocked
+            || ctx.bot_challenge
+            || matches!(
+                ctx.rate_limit_decision,
+                Some(RateLimitDecision::Limited { .. })
+            ) {
+            session.client_addr().and_then(|address| {
+                address.as_inet().map(|inet| {
+                    client_ip(
+                        inet.ip(),
+                        &session.req_header().headers,
+                        &self.trusted_proxies,
+                    )
+                    .to_string()
+                })
+            })
+        } else {
+            None
+        };
+        let attack_type = if ctx.waf_blocked {
+            Some("waf")
+        } else if ctx.bot_blocked {
+            Some("bot_block")
+        } else if ctx.bot_challenge {
+            Some("bot_challenge")
+        } else if matches!(
+            ctx.rate_limit_decision,
+            Some(RateLimitDecision::Limited { .. })
+        ) {
+            Some("rate_limit")
+        } else {
+            None
+        };
+        analytics.record_with_dimensions(
+            completion_event(proxy_host_id, status_code, latency_ms, security),
+            AnalyticsDimensionEvent {
+                endpoint,
+                upstream,
+                attacker_ip,
+                bytes: response_bytes,
+                attack_type: attack_type.map(str::to_owned),
+            },
+        );
         invoke_analytics_changed(&self.analytics_changed);
         ctx.analytics_logged = true;
     }
@@ -1037,6 +1118,30 @@ impl ProxyHttp for BeaRustProxy {
         );
         let challenge_host = normalize_host(host).unwrap_or_default();
         let method = session.req_header().method.as_str();
+        if let (Some(policy), Some(peer)) = (
+            &self.ip_security,
+            session
+                .client_addr()
+                .and_then(|addr| addr.as_inet().map(|inet| inet.ip())),
+        ) {
+            let ip = client_ip(peer, &session.req_header().headers, &self.trusted_proxies);
+            let decision = policy.evaluate(ip);
+            if decision.blocked {
+                tracing::info!(
+                    event = "ip_security_block",
+                    request_id = %ctx.request_id,
+                    rule_id = ?decision.rule_id,
+                    score = decision.score,
+                    client_ip = %ip
+                );
+                session
+                    .respond_error_with_body(403, Bytes::from_static(b"Request blocked"))
+                    .await?;
+                self.record_completion(session, ctx, Some(403));
+                ctx.completion_logged = true;
+                return Ok(true);
+            }
+        }
         if let Some(bot) = &self.bot {
             let headers = session
                 .req_header()
@@ -1199,7 +1304,7 @@ impl ProxyHttp for BeaRustProxy {
                 return Ok(true);
             }
         }
-        let Some((route, _)) = snapshot.route(host, &path) else {
+        let Some((resolved_route, _)) = snapshot.route(host, &path) else {
             session.respond_error(404).await?;
             log_request(
                 &ctx.request_id,
@@ -1215,8 +1320,46 @@ impl ProxyHttp for BeaRustProxy {
             ctx.completion_logged = true;
             return Ok(true);
         };
+        let route = resolved_route.clone();
         ctx.route = Some(route.clone());
         ctx.snapshot = Some(snapshot);
+        if let Some(auth) = &self.host_auth {
+            let authorization = session
+                .req_header()
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok());
+            if auth.protected(&route.host) && !auth.authorized(&route.host, authorization) {
+                let realm = auth
+                    .realm(&route.host)
+                    .unwrap_or_else(|| "BeaRust protected host".into())
+                    .replace('"', "'")
+                    .chars()
+                    .filter(|ch| !ch.is_ascii_control())
+                    .take(128)
+                    .collect::<String>();
+                let mut response = ResponseHeader::build(401, Some(1)).map_err(|error| {
+                    pingora_core::Error::explain(ErrorType::HTTPStatus(500), error.to_string())
+                })?;
+                response
+                    .insert_header("WWW-Authenticate", format!("Basic realm=\"{realm}\""))
+                    .map_err(|error| {
+                        pingora_core::Error::explain(ErrorType::HTTPStatus(500), error.to_string())
+                    })?;
+                response
+                    .insert_header("Cache-Control", "no-store")
+                    .map_err(|error| {
+                        pingora_core::Error::explain(ErrorType::HTTPStatus(500), error.to_string())
+                    })?;
+                session
+                    .as_downstream_mut()
+                    .write_error_response(response, Bytes::from_static(b"Authentication required"))
+                    .await?;
+                self.record_completion(session, ctx, Some(401));
+                ctx.completion_logged = true;
+                return Ok(true);
+            }
+        }
         if let Some(store) = &self.rate_limiter {
             let peer = session
                 .client_addr()
@@ -1228,14 +1371,15 @@ impl ProxyHttp for BeaRustProxy {
                 // listener restart.
                 let host_id = route_key(ctx.route.as_ref().expect("route must be set"));
                 let policy = store.host_policy(host_id);
-                let decision = store.evaluate(
-                    RateLimitKey {
-                        proxy_host_id: host_id,
-                        client_ip: ip,
-                    },
-                    &policy,
-                    Instant::now(),
-                );
+                let key = RateLimitKey {
+                    proxy_host_id: host_id,
+                    client_ip: ip,
+                };
+                let decision = if policy.key_scope == RateLimitKeyScope::ProxyHostPathIp {
+                    store.evaluate_path(key, &path, &policy, Instant::now())
+                } else {
+                    store.evaluate(key, &policy, Instant::now())
+                };
                 ctx.rate_limit_decision = Some(decision);
                 if let RateLimitDecision::Limited { .. } = decision {
                     emit_rate_limit_telemetry(&ctx.request_id, &decision, policy.action);
@@ -1306,7 +1450,18 @@ impl ProxyHttp for BeaRustProxy {
         } else {
             None
         };
-        let Some(lease) = plugin_lease.or_else(|| pool.select(ctx.excluded_backend)) else {
+        let client_key = session.client_addr().map(|address| {
+            address
+                .as_inet()
+                .map(|inet| inet.ip().to_string())
+                .unwrap_or_else(|| address.to_string())
+        });
+        let Some(lease) = plugin_lease.or_else(|| {
+            pool.select_with_key(
+                ctx.excluded_backend,
+                client_key.as_deref().map(str::as_bytes),
+            )
+        }) else {
             return Err(pingora_core::Error::explain(
                 ErrorType::HTTPStatus(503),
                 "no healthy upstream",
@@ -2632,16 +2787,19 @@ mod tests {
             algorithm: Algorithm::Plugin,
             connect_timeout_seconds: 3,
             request_timeout_seconds: 30,
+            passive_health: false,
             backends: vec![
                 BackendConfig {
                     address: "127.0.0.1:19001".parse().unwrap(),
                     health_check: HealthCheckKind::Tcp,
                     health_path: None,
+                    weight: 1,
                 },
                 BackendConfig {
                     address: "127.0.0.1:19002".parse().unwrap(),
                     health_check: HealthCheckKind::Tcp,
                     health_path: None,
+                    weight: 1,
                 },
             ],
         };

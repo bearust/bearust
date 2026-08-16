@@ -231,15 +231,13 @@ fn rejects_route_that_references_missing_pool() {
 }
 
 #[test]
-fn rejects_weight_field_in_phase_one() {
-    let invalid = VALID.replace(
+fn accepts_backend_weight_for_weighted_pools() {
+    let config = Config::parse(&VALID.replace(
         "address = \"127.0.0.1:19001\"",
         "address = \"127.0.0.1:19001\"\nweight = 2",
-    );
-    assert!(Config::parse(&invalid)
-        .unwrap_err()
-        .to_string()
-        .contains("weight"));
+    ))
+    .expect("backend weights are part of the load-balancer contract");
+    assert_eq!(config.upstream_pools[0].backends[0].weight, 2);
 }
 
 #[test]

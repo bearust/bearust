@@ -455,6 +455,9 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             let store = store.clone();
             let http3_options = crate::http3::Http3Options {
                 waf: Some(waf_store.clone()),
+                ip_security: Some(control_state.ip_security.clone()),
+                host_auth: Some(control_state.host_auth.clone()),
+                trusted_proxies: Some(Arc::new(trusted_proxies.clone())),
                 analytics: Some(Arc::new(crate::http3::AnalyticsContext {
                     collector: analytics.clone(),
                     host_ids: Arc::new(analytics_host_ids.clone()),
@@ -487,7 +490,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             action: match config.rate_limit.action { config::RateLimitAction::Block => crate::rate_limit::RateLimitAction::Block, config::RateLimitAction::Monitor => crate::rate_limit::RateLimitAction::Monitor },
             capacity: config.rate_limit.capacity as u32,
             refill_per_second: config.rate_limit.refill_per_second,
-            key_scope: match config.rate_limit.key_scope { config::RateLimitKeyScope::ProxyHostIp => RateLimitKeyScope::ProxyHostIp },
+            key_scope: match config.rate_limit.key_scope { config::RateLimitKeyScope::ProxyHostIp => RateLimitKeyScope::ProxyHostIp, config::RateLimitKeyScope::ProxyHostPathIp => RateLimitKeyScope::ProxyHostPathIp },
         };
         rate_limiter.set_policy(rate_policy.clone());
         if let Ok(host_configs) = crate::control_plane::repository::list_host_rate_limit_configs(&control_state.db).await {
@@ -547,7 +550,10 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         server_config.graceful_shutdown_timeout_seconds =
             Some(config.server.graceful_shutdown_seconds);
         let ready_path = std::env::var_os("BEARUST_UPGRADE_READY").map(PathBuf::from);
-        let mut proxy_handler = crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store).with_bot_store(bot_store, challenge_service)
+        let mut proxy_handler = crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store)
+                .with_ip_security_store(control_state.ip_security.clone())
+                .with_host_auth_store(control_state.host_auth.clone())
+                .with_bot_store(bot_store, challenge_service)
                 .with_analytics(analytics)
                 .with_analytics_changed_notifier(analytics_changed)
                 .with_analytics_host_ids(analytics_host_ids)

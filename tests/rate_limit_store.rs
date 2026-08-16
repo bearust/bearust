@@ -141,3 +141,38 @@ fn policy_updates_reset_existing_buckets() {
     });
     assert_eq!(store.len(), 0);
 }
+
+#[test]
+fn endpoint_scope_separates_paths_for_the_same_client() {
+    let store = RateLimiterStore::new(8, Duration::from_secs(60));
+    let policy = RateLimitPolicy {
+        enabled: true,
+        capacity: 1,
+        refill_per_second: 0.001,
+        key_scope: bearust::rate_limit::RateLimitKeyScope::ProxyHostPathIp,
+        ..RateLimitPolicy::default()
+    };
+    let start = Instant::now();
+    assert!(matches!(
+        store.evaluate_path(key(1, "192.0.2.1"), "/orders", &policy, start),
+        Decision::Allowed { .. }
+    ));
+    assert!(matches!(
+        store.evaluate_path(
+            key(1, "192.0.2.1"),
+            "/orders",
+            &policy,
+            start + Duration::from_millis(1),
+        ),
+        Decision::Limited { .. }
+    ));
+    assert!(matches!(
+        store.evaluate_path(
+            key(1, "192.0.2.1"),
+            "/health",
+            &policy,
+            start + Duration::from_millis(2),
+        ),
+        Decision::Allowed { .. }
+    ));
+}

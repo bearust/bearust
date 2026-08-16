@@ -7,7 +7,7 @@
 //! against `pingora-core` 0.8.1's own source and Cargo.toml: no `quic`/`h3`
 //! feature, no QUIC dependency, no QUIC source file anywhere in the crate).
 
-use crate::analytics::AnalyticsCollector;
+use crate::analytics::{AnalyticsCollector, AnalyticsDimensionEvent};
 use crate::bot_challenge::{unix_now, ChallengeService};
 use crate::bot_protection::{evaluate as evaluate_bot, BotAction, BotInspectionContext};
 use crate::bot_store::BotStore;
@@ -16,7 +16,9 @@ use crate::observability::validated_request_id;
 use crate::plugin_notify::NotificationSink;
 use crate::plugin_runtime::PluginManager;
 use crate::proxy::cookie_value;
-use crate::rate_limit::{Decision as RateLimitDecision, RateLimitAction, RateLimitKey};
+use crate::rate_limit::{
+    Decision as RateLimitDecision, RateLimitAction, RateLimitKey, RateLimitKeyScope,
+};
 use crate::rate_limit_store::{client_ip, IpNetSet, RateLimiterStore};
 use crate::runtime::RuntimeStore;
 use crate::waf_store::WafStore;
@@ -121,6 +123,9 @@ const BOT_INSPECTION_HEADERS: [&str; 6] = [
 #[derive(Default)]
 pub struct Http3Options {
     pub waf: Option<Arc<WafStore>>,
+    pub ip_security: Option<Arc<crate::security_policy::IpSecurityStore>>,
+    pub host_auth: Option<Arc<crate::security_policy::HostAuthStore>>,
+    pub trusted_proxies: Option<Arc<IpNetSet>>,
     pub analytics: Option<Arc<AnalyticsContext>>,
     pub rate_limit: Option<Arc<RateLimitContext>>,
     pub bot: Option<Arc<BotContext>>,
@@ -135,6 +140,9 @@ pub struct Http3Options {
 struct HandlerState {
     store: Arc<RuntimeStore>,
     waf: Option<Arc<WafStore>>,
+    ip_security: Option<Arc<crate::security_policy::IpSecurityStore>>,
+    host_auth: Option<Arc<crate::security_policy::HostAuthStore>>,
+    trusted_proxies: Option<Arc<IpNetSet>>,
     client: Arc<reqwest::Client>,
     analytics: Option<Arc<AnalyticsContext>>,
     rate_limit: Option<Arc<RateLimitContext>>,
@@ -170,6 +178,24 @@ fn record_analytics_event(
     start: Instant,
     security: SecurityFlags,
 ) {
+    record_analytics_event_with_dimensions(
+        analytics,
+        host,
+        status,
+        start,
+        security,
+        AnalyticsDimensionEvent::default(),
+    );
+}
+
+fn record_analytics_event_with_dimensions(
+    analytics: &Option<Arc<AnalyticsContext>>,
+    host: Option<&str>,
+    status: u16,
+    start: Instant,
+    security: SecurityFlags,
+    dimensions: AnalyticsDimensionEvent,
+) {
     let Some(analytics) = analytics else { return };
     let proxy_host_id = host
         .and_then(|host| analytics.host_ids.get(host).copied())
@@ -180,12 +206,15 @@ fn record_analytics_event(
         security.bot_challenge,
         security.rate_limited,
     );
-    analytics.collector.record(crate::proxy::completion_event(
-        proxy_host_id,
-        status,
-        start.elapsed().as_millis() as u64,
-        security,
-    ));
+    analytics.collector.record_with_dimensions(
+        crate::proxy::completion_event(
+            proxy_host_id,
+            status,
+            start.elapsed().as_millis() as u64,
+            security,
+        ),
+        dimensions,
+    );
     if let Some(changed) = &analytics.changed {
         changed();
     }
@@ -270,6 +299,9 @@ pub async fn serve(
     let state = Arc::new(HandlerState {
         store,
         waf: options.waf,
+        ip_security: options.ip_security,
+        host_auth: options.host_auth,
+        trusted_proxies: options.trusted_proxies,
         client: Arc::new(client),
         analytics: options.analytics,
         rate_limit: options.rate_limit,
@@ -708,6 +740,42 @@ async fn handle_request<S>(
             .map(|(_, value)| value.as_bytes()),
     );
 
+    if let Some(policy) = &state.ip_security {
+        let ip = state
+            .trusted_proxies
+            .as_ref()
+            .map_or(remote_addr.ip(), |trusted| {
+                client_ip(remote_addr.ip(), req.headers(), trusted)
+            });
+        let decision = policy.evaluate(ip);
+        if decision.blocked {
+            tracing::info!(
+                event = "ip_security_block",
+                request_id = %request_id,
+                rule_id = ?decision.rule_id,
+                score = decision.score,
+                client_ip = %ip
+            );
+            let resp = http::Response::builder()
+                .status(http::StatusCode::FORBIDDEN)
+                .body(())
+                .expect("static response head is always valid");
+            let _ = stream.send_response(resp).await;
+            let _ = stream
+                .send_data(bytes::Bytes::from_static(b"Request blocked"))
+                .await;
+            let _ = stream.finish().await;
+            record_analytics_event(
+                &state.analytics,
+                downstream_host.as_deref(),
+                403,
+                start,
+                SecurityFlags::default(),
+            );
+            return;
+        }
+    }
+
     // Single-phase evaluation (buffer the whole body up to
     // MAX_INSPECTION_BODY_BYTES, then evaluate once): this task
     // deliberately does not replicate src/proxy.rs's two-phase
@@ -909,6 +977,42 @@ async fn handle_request<S>(
         return;
     };
 
+    if let Some(auth) = &state.host_auth {
+        let authorization = req
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok());
+        if auth.protected(&route.host) && !auth.authorized(&route.host, authorization) {
+            let realm = auth
+                .realm(&route.host)
+                .unwrap_or_else(|| "BeaRust protected host".into())
+                .replace('"', "'")
+                .chars()
+                .filter(|ch| !ch.is_ascii_control())
+                .take(128)
+                .collect::<String>();
+            let resp = http::Response::builder()
+                .status(http::StatusCode::UNAUTHORIZED)
+                .header("www-authenticate", format!("Basic realm=\"{realm}\""))
+                .header("cache-control", "no-store")
+                .body(())
+                .expect("static response head is always valid");
+            let _ = stream.send_response(resp).await;
+            let _ = stream
+                .send_data(bytes::Bytes::from_static(b"Authentication required"))
+                .await;
+            let _ = stream.finish().await;
+            record_analytics_event(
+                &state.analytics,
+                Some(route.host.as_str()),
+                401,
+                start,
+                SecurityFlags::default(),
+            );
+            return;
+        }
+    }
+
     // Rate limiting, mirroring src/proxy.rs's placement: after the WAF has
     // already passed and a route has resolved, before backend selection.
     // `client_ip` and `route_key` are reused directly from src/proxy.rs and
@@ -919,14 +1023,17 @@ async fn handle_request<S>(
         let ip = client_ip(remote_addr.ip(), req.headers(), &rate_limit.trusted_proxies);
         let host_id = crate::proxy::route_key(route);
         let policy = rate_limit.limiter.host_policy(host_id);
-        let decision = rate_limit.limiter.evaluate(
-            RateLimitKey {
-                proxy_host_id: host_id,
-                client_ip: ip,
-            },
-            &policy,
-            Instant::now(),
-        );
+        let key = RateLimitKey {
+            proxy_host_id: host_id,
+            client_ip: ip,
+        };
+        let decision = if policy.key_scope == RateLimitKeyScope::ProxyHostPathIp {
+            rate_limit
+                .limiter
+                .evaluate_path(key, &path, &policy, Instant::now())
+        } else {
+            rate_limit.limiter.evaluate(key, &policy, Instant::now())
+        };
         if let RateLimitDecision::Limited { .. } = decision {
             crate::proxy::emit_rate_limit_telemetry(&request_id, &decision, policy.action);
             if policy.action == RateLimitAction::Block {
@@ -964,7 +1071,7 @@ async fn handle_request<S>(
 
     // balance.select: mirrors src/proxy.rs's precedence -- try the plugin's
     // pick first (validated via pool.select_specific), falling back to
-    // pool.select(None) on any failure (no plugin, disabled, trap, invalid
+    // pool.select_with_key(None, ...) on any failure (no plugin, disabled, trap, invalid
     // pick, ...), exactly as apply_load_balancer_plugin's caller does.
     let lease = match apply_load_balancer_plugin(
         state.plugin_manager.as_ref(),
@@ -978,7 +1085,7 @@ async fn handle_request<S>(
     .await
     {
         Some(lease) => Some(lease),
-        None => pool.select(None),
+        None => pool.select_with_key(None, Some(remote_addr.ip().to_string().as_bytes())),
     };
     let Some(lease) = lease else {
         let resp = http::Response::builder()
@@ -1049,6 +1156,12 @@ async fn handle_request<S>(
         Ok(upstream_resp) => {
             let status = http::StatusCode::from_u16(upstream_resp.status().as_u16())
                 .unwrap_or(http::StatusCode::BAD_GATEWAY);
+            let response_bytes = upstream_resp
+                .headers()
+                .get("content-length")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
             use futures_util::StreamExt as _;
 
             // transform.response: reuses src/proxy.rs's pure
@@ -1130,12 +1243,23 @@ async fn handle_request<S>(
                 }
                 let _ = stream.finish().await;
             }
-            record_analytics_event(
+            record_analytics_event_with_dimensions(
                 &state.analytics,
                 Some(route.host.as_str()),
                 status.as_u16(),
                 start,
                 SecurityFlags::default(),
+                AnalyticsDimensionEvent {
+                    endpoint: Some(path.clone()),
+                    upstream: Some(lease.address().to_string()),
+                    bytes: response_bytes,
+                    ..AnalyticsDimensionEvent::default()
+                },
+            );
+            pool.record_result(
+                lease.id(),
+                status.as_u16(),
+                start.elapsed().as_millis() as u64,
             );
         }
         Err(_) => {
@@ -1152,6 +1276,7 @@ async fn handle_request<S>(
                 start,
                 SecurityFlags::default(),
             );
+            pool.record_result(lease.id(), 502, start.elapsed().as_millis() as u64);
         }
     }
 }

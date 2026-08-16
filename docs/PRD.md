@@ -743,20 +743,28 @@ raw fingerprints, and tokens are never rendered in the dashboard or audit data.
 The responsive admin dashboard exposes policy and crawler controls with
 validation and accessible loading/error states.
 
-Adaptive rate limiting, CAPTCHA provider integrations, and tuning feedback
-remain deferred to Phase 7C and later increments.
+### Phase 7C status: traffic policy controls and analyst feedback
+
+Phase 7C adds bounded adaptive rate-limit scopes for host/client and
+endpoint/client keys, operator-managed CIDR reputation policies with optional
+country metadata, per-proxy-host HTTP Basic Authentication, and an authenticated
+false-positive feedback intake. Policies are persisted in SQLite, validated at
+the control plane, reloaded into immutable data-plane snapshots, and applied to
+both HTTP/1.1/2 and HTTP/3. CAPTCHA provider integrations and automatic feedback
+driven rule retraining remain deferred.
 
 ### Phase 8 status: bounded analytics dashboard
 
 Phase 8 delivers process-local operational analytics for proxy traffic and
-security decisions. A bounded one-minute ring buffer retains 24 hours (up to
-1,440 buckets per host) and resets on process restart. Summary and timeseries
-queries are authenticated, read-only endpoints for `admin`, `operator`, and
-`viewer` roles; host and bucket limits are bounded at 100 and 1,440, and
-invalid or oversized ranges return `400`. Collection is fail-open and stores
-only aggregate status, latency histograms, and redacted WAF, bot, and
-rate-limit counters—never raw IP addresses, complete URLs, headers, bodies,
-credentials, tokens, or secrets.
+security decisions. A bounded one-minute ring buffer retains a configurable
+60 minutes to 7 days (default 24 hours) and resets on process restart. Summary
+and timeseries queries are authenticated, read-only endpoints for `admin`,
+`operator`, and `viewer` roles; host and bucket limits are bounded at 100 and
+10,080, and invalid or oversized ranges return `400`. Collection is fail-open
+and stores aggregate status, latency histograms, bandwidth, bounded endpoint
+and upstream rankings, security-event categories, and top attacker IPs for the
+configured process-local window. It never stores request bodies, headers,
+credentials, tokens, or complete URLs.
 
 The dashboard provides host/time filters, request and status cards, latency
 percentiles, error views, security-event panels, and loading/error/empty
@@ -767,8 +775,10 @@ internal bind is `127.0.0.1:9090`, internal-only mode requires loopback, and
 external exposure requires authentication. Output uses bounded configured
 proxy-host and status-class labels with a 256 KiB default cap.
 
-Durable history, Redis/cross-node aggregation and fan-out, per-route
-dimensions, custom retention, and cross-node replay remain deferred to Phase 10–13.
+The dashboard exposes the bounded dimensions through `/api/analytics/dimensions`
+and the retention window is configurable by administrators through
+`/api/analytics/retention`. Durable historical rollups, Redis/cross-node
+aggregation and fan-out, and cross-node replay remain deferred to Phase 10–13.
 
 ### Phase 9 status: self-learning (traffic baseline, anomaly detection, adaptive tuning)
 

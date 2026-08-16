@@ -11,8 +11,8 @@ vi.mock("./api", async () => {
   return { ...actual, api: { ...actual.api, getAnalyticsSummary: vi.fn(), getAnalyticsTimeseries: vi.fn() } };
 });
 
-const summary = { requests: 4, status_2xx: 3, status_3xx: 0, status_4xx: 1, status_5xx: 0, waf_blocks: 1, bot_blocks: 0, bot_challenges: 0, rate_limited: 0, p50_ms: 12, p95_ms: 40, p99_ms: 50 };
-const row = { timestamp: "2026-07-22T10:00:00Z", proxy_host_id: 1, requests: 4, status_2xx: 3, status_3xx: 0, status_4xx: 1, status_5xx: 0, waf_blocks: 1, bot_blocks: 0, bot_challenges: 0, rate_limited: 0, p50_ms: 12, p95_ms: 40, p99_ms: 50 };
+const summary = { requests: 4, status_2xx: 3, status_3xx: 0, status_4xx: 1, status_5xx: 0, waf_blocks: 1, bot_blocks: 0, bot_challenges: 0, rate_limited: 0, bandwidth_bytes: 4096, p50_ms: 12, p95_ms: 40, p99_ms: 50 };
+const row = { timestamp: "2026-07-22T10:00:00Z", proxy_host_id: 1, requests: 4, status_2xx: 3, status_3xx: 0, status_4xx: 1, status_5xx: 0, waf_blocks: 1, bot_blocks: 0, bot_challenges: 0, rate_limited: 0, bandwidth_bytes: 4096, p50_ms: 12, p95_ms: 40, p99_ms: 50 };
 
 describe("analytics dashboard", () => {
   afterEach(() => { vi.restoreAllMocks(); document.body.innerHTML = ""; });

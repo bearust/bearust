@@ -199,7 +199,7 @@
   },
   "security": {
     "coverageTitle": "PRD capability coverage",
-    "coverageDescription": "This matrix separates controls available in the current API from requirements that need a backend contract before the UI can safely manage them.",
+    "coverageDescription": "This matrix summarizes the security controls that are live in the current data-plane and control-plane contracts.",
     "available": "Available",
     "partial": "Partial",
     "notExposed": "Not exposed",
@@ -210,11 +210,11 @@
     "botChallengeTitle": "Bot challenge",
     "botChallengeDetail": "Risk-based protection and an in-browser proof-of-work challenge are available; an external CAPTCHA provider is not exposed.",
     "ipGeoTitle": "IP reputation and GeoIP",
-    "ipGeoDetail": "The current control-plane API does not expose reputation feeds, country matching, or IP allow/deny policy management.",
+    "ipGeoDetail": "Manage bounded CIDR reputation and Geo policy rules with score, action, and optional country metadata. External reputation feeds are not required for local policy enforcement.",
     "authChallengeTitle": "Per-host authentication challenge",
-    "authChallengeDetail": "Host-level visitor authentication is not represented in the current proxy-host or security API contracts.",
+    "authChallengeDetail": "Configure Basic authentication per proxy host; unauthorized visitors receive a safe challenge before upstream routing.",
     "falsePositiveLoopTitle": "False-positive feedback loop",
-    "falsePositiveLoopDetail": "Adaptive tuning recommendations are available, but direct false-positive labels and feedback events are not collected."
+    "falsePositiveLoopDetail": "Admins can label false and true positives, review recent feedback, and keep adaptive policy changes approval-gated."
   },
   "analytics": {
     "title": "Analytics",
@@ -424,11 +424,11 @@
     "telemetryBoundaries": "Telemetry boundaries",
     "telemetryDescription": "The page distinguishes live data from capabilities intentionally outside the current aggregate API.",
     "collectedTitle": "Collected",
-    "collectedDetail": "Requests, status classes, p50/p95/p99 latency, WAF/bot/rate-limit counters, and upstream health.",
+    "collectedDetail": "Requests, bandwidth, status classes, p50/p95/p99 latency, top endpoints/upstreams/attacker IPs, attack types, WAF/bot/rate-limit counters, and upstream health.",
     "redactedTitle": "Privacy-preserving",
     "redactedDetail": "Aggregate telemetry does not expose request bodies, headers, credentials, raw IPs, or complete URLs.",
-    "notCollectedTitle": "Not collected",
-    "notCollectedDetail": "Bandwidth, per-route top endpoints, attacker IP rankings, and durable custom retention need backend telemetry extensions.",
+    "notCollectedTitle": "Retention boundary",
+    "notCollectedDetail": "Raw telemetry is bounded to a 24-hour process-local window; durable historical rollups and custom retention need a persistent analytics store.",
     "prometheusTitle": "Prometheus",
     "prometheusDetail": "The /metrics endpoint, bind address, and authentication mode are controlled by deployment configuration, not changed from this UI.",
     "openMetrics": "Open /metrics"

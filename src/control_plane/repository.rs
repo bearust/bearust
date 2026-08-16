@@ -4,8 +4,10 @@ use crate::bot_protection::{
 use crate::cluster_raft::{CommandResult, ConfigCommand};
 use crate::control_plane::models::{
     AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AdvisorDraftDecision, AdvisorJobPage,
-    AdvisorJobRecord, AuditLogItem, AuditLogPage, AuditLogQuery, CertificateMetadata, ProxyHost,
-    RateLimitConfig, RoleDetail, RolePermissionScope, User, WafAction, WafConfig, WafMode, WafRule,
+    AdvisorJobRecord, AnalyticsRetentionConfig, AuditLogItem, AuditLogPage, AuditLogQuery,
+    CertificateMetadata, IpSecurityAction, IpSecurityRule, ProxyHost, ProxyHostAuth,
+    RateLimitConfig, RoleDetail, RolePermissionScope, User, WafAction, WafConfig, WafFeedback,
+    WafMode, WafRule,
 };
 use crate::control_plane::rbac::Role;
 use crate::rate_limit::{RateLimitAction, RateLimitKeyScope, RateLimitPolicy};
@@ -783,6 +785,10 @@ async fn apply_raft_command_inner(
             }
         }
         ConfigCommand::DeleteProxyHost { host_id, .. } => {
+            sqlx::query("DELETE FROM proxy_host_auth WHERE host_id=?")
+                .bind(host_id)
+                .execute(&mut *tx)
+                .await?;
             let deleted = sqlx::query("DELETE FROM proxy_hosts WHERE id=?")
                 .bind(host_id)
                 .execute(&mut *tx)
@@ -935,6 +941,20 @@ fn parse_waf_action(value: &str) -> WafAction {
         _ => WafAction::Inherit,
     }
 }
+fn ip_security_action_value(action: IpSecurityAction) -> &'static str {
+    match action {
+        IpSecurityAction::Monitor => "monitor",
+        IpSecurityAction::Block => "block",
+        IpSecurityAction::Allow => "allow",
+    }
+}
+fn parse_ip_security_action(value: &str) -> IpSecurityAction {
+    match value {
+        "block" => IpSecurityAction::Block,
+        "allow" => IpSecurityAction::Allow,
+        _ => IpSecurityAction::Monitor,
+    }
+}
 fn rate_limit_action_value(a: RateLimitAction) -> &'static str {
     if matches!(a, RateLimitAction::Block) {
         "block"
@@ -950,7 +970,17 @@ fn parse_rate_limit_action(v: &str) -> RateLimitAction {
     }
 }
 fn parse_rate_limit_scope(v: &str) -> Option<RateLimitKeyScope> {
-    (v == "proxy_host_ip").then_some(RateLimitKeyScope::ProxyHostIp)
+    match v {
+        "proxy_host_ip" => Some(RateLimitKeyScope::ProxyHostIp),
+        "proxy_host_path_ip" => Some(RateLimitKeyScope::ProxyHostPathIp),
+        _ => None,
+    }
+}
+fn rate_limit_scope_value(scope: RateLimitKeyScope) -> &'static str {
+    match scope {
+        RateLimitKeyScope::ProxyHostIp => "proxy_host_ip",
+        RateLimitKeyScope::ProxyHostPathIp => "proxy_host_path_ip",
+    }
 }
 fn validate_rate_limit_config(c: &RateLimitConfig) -> Result<(), sqlx::Error> {
     RateLimitPolicy {
@@ -983,7 +1013,7 @@ pub async fn update_rate_limit_config(
     c: &RateLimitConfig,
 ) -> Result<u64, sqlx::Error> {
     validate_rate_limit_config(c)?;
-    Ok(sqlx::query("UPDATE rate_limit_config SET enabled=?,action=?,capacity=?,refill_per_second=?,key_scope=?,updated_at=? WHERE id=1").bind(c.enabled as i64).bind(rate_limit_action_value(c.action)).bind(c.capacity as i64).bind(c.refill_per_second).bind("proxy_host_ip").bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?.rows_affected())
+    Ok(sqlx::query("UPDATE rate_limit_config SET enabled=?,action=?,capacity=?,refill_per_second=?,key_scope=?,updated_at=? WHERE id=1").bind(c.enabled as i64).bind(rate_limit_action_value(c.action)).bind(c.capacity as i64).bind(c.refill_per_second).bind(rate_limit_scope_value(c.key_scope)).bind(chrono::Utc::now().to_rfc3339()).execute(pool).await?.rows_affected())
 }
 
 fn bot_mode_value(mode: BotMode) -> &'static str {
@@ -1261,6 +1291,250 @@ pub async fn delete_waf_rule(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error>
             .await?
             .rows_affected(),
     )
+}
+
+fn ip_security_rule_from_row(row: &sqlx::any::AnyRow) -> IpSecurityRule {
+    IpSecurityRule {
+        id: row.get("id"),
+        cidr: row.get("cidr"),
+        action: parse_ip_security_action(&row.get::<String, _>("action")),
+        score: row.get("score"),
+        country_code: row.get("country_code"),
+        enabled: row.get::<i64, _>("enabled") != 0,
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+pub async fn list_ip_security_rules(pool: &DbPool) -> Result<Vec<IpSecurityRule>, sqlx::Error> {
+    let rows = sqlx::query("SELECT id,cidr,action,score,country_code,enabled,created_at,updated_at FROM ip_security_rules ORDER BY id")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.iter().map(ip_security_rule_from_row).collect())
+}
+
+pub async fn insert_ip_security_rule(
+    pool: &DbPool,
+    rule: &IpSecurityRule,
+) -> Result<i64, sqlx::Error> {
+    let id = if rule.id > 0 { rule.id } else { generated_id() };
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO ip_security_rules(id,cidr,action,score,country_code,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
+        .bind(id)
+        .bind(&rule.cidr)
+        .bind(ip_security_action_value(rule.action))
+        .bind(rule.score)
+        .bind(&rule.country_code)
+        .bind(rule.enabled as i64)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+    Ok(id)
+}
+
+pub async fn update_ip_security_rule(
+    pool: &DbPool,
+    id: i64,
+    rule: &IpSecurityRule,
+) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("UPDATE ip_security_rules SET cidr=?,action=?,score=?,country_code=?,enabled=?,updated_at=? WHERE id=?")
+        .bind(&rule.cidr)
+        .bind(ip_security_action_value(rule.action))
+        .bind(rule.score)
+        .bind(&rule.country_code)
+        .bind(rule.enabled as i64)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(id)
+        .execute(pool)
+        .await?
+        .rows_affected())
+}
+
+pub async fn delete_ip_security_rule(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("DELETE FROM ip_security_rules WHERE id=?")
+        .bind(id)
+        .execute(pool)
+        .await?
+        .rows_affected())
+}
+
+#[derive(Clone, Debug)]
+pub struct HostAuthRecord {
+    pub host_id: i64,
+    pub host: String,
+    pub enabled: bool,
+    pub realm: String,
+    pub username: String,
+    pub password_hash: String,
+    pub updated_at: String,
+}
+
+fn host_auth_from_row(row: &sqlx::any::AnyRow) -> HostAuthRecord {
+    HostAuthRecord {
+        host_id: row.get("host_id"),
+        host: row.get("host"),
+        enabled: row.get::<i64, _>("enabled") != 0,
+        realm: row.get("realm"),
+        username: row.get("username"),
+        password_hash: row.get("password_hash"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+pub async fn list_host_auth_configs(pool: &DbPool) -> Result<Vec<HostAuthRecord>, sqlx::Error> {
+    let rows = sqlx::query("SELECT a.host_id,h.domain AS host,a.enabled,a.realm,a.username,a.password_hash,a.updated_at FROM proxy_host_auth a JOIN proxy_hosts h ON h.id=a.host_id ORDER BY a.host_id")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.iter().map(host_auth_from_row).collect())
+}
+
+pub async fn get_host_auth_record(
+    pool: &DbPool,
+    host_id: i64,
+) -> Result<Option<HostAuthRecord>, sqlx::Error> {
+    let row = sqlx::query("SELECT a.host_id,h.domain AS host,a.enabled,a.realm,a.username,a.password_hash,a.updated_at FROM proxy_host_auth a JOIN proxy_hosts h ON h.id=a.host_id WHERE a.host_id=?")
+        .bind(host_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.as_ref().map(host_auth_from_row))
+}
+
+pub async fn get_host_auth(
+    pool: &DbPool,
+    host_id: i64,
+) -> Result<Option<ProxyHostAuth>, sqlx::Error> {
+    Ok(get_host_auth_record(pool, host_id)
+        .await?
+        .map(|record| ProxyHostAuth {
+            host_id: record.host_id,
+            enabled: record.enabled,
+            realm: record.realm,
+            username: record.username,
+            updated_at: record.updated_at,
+        }))
+}
+
+pub async fn upsert_host_auth(
+    pool: &DbPool,
+    host_id: i64,
+    enabled: bool,
+    realm: &str,
+    username: &str,
+    password_hash: &str,
+) -> Result<(), sqlx::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let changed = sqlx::query("UPDATE proxy_host_auth SET enabled=?,realm=?,username=?,password_hash=?,updated_at=? WHERE host_id=?")
+        .bind(enabled as i64)
+        .bind(realm)
+        .bind(username)
+        .bind(password_hash)
+        .bind(&now)
+        .bind(host_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    if changed == 0 {
+        sqlx::query("INSERT INTO proxy_host_auth(host_id,enabled,realm,username,password_hash,updated_at) VALUES(?,?,?,?,?,?)")
+            .bind(host_id)
+            .bind(enabled as i64)
+            .bind(realm)
+            .bind(username)
+            .bind(password_hash)
+            .bind(&now)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn delete_host_auth(pool: &DbPool, host_id: i64) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("DELETE FROM proxy_host_auth WHERE host_id=?")
+        .bind(host_id)
+        .execute(pool)
+        .await?
+        .rows_affected())
+}
+
+fn waf_feedback_from_row(row: &sqlx::any::AnyRow) -> WafFeedback {
+    WafFeedback {
+        id: row.get("id"),
+        reporter_id: row.get("reporter_id"),
+        request_id: row.get("request_id"),
+        rule_id: row.get("rule_id"),
+        label: row.get("label"),
+        note: row.get("note"),
+        created_at: row.get("created_at"),
+    }
+}
+
+pub async fn list_waf_feedback(pool: &DbPool, limit: u32) -> Result<Vec<WafFeedback>, sqlx::Error> {
+    let limit = i64::from(limit.clamp(1, 500));
+    let rows = sqlx::query("SELECT id,reporter_id,request_id,rule_id,label,note,created_at FROM waf_feedback ORDER BY id DESC LIMIT ?")
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.iter().map(waf_feedback_from_row).collect())
+}
+
+pub async fn insert_waf_feedback(
+    pool: &DbPool,
+    reporter_id: Option<i64>,
+    request_id: Option<&str>,
+    rule_id: Option<i64>,
+    label: &str,
+    note: &str,
+) -> Result<WafFeedback, sqlx::Error> {
+    let id = generated_id();
+    let created_at = chrono::Utc::now().to_rfc3339();
+    sqlx::query("INSERT INTO waf_feedback(id,reporter_id,request_id,rule_id,label,note,created_at) VALUES(?,?,?,?,?,?,?)")
+        .bind(id)
+        .bind(reporter_id)
+        .bind(request_id)
+        .bind(rule_id)
+        .bind(label)
+        .bind(note)
+        .bind(&created_at)
+        .execute(pool)
+        .await?;
+    Ok(WafFeedback {
+        id,
+        reporter_id,
+        request_id: request_id.map(str::to_owned),
+        rule_id,
+        label: label.to_owned(),
+        note: note.to_owned(),
+        created_at,
+    })
+}
+
+pub async fn get_analytics_retention(
+    pool: &DbPool,
+) -> Result<AnalyticsRetentionConfig, sqlx::Error> {
+    let row = sqlx::query("SELECT retention_minutes,updated_at FROM analytics_config WHERE id=1")
+        .fetch_one(pool)
+        .await?;
+    Ok(AnalyticsRetentionConfig {
+        retention_minutes: row.get::<i64, _>("retention_minutes").clamp(60, 10_080) as u32,
+        updated_at: row.get("updated_at"),
+    })
+}
+
+pub async fn update_analytics_retention(
+    pool: &DbPool,
+    retention_minutes: u32,
+) -> Result<AnalyticsRetentionConfig, sqlx::Error> {
+    let retention_minutes = retention_minutes.clamp(60, 10_080);
+    let updated_at = chrono::Utc::now().to_rfc3339();
+    sqlx::query("UPDATE analytics_config SET retention_minutes=?,updated_at=? WHERE id=1")
+        .bind(i64::from(retention_minutes))
+        .bind(&updated_at)
+        .execute(pool)
+        .await?;
+    Ok(AnalyticsRetentionConfig {
+        retention_minutes,
+        updated_at,
+    })
 }
 
 pub async fn seed_builtin_waf_rules(pool: &DbPool) -> Result<(), sqlx::Error> {
@@ -2857,6 +3131,10 @@ pub async fn insert_host(pool: &DbPool, h: &ProxyHost) -> Result<ProxyHost, sqlx
     Ok(x)
 }
 pub async fn delete_host(pool: &DbPool, id: i64) -> Result<u64, sqlx::Error> {
+    sqlx::query("DELETE FROM proxy_host_auth WHERE host_id=?")
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(sqlx::query("DELETE FROM proxy_hosts WHERE id=?")
         .bind(id)
         .execute(pool)
@@ -2871,6 +3149,10 @@ pub async fn delete_host_and_scopes(pool: &DbPool, id: i64) -> Result<u64, sqlx:
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN").execute(&mut *conn).await?;
     let result = async {
+        sqlx::query("DELETE FROM proxy_host_auth WHERE host_id=?")
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
         let changed = sqlx::query("DELETE FROM proxy_hosts WHERE id=?")
             .bind(id)
             .execute(&mut *conn)
@@ -3369,7 +3651,8 @@ pub async fn apply_tuning_recommendation_tx(
         },
         capacity: current_cap,
         refill_per_second: current_refill,
-        key_scope: crate::rate_limit::RateLimitKeyScope::ProxyHostIp,
+        key_scope: parse_rate_limit_scope(&global_row.get::<String, _>("key_scope"))
+            .unwrap_or(crate::rate_limit::RateLimitKeyScope::ProxyHostIp),
         updated_at: global_row.get("updated_at"),
     };
 

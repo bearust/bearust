@@ -49,6 +49,7 @@ describe('localized dashboard formatting', () => {
       bot_blocks: 0,
       bot_challenges: 0,
       rate_limited: 8_765,
+      bandwidth_bytes: 98_765,
       p50_ms: 12.5,
       p95_ms: 40.25,
       p99_ms: 50.75,

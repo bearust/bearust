@@ -357,6 +357,106 @@ pub struct WafRule {
     pub updated_at: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IpSecurityAction {
+    #[default]
+    Monitor,
+    Block,
+    Allow,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IpSecurityRule {
+    pub id: i64,
+    pub cidr: String,
+    pub action: IpSecurityAction,
+    pub score: i32,
+    pub country_code: Option<String>,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IpSecurityRuleCreate {
+    pub cidr: String,
+    #[serde(default)]
+    pub action: IpSecurityAction,
+    #[serde(default)]
+    pub score: i32,
+    pub country_code: Option<String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct IpSecurityRulePatch {
+    pub cidr: Option<String>,
+    pub action: Option<IpSecurityAction>,
+    pub score: Option<i32>,
+    pub country_code: Option<Option<String>>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyHostAuth {
+    pub host_id: i64,
+    pub enabled: bool,
+    pub realm: String,
+    pub username: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyHostAuthPatch {
+    pub enabled: Option<bool>,
+    pub realm: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WafFeedback {
+    pub id: i64,
+    pub reporter_id: Option<i64>,
+    pub request_id: Option<String>,
+    pub rule_id: Option<i64>,
+    pub label: String,
+    pub note: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WafFeedbackCreate {
+    pub request_id: Option<String>,
+    pub rule_id: Option<i64>,
+    #[serde(default = "default_false_positive_label")]
+    pub label: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AnalyticsRetentionConfig {
+    pub retention_minutes: u32,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsRetentionPatch {
+    pub retention_minutes: u32,
+}
+
+fn default_false_positive_label() -> String {
+    "false_positive".into()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoleCreate {
@@ -420,6 +520,7 @@ pub struct LoadBalancerPool {
     pub algorithm: crate::config::Algorithm,
     pub connect_timeout_seconds: u64,
     pub request_timeout_seconds: u64,
+    pub passive_health: bool,
     pub backends: Vec<LoadBalancerBackend>,
 }
 
@@ -429,8 +530,11 @@ pub struct LoadBalancerBackend {
     pub address: String,
     pub health_check: crate::config::HealthCheckKind,
     pub health_path: Option<String>,
+    pub weight: u32,
     pub healthy: bool,
     pub inflight: usize,
+    pub response_time_ewma_ms: Option<u64>,
+    pub passive_failures: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

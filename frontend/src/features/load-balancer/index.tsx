@@ -45,6 +45,7 @@ type BackendDraft = {
   address: string;
   health_check: LoadBalancerHealthCheck;
   health_path: string;
+  weight: string;
 };
 
 type PoolDraft = {
@@ -52,6 +53,7 @@ type PoolDraft = {
   algorithm: LoadBalancerAlgorithm;
   connect_timeout_seconds: string;
   request_timeout_seconds: string;
+  passive_health: boolean;
   backends: BackendDraft[];
 };
 
@@ -63,7 +65,8 @@ const emptyPool: PoolDraft = {
   algorithm: "round_robin",
   connect_timeout_seconds: "3",
   request_timeout_seconds: "30",
-  backends: [{ address: "", health_check: "tcp", health_path: "" }],
+  passive_health: false,
+  backends: [{ address: "", health_check: "tcp", health_path: "", weight: "1" }],
 };
 
 const emptyRoute: RouteDraft = {
@@ -76,9 +79,9 @@ const emptyRoute: RouteDraft = {
 const algorithmRequirements = [
   { key: "round_robin", label: "Round robin", detail: "Deterministic rotation across healthy backends." },
   { key: "least_connections", label: "Least connections", detail: "Prefers the backend with the fewest active requests." },
-  { key: "weighted", label: "Weighted", detail: "Static backend weights are not exposed by the current runtime contract." },
-  { key: "ip_hash", label: "IP hash", detail: "Client-affinity hashing is not exposed by the current runtime contract." },
-  { key: "adaptive_weight", label: "Adaptive weight", detail: "Response-time learning is not exposed by the current runtime contract." },
+  { key: "weighted", label: "Weighted", detail: "Distributes traffic according to each backend's configured weight." },
+  { key: "ip_hash", label: "IP hash", detail: "Keeps a client on a stable healthy backend when possible." },
+  { key: "adaptive_weight", label: "Adaptive weight", detail: "Combines static weights with observed response-time EWMA." },
   { key: "plugin", label: "Plugin", detail: "Delegates selection to the sandboxed balance.select hook." },
 ] as const;
 
@@ -90,10 +93,11 @@ const demoSnapshot: LoadBalancerSnapshot = {
       algorithm: "least_connections",
       connect_timeout_seconds: 3,
       request_timeout_seconds: 30,
+      passive_health: true,
       backends: [
-        { id: 0, address: "10.20.1.11:8080", health_check: "http", health_path: "/health", healthy: true, inflight: 8 },
-        { id: 1, address: "10.20.1.12:8080", health_check: "http", health_path: "/health", healthy: true, inflight: 4 },
-        { id: 2, address: "10.20.1.13:8080", health_check: "http", health_path: "/health", healthy: false, inflight: 0 },
+        { id: 0, address: "10.20.1.11:8080", health_check: "http", health_path: "/health", weight: 2, healthy: true, inflight: 8, response_time_ewma_ms: 42, passive_failures: 0 },
+        { id: 1, address: "10.20.1.12:8080", health_check: "http", health_path: "/health", weight: 1, healthy: true, inflight: 4, response_time_ewma_ms: 58, passive_failures: 0 },
+        { id: 2, address: "10.20.1.13:8080", health_check: "http", health_path: "/health", weight: 1, healthy: false, inflight: 0, response_time_ewma_ms: null, passive_failures: 3 },
       ],
     },
     {
@@ -101,9 +105,10 @@ const demoSnapshot: LoadBalancerSnapshot = {
       algorithm: "round_robin",
       connect_timeout_seconds: 3,
       request_timeout_seconds: 30,
+      passive_health: false,
       backends: [
-        { id: 0, address: "10.20.2.21:3000", health_check: "tcp", health_path: null, healthy: true, inflight: 2 },
-        { id: 1, address: "10.20.2.22:3000", health_check: "tcp", health_path: null, healthy: true, inflight: 1 },
+        { id: 0, address: "10.20.2.21:3000", health_check: "tcp", health_path: null, weight: 1, healthy: true, inflight: 2, response_time_ewma_ms: 19, passive_failures: 0 },
+        { id: 1, address: "10.20.2.22:3000", health_check: "tcp", health_path: null, weight: 1, healthy: true, inflight: 1, response_time_ewma_ms: 21, passive_failures: 0 },
       ],
     },
   ],
@@ -112,10 +117,10 @@ const demoSnapshot: LoadBalancerSnapshot = {
     { name: "admin-console", host: "console.bearust.local", path_prefix: "/", upstream_pool: "console-pool" },
   ],
   capabilities: {
-    algorithms: ["round_robin", "least_connections", "plugin"],
+    algorithms: ["round_robin", "least_connections", "weighted", "ip_hash", "adaptive_weight", "plugin"],
     health_checks: ["tcp", "http"],
-    passive_health: false,
-    adaptive_weighting: false,
+    passive_health: true,
+    adaptive_weighting: true,
   },
 };
 
@@ -156,7 +161,7 @@ export function LoadBalancer() {
   const backendCount = pools.reduce((total, pool) => total + pool.backends.length, 0);
   const healthyBackends = pools.reduce((total, pool) => total + pool.backends.filter((backend) => backend.healthy).length, 0);
   const degradedPools = pools.filter((pool) => pool.backends.length === 0 || pool.backends.some((backend) => !backend.healthy)).length;
-  const algorithmOptions = snapshot?.capabilities.algorithms ?? ["round_robin", "least_connections", "plugin"];
+  const algorithmOptions = snapshot?.capabilities.algorithms ?? ["round_robin", "least_connections", "weighted", "ip_hash", "adaptive_weight", "plugin"];
 
   const openNewPool = () => {
     setEditingPoolName(null);
@@ -171,10 +176,12 @@ export function LoadBalancer() {
       algorithm: pool.algorithm,
       connect_timeout_seconds: String(pool.connect_timeout_seconds),
       request_timeout_seconds: String(pool.request_timeout_seconds),
+      passive_health: pool.passive_health,
       backends: pool.backends.map((backend) => ({
         address: backend.address,
         health_check: backend.health_check,
         health_path: backend.health_path ?? "",
+        weight: String(backend.weight),
       })),
     });
     setPoolDialogOpen(true);
@@ -196,9 +203,9 @@ export function LoadBalancer() {
     const connectTimeout = Number(poolDraft.connect_timeout_seconds);
     const requestTimeout = Number(poolDraft.request_timeout_seconds);
     const backends = poolDraft.backends
-      .map((backend) => ({ ...backend, address: backend.address.trim(), health_path: backend.health_path.trim() }))
+      .map((backend) => ({ ...backend, address: backend.address.trim(), health_path: backend.health_path.trim(), weight: Number(backend.weight) }))
       .filter((backend) => backend.address);
-    if (!name || !Number.isInteger(connectTimeout) || connectTimeout < 1 || !Number.isInteger(requestTimeout) || requestTimeout < 1 || backends.length === 0) {
+    if (!name || !Number.isInteger(connectTimeout) || connectTimeout < 1 || !Number.isInteger(requestTimeout) || requestTimeout < 1 || backends.length === 0 || backends.some((backend) => !Number.isInteger(backend.weight) || backend.weight < 1 || backend.weight > 1000)) {
       setError("Enter a pool name, positive timeouts, and at least one backend.");
       return;
     }
@@ -216,7 +223,8 @@ export function LoadBalancer() {
       algorithm: poolDraft.algorithm,
       connect_timeout_seconds: connectTimeout,
       request_timeout_seconds: requestTimeout,
-      backends: backends.map((backend, id) => ({ id, address: backend.address, health_check: backend.health_check, health_path: backend.health_check === "http" ? backend.health_path : null, healthy: true, inflight: 0 })),
+      passive_health: poolDraft.passive_health,
+      backends: backends.map((backend, id) => ({ id, address: backend.address, health_check: backend.health_check, health_path: backend.health_check === "http" ? backend.health_path : null, weight: backend.weight, healthy: true, inflight: 0, response_time_ewma_ms: null, passive_failures: 0 })),
     };
     const nextPools = editingPoolName == null ? [...pools, nextPool] : pools.map((pool) => pool.name === editingPoolName ? nextPool : pool);
     const nextRoutes = routes.map((route) => route.upstream_pool === editingPoolName ? { ...route, upstream_pool: name } : route);
@@ -383,16 +391,16 @@ export function LoadBalancer() {
 
 function PoolCard({ pool, canWrite, busy, onEdit, onDelete }: { pool: LoadBalancerPool; canWrite: boolean; busy: boolean; onEdit: () => void; onDelete: () => void }) {
   const healthy = pool.backends.filter((backend) => backend.healthy).length;
-  return <div className="rounded-lg border p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{pool.name}</p><Badge variant="outline">{formatAlgorithm(pool.algorithm)}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{healthy} / {pool.backends.length} healthy · {pool.connect_timeout_seconds}s connect · {pool.request_timeout_seconds}s request</p></div><div className="flex gap-1"><Button variant="ghost" size="icon" aria-label={`Edit ${pool.name}`} onClick={onEdit} disabled={!canWrite || busy}><Pencil /></Button><Button variant="ghost" size="icon" aria-label={`Delete ${pool.name}`} onClick={onDelete} disabled={!canWrite || busy}><Trash2 /></Button></div></div><div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{pool.backends.map((backend) => <BackendStatus backend={backend} key={backend.id} />)}</div></div>;
+  return <div className="rounded-lg border p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{pool.name}</p><Badge variant="outline">{formatAlgorithm(pool.algorithm)}</Badge>{pool.passive_health && <Badge variant="secondary">Passive health</Badge>}</div><p className="mt-1 text-xs text-muted-foreground">{healthy} / {pool.backends.length} healthy · {pool.connect_timeout_seconds}s connect · {pool.request_timeout_seconds}s request</p></div><div className="flex gap-1"><Button variant="ghost" size="icon" aria-label={`Edit ${pool.name}`} onClick={onEdit} disabled={!canWrite || busy}><Pencil /></Button><Button variant="ghost" size="icon" aria-label={`Delete ${pool.name}`} onClick={onDelete} disabled={!canWrite || busy}><Trash2 /></Button></div></div><div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{pool.backends.map((backend) => <BackendStatus backend={backend} key={backend.id} />)}</div></div>;
 }
 
 function BackendStatus({ backend }: { backend: LoadBalancerBackend }) {
-  return <div className="rounded-md border bg-muted/20 p-3"><div className="flex items-start justify-between gap-2"><span className="truncate font-mono text-xs">{backend.address}</span><StatusBadge status={backend.healthy ? "healthy" : "danger"}>{backend.healthy ? "Healthy" : "Unhealthy"}</StatusBadge></div><div className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground"><span>{backend.health_check === "http" ? `HTTP ${backend.health_path}` : "TCP probe"}</span><span>{backend.inflight} in flight</span></div></div>;
+  return <div className="rounded-md border bg-muted/20 p-3"><div className="flex items-start justify-between gap-2"><span className="truncate font-mono text-xs">{backend.address}</span><StatusBadge status={backend.healthy ? "healthy" : "danger"}>{backend.healthy ? "Healthy" : "Unhealthy"}</StatusBadge></div><div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[11px] text-muted-foreground"><span>{backend.health_check === "http" ? `HTTP ${backend.health_path}` : "TCP probe"}</span><span className="text-right">{backend.inflight} in flight</span><span>Weight {backend.weight}</span><span className="text-right">{backend.response_time_ewma_ms == null ? "No EWMA" : `${backend.response_time_ewma_ms}ms EWMA`}</span>{backend.passive_failures > 0 && <span className="col-span-2 text-amber-700 dark:text-amber-400">{backend.passive_failures} passive failure{backend.passive_failures === 1 ? "" : "s"}</span>}</div></div>;
 }
 
 function PoolDialog({ open, onOpenChange, draft, setDraft, editing, algorithms, busy, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; draft: PoolDraft; setDraft: (draft: PoolDraft) => void; editing: boolean; algorithms: string[]; busy: boolean; onSubmit: (event: FormEvent) => void }) {
   const updateBackend = (index: number, patch: Partial<BackendDraft>) => setDraft({ ...draft, backends: draft.backends.map((backend, current) => current === index ? { ...backend, ...patch } : backend) });
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>{editing ? "Edit upstream pool" : "Create upstream pool"}</DialogTitle><DialogDescription>Configure selection, timeouts, and bounded active health checks for this backend pool.</DialogDescription></DialogHeader><form id="pool-form" className="space-y-5" onSubmit={onSubmit}><div className="grid gap-4 sm:grid-cols-2"><Field label="Pool name" value={draft.name} onChange={(value) => setDraft({ ...draft, name: value })} placeholder="api-pool" /><div className="space-y-2"><Label htmlFor="pool-algorithm">Algorithm</Label><select id="pool-algorithm" value={draft.algorithm} onChange={(event) => setDraft({ ...draft, algorithm: event.target.value as LoadBalancerAlgorithm })} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm" disabled={busy}>{algorithms.map((algorithm) => <option value={algorithm} key={algorithm}>{formatAlgorithm(algorithm)}</option>)}</select></div><Field label="Connect timeout (seconds)" type="number" value={draft.connect_timeout_seconds} onChange={(value) => setDraft({ ...draft, connect_timeout_seconds: value })} /><Field label="Request timeout (seconds)" type="number" value={draft.request_timeout_seconds} onChange={(value) => setDraft({ ...draft, request_timeout_seconds: value })} /></div><div className="space-y-3"><div className="flex items-center justify-between"><div><p className="text-sm font-medium">Backend targets</p><p className="text-xs text-muted-foreground">At least one target is required.</p></div><Button type="button" variant="outline" size="sm" onClick={() => setDraft({ ...draft, backends: [...draft.backends, { address: "", health_check: "tcp", health_path: "" }] })} disabled={busy}><Plus />Backend</Button></div>{draft.backends.map((backend, index) => <div className="grid gap-3 rounded-lg border p-3 sm:grid-cols-[minmax(0,1fr)_130px_minmax(0,1fr)_auto]" key={`${index}-${backend.address}`}><Field label={`Address ${index + 1}`} value={backend.address} onChange={(value) => updateBackend(index, { address: value })} placeholder="10.0.0.11:8080" /><div className="space-y-2"><Label htmlFor={`health-check-${index}`}>Check</Label><select id={`health-check-${index}`} value={backend.health_check} onChange={(event) => updateBackend(index, { health_check: event.target.value as LoadBalancerHealthCheck })} className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm" disabled={busy}><option value="tcp">TCP</option><option value="http">HTTP</option></select></div><Field label="HTTP path" value={backend.health_path} onChange={(value) => updateBackend(index, { health_path: value })} placeholder="/health" disabled={busy || backend.health_check !== "http"} /><Button type="button" variant="ghost" size="icon" className="self-end" aria-label={`Remove backend ${index + 1}`} onClick={() => setDraft({ ...draft, backends: draft.backends.filter((_, current) => current !== index) })} disabled={busy || draft.backends.length === 1}><Trash2 /></Button></div>)}</div></form><DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit" form="pool-form" disabled={busy}><Settings2 />{editing ? "Save pool" : "Create pool"}</Button></DialogFooter></DialogContent></Dialog>;
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>{editing ? "Edit upstream pool" : "Create upstream pool"}</DialogTitle><DialogDescription>Configure selection, timeouts, weights, and active/passive health for this backend pool.</DialogDescription></DialogHeader><form id="pool-form" className="space-y-5" onSubmit={onSubmit}><div className="grid gap-4 sm:grid-cols-2"><Field label="Pool name" value={draft.name} onChange={(value) => setDraft({ ...draft, name: value })} placeholder="api-pool" /><div className="space-y-2"><Label htmlFor="pool-algorithm">Algorithm</Label><select id="pool-algorithm" value={draft.algorithm} onChange={(event) => setDraft({ ...draft, algorithm: event.target.value as LoadBalancerAlgorithm })} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm" disabled={busy}>{algorithms.map((algorithm) => <option value={algorithm} key={algorithm}>{formatAlgorithm(algorithm)}</option>)}</select></div><Field label="Connect timeout (seconds)" type="number" value={draft.connect_timeout_seconds} onChange={(value) => setDraft({ ...draft, connect_timeout_seconds: value })} /><Field label="Request timeout (seconds)" type="number" value={draft.request_timeout_seconds} onChange={(value) => setDraft({ ...draft, request_timeout_seconds: value })} /></div><label className="flex items-start gap-3 rounded-lg border p-3 text-sm"><input type="checkbox" checked={draft.passive_health} onChange={(event) => setDraft({ ...draft, passive_health: event.target.checked })} disabled={busy} className="mt-0.5 size-4 accent-primary" /><span><span className="font-medium">Enable passive health</span><span className="mt-1 block text-xs text-muted-foreground">Three real-traffic failures temporarily remove a backend; active probes can restore it.</span></span></label><div className="space-y-3"><div className="flex items-center justify-between"><div><p className="text-sm font-medium">Backend targets</p><p className="text-xs text-muted-foreground">Weights must be between 1 and 1000.</p></div><Button type="button" variant="outline" size="sm" onClick={() => setDraft({ ...draft, backends: [...draft.backends, { address: "", health_check: "tcp", health_path: "", weight: "1" }] })} disabled={busy}><Plus />Backend</Button></div>{draft.backends.map((backend, index) => <div className="grid gap-3 rounded-lg border p-3 sm:grid-cols-[minmax(0,1fr)_110px_90px_minmax(0,1fr)_auto]" key={`${index}-${backend.address}`}><Field label={`Address ${index + 1}`} value={backend.address} onChange={(value) => updateBackend(index, { address: value })} placeholder="10.0.0.11:8080" /><div className="space-y-2"><Label htmlFor={`health-check-${index}`}>Check</Label><select id={`health-check-${index}`} value={backend.health_check} onChange={(event) => updateBackend(index, { health_check: event.target.value as LoadBalancerHealthCheck })} className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm" disabled={busy}><option value="tcp">TCP</option><option value="http">HTTP</option></select></div><Field label="Weight" type="number" value={backend.weight} onChange={(value) => updateBackend(index, { weight: value })} placeholder="1" disabled={busy} /><Field label="HTTP path" value={backend.health_path} onChange={(value) => updateBackend(index, { health_path: value })} placeholder="/health" disabled={busy || backend.health_check !== "http"} /><Button type="button" variant="ghost" size="icon" className="self-end" aria-label={`Remove backend ${index + 1}`} onClick={() => setDraft({ ...draft, backends: draft.backends.filter((_, current) => current !== index) })} disabled={busy || draft.backends.length === 1}><Trash2 /></Button></div>)}</div></form><DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit" form="pool-form" disabled={busy}><Settings2 />{editing ? "Save pool" : "Create pool"}</Button></DialogFooter></DialogContent></Dialog>;
 }
 
 function RouteDialog({ open, onOpenChange, draft, setDraft, editing, pools, busy, onSubmit }: { open: boolean; onOpenChange: (open: boolean) => void; draft: RouteDraft; setDraft: (draft: RouteDraft) => void; editing: boolean; pools: LoadBalancerPool[]; busy: boolean; onSubmit: (event: FormEvent) => void }) {
@@ -406,5 +414,5 @@ function EmptyState({ title, description, action }: { title: string; description
 function LoadingRows() { return <div className="space-y-3" role="status" aria-label="Loading upstream pools">{[1, 2].map((item) => <div className="h-28 animate-pulse rounded-lg bg-muted" key={item} />)}</div>; }
 function Field({ label, value, onChange, type = "text", placeholder, disabled = false }: { label: string; value: string; onChange: (value: string) => void; type?: string; placeholder?: string; disabled?: boolean }) { return <div className="space-y-2"><Label>{label}</Label><Input aria-label={label} type={type} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} disabled={disabled} required /></div>; }
 function formatAlgorithm(value: string) { return value.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" "); }
-function toConfigRequest(pools: LoadBalancerPool[], routes: LoadBalancerRoute[]): LoadBalancerConfigRequest { return { pools: pools.map((pool) => ({ name: pool.name, algorithm: pool.algorithm, connect_timeout_seconds: pool.connect_timeout_seconds, request_timeout_seconds: pool.request_timeout_seconds, backends: pool.backends.map((backend) => ({ address: backend.address, health_check: backend.health_check, health_path: backend.health_check === "http" ? backend.health_path : null })) })), routes }; }
-function makeDemoSnapshot(request: LoadBalancerConfigRequest, generation: number): LoadBalancerSnapshot { return { generation, pools: request.pools.map((pool) => ({ ...pool, backends: pool.backends.map((backend, id) => ({ ...backend, id, healthy: true, inflight: 0 })) })), routes: request.routes, capabilities: demoSnapshot.capabilities }; }
+function toConfigRequest(pools: LoadBalancerPool[], routes: LoadBalancerRoute[]): LoadBalancerConfigRequest { return { pools: pools.map((pool) => ({ name: pool.name, algorithm: pool.algorithm, connect_timeout_seconds: pool.connect_timeout_seconds, request_timeout_seconds: pool.request_timeout_seconds, passive_health: pool.passive_health, backends: pool.backends.map((backend) => ({ address: backend.address, health_check: backend.health_check, health_path: backend.health_check === "http" ? backend.health_path : null, weight: backend.weight })) })), routes }; }
+function makeDemoSnapshot(request: LoadBalancerConfigRequest, generation: number): LoadBalancerSnapshot { return { generation, pools: request.pools.map((pool) => ({ ...pool, backends: pool.backends.map((backend, id) => ({ ...backend, id, healthy: true, inflight: 0, response_time_ewma_ms: null, passive_failures: 0 })) })), routes: request.routes, capabilities: demoSnapshot.capabilities }; }

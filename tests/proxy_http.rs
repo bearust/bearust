@@ -58,10 +58,12 @@ async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() 
             algorithm: Algorithm::RoundRobin,
             connect_timeout_seconds: 1,
             request_timeout_seconds: 1,
+            passive_health: false,
             backends: vec![BackendConfig {
                 address: backend_addr,
                 health_check: HealthCheckKind::Tcp,
                 health_path: None,
+                weight: 1,
             }],
         }],
         routes: vec![RouteConfig {

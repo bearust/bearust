@@ -64,11 +64,13 @@ fn is_loopback(ip: IpAddr) -> bool {
 pub fn render(snapshot: &AnalyticsSnapshot, config: &PrometheusConfig) -> Result<String, ()> {
     config.validate().map_err(|_| ())?;
     let mut out = String::new();
-    out.push_str("# TYPE bearust_requests_total counter\n# TYPE bearust_request_duration_ms gauge\n# TYPE bearust_security_events_total counter\n# TYPE bearust_rate_limit_events_total counter\n");
+    out.push_str("# TYPE bearust_requests_total counter\n# TYPE bearust_bandwidth_bytes_total counter\n# TYPE bearust_request_duration_ms gauge\n# TYPE bearust_security_events_total counter\n# TYPE bearust_rate_limit_events_total counter\n");
     let mut counters: BTreeMap<(String, String, String), u64> = BTreeMap::new();
     let mut gauges: BTreeMap<(String, String), u64> = BTreeMap::new();
+    let mut bandwidth: BTreeMap<String, u64> = BTreeMap::new();
     for b in &snapshot.timeseries {
         let host = b.proxy_host_id.to_string();
+        *bandwidth.entry(host.clone()).or_default() += b.bandwidth_bytes;
         let class = [
             ("2xx", b.status_2xx),
             ("3xx", b.status_3xx),
@@ -114,6 +116,14 @@ pub fn render(snapshot: &AnalyticsSnapshot, config: &PrometheusConfig) -> Result
     }
     for ((name, host), value) in gauges {
         line(&mut out, &name, &[("proxy_host_id", host.as_str())], value);
+    }
+    for (host, value) in bandwidth {
+        line(
+            &mut out,
+            "bearust_bandwidth_bytes_total",
+            &[("proxy_host_id", host.as_str())],
+            value,
+        );
     }
     if out.len() > config.max_output_bytes {
         // Keep only complete exposition lines; never return a partial sample.

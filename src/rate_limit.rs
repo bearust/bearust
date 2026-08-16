@@ -29,6 +29,7 @@ pub enum RateLimitAction {
 pub enum RateLimitKeyScope {
     #[default]
     ProxyHostIp,
+    ProxyHostPathIp,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

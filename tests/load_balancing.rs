@@ -14,6 +14,10 @@ fn pool(algorithm: &str) -> Arc<PoolState> {
     let duplicate = config.upstream_pools[0].backends[0].clone();
     config.upstream_pools[0].backends.push(duplicate);
     config.upstream_pools[0].backends[1].address = "127.0.0.1:19002".parse().unwrap();
+    if matches!(algorithm, "weighted" | "adaptive_weight") {
+        config.upstream_pools[0].backends[0].weight = 3;
+        config.upstream_pools[0].backends[1].weight = 1;
+    }
     let pool = Arc::new(PoolState::new(&config.upstream_pools[0]));
     pool.set_healthy(0.into(), true);
     pool.set_healthy(1.into(), true);
@@ -76,6 +80,47 @@ fn plugin_algorithm_falls_back_to_round_robin_selection() {
     assert_eq!(selected[0], selected[2]);
     assert_eq!(selected[1], selected[3]);
     assert_ne!(selected[0], selected[1]);
+}
+
+#[test]
+fn weighted_selection_honors_backend_weights() {
+    let pool = pool("weighted");
+    let selected: Vec<_> = (0..4)
+        .map(|_| pool.select(None).unwrap().id().index())
+        .collect();
+    assert_eq!(selected, vec![0, 0, 0, 1]);
+}
+
+#[test]
+fn ip_hash_keeps_a_client_on_the_same_backend() {
+    let pool = pool("ip_hash");
+    let first = pool
+        .select_with_key(None, Some(b"198.51.100.20"))
+        .unwrap()
+        .id();
+    let second = pool
+        .select_with_key(None, Some(b"198.51.100.20"))
+        .unwrap()
+        .id();
+    assert_eq!(first, second);
+}
+
+#[test]
+fn passive_health_ejects_after_three_failures_and_active_health_restores() {
+    let text = include_str!("fixtures/valid.toml").replace(
+        "algorithm = \"least_connections\"",
+        "algorithm = \"round_robin\"\npassive_health = true",
+    );
+    let config = Config::parse(&text).unwrap();
+    let pool = std::sync::Arc::new(PoolState::new(&config.upstream_pools[0]));
+    pool.set_healthy(0.into(), true);
+    pool.record_result(0.into(), 500, 20);
+    pool.record_result(0.into(), 500, 20);
+    pool.record_result(0.into(), 500, 20);
+    assert!(!pool.is_healthy(0.into()));
+    assert!(pool.select(None).is_none());
+    pool.set_healthy(0.into(), true);
+    assert!(pool.select(None).is_some());
 }
 
 #[test]

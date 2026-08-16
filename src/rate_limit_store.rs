@@ -79,8 +79,13 @@ struct Entry {
     last_seen: Instant,
     sequence: u64,
 }
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct BucketKey {
+    key: RateLimitKey,
+    path: Option<String>,
+}
 struct State {
-    entries: HashMap<RateLimitKey, Entry>,
+    entries: HashMap<BucketKey, Entry>,
     sequence: u64,
 }
 
@@ -128,7 +133,7 @@ impl RateLimiterStore {
             current.insert(host_id, policy);
         }
         if let Ok(mut state) = self.state.lock() {
-            state.entries.retain(|k, _| k.proxy_host_id != host_id);
+            state.entries.retain(|k, _| k.key.proxy_host_id != host_id);
         }
     }
 
@@ -145,6 +150,30 @@ impl RateLimiterStore {
     }
 
     pub fn evaluate(&self, key: RateLimitKey, policy: &RateLimitPolicy, now: Instant) -> Decision {
+        self.evaluate_inner(key, None, policy, now)
+    }
+
+    /// Evaluate a request against a host+path+client bucket. The path is
+    /// bounded before entering the map so a hostile URL cannot create an
+    /// unbounded number of distinct keys.
+    pub fn evaluate_path(
+        &self,
+        key: RateLimitKey,
+        path: &str,
+        policy: &RateLimitPolicy,
+        now: Instant,
+    ) -> Decision {
+        let path = path.chars().take(512).collect::<String>();
+        self.evaluate_inner(key, Some(path), policy, now)
+    }
+
+    fn evaluate_inner(
+        &self,
+        key: RateLimitKey,
+        path: Option<String>,
+        policy: &RateLimitPolicy,
+        now: Instant,
+    ) -> Decision {
         if !policy.enabled || self.max_entries == 0 || policy.validate().is_err() {
             return Decision::Allowed {
                 remaining_tokens: policy.capacity,
@@ -161,6 +190,7 @@ impl RateLimiterStore {
                 }
             }
         };
+        let bucket_key = BucketKey { key, path };
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
@@ -168,19 +198,19 @@ impl RateLimiterStore {
         state
             .entries
             .retain(|_, entry| now.saturating_duration_since(entry.last_seen) <= self.idle_ttl);
-        if !state.entries.contains_key(&key) && state.entries.len() >= self.max_entries {
+        if !state.entries.contains_key(&bucket_key) && state.entries.len() >= self.max_entries {
             if let Some(oldest) = state
                 .entries
                 .iter()
                 .min_by_key(|(_, entry)| entry.sequence)
-                .map(|(key, _)| *key)
+                .map(|(key, _)| key.clone())
             {
                 state.entries.remove(&oldest);
             }
         }
         state.sequence = state.sequence.wrapping_add(1);
         let sequence = state.sequence;
-        let entry = state.entries.entry(key).or_insert_with(|| Entry {
+        let entry = state.entries.entry(bucket_key).or_insert_with(|| Entry {
             bucket,
             last_seen: now,
             sequence,

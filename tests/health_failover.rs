@@ -97,10 +97,12 @@ async fn supervisor_transitions_backend_eligibility_within_one_second() {
             algorithm: Algorithm::RoundRobin,
             connect_timeout_seconds: 1,
             request_timeout_seconds: 1,
+            passive_health: false,
             backends: vec![BackendConfig {
                 address: server.address,
                 health_check: HealthCheckKind::Http,
                 health_path: Some("/health".into()),
+                weight: 1,
             }],
         };
         let pool = Arc::new(PoolState::new(&config));

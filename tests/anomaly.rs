@@ -22,6 +22,7 @@ fn create_sample_bucket(
         bot_blocks: 0,
         bot_challenges: 0,
         rate_limited: 0,
+        bandwidth_bytes: 0,
         p50_ms: Some(10),
         p95_ms: Some(25),
         p99_ms: Some(50),

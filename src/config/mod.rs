@@ -146,6 +146,7 @@ pub enum RateLimitAction {
 pub enum RateLimitKeyScope {
     #[default]
     ProxyHostIp,
+    ProxyHostPathIp,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -231,6 +232,10 @@ pub struct PoolConfig {
     pub connect_timeout_seconds: u64,
     #[serde(default = "default_request_timeout")]
     pub request_timeout_seconds: u64,
+    /// Feed real-traffic failures back into backend eligibility in addition
+    /// to the active probe supervisor.
+    #[serde(default)]
+    pub passive_health: bool,
     pub backends: Vec<BackendConfig>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -239,6 +244,8 @@ pub struct BackendConfig {
     pub address: SocketAddr,
     pub health_check: HealthCheckKind,
     pub health_path: Option<String>,
+    #[serde(default = "default_backend_weight")]
+    pub weight: u32,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -253,6 +260,9 @@ pub struct RouteConfig {
 pub enum Algorithm {
     RoundRobin,
     LeastConnections,
+    Weighted,
+    IpHash,
+    AdaptiveWeight,
     Plugin,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -296,6 +306,9 @@ fn default_connect_timeout() -> u64 {
 }
 fn default_request_timeout() -> u64 {
     30
+}
+fn default_backend_weight() -> u32 {
+    1
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -585,6 +598,12 @@ impl Config {
                 );
             }
             for (j, b) in p.backends.iter().enumerate() {
+                if !(1..=1_000).contains(&b.weight) {
+                    return err(
+                        &format!("upstream_pools[{i}].backends[{j}].weight"),
+                        "must be between 1 and 1000",
+                    );
+                }
                 if b.health_check == HealthCheckKind::Http
                     && b.health_path.as_deref().is_none_or(|x| {
                         !x.starts_with('/') || x.chars().any(|ch| ch.is_ascii_control())
