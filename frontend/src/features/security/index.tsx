@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Activity, Bot, Check, Download, FilePlus2, LockKeyhole, Plus, RefreshCw, ShieldCheck, SlidersHorizontal, Trash2, Upload } from "lucide-react";
 import { api, type BotConfig, type BotMode, type RateLimitAction, type RateLimitConfig, type TrustedCrawler, type WafAction, type WafConfig, type WafMode, type WafRule } from "@/api";
@@ -7,6 +8,7 @@ import { DEMO_MODE } from "@/lib/demo";
 import { sanitizeError } from "@/lib/errors";
 import { useRealtimeRefresh } from "@/hooks/use-realtime-refresh";
 import { useAuthStore } from "@/stores/auth-store";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,6 +38,7 @@ const emptyRule: RuleForm = { name: "", category: "custom", severity: "medium", 
 
 export function Security() {
   const user = useAuthStore((state) => state.user);
+  const { t } = useTranslation();
   const isAdmin = user?.role === "admin";
   const initialTab = new URLSearchParams(window.location.search).get("tab");
   const [activeTab, setActiveTab] = useState(initialTab === "bot" ? "bot" : initialTab === "rate" ? "rate" : "waf");
@@ -49,6 +52,7 @@ export function Security() {
   const [error, setError] = useState("");
   const [toml, setToml] = useState("");
   const [ruleOpen, setRuleOpen] = useState(false);
+  const [confirmRule, setConfirmRule] = useState<WafRule | null>(null);
   const [ruleForm, setRuleForm] = useState<RuleForm>(emptyRule);
 
   const refresh = async () => {
@@ -102,8 +106,14 @@ export function Security() {
     } catch (exception) { setError(sanitizeError(exception)); } finally { setBusy(false); }
   };
 
-  const deleteRule = async (rule: WafRule) => {
-    if (!window.confirm(`Delete ${rule.name}?`)) return;
+  const deleteRule = (rule: WafRule) => {
+    setConfirmRule(rule);
+  };
+
+  const confirmDeleteRule = async () => {
+    if (!confirmRule) return;
+    const rule = confirmRule;
+    setConfirmRule(null);
     setBusy(true);
     try {
       if (DEMO_MODE) setRules((current) => current.filter((item) => item.id !== rule.id));
@@ -156,13 +166,35 @@ export function Security() {
   return <Main><PageHeader title="Security" description="Tune the protection layers that guard your proxy hosts." action={<><Badge variant="outline" className="hidden gap-1.5 rounded-full sm:inline-flex"><span className={`size-1.5 rounded-full ${DEMO_MODE ? "bg-amber-500" : "bg-emerald-500"}`} />{DEMO_MODE ? "Demo data" : "API connected"}</Badge><Button variant="outline" size="icon" aria-label="Refresh security policies" onClick={() => void refresh()} disabled={loading}><RefreshCw className={loading ? "animate-spin" : ""} /></Button></>} />
     {error && <div role="alert" className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>}
     <div className="mb-6 grid gap-4 sm:grid-cols-3"><SecuritySummary icon={ShieldCheck} label="WAF engine" status={wafConfig.mode === "block" ? "healthy" : "warning"} value={wafConfig.mode === "block" ? "Enforcing" : "Monitor only"} detail={`${rules.length} rules configured`} /><SecuritySummary icon={Bot} label="Bot protection" status={botConfig.mode === "monitor" ? "warning" : "healthy"} value={botConfig.mode === "monitor" ? "Monitoring" : botConfig.mode === "challenge" ? "Challenging" : "Blocking"} detail={`${crawlers.length} trusted crawler${crawlers.length === 1 ? "" : "s"}`} /><SecuritySummary icon={Activity} label="Rate limiting" status={rateConfig.enabled ? "healthy" : "warning"} value={rateConfig.enabled ? "Enabled" : "Paused"} detail={`${rateConfig.capacity.toLocaleString()} burst capacity`} /></div>
+    <Card className="mb-6"><CardHeader><CardTitle>{t("security.coverageTitle")}</CardTitle><CardDescription>{t("security.coverageDescription")}</CardDescription></CardHeader><CardContent className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{securityCoverage.map((item) => <SecurityCapability key={item.key} title={t(`security.${item.key}Title`)} detail={t(`security.${item.key}Detail`)} status={item.status === "available" ? "healthy" : item.status === "partial" ? "info" : "warning"} label={t(`security.${item.status}`)} />)}</CardContent></Card>
     <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6"><TabsList><TabsTrigger value="waf">WAF rules</TabsTrigger><TabsTrigger value="bot">Bot protection</TabsTrigger><TabsTrigger value="rate">Rate limiting</TabsTrigger></TabsList>
       <TabsContent value="waf"><WafPanel config={wafConfig} rules={rules} canWrite={isAdmin} busy={busy} onToggle={() => void updateWafMode()} onAdd={() => setRuleOpen(true)} onToggleRule={(rule) => void toggleRule(rule)} onDelete={(rule) => void deleteRule(rule)} toml={toml} setToml={setToml} onImport={() => void importWaf()} onExport={() => void exportWaf()} /></TabsContent>
       <TabsContent value="bot"><BotPanel config={botConfig} crawlers={crawlers} canWrite={isAdmin} busy={busy} onSave={(next) => void saveBot(next)} onToggleCrawler={(crawler) => void toggleCrawler(crawler)} onDeleteCrawler={(crawler) => void deleteCrawler(crawler)} onAddCrawler={(userAgent, domain) => void addCrawler(userAgent, domain)} toml={toml} setToml={setToml} onImport={() => void importBot()} onExport={() => void exportBot()} /></TabsContent>
       <TabsContent value="rate"><RatePanel config={rateConfig} canWrite={isAdmin} busy={busy} onSave={(next) => void saveRate(next)} /></TabsContent>
     </Tabs>
-    <Dialog open={ruleOpen} onOpenChange={setRuleOpen}><DialogContent><DialogHeader><DialogTitle>Create custom WAF rule</DialogTitle><DialogDescription>The matcher is validated by the BeaRust WAF compiler before it is persisted.</DialogDescription></DialogHeader><form id="rule-form" className="space-y-4" onSubmit={(event) => void saveRule(event)}><div className="grid gap-4 sm:grid-cols-2"><Field label="Rule name" value={ruleForm.name} onChange={(value) => setRuleForm({ ...ruleForm, name: value })} placeholder="Block suspicious path" /><Field label="Category" value={ruleForm.category} onChange={(value) => setRuleForm({ ...ruleForm, category: value })} placeholder="custom" /><Field label="Severity" value={ruleForm.severity} onChange={(value) => setRuleForm({ ...ruleForm, severity: value })} placeholder="medium" /><div className="space-y-2"><Label htmlFor="rule-action">Action</Label><select id="rule-action" value={ruleForm.action} onChange={(event) => setRuleForm({ ...ruleForm, action: event.target.value as WafAction })} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="inherit">Inherit</option><option value="allow">Allow</option><option value="log">Log</option><option value="block">Block</option></select></div></div><div className="space-y-2"><Label htmlFor="rule-matcher">Matcher JSON</Label><textarea id="rule-matcher" value={ruleForm.matcher} onChange={(event) => setRuleForm({ ...ruleForm, matcher: event.target.value })} className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring/50" /></div></form><DialogFooter><Button variant="outline" onClick={() => setRuleOpen(false)}>Cancel</Button><Button type="submit" form="rule-form" disabled={busy || !isAdmin}><FilePlus2 />Create rule</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={ruleOpen} onOpenChange={setRuleOpen}><DialogContent><DialogHeader><DialogTitle>Create custom WAF rule</DialogTitle><DialogDescription>The matcher is validated by the BeaRust WAF compiler before it is persisted.</DialogDescription></DialogHeader><form id="rule-form" className="space-y-4" onSubmit={(event) => void saveRule(event)}><div className="grid gap-4 sm:grid-cols-2"><Field label="Rule name" value={ruleForm.name} onChange={(value) => setRuleForm({ ...ruleForm, name: value })} placeholder="Block suspicious path" /><Field label="Category" value={ruleForm.category} onChange={(value) => setRuleForm({ ...ruleForm, category: value })} placeholder="custom" /><Field label="Severity" value={ruleForm.severity} onChange={(value) => setRuleForm({ ...ruleForm, severity: value })} placeholder="medium" /><div className="space-y-2"><Label htmlFor="rule-action">Action</Label><select id="rule-action" value={ruleForm.action} onChange={(event) => setRuleForm({ ...ruleForm, action: event.target.value as WafAction })} className="h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"><option value="inherit">Inherit</option><option value="allow">Allow</option><option value="log">Log</option><option value="block">Block</option></select></div></div><div className="space-y-2"><Label htmlFor="rule-matcher">Matcher JSON</Label><textarea id="rule-matcher" value={ruleForm.matcher} onChange={(event) => setRuleForm({ ...ruleForm, matcher: event.target.value })} className="min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring/50" /></div></form><DialogFooter><Button variant="outline" onClick={() => setRuleOpen(false)}>Cancel</Button><Button type="submit" form="rule-form" disabled={busy || !isAdmin}><FilePlus2 />Create rule</Button></DialogFooter></DialogContent></Dialog>
+    <ConfirmDialog
+      open={confirmRule != null}
+      onOpenChange={(open) => { if (!open && !busy) setConfirmRule(null); }}
+      title="Delete WAF rule?"
+      description={confirmRule ? `The custom rule “${confirmRule.name}” will stop evaluating traffic immediately.` : "The selected custom WAF rule will be removed."}
+      pending={busy}
+      onConfirm={() => void confirmDeleteRule()}
+    />
   </Main>;
+}
+
+const securityCoverage = [
+  { key: "waf", status: "available" },
+  { key: "virtualPatching", status: "available" },
+  { key: "botChallenge", status: "partial" },
+  { key: "ipGeo", status: "notExposed" },
+  { key: "authChallenge", status: "notExposed" },
+  { key: "falsePositiveLoop", status: "partial" },
+] as const;
+
+function SecurityCapability({ title, detail, status, label }: { title: string; detail: string; status: "healthy" | "warning" | "info"; label: string }) {
+  return <div className="rounded-lg border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-medium">{title}</p><StatusBadge status={status}>{label}</StatusBadge></div><p className="mt-2 text-xs leading-5 text-muted-foreground">{detail}</p></div>;
 }
 
 function WafPanel({ config, rules, canWrite, busy, onToggle, onAdd, onToggleRule, onDelete, toml, setToml, onImport, onExport }: { config: WafConfig; rules: WafRule[]; canWrite: boolean; busy: boolean; onToggle: () => void; onAdd: () => void; onToggleRule: (rule: WafRule) => void; onDelete: (rule: WafRule) => void; toml: string; setToml: (value: string) => void; onImport: () => void; onExport: () => void }) {

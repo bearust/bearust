@@ -30,6 +30,7 @@ import { DEMO_MODE } from "@/lib/demo";
 import { sanitizeError } from "@/lib/errors";
 import { useRealtimeRefresh } from "@/hooks/use-realtime-refresh";
 import { useAuthStore } from "@/stores/auth-store";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -55,6 +56,7 @@ type PoolDraft = {
 };
 
 type RouteDraft = LoadBalancerRoute;
+type ConfirmTarget = { kind: "pool" | "route"; name: string } | null;
 
 const emptyPool: PoolDraft = {
   name: "",
@@ -129,6 +131,7 @@ export function LoadBalancer() {
   const [editingRouteName, setEditingRouteName] = useState<string | null>(null);
   const [poolDraft, setPoolDraft] = useState<PoolDraft>(emptyPool);
   const [routeDraft, setRouteDraft] = useState<RouteDraft>(emptyRoute);
+  const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget>(null);
 
   const refresh = async () => {
     if (DEMO_MODE) return;
@@ -230,18 +233,35 @@ export function LoadBalancer() {
     }
   };
 
-  const removePool = async (pool: LoadBalancerPool) => {
-    if (!canWrite || !window.confirm(`Delete the ${pool.name} pool?`)) return;
+  const removePool = (pool: LoadBalancerPool) => {
+    if (!canWrite) return;
     const linkedRoutes = routes.filter((route) => route.upstream_pool === pool.name);
     if (linkedRoutes.length > 0) {
       setError(`Cannot delete ${pool.name}; ${linkedRoutes.length} route${linkedRoutes.length === 1 ? " is" : "s are"} still linked to it.`);
       return;
     }
+    setConfirmTarget({ kind: "pool", name: pool.name });
+  };
+
+  const removeRoute = (route: LoadBalancerRoute) => {
+    if (!canWrite) return;
+    setConfirmTarget({ kind: "route", name: route.name });
+  };
+
+  const confirmRemove = async () => {
+    if (!confirmTarget) return;
+    const target = confirmTarget;
+    setConfirmTarget(null);
     setBusy(true);
     setError("");
     try {
-      await persist(pools.filter((item) => item.name !== pool.name), routes);
-      toast.success("Upstream pool removed");
+      if (target.kind === "pool") {
+        await persist(pools.filter((item) => item.name !== target.name), routes);
+        toast.success("Upstream pool removed");
+      } else {
+        await persist(pools, routes.filter((item) => item.name !== target.name));
+        toast.success("Route removed");
+      }
     } catch (exception) {
       setError(sanitizeError(exception));
     } finally {
@@ -280,20 +300,6 @@ export function LoadBalancer() {
       await persist(pools, nextRoutes);
       setRouteDialogOpen(false);
       toast.success(editingRouteName == null ? "Route created" : "Route updated");
-    } catch (exception) {
-      setError(sanitizeError(exception));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const removeRoute = async (route: LoadBalancerRoute) => {
-    if (!canWrite || !window.confirm(`Delete the ${route.name} route?`)) return;
-    setBusy(true);
-    setError("");
-    try {
-      await persist(pools, routes.filter((item) => item.name !== route.name));
-      toast.success("Route removed");
     } catch (exception) {
       setError(sanitizeError(exception));
     } finally {
@@ -340,7 +346,7 @@ export function LoadBalancer() {
             <Button variant="outline" size="sm" onClick={openNewPool} disabled={!canWrite || busy}><Plus />Pool</Button>
           </CardHeader>
           <CardContent>
-            {loading ? <LoadingRows /> : pools.length === 0 ? <EmptyState title="No upstream pools" description="Create a pool before adding a virtual host route." action={<Button onClick={openNewPool} disabled={!canWrite}><Plus />Create pool</Button>} /> : <div className="space-y-3">{pools.map((pool) => <PoolCard key={pool.name} pool={pool} canWrite={canWrite} busy={busy} onEdit={() => openEditPool(pool)} onDelete={() => void removePool(pool)} />)}</div>}
+            {loading ? <LoadingRows /> : pools.length === 0 ? <EmptyState title="No upstream pools" description="Create a pool before adding a virtual host route." action={<Button onClick={openNewPool} disabled={!canWrite}><Plus />Create pool</Button>} /> : <div className="space-y-3">{pools.map((pool) => <PoolCard key={pool.name} pool={pool} canWrite={canWrite} busy={busy} onEdit={() => openEditPool(pool)} onDelete={() => removePool(pool)} />)}</div>}
           </CardContent>
         </Card>
 
@@ -356,13 +362,21 @@ export function LoadBalancer() {
 
       <Card className="mt-6">
         <CardHeader className="flex flex-row items-start justify-between gap-4"><div><CardTitle>Virtual host routes</CardTitle><CardDescription>Map domains and path prefixes to upstream pools.</CardDescription></div><Button variant="outline" onClick={openNewRoute} disabled={!canWrite || pools.length === 0 || busy}><Plus />Add route</Button></CardHeader>
-        <CardContent>{routes.length === 0 ? <EmptyState title="No routes configured" description="A pool can exist without receiving traffic until a route is attached." action={pools.length > 0 ? <Button onClick={openNewRoute} disabled={!canWrite}><Plus />Create route</Button> : undefined} /> : <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b text-left text-xs text-muted-foreground"><th className="pb-3 font-medium">Route</th><th className="pb-3 font-medium">Host</th><th className="pb-3 font-medium">Path prefix</th><th className="pb-3 font-medium">Upstream pool</th><th className="pb-3 text-right font-medium">Actions</th></tr></thead><tbody>{routes.map((route) => <tr className="border-b last:border-0" key={route.name}><td className="py-4 font-medium">{route.name}</td><td className="py-4 font-mono text-xs">{route.host}</td><td className="py-4 font-mono text-xs">{route.path_prefix}</td><td className="py-4"><Badge variant="secondary">{route.upstream_pool}</Badge></td><td className="py-4 text-right"><div className="flex justify-end gap-1"><Button variant="ghost" size="icon" aria-label={`Edit ${route.name}`} onClick={() => openEditRoute(route)} disabled={!canWrite || busy}><Pencil /></Button><Button variant="ghost" size="icon" aria-label={`Delete ${route.name}`} onClick={() => void removeRoute(route)} disabled={!canWrite || busy}><Trash2 /></Button></div></td></tr>)}</tbody></table></div>}</CardContent>
+        <CardContent>{routes.length === 0 ? <EmptyState title="No routes configured" description="A pool can exist without receiving traffic until a route is attached." action={pools.length > 0 ? <Button onClick={openNewRoute} disabled={!canWrite}><Plus />Create route</Button> : undefined} /> : <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b text-left text-xs text-muted-foreground"><th className="pb-3 font-medium">Route</th><th className="pb-3 font-medium">Host</th><th className="pb-3 font-medium">Path prefix</th><th className="pb-3 font-medium">Upstream pool</th><th className="pb-3 text-right font-medium">Actions</th></tr></thead><tbody>{routes.map((route) => <tr className="border-b last:border-0" key={route.name}><td className="py-4 font-medium">{route.name}</td><td className="py-4 font-mono text-xs">{route.host}</td><td className="py-4 font-mono text-xs">{route.path_prefix}</td><td className="py-4"><Badge variant="secondary">{route.upstream_pool}</Badge></td><td className="py-4 text-right"><div className="flex justify-end gap-1"><Button variant="ghost" size="icon" aria-label={`Edit ${route.name}`} onClick={() => openEditRoute(route)} disabled={!canWrite || busy}><Pencil /></Button><Button variant="ghost" size="icon" aria-label={`Delete ${route.name}`} onClick={() => removeRoute(route)} disabled={!canWrite || busy}><Trash2 /></Button></div></td></tr>)}</tbody></table></div>}</CardContent>
       </Card>
 
       <Card className="mt-6"><CardHeader><CardTitle>Operational guardrails</CardTitle><CardDescription>Load-balancer changes are validated before the runtime snapshot is swapped.</CardDescription></CardHeader><CardContent className="grid gap-3 text-sm md:grid-cols-3"><Guardrail icon={CheckCircle2} title="Atomic reload" detail="A candidate pool and health supervisor start before live traffic switches." /><Guardrail icon={Clock3} title="Bounded timeouts" detail="Connect and request timeouts stay explicit per pool." /><Guardrail icon={Settings2} title="Hot configuration" detail="Changes are persisted to the configured TOML and broadcast over SSE." /></CardContent></Card>
 
       <PoolDialog open={poolDialogOpen} onOpenChange={setPoolDialogOpen} draft={poolDraft} setDraft={setPoolDraft} editing={editingPoolName != null} algorithms={algorithmOptions} busy={busy} onSubmit={savePool} />
       <RouteDialog open={routeDialogOpen} onOpenChange={setRouteDialogOpen} draft={routeDraft} setDraft={setRouteDraft} editing={editingRouteName != null} pools={pools} busy={busy} onSubmit={saveRoute} />
+      <ConfirmDialog
+        open={confirmTarget != null}
+        onOpenChange={(open) => { if (!open && !busy) setConfirmTarget(null); }}
+        title={confirmTarget?.kind === "pool" ? "Delete upstream pool?" : "Delete virtual host route?"}
+        description={confirmTarget?.kind === "pool" ? `The ${confirmTarget.name} pool will be removed from the live routing configuration.` : `The ${confirmTarget?.name ?? "selected"} route will stop receiving traffic.`}
+        pending={busy}
+        onConfirm={() => void confirmRemove()}
+      />
     </Main>
   );
 }
@@ -390,7 +404,7 @@ function Capability({ label, value, status }: { label: string; value: string; st
 function Guardrail({ icon: Icon, title, detail }: { icon: typeof CheckCircle2; title: string; detail: string }) { return <div className="rounded-lg border p-4"><Icon className="size-4 text-primary" /><p className="mt-3 font-medium">{title}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">{detail}</p></div>; }
 function EmptyState({ title, description, action }: { title: string; description: string; action?: ReactNode }) { return <div className="flex flex-col items-center justify-center rounded-lg border border-dashed px-6 py-12 text-center"><CircleAlert className="size-5 text-muted-foreground" /><p className="mt-3 text-sm font-medium">{title}</p><p className="mt-1 max-w-sm text-xs text-muted-foreground">{description}</p>{action && <div className="mt-4">{action}</div>}</div>; }
 function LoadingRows() { return <div className="space-y-3" role="status" aria-label="Loading upstream pools">{[1, 2].map((item) => <div className="h-28 animate-pulse rounded-lg bg-muted" key={item} />)}</div>; }
-function Field({ label, value, onChange, type = "text", placeholder, disabled = false }: { label: string; value: string; onChange: (value: string) => void; type?: string; placeholder?: string; disabled?: boolean }) { return <div className="space-y-2"><Label>{label}</Label><Input type={type} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} disabled={disabled} required /></div>; }
+function Field({ label, value, onChange, type = "text", placeholder, disabled = false }: { label: string; value: string; onChange: (value: string) => void; type?: string; placeholder?: string; disabled?: boolean }) { return <div className="space-y-2"><Label>{label}</Label><Input aria-label={label} type={type} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} disabled={disabled} required /></div>; }
 function formatAlgorithm(value: string) { return value.split("_").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" "); }
 function toConfigRequest(pools: LoadBalancerPool[], routes: LoadBalancerRoute[]): LoadBalancerConfigRequest { return { pools: pools.map((pool) => ({ name: pool.name, algorithm: pool.algorithm, connect_timeout_seconds: pool.connect_timeout_seconds, request_timeout_seconds: pool.request_timeout_seconds, backends: pool.backends.map((backend) => ({ address: backend.address, health_check: backend.health_check, health_path: backend.health_check === "http" ? backend.health_path : null })) })), routes }; }
 function makeDemoSnapshot(request: LoadBalancerConfigRequest, generation: number): LoadBalancerSnapshot { return { generation, pools: request.pools.map((pool) => ({ ...pool, backends: pool.backends.map((backend, id) => ({ ...backend, id, healthy: true, inflight: 0 })) })), routes: request.routes, capabilities: demoSnapshot.capabilities }; }

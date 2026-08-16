@@ -197,6 +197,25 @@
     "saving": "Saving…",
     "savePolicy": "Save policy"
   },
+  "security": {
+    "coverageTitle": "PRD capability coverage",
+    "coverageDescription": "This matrix separates controls available in the current API from requirements that need a backend contract before the UI can safely manage them.",
+    "available": "Available",
+    "partial": "Partial",
+    "notExposed": "Not exposed",
+    "wafTitle": "Signature and semantic WAF",
+    "wafDetail": "Built-in rule packs and custom matcher rules are available with live policy updates.",
+    "virtualPatchingTitle": "Virtual patching",
+    "virtualPatchingDetail": "Custom WAF rules can be added, enabled, and removed without restarting the proxy.",
+    "botChallengeTitle": "Bot challenge",
+    "botChallengeDetail": "Risk-based protection and an in-browser proof-of-work challenge are available; an external CAPTCHA provider is not exposed.",
+    "ipGeoTitle": "IP reputation and GeoIP",
+    "ipGeoDetail": "The current control-plane API does not expose reputation feeds, country matching, or IP allow/deny policy management.",
+    "authChallengeTitle": "Per-host authentication challenge",
+    "authChallengeDetail": "Host-level visitor authentication is not represented in the current proxy-host or security API contracts.",
+    "falsePositiveLoopTitle": "False-positive feedback loop",
+    "falsePositiveLoopDetail": "Adaptive tuning recommendations are available, but direct false-positive labels and feedback events are not collected."
+  },
   "analytics": {
     "title": "Analytics",
     "description": "Process-local · last 24 hours",

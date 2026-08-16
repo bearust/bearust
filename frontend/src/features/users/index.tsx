@@ -6,6 +6,7 @@ import { DEMO_MODE } from "@/lib/demo";
 import { sanitizeError } from "@/lib/errors";
 import { useRealtimeRefresh } from "@/hooks/use-realtime-refresh";
 import { useAuthStore } from "@/stores/auth-store";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -26,12 +27,13 @@ const demoUsers: User[] = [
 ];
 const demoRoles: RoleRecord[] = [
   { id: 1, slug: "admin", name: "Administrator", description: "Full control", system_managed: true, permissions: permissionOptions },
-  { id: 2, slug: "operator", name: "Operator", description: "Operate edge services", system_managed: true, permissions: ["proxy_hosts.read", "proxy_hosts.write", "certificates.read", "certificates.write", "audit_logs.read", "bot_protection.manage"] },
+  { id: 2, slug: "operator", name: "Operator", description: "Operate edge services", system_managed: true, permissions: ["proxy_hosts.read", "proxy_hosts.write", "certificates.read", "certificates.write", "audit_logs.read", "ai_advisor.read", "ai_advisor.request"] },
   { id: 3, slug: "viewer", name: "Viewer", description: "Read-only access", system_managed: true, permissions: ["proxy_hosts.read", "certificates.read", "audit_logs.read"] },
 ];
 
 type UserForm = { email: string; password: string; role: string };
 type RoleForm = { slug: string; name: string; description: string; permissions: PermissionKey[]; scopeHostIds: string };
+type ConfirmTarget = { kind: "user"; item: User } | { kind: "role"; item: RoleRecord } | null;
 const emptyUser: UserForm = { email: "", password: "", role: "viewer" };
 const emptyRole: RoleForm = { slug: "", name: "", description: "", permissions: [], scopeHostIds: "" };
 
@@ -49,6 +51,7 @@ export function Users() {
   const [loading, setLoading] = useState(!DEMO_MODE);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget>(null);
 
   const refresh = async () => {
     if (DEMO_MODE) return;
@@ -81,10 +84,30 @@ export function Users() {
     setBusy(true); setError("");
     try { if (DEMO_MODE) setUsers((current) => current.map((item) => item.id === user.id ? { ...item, ...patch } : item)); else { await api.updateUser(user.id, patch); await refresh(); } toast.success("User updated"); } catch (exception) { setError(sanitizeError(exception)); } finally { setBusy(false); }
   };
-  const deleteUser = async (user: User) => {
-    if (!window.confirm(`Delete ${user.email}?`)) return;
+  const deleteUser = (user: User) => {
+    if (!isAdmin) return;
+    setConfirmTarget({ kind: "user", item: user });
+  };
+  const deleteRole = (role: RoleRecord) => {
+    if (!isAdmin || role.system_managed) return;
+    setConfirmTarget({ kind: "role", item: role });
+  };
+  const confirmDelete = async () => {
+    if (!confirmTarget) return;
+    const target = confirmTarget;
+    setConfirmTarget(null);
     setBusy(true);
-    try { if (DEMO_MODE) setUsers((current) => current.filter((item) => item.id !== user.id)); else { await api.deleteUser(user.id); await refresh(); } toast.success("User deleted"); } catch (exception) { setError(sanitizeError(exception)); } finally { setBusy(false); }
+    try {
+      if (target.kind === "user") {
+        if (DEMO_MODE) setUsers((current) => current.filter((item) => item.id !== target.item.id));
+        else { await api.deleteUser(target.item.id); await refresh(); }
+        toast.success("User deleted");
+      } else {
+        if (DEMO_MODE) setRoles((current) => current.filter((item) => item.id !== target.item.id));
+        else { await api.deleteRole(target.item.id); await refresh(); }
+        toast.success("Role deleted");
+      }
+    } catch (exception) { setError(sanitizeError(exception)); } finally { setBusy(false); }
   };
   const revokeSessions = async (user: User) => {
     setBusy(true);
@@ -116,12 +139,6 @@ export function Users() {
       setRoleOpen(false); toast.success(editingRoleId == null ? "Role created" : "Role updated");
     } catch (exception) { setError(sanitizeError(exception)); } finally { setBusy(false); }
   };
-  const deleteRole = async (role: RoleRecord) => {
-    if (role.system_managed || !window.confirm(`Delete ${role.name}?`)) return;
-    setBusy(true);
-    try { if (DEMO_MODE) setRoles((current) => current.filter((item) => item.id !== role.id)); else { await api.deleteRole(role.id); await refresh(); } toast.success("Role deleted"); } catch (exception) { setError(sanitizeError(exception)); } finally { setBusy(false); }
-  };
-
   return <Main><PageHeader title="Users & Roles" description="Manage people, roles, and resource permissions in the control plane." action={<><Badge variant="outline" className="hidden gap-1.5 rounded-full sm:inline-flex"><span className={`size-1.5 rounded-full ${DEMO_MODE ? "bg-amber-500" : "bg-emerald-500"}`} />{DEMO_MODE ? "Demo data" : "API connected"}</Badge><Button onClick={() => { setUserForm(emptyUser); setUserOpen(true); }} disabled={!isAdmin}><MailPlus />Invite user</Button></>} />
     {error && <div role="alert" className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>}
     <div className="mb-6 grid gap-4 sm:grid-cols-3"><Summary icon={UsersIcon} label="Team members" value={String(users.length)} detail={`${users.filter((user) => !user.disabled).length} active accounts`} /><Summary icon={ShieldCheck} label="Administrators" value={String(adminCount)} detail="Active full-control accounts" /><Summary icon={UserRound} label="Disabled accounts" value={String(users.filter((user) => user.disabled).length)} detail="Access currently suspended" /></div>
@@ -130,6 +147,14 @@ export function Users() {
 
     <Dialog open={userOpen} onOpenChange={setUserOpen}><DialogContent><DialogHeader><DialogTitle>Create user</DialogTitle><DialogDescription>Create an authenticated account and assign its initial role.</DialogDescription></DialogHeader><form id="user-form" className="space-y-4" onSubmit={(event) => void submitUser(event)}><Field label="Email" type="email" value={userForm.email} onChange={(value) => setUserForm({ ...userForm, email: value })} placeholder="operator@example.com" /><Field label="Temporary password" type="password" value={userForm.password} onChange={(value) => setUserForm({ ...userForm, password: value })} autoComplete="new-password" /><div className="space-y-2"><Label htmlFor="user-role">Role</Label><select id="user-role" value={userForm.role} onChange={(event) => setUserForm({ ...userForm, role: event.target.value })} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm">{roleOptions.map((role) => <option key={role.slug} value={role.slug}>{role.name}</option>)}</select></div></form><DialogFooter><Button variant="outline" onClick={() => setUserOpen(false)}>Cancel</Button><Button type="submit" form="user-form" disabled={busy}><MailPlus />Create user</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={roleOpen} onOpenChange={setRoleOpen}><DialogContent className="max-h-[90vh] overflow-y-auto"><DialogHeader><DialogTitle>{editingRoleId == null ? "Create custom role" : "Edit role"}</DialogTitle><DialogDescription>Grant only the permissions this role needs.</DialogDescription></DialogHeader><form id="role-form" className="space-y-4" onSubmit={(event) => void submitRole(event)}><div className="grid gap-4 sm:grid-cols-2"><Field label="Slug" value={roleForm.slug} onChange={(value) => setRoleForm({ ...roleForm, slug: value })} disabled={editingRoleId != null} /><Field label="Name" value={roleForm.name} onChange={(value) => setRoleForm({ ...roleForm, name: value })} /><div className="sm:col-span-2"><Field label="Description" value={roleForm.description} onChange={(value) => setRoleForm({ ...roleForm, description: value })} /></div></div><div><p className="mb-2 text-sm font-medium">Permissions</p><div className="grid gap-2 sm:grid-cols-2">{permissionOptions.map((permission) => <label className="flex items-center gap-2 rounded-md border px-3 py-2 text-xs" key={permission}><input type="checkbox" checked={roleForm.permissions.includes(permission)} onChange={() => togglePermission(permission)} className="size-4 accent-primary" />{permission}</label>)}</div></div><Field label="Scoped proxy host IDs" value={roleForm.scopeHostIds} onChange={(value) => setRoleForm({ ...roleForm, scopeHostIds: value })} placeholder="1, 2, 3" /><p className="-mt-2 text-xs text-muted-foreground">Applies to proxy host read/write permissions. Leave blank for global access.</p></form><DialogFooter><Button variant="outline" onClick={() => setRoleOpen(false)}>Cancel</Button><Button type="submit" form="role-form" disabled={busy || !isAdmin}><Plus />Save role</Button></DialogFooter></DialogContent></Dialog>
+    <ConfirmDialog
+      open={confirmTarget != null}
+      onOpenChange={(open) => { if (!open && !busy) setConfirmTarget(null); }}
+      title={confirmTarget?.kind === "user" ? "Delete user?" : "Delete custom role?"}
+      description={confirmTarget?.kind === "user" ? `${confirmTarget.item.email} will lose access to the control plane.` : `${confirmTarget?.item.name ?? "This role"} will be permanently removed.`}
+      pending={busy}
+      onConfirm={() => void confirmDelete()}
+    />
   </Main>;
 }
 

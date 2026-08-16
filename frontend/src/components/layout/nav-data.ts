@@ -6,6 +6,7 @@ import {
   FileClock,
   LayoutDashboard,
   Network,
+  Settings,
   ShieldCheck,
   Sparkles,
   Users,
@@ -47,6 +48,7 @@ export const sidebarData: SidebarData = {
       items: [
         { title: "Users & Roles", url: "/users", icon: Users },
         { title: "Audit Log", url: "/audit-log", icon: FileClock },
+        { title: "Settings", url: "/settings", icon: Settings },
       ],
     },
   ],

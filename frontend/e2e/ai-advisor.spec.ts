@@ -73,4 +73,21 @@ test.describe("BeaRust shadcn-admin shell", () => {
     await expect(page.getByText("Virtual host routes", { exact: true })).toBeVisible();
     await expect(page.getByText("api.bearust.local", { exact: true })).toBeVisible();
   });
+
+  test("uses an in-app confirmation before deleting an upstream pool", async ({ page }) => {
+    await page.goto("/load-balancer");
+    await page.getByRole("button", { name: "Add pool" }).click();
+    await expect(page.getByRole("dialog", { name: "Create upstream pool" })).toBeVisible();
+    await page.getByLabel("Pool name").fill("edge-pool");
+    await page.getByLabel("Address 1").fill("10.20.3.11:8080");
+    await page.getByRole("button", { name: "Create pool" }).click();
+    await expect(page.getByText("edge-pool", { exact: true }).first()).toBeVisible();
+
+    await page.getByRole("button", { name: "Delete edge-pool" }).click();
+    const confirmation = page.getByRole("alertdialog");
+    await expect(confirmation).toBeVisible();
+    await expect(confirmation).toContainText("Delete upstream pool?");
+    await confirmation.getByRole("button", { name: "Cancel" }).click();
+    await expect(page.getByText("edge-pool", { exact: true }).first()).toBeVisible();
+  });
 });

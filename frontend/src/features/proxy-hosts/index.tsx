@@ -17,6 +17,7 @@ import { DEMO_MODE } from "@/lib/demo";
 import { sanitizeError } from "@/lib/errors";
 import { useRealtimeRefresh } from "@/hooks/use-realtime-refresh";
 import { useAuthStore } from "@/stores/auth-store";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -77,6 +78,7 @@ export function ProxyHosts() {
   const [uploadName, setUploadName] = useState("");
   const [certificateFile, setCertificateFile] = useState<File | null>(null);
   const [keyFile, setKeyFile] = useState<File | null>(null);
+  const [confirmHost, setConfirmHost] = useState<Host | null>(null);
   const [loading, setLoading] = useState(!DEMO_MODE);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -172,8 +174,15 @@ export function ProxyHosts() {
     }
   };
 
-  const removeHost = async (host: Host) => {
-    if (!window.confirm(`Delete ${host.domain}?`)) return;
+  const removeHost = (host: Host) => {
+    if (!canWrite) return;
+    setConfirmHost(host);
+  };
+
+  const confirmRemoveHost = async () => {
+    if (!confirmHost) return;
+    const host = confirmHost;
+    setConfirmHost(null);
     setBusy(`delete-${host.id}`);
     try {
       if (DEMO_MODE) setHosts((current) => current.filter((item) => item.id !== host.id));
@@ -281,7 +290,7 @@ export function ProxyHosts() {
         </CardHeader>
         <CardContent>
           {loading ? <LoadingRows /> : <Table><TableHeader><TableRow><TableHead>Host</TableHead><TableHead>Domain</TableHead><TableHead>Upstream</TableHead><TableHead>TLS</TableHead><TableHead>Status</TableHead><TableHead className="w-10"><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader><TableBody>
-            {visibleHosts.map((host) => <TableRow key={host.id}><TableCell><div className="font-medium">{host.name}</div><div className="text-xs text-muted-foreground">{host.enabled ? "Enabled" : "Disabled"}</div></TableCell><TableCell className="font-mono text-xs">{host.domain}</TableCell><TableCell className="font-mono text-xs text-muted-foreground">{host.upstream_host}:{host.upstream_port}</TableCell><TableCell><Badge variant="secondary">{host.tls_mode === "disabled" ? "Off" : host.tls_mode}</Badge></TableCell><TableCell><StatusBadge status={host.enabled ? "healthy" : "warning"}>{host.enabled ? "Healthy" : "Disabled"}</StatusBadge></TableCell><TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label={`Actions for ${host.name}`}><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => openEdit(host)} disabled={!canWrite}><Pencil />Edit host</DropdownMenuItem><DropdownMenuItem onClick={() => setCertificateOpen(true)} disabled={!canWrite}><KeyRound />Issue certificate</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onClick={() => void removeHost(host)} disabled={!canWrite || busy === `delete-${host.id}`}><Trash2 />Delete host</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow>)}
+            {visibleHosts.map((host) => <TableRow key={host.id}><TableCell><div className="font-medium">{host.name}</div><div className="text-xs text-muted-foreground">{host.enabled ? "Enabled" : "Disabled"}</div></TableCell><TableCell className="font-mono text-xs">{host.domain}</TableCell><TableCell className="font-mono text-xs text-muted-foreground">{host.upstream_host}:{host.upstream_port}</TableCell><TableCell><Badge variant="secondary">{host.tls_mode === "disabled" ? "Off" : host.tls_mode}</Badge></TableCell><TableCell><StatusBadge status={host.enabled ? "healthy" : "warning"}>{host.enabled ? "Healthy" : "Disabled"}</StatusBadge></TableCell><TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" aria-label={`Actions for ${host.name}`}><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => openEdit(host)} disabled={!canWrite}><Pencil />Edit host</DropdownMenuItem><DropdownMenuItem onClick={() => setCertificateOpen(true)} disabled={!canWrite}><KeyRound />Issue certificate</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onClick={() => removeHost(host)} disabled={!canWrite || busy === `delete-${host.id}`}><Trash2 />Delete host</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow>)}
           </TableBody></Table>}
           {!loading && visibleHosts.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">No proxy hosts match your search.</div>}
         </CardContent>
@@ -297,6 +306,14 @@ export function ProxyHosts() {
       <Dialog open={certificateOpen} onOpenChange={setCertificateOpen}><DialogContent><DialogHeader><DialogTitle>Request ACME certificate</DialogTitle><DialogDescription>The private Cloudflare token is sent only to the control plane and is never rendered after submission.</DialogDescription></DialogHeader><form id="certificate-form" className="space-y-4" onSubmit={(event) => void issueCertificate(event)}><div className="space-y-2"><Label htmlFor="certificate-hostnames">Hostnames</Label><Input id="certificate-hostnames" value={hostnameText} onChange={(event) => setHostnameText(event.target.value)} placeholder="api.example.com, *.example.com" required /><p className="text-xs text-muted-foreground">Separate multiple names with commas. Wildcards require DNS-01.</p></div><div className="grid gap-4 sm:grid-cols-2"><div className="space-y-2"><Label htmlFor="acme-environment">Environment</Label><select id="acme-environment" value={acme.environment} onChange={(event) => setAcme({ ...acme, environment: event.target.value as AcmeRequest["environment"] })} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="staging">Staging</option><option value="production">Production</option></select></div><div className="space-y-2"><Label htmlFor="acme-challenge">Challenge</Label><select id="acme-challenge" value={acme.challenge} onChange={(event) => setAcme({ ...acme, challenge: event.target.value as AcmeRequest["challenge"] })} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="http01">HTTP-01</option><option value="cloudflare_dns01">Cloudflare DNS-01</option></select></div></div>{acme.challenge === "cloudflare_dns01" && <div className="space-y-2"><Label htmlFor="cloudflare-token">Cloudflare API token</Label><Input id="cloudflare-token" type="password" value={acme.cloudflare_api_token ?? ""} onChange={(event) => setAcme({ ...acme, cloudflare_api_token: event.target.value })} autoComplete="off" /></div>}</form><DialogFooter><Button type="button" variant="outline" onClick={() => setCertificateOpen(false)}>Cancel</Button><Button type="submit" form="certificate-form" disabled={busy === "acme"}>{busy === "acme" ? "Submitting…" : "Request certificate"}</Button></DialogFooter></DialogContent></Dialog>
 
       <Dialog open={uploadOpen} onOpenChange={(nextOpen) => { setUploadOpen(nextOpen); if (!nextOpen) { setUploadName(""); setCertificateFile(null); setKeyFile(null); } }}><DialogContent><DialogHeader><DialogTitle>Upload certificate</DialogTitle><DialogDescription>PEM certificate and private-key bytes are sent to the control plane for validation and are never displayed after upload.</DialogDescription></DialogHeader><form id="upload-certificate-form" className="space-y-4" onSubmit={(event) => void uploadCertificate(event)}><Field id="upload-certificate-name" label="Certificate name" value={uploadName} onChange={setUploadName} placeholder="Internal CA" /><div className="space-y-2"><Label htmlFor="upload-certificate-file">Certificate file</Label><Input id="upload-certificate-file" type="file" accept=".pem,.crt,.cer,application/x-pem-file" onChange={(event) => setCertificateFile(event.target.files?.[0] ?? null)} required /></div><div className="space-y-2"><Label htmlFor="upload-key-file">Private-key file</Label><Input id="upload-key-file" type="file" accept=".pem,.key,application/x-pem-file" onChange={(event) => setKeyFile(event.target.files?.[0] ?? null)} required /></div></form><DialogFooter><Button type="button" variant="outline" onClick={() => setUploadOpen(false)}>Cancel</Button><Button type="submit" form="upload-certificate-form" disabled={busy === "upload"}>{busy === "upload" ? "Uploading…" : "Upload certificate"}</Button></DialogFooter></DialogContent></Dialog>
+      <ConfirmDialog
+        open={confirmHost != null}
+        onOpenChange={(open) => { if (!open && busy == null) setConfirmHost(null); }}
+        title="Delete proxy host?"
+        description={confirmHost ? `${confirmHost.domain} and its routing entry will be removed from the control plane.` : "The selected proxy host will be removed."}
+        pending={busy != null}
+        onConfirm={() => void confirmRemoveHost()}
+      />
     </Main>
   );
 }

@@ -5,6 +5,7 @@ import {
   type MutableRefObject,
   type FormEvent,
 } from "react";
+import { toast } from "sonner";
 import {
   api,
   AcmeRequest,
@@ -78,6 +79,7 @@ import {
   IconUsers,
 } from "./icons";
 import { AiAdvisorSection } from "./aiAdvisor";
+import { ConfirmDialog } from "./components/confirm-dialog";
 import { useTranslation } from "react-i18next";
 import {
   SERVER_ERROR_KEYS,
@@ -286,7 +288,8 @@ export function AcmeWizard({
     [domains, setDomains] = useState(""),
     [token, setToken] = useState(""),
     [error, setError] = useState(""),
-    [busy, setBusy] = useState(false);
+    [busy, setBusy] = useState(false),
+    [confirmProduction, setConfirmProduction] = useState(false);
   if (!canWrite) return null;
   const hosts = domains
     .split(/[,\n]+/)
@@ -294,39 +297,43 @@ export function AcmeWizard({
     .filter(Boolean);
   const invalid = hosts.some((h) => !validHostname(h, challenge));
   const missingToken = challenge === "cloudflare_dns01" && !token.trim();
+  const issueCertificate = async () => {
+    setConfirmProduction(false);
+    setBusy(true);
+    setError("");
+    try {
+      await api.issueAcme({
+        environment,
+        challenge,
+        hostnames: hosts,
+        ...(challenge === "cloudflare_dns01"
+          ? { cloudflare_api_token: token }
+          : {}),
+      });
+      setDomains("");
+      setToken("");
+      onIssued();
+    } catch (x) {
+      setError(sanitizeError(x));
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
-    <Panel label={t("acme.title")}>
-      <form
-        className="grid gap-4 sm:grid-cols-2"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          if (invalid || missingToken || busy) return;
-          if (
-            environment === "production" &&
-            !window.confirm(t("acme.productionConfirm"))
-          )
-            return;
-          setBusy(true);
-          setError("");
-          try {
-            await api.issueAcme({
-              environment,
-              challenge,
-              hostnames: hosts,
-              ...(challenge === "cloudflare_dns01"
-                ? { cloudflare_api_token: token }
-                : {}),
-            });
-            setDomains("");
-            setToken("");
-            onIssued();
-          } catch (x) {
-            setError(sanitizeError(x));
-          } finally {
-            setBusy(false);
-          }
-        }}
-      >
+    <>
+      <Panel label={t("acme.title")}>
+        <form
+          className="grid gap-4 sm:grid-cols-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (invalid || missingToken || busy) return;
+            if (environment === "production") {
+              setConfirmProduction(true);
+              return;
+            }
+            void issueCertificate();
+          }}
+        >
         <SelectField
           label={t("acme.environment")}
           value={environment}
@@ -375,8 +382,18 @@ export function AcmeWizard({
         >
           {busy ? t("acme.issuing") : t("acme.issue")}
         </Button>
-      </form>
-    </Panel>
+        </form>
+      </Panel>
+      <ConfirmDialog
+        open={confirmProduction}
+        onOpenChange={(open) => { if (!open && !busy) setConfirmProduction(false); }}
+        title={t("acme.production")}
+        description={t("acme.productionConfirm")}
+        confirmLabel={t("acme.issue")}
+        pending={busy}
+        onConfirm={() => void issueCertificate()}
+      />
+    </>
   );
 }
 
@@ -537,6 +554,10 @@ export function UsersSection({
   const { formatNumber } = useLocaleFormatters();
   const [error, setError] = useState(""),
     [busy, setBusy] = useState<number | null>(null);
+  const [confirmUser, setConfirmUser] = useState<{
+    action: "toggle" | "delete";
+    user: User;
+  } | null>(null);
   const [email, setEmail] = useState(""),
     [password, setPassword] = useState(""),
     [role, setRole] = useState<Role>("viewer");
@@ -626,20 +647,7 @@ export function UsersSection({
                         <Button
                           variant="secondary"
                           disabled={busy === item.id}
-                          onClick={() => {
-                            if (
-                              window.confirm(
-                                item.disabled
-                                  ? t("users.enableConfirm")
-                                  : t("users.disableConfirm"),
-                              )
-                            )
-                              void run(item.id, () =>
-                                api.updateUser(item.id, {
-                                  disabled: !item.disabled,
-                                }),
-                              );
-                          }}
+                          onClick={() => setConfirmUser({ action: "toggle", user: item })}
                         >
                           {item.disabled
                             ? t("common.enable")
@@ -653,7 +661,7 @@ export function UsersSection({
                               const result = await api.revokeUserSessions(
                                 item.id,
                               );
-                              window.alert(
+                              toast.success(
                                 t("users.revokedSessions", {
                                   count: formatNumber(result.revoked, {
                                     maximumFractionDigits: 0,
@@ -668,10 +676,7 @@ export function UsersSection({
                         <Button
                           variant="danger"
                           disabled={busy === item.id}
-                          onClick={() => {
-                            if (window.confirm(t("users.deleteConfirm")))
-                              void run(item.id, () => api.deleteUser(item.id));
-                          }}
+                          onClick={() => setConfirmUser({ action: "delete", user: item })}
                         >
                           {t("common.delete")}
                         </Button>
@@ -727,6 +732,24 @@ export function UsersSection({
           {t("users.create")}
         </Button>
       </form>
+      <ConfirmDialog
+        open={confirmUser != null}
+        onOpenChange={(open) => { if (!open && busy == null) setConfirmUser(null); }}
+        title={confirmUser?.action === "delete" ? t("common.delete") : confirmUser?.user.disabled ? t("common.enable") : t("common.disable")}
+        description={confirmUser?.action === "delete" ? t("users.deleteConfirm") : confirmUser?.user.disabled ? t("users.enableConfirm") : t("users.disableConfirm")}
+        confirmLabel={confirmUser?.action === "delete" ? t("common.delete") : confirmUser?.user.disabled ? t("common.enable") : t("common.disable")}
+        pending={busy != null}
+        onConfirm={() => {
+          if (!confirmUser) return;
+          const target = confirmUser;
+          setConfirmUser(null);
+          if (target.action === "delete") {
+            void run(target.user.id, () => api.deleteUser(target.user.id));
+          } else {
+            void run(target.user.id, () => api.updateUser(target.user.id, { disabled: !target.user.disabled }));
+          }
+        }}
+      />
     </Panel>
   );
 }
@@ -763,6 +786,7 @@ export function RolesSection({
     [name, setName] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
+  const [confirmRole, setConfirmRole] = useState<RoleRecord | null>(null);
   const [drafts, setDrafts] = useState<ScopeDraft>(
     () =>
       Object.fromEntries(
@@ -971,10 +995,7 @@ export function RolesSection({
                     <Button
                       variant="danger"
                       disabled={busy}
-                      onClick={() =>
-                        window.confirm(t("roles.deleteConfirm")) &&
-                        void run(() => api.deleteRole(role.id))
-                      }
+                      onClick={() => setConfirmRole(role)}
                     >
                       {t("common.delete")}
                     </Button>
@@ -1021,6 +1042,20 @@ export function RolesSection({
       <p className="mt-4 text-sm text-legacy-muted">
         {t("roles.available", { permissions: PERMISSIONS.join(", ") })}
       </p>
+      <ConfirmDialog
+        open={confirmRole != null}
+        onOpenChange={(open) => { if (!open && !busy) setConfirmRole(null); }}
+        title={t("common.delete")}
+        description={t("roles.deleteConfirm")}
+        confirmLabel={t("common.delete")}
+        pending={busy}
+        onConfirm={() => {
+          if (!confirmRole) return;
+          const roleId = confirmRole.id;
+          setConfirmRole(null);
+          void run(() => api.deleteRole(roleId));
+        }}
+      />
     </Panel>
   );
 }

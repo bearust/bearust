@@ -27,7 +27,6 @@ afterEach(() => { vi.restoreAllMocks(); document.body.innerHTML = ''; });
 
 describe('role scope editor', () => {
   it('uses the role-specific confirmation before deleting a custom role', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
     const remove = vi.spyOn(api, 'deleteRole').mockResolvedValue(undefined);
     const view = render();
 
@@ -35,7 +34,13 @@ describe('role scope editor', () => {
       ([...view.element.querySelectorAll('button')].find((button) => button.textContent === 'Delete') as HTMLButtonElement).click();
     });
 
-    expect(confirm).toHaveBeenCalledWith('Delete this role?');
+    const dialog = document.body.querySelector('[role="alertdialog"]') as HTMLElement;
+    expect(dialog).toBeTruthy();
+    expect(dialog.textContent).toContain('Delete this role?');
+    expect(remove).not.toHaveBeenCalled();
+    await act(async () => {
+      (dialog.querySelector('button:not([data-radix-collection-item])') as HTMLButtonElement | null)?.click();
+    });
     expect(remove).not.toHaveBeenCalled();
     view.root.unmount();
   });

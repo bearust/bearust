@@ -11,7 +11,9 @@ import {
 
 const links = [
   { title: "Overview", href: "/" },
+  { title: "Operations", href: "/operations" },
   { title: "Proxy hosts", href: "/proxy-hosts" },
+  { title: "Load balancer", href: "/load-balancer" },
   { title: "Security", href: "/security" },
   { title: "Analytics", href: "/analytics" },
   { title: "Cluster", href: "/cluster" },
@@ -24,7 +26,7 @@ export function TopNav({ className }: { className?: string }) {
     <>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button size="icon" variant="outline" className="md:size-8 lg:hidden">
+          <Button size="icon" variant="outline" className="md:size-8 2xl:hidden">
             <Menu />
             <span className="sr-only">Open section navigation</span>
           </Button>
@@ -39,7 +41,7 @@ export function TopNav({ className }: { className?: string }) {
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
-      <nav className={cn("hidden items-center gap-4 lg:flex xl:gap-6", className)} aria-label="Primary">
+      <nav className={cn("hidden items-center gap-4 2xl:flex 2xl:gap-6", className)} aria-label="Primary">
         {links.map((link) => (
           <Link
             key={link.href}

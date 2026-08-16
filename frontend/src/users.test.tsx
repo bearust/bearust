@@ -83,7 +83,6 @@ describe('Dashboard Users UI',()=>{
     const create=vi.spyOn(api,'createUser').mockResolvedValue(created);
     const update=vi.spyOn(api,'updateUser').mockResolvedValue({...operator,role:'viewer'});
     const remove=vi.spyOn(api,'deleteUser').mockResolvedValue(undefined);
-    vi.spyOn(window,'confirm').mockReturnValue(true);
     const {element,root}=await renderDashboard(admin,[admin,operator]);
     const form=element.querySelector('[data-testid="user-create-form"]') as HTMLFormElement;
     const inputs=form.querySelectorAll('input');
@@ -93,8 +92,16 @@ describe('Dashboard Users UI',()=>{
     const selects=element.querySelectorAll('select');
     expect(selects.length).toBeGreaterThanOrEqual(3);
     const buttons=[...element.querySelectorAll('button')].filter(button=>button.textContent==='Disable'||button.textContent==='Delete') as HTMLButtonElement[];
-    await act(async()=>{buttons[0].click();buttons[1].click();});
+    await act(async()=>{buttons[0].click();});
+    let dialog=document.body.querySelector('[role="alertdialog"]') as HTMLElement;
+    expect(dialog).toBeTruthy();
+    await act(async()=>{(dialog.querySelector('button:last-child') as HTMLButtonElement).click();});
     expect(update).toHaveBeenCalledWith(2,{disabled:true});
+
+    await act(async()=>{buttons[1].click();});
+    dialog=document.body.querySelector('[role="alertdialog"]') as HTMLElement;
+    expect(dialog).toBeTruthy();
+    await act(async()=>{(dialog.querySelector('button:last-child') as HTMLButtonElement).click();});
     expect(remove).toHaveBeenCalledWith(2);
     root.unmount();
   });
