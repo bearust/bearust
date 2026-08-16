@@ -1,6 +1,20 @@
 # Development
 
-Native development needs Rust 1.97.1, Cargo, clang, cmake, make, perl, and pkg-config. Without local Rust, run `docker compose -f docker-compose.dev.yml up --build`; the repository and Cargo caches are mounted and cargo-watch reruns the server.
+The supported zero-prerequisite development path is:
+
+```bash
+docker compose -f docker-compose.dev.yml up --build
+```
+
+This starts the Rust backend with cargo-watch and the API-backed Vite frontend
+with hot module reload. Open `http://localhost:5183`; the control API is
+available at `http://127.0.0.1:8081`. Frontend dependencies, Rust dependencies,
+compiled targets, and development data are cached in Docker volumes, so a new
+contributor does not need to install Rust or Node locally or run a preparation
+command. The development setup token defaults to `bearust-dev-setup`.
+
+Native development is still supported with Rust 1.97.1, Cargo, clang, cmake,
+make, perl, pkg-config, and Node 22.
 
 Tests in `src/` and `tests/` cover routing, balancing, health, reload, logs, HTTP, WebSocket, and shutdown. Use `cargo test --locked`, `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings`.
 

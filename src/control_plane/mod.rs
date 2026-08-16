@@ -47,7 +47,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
-    routing::{get, post},
+    routing::{any, get, post},
     Json, Router,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -62,7 +62,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Mutex;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -694,6 +694,9 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route("/api/cluster/status", get(get_cluster_status))
         .route("/api/certificates/{id}/renew", post(renew_acme))
         .route("/api/certificates/{id}/status", get(acme_status));
+    let app = app
+        .route("/api", any(api_not_found))
+        .route("/api/{*path}", any(api_not_found));
     let app = if include_metrics {
         app.route("/metrics", get(prometheus_metrics))
     } else {
@@ -702,7 +705,15 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
     app.layer(axum::middleware::from_fn(csrf_guard))
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
-        .fallback_service(ServeDir::new("/usr/share/bearust/frontend"))
+        .fallback_service(
+            ServeDir::new("/usr/share/bearust/frontend")
+                .append_index_html_on_directories(true)
+                .fallback(ServeFile::new("/usr/share/bearust/frontend/index.html")),
+        )
+}
+
+async fn api_not_found() -> StatusCode {
+    StatusCode::NOT_FOUND
 }
 
 /// Protect cookie-authenticated mutations with a double-submit token. The

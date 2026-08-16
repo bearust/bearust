@@ -7,15 +7,20 @@ BeaRust is a configuration-driven reverse proxy and load balancer. It supports H
 ## Five-minute start
 
 ```sh
-cp .env.example .env
 docker compose up -d --build
-curl -H 'Host: api.example.com' http://127.0.0.1:8080/v1/health
 ```
 
-SQLite is the default and is persisted under `./data`. External database
-profiles are opt-in; copy `.env.example`, uncomment the matching `DATABASE_URL`
-and credential lines, replace the development passwords, and start exactly one
-profile:
+The bundled management UI and control API are available at the loopback-only
+`http://127.0.0.1:8081`. Port `8080` is the data-plane proxy for application
+traffic. SQLite and certificate material live in the named `bearust-data` and
+`bearust-tls` volumes, so a fresh checkout does not need pre-created host
+directories. The first startup generates a setup token in the data volume; set
+`BEARUST_SETUP_TOKEN` in an untracked `.env` when you want a deterministic
+production bootstrap token.
+
+External database profiles are opt-in; copy `.env.example`, uncomment the
+matching `DATABASE_URL` and credential lines, replace the development
+passwords, and start exactly one profile:
 
 ```sh
 docker compose --profile postgres up -d --build
@@ -34,31 +39,51 @@ profiles makes it wait for both services; `DATABASE_URL` still selects the
 backend it uses. For a non-default env file, pass it explicitly with
 `docker compose --env-file .env.production --profile postgres up -d`.
 
-For the development compose file, build the UI once before opening the management page:
+For development, one command starts both the Rust backend with cargo-watch and
+the API-backed Vite frontend with hot module reload:
 
 ```sh
-npm ci --prefix frontend && npm run build --prefix frontend
-docker compose -f docker-compose.dev.yml up -d --build
+docker compose -f docker-compose.dev.yml up --build
 ```
 
-To review the frontend shell without a backend, run the demo dashboard directly:
+Open `http://localhost:5183`. The backend API is also exposed at
+`http://127.0.0.1:8081`; the frontend proxies `/api` to the backend over the
+Compose network. Development uses an isolated named data volume and the
+bootstrap token `bearust-dev-setup` unless `BEARUST_SETUP_TOKEN` is supplied.
+The setup page pre-fills that development token.
+
+To stop the development stack:
 
 ```sh
-npm ci --prefix frontend && npm --prefix frontend run dev
+docker compose -f docker-compose.dev.yml down
 ```
 
-The default frontend dev mode is a deterministic demo-data environment for
-visual review. The API-backed development entry point is available with:
+To reset only development state, including its database and installed
+dependencies:
 
 ```sh
-npm --prefix frontend run dev:api
+docker compose -f docker-compose.dev.yml down -v
 ```
 
-The frontend dev server is available at `http://localhost:5183`.
+The deterministic demo dashboard remains available when explicitly requested:
+`npm --prefix frontend run dev`.
 
-Edit `config/bearust.example.toml` (or set `BEARUST_CONFIG`) for backends. Mount persistent `./data` and a read-only `./tls` directory (override with `BEARUST_DATA`/`BEARUST_TLS`). Reload with `docker compose kill -s HUP bearust` or `bearust reload --pid-file ./bearust.pid`. Configuration is TOML with `[server]`, `[health]`, `[[upstream_pools]]`, and `[[routes]]` tables.
+Edit `config/bearust.example.toml` (or set `BEARUST_CONFIG`) for backends.
+Production stores persistent state in named Docker volumes; reload with
+`docker compose kill -s HUP bearust` or `bearust reload --pid-file
+/run/bearust/bearust.pid`. Configuration is TOML with `[server]`, `[health]`,
+`[[upstream_pools]]`, and `[[routes]]` tables.
 
-The management API is available at host `127.0.0.1:8081` in Docker Compose (the container binds `0.0.0.0:8081`, while the host port remains localhost-only). Set `BEARUST_SETUP_TOKEN` before startup, or read the generated one-time token from `./data/setup-token` and expose the management UI only through an HTTPS reverse proxy. Keep `./data` private because it contains the SQLite database and certificate material.
+For a future registry publish, build the same production image with a registry
+tag without changing the Compose file:
+
+```sh
+BEARUST_IMAGE=ghcr.io/your-account/bearust:latest docker compose build
+docker push ghcr.io/your-account/bearust:latest
+```
+
+The default local production tag is `bearust:local`; BeaRust does not push to
+any registry automatically.
 
 Run `cargo test --locked`, `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings`. Frontend localization contributions must also run `npm run validate-locales --prefix frontend`; the supported UI locale codes are `en` (English), `id` (Indonesian), and `ja` (Japanese). See [DEVELOPMENT.md](DEVELOPMENT.md), [localization contribution guidance](docs/localization.md), [DEPLOY.md](DEPLOY.md), and the [roadmap](docs/PRD.md). Licensed under MIT OR Apache-2.0.
 
@@ -66,7 +91,10 @@ Certificate automation is documented in [docs/acme.md](docs/acme.md). Start with
 
 ## Management users and RBAC
 
-The control plane listens on `http://127.0.0.1:8081` in the development compose setup. On a fresh data directory, `GET /api/setup/status` reports that initialization is required. Create the first administrator exactly once with the one-time setup token:
+The control plane and bundled management UI listen on `http://127.0.0.1:8081` by
+default (loopback-only in both Compose files). On a fresh data directory,
+`GET /api/setup/status` reports that initialization is required. Create the
+first administrator exactly once with the one-time setup token:
 
 ```sh
 curl -c cookies.txt -H 'Content-Type: application/json' \

@@ -28,9 +28,10 @@ function SetupPage() {
   const { t } = useTranslation();
   const navigate = Route.useNavigate();
   const queryClient = useQueryClient();
+  const developmentSetupToken = import.meta.env.VITE_DEV_SETUP_TOKEN ?? "";
   const [email, setEmail] = useState(""),
     [password, setPassword] = useState(""),
-    [token, setToken] = useState(""),
+    [token, setToken] = useState(developmentSetupToken),
     [error, setError] = useState("");
 
   return (

@@ -280,32 +280,49 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
     let rt = tokio::runtime::Runtime::new().map_err(|e| AppError::Server(e.to_string()))?;
     rt.block_on(async move {
         let store = Arc::new(RuntimeStore::from_path(&path).await?);
-        let database_url = std::env::var("DATABASE_URL")
+        let database_url_from_env = std::env::var("DATABASE_URL")
             .ok()
-            .filter(|value| !value.trim().is_empty())
+            .filter(|value| !value.trim().is_empty());
+        let database_url = database_url_from_env
+            .clone()
             .unwrap_or_else(|| format!("sqlite://{}", config.server.control_database.display()));
-        if std::env::var_os("DATABASE_URL").is_none()
-            && is_sqlite_database_url(&database_url)
+        let sqlite_path = if is_sqlite_database_url(&database_url)
             && !database_url.contains(":memory:")
         {
-            if let Some(parent) = config.server.control_database.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| AppError::Server(format!("create database directory: {e}")))?;
+            match database_url_from_env.as_deref() {
+                Some(url) => sqlite_database_path(url),
+                None => Some(config.server.control_database.clone()),
             }
-            std::fs::File::create(&config.server.control_database)
-                .map_err(|e| AppError::Server(format!("create database file: {e}")))?;
+        } else {
+            None
+        };
+        if let Some(database_path) = sqlite_path.as_deref() {
+            ensure_sqlite_database_file(database_path)?;
         }
         let setup_token_from_env = std::env::var("BEARUST_SETUP_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
         let setup_token = setup_token_from_env.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        if setup_token_from_env.is_none() && is_sqlite_database_url(&database_url) {
-            let token_path = config.server.control_database.parent().unwrap_or(std::path::Path::new(".")).join("setup-token");
-            if let Some(parent) = token_path.parent() { std::fs::create_dir_all(parent).map_err(|e| AppError::Server(format!("create setup token directory: {e}")))?; }
-            std::fs::write(&token_path, format!("{setup_token}\n")).map_err(|e| AppError::Server(format!("write setup token: {e}")))?;
-            #[cfg(unix)]
-            { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)); }
-            tracing::warn!(event = "generated_setup_token_file", path = %token_path.display());
+        if setup_token_from_env.is_none() {
+            if let Some(database_path) = sqlite_path.as_deref() {
+                let token_path = database_path.parent().unwrap_or(std::path::Path::new(".")).join("setup-token");
+                if let Some(parent) = token_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        AppError::Server(format!("create setup token directory: {e}"))
+                    })?;
+                }
+                std::fs::write(&token_path, format!("{setup_token}\n"))
+                    .map_err(|e| AppError::Server(format!("write setup token: {e}")))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &token_path,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+                tracing::warn!(event = "generated_setup_token_file", path = %token_path.display());
+            }
         }
         tracing::info!(event = "control_plane_start", bind = %config.server.control_bind, setup_token_configured = setup_token_from_env.is_some(), generated_setup_token = setup_token_from_env.is_none());
         let mut control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
@@ -577,8 +594,17 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                 );
             }
         }
-        let control_listener = tokio::net::TcpListener::bind(config.server.control_bind).await
-            .map_err(|e| AppError::Server(format!("control plane bind: {e}")))?;
+        let proxy_upgrade = std::env::var_os("BEARUST_PROXY_UPGRADE").is_some();
+        let control_bind = config.server.control_bind;
+        let control_listener = if proxy_upgrade {
+            None
+        } else {
+            Some(
+                tokio::net::TcpListener::bind(control_bind)
+                    .await
+                    .map_err(|e| AppError::Server(format!("control plane bind: {e}")))?,
+            )
+        };
         let control_router = crate::control_plane::router_with_metrics(
             control_state.clone(),
             config.prometheus.bind == config.server.control_bind,
@@ -593,6 +619,23 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         });
 
         let control_task = tokio::spawn(async move {
+            let control_listener = match control_listener {
+                Some(listener) => listener,
+                None => loop {
+                    match tokio::net::TcpListener::bind(control_bind).await {
+                        Ok(listener) => break listener,
+                        Err(error) => {
+                            tracing::debug!(
+                                event = "control_plane_bind_retry",
+                                bind = %control_bind,
+                                reason = %error,
+                                "waiting for the previous process to release the control listener"
+                            );
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+                },
+            };
             let _ = axum::serve(control_listener, control_router).await;
         });
         if config.prometheus.enabled && config.prometheus.bind != config.server.control_bind {
@@ -779,6 +822,44 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
 
 fn is_sqlite_database_url(url: &str) -> bool {
     url.trim_start().to_ascii_lowercase().starts_with("sqlite:")
+}
+
+fn sqlite_database_path(url: &str) -> Option<PathBuf> {
+    let trimmed = url.trim_start();
+    let path = if trimmed
+        .get(.."sqlite://".len())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("sqlite://"))
+    {
+        &trimmed["sqlite://".len()..]
+    } else if trimmed
+        .get(.."sqlite:".len())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("sqlite:"))
+    {
+        &trimmed["sqlite:".len()..]
+    } else {
+        return None;
+    };
+    let path = path.split(['?', '#']).next()?.trim();
+    if path.is_empty() || path == ":memory:" {
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
+fn ensure_sqlite_database_file(path: &Path) -> Result<(), AppError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| AppError::Server(format!("create database directory: {error}")))?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map(|_| ())
+        .map_err(|error| AppError::Server(format!("create database file: {error}")))
 }
 
 fn plugin_command(action: PluginCommand) -> Result<(), AppError> {
@@ -1048,4 +1129,34 @@ fn plugin_install(
         target_dir.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod sqlite_startup_tests {
+    use super::{ensure_sqlite_database_file, sqlite_database_path};
+    use std::fs;
+
+    #[test]
+    fn parses_file_backed_sqlite_urls_without_query_parameters() {
+        assert_eq!(
+            sqlite_database_path("sqlite:///data/bearust.sqlite?mode=rwc"),
+            Some("/data/bearust.sqlite".into())
+        );
+        assert_eq!(sqlite_database_path("sqlite::memory:"), None);
+    }
+
+    #[test]
+    fn creates_missing_database_without_truncating_an_existing_file() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("nested").join("bearust.sqlite");
+
+        ensure_sqlite_database_file(&path).expect("create database file");
+        fs::write(&path, b"existing database bytes").expect("seed database file");
+        ensure_sqlite_database_file(&path).expect("keep database file");
+
+        assert_eq!(
+            fs::read(&path).expect("read database file"),
+            b"existing database bytes"
+        );
+    }
 }

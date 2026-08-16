@@ -1,5 +1,6 @@
 services:
   bearust:
+    image: "${BEARUST_IMAGE:-bearust:local}"
     build:
       context: .
       dockerfile: Dockerfile
@@ -9,8 +10,8 @@ services:
       - "127.0.0.1:${BEARUST_CONTROL_PORT:-8081}:8081"
     volumes:
       - "${BEARUST_CONFIG:-./config/bearust.example.toml}:/etc/bearust/bearust.toml:ro"
-      - "${BEARUST_DATA:-./data}:/data"
-      - "${BEARUST_TLS:-./tls}:/etc/bearust/tls:ro"
+      - bearust-data:/data
+      - bearust-tls:/etc/bearust/tls
     environment:
       RUST_LOG: "${RUST_LOG:-info}"
       BEARUST_SETUP_TOKEN: "${BEARUST_SETUP_TOKEN:-}"
@@ -31,6 +32,12 @@ services:
         condition: service_healthy
         required: false
     working_dir: /run/bearust
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/bearust/bearust.pid && nc -z 127.0.0.1 8080 && nc -z 127.0.0.1 8081"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 20
     read_only: true
     tmpfs:
       - /tmp:mode=1777
@@ -71,5 +78,7 @@ services:
       retries: 20
 
 volumes:
+  bearust-data:
+  bearust-tls:
   postgres-data:
   mysql-data:

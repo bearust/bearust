@@ -17,7 +17,8 @@ RUN cargo build --release --locked
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates netcat-openbsd && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 bearust && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin bearust \
-    && mkdir -p /run/bearust && chown bearust:bearust /run/bearust
+    && mkdir -p /data /etc/bearust/tls /run/bearust \
+    && chown -R bearust:bearust /data /etc/bearust/tls /run/bearust
 COPY --from=builder /src/target/release/bearust /usr/local/bin/bearust
 COPY --from=frontend-builder /frontend/dist /usr/share/bearust/frontend
 USER bearust

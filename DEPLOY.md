@@ -1,8 +1,33 @@
 # Deployment and operations
 
-The production image runs as UID/GID 10001, drops all capabilities, enables `no-new-privileges`, and uses a read-only root filesystem. The TOML config and `/etc/bearust/tls` are mounted read-only; `/data` stores certificate metadata/material and must be writable by UID 10001. `/tmp` and `/run/bearust` are tmpfs. `${BEARUST_PORT:-8080}` maps to proxy port 8080.
+The production image runs as UID/GID 10001, drops all capabilities, enables
+`no-new-privileges`, and uses a read-only root filesystem. The TOML config is
+mounted read-only; `/data` and `/etc/bearust/tls` are persistent named Docker
+volumes initialized with the correct ownership for UID 10001. `/tmp` and
+`/run/bearust` are tmpfs. `${BEARUST_PORT:-8080}` maps to the data-plane proxy
+port 8080, while the bundled management UI and control API are exposed
+loopback-only at `http://127.0.0.1:${BEARUST_CONTROL_PORT:-8081}`.
 
-For a custom certificate, place the PEM chain and private key below `/etc/bearust/tls` and reference them from `[server.tls]`. Keep private keys mode `0600`; never put key contents or ACME tokens in configuration, logs, or issue reports. The certificate store persists active metadata below `/data` and activates new material atomically, preserving the previous active certificate when validation or issuance fails.
+The default production deployment is intentionally one command:
+
+```bash
+docker compose up -d --build
+```
+
+It uses the local image tag `bearust:local`. To build the same image for a
+public registry, provide a tag explicitly and push it yourself:
+
+```bash
+BEARUST_IMAGE=ghcr.io/your-account/bearust:latest docker compose build
+docker push ghcr.io/your-account/bearust:latest
+```
+
+For a custom certificate, copy the PEM chain and private key into the
+`bearust-tls` volume and reference them from `[server.tls]`. Keep private keys
+mode `0600`; never put key contents or ACME tokens in configuration, logs, or
+issue reports. The certificate store persists active metadata below `/data`
+and activates new material atomically, preserving the previous active
+certificate when validation or issuance fails.
 
 Let's Encrypt HTTP-01 requires public port 80 and every requested hostname resolving to the proxy. DNS-01 is required for wildcard names or deployments without port 80; the Cloudflare API token should be scoped to the target zone with only `Zone:DNS:Edit` and `Zone:Zone:Read`. Renewal runs asynchronously outside request handling once a certificate enters its renewal window, with bounded retries and last-known-good fallback. See [docs/acme.md](docs/acme.md) for the staging-first rollout and recovery procedure.
 
@@ -25,8 +50,8 @@ commit API keys or include them in support bundles.
 ## Database profiles
 
 The default `docker compose up -d` keeps the control plane on SQLite at
-`/data/bearust.sqlite`, persisted by the `BEARUST_DATA` mount. PostgreSQL and
-MySQL are opt-in profiles with health checks and named volumes:
+`/data/bearust.sqlite`, persisted by the `bearust-data` named volume.
+PostgreSQL and MySQL are opt-in profiles with health checks and named volumes:
 
 Uncomment and set the matching `DATABASE_URL` and `POSTGRES_*` or `MYSQL_*`
 credentials in `.env` (use a long random password in production), then run

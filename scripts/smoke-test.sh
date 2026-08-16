@@ -7,9 +7,10 @@ set -euo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp_dir="$(mktemp -d)"
 project="bearust-smoke-${RANDOM}"
-compose=(docker compose -p "$project" -f "$root_dir/docker-compose.yml")
+export BEARUST_PORT=18080
+export BEARUST_CONTROL_PORT=18081
 cleanup() {
-  "${compose[@]}" down --remove-orphans >/dev/null 2>&1 || true
+  "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
@@ -17,9 +18,27 @@ trap cleanup EXIT
 mkdir -p "$tmp_dir/data" "$tmp_dir/tls"
 chmod 0777 "$tmp_dir/data"
 
+# Production Compose uses named volumes by default. Override those two mount
+# targets for this isolated test so the script can rotate ephemeral material
+# without touching a developer's persistent volumes.
+cat >"$tmp_dir/compose.override.yml" <<YAML
+services:
+  bearust:
+    volumes:
+      - "$tmp_dir/data:/data"
+      - "$tmp_dir/tls:/etc/bearust/tls"
+YAML
+compose=(
+  docker compose
+  -p "$project"
+  -f "$root_dir/docker-compose.yml"
+  -f "$tmp_dir/compose.override.yml"
+)
+
 cat >"$tmp_dir/base.toml" <<'TOML'
 [server]
 bind = "0.0.0.0:8080"
+control_bind = "0.0.0.0:8081"
 graceful_shutdown_seconds = 1
 
 [health]
@@ -58,29 +77,42 @@ wait_healthy() {
 }
 
 fetch_cert_fingerprint() {
-  openssl s_client -connect 127.0.0.1:8080 -servername localhost </dev/null 2>/dev/null \
+  openssl s_client -connect "127.0.0.1:${BEARUST_PORT}" -servername localhost </dev/null 2>/dev/null \
     | openssl x509 -noout -fingerprint -sha256 \
     | sed 's/^sha256 Fingerprint=//; s/://g'
 }
 
 echo "[smoke] building production image"
 "${compose[@]}" build bearust
+image="$("${compose[@]}" config --images | awk 'NF { print; exit }')"
+test -n "$image"
+docker image inspect "$image" >/dev/null
 
 echo "[smoke] plaintext compatibility"
 cp "$tmp_dir/base.toml" "$tmp_dir/plain.toml"
-BEARUST_CONFIG="$tmp_dir/plain.toml" BEARUST_DATA="$tmp_dir/data" BEARUST_TLS="$tmp_dir/tls" \
-  "${compose[@]}" up -d bearust
+BEARUST_CONFIG="$tmp_dir/plain.toml" "${compose[@]}" up -d bearust
 wait_healthy
 plain_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-  -H 'Host: api.example.com' http://127.0.0.1:8080/)"
+  -H 'Host: api.example.com' "http://127.0.0.1:${BEARUST_PORT}/")"
 test "$plain_status" = 503
-"${compose[@]}" down --remove-orphans
+control_root_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  "http://127.0.0.1:${BEARUST_CONTROL_PORT}/")"
+test "$control_root_status" = 200
+control_deep_link_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  "http://127.0.0.1:${BEARUST_CONTROL_PORT}/login")"
+test "$control_deep_link_status" = 200
+unknown_api_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  "http://127.0.0.1:${BEARUST_CONTROL_PORT}/api/not-a-real-endpoint")"
+test "$unknown_api_status" = 404
+"${compose[@]}" down --volumes --remove-orphans
 
 echo "[smoke] generating an ephemeral self-signed certificate"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj '/CN=localhost' -keyout "$tmp_dir/tls/key.pem" -out "$tmp_dir/tls/cert.pem" \
   >/dev/null 2>&1
-chmod 0600 "$tmp_dir/tls/key.pem"
+# This certificate is disposable test material. Make the key readable by the
+# non-root runtime UID; real deployment keys must remain mode 0600.
+chmod 0644 "$tmp_dir/tls/key.pem"
 cat "$tmp_dir/base.toml" >"$tmp_dir/tls.toml"
 cat >>"$tmp_dir/tls.toml" <<TOML
 
@@ -92,27 +124,35 @@ TOML
 echo "[smoke] invalid certificate is rejected at startup"
 cp "$tmp_dir/tls.toml" "$tmp_dir/invalid.toml"
 sed -i 's#cert.pem#missing.pem#' "$tmp_dir/invalid.toml"
-if BEARUST_CONFIG="$tmp_dir/invalid.toml" BEARUST_DATA="$tmp_dir/data" BEARUST_TLS="$tmp_dir/tls" \
-    "${compose[@]}" run --rm --no-deps bearust >/dev/null 2>&1; then
+if docker run --rm --read-only \
+    --tmpfs /tmp:mode=1777 \
+    --tmpfs /run/bearust:uid=10001,gid=10001,mode=0755 \
+    -e BEARUST_PROXY_CHILD=1 \
+    -e BEARUST_SETUP_TOKEN=smoke-test-token \
+    -e DATABASE_URL=sqlite:///data/bearust.sqlite \
+    -v "$tmp_dir/data:/data" \
+    -v "$tmp_dir/tls:/etc/bearust/tls:ro" \
+    -v "$tmp_dir/invalid.toml:/etc/bearust/bearust.toml:ro" \
+    --entrypoint bearust "$image" serve --config /etc/bearust/bearust.toml --json-logs \
+    >/dev/null 2>&1; then
   echo "invalid TLS material unexpectedly started" >&2
   exit 1
 fi
 
 echo "[smoke] HTTPS listener and certificate reload"
-BEARUST_CONFIG="$tmp_dir/tls.toml" BEARUST_DATA="$tmp_dir/data" BEARUST_TLS="$tmp_dir/tls" \
-  "${compose[@]}" up -d bearust
+BEARUST_CONFIG="$tmp_dir/tls.toml" "${compose[@]}" up -d bearust
 wait_healthy
 tls_status="$(curl --silent --show-error --insecure --output /dev/null --write-out '%{http_code}' \
-  -H 'Host: api.example.com' https://127.0.0.1:8080/)"
+  -H 'Host: api.example.com' "https://127.0.0.1:${BEARUST_PORT}/")"
 test "$tls_status" = 503
 before="$(fetch_cert_fingerprint)"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj '/CN=localhost-reloaded' -keyout "$tmp_dir/tls/key-new.pem" -out "$tmp_dir/tls/cert-new.pem" \
   >/dev/null 2>&1
-chmod 0600 "$tmp_dir/tls/key-new.pem"
+chmod 0644 "$tmp_dir/tls/key-new.pem"
 mv "$tmp_dir/tls/cert-new.pem" "$tmp_dir/tls/cert.pem"
 mv "$tmp_dir/tls/key-new.pem" "$tmp_dir/tls/key.pem"
-docker compose -p "$project" -f "$root_dir/docker-compose.yml" kill -s HUP bearust
+"${compose[@]}" kill -s HUP bearust
 after=""
 for _ in $(seq 1 30); do
   after="$(fetch_cert_fingerprint || true)"
@@ -122,7 +162,6 @@ done
 test -n "$after" && test "$after" != "$before"
 
 echo "[smoke] production image identity and secret-leak check"
-image="${project}-bearust"
 test "$(docker run --rm --entrypoint id "$image")" = 'uid=10001(bearust) gid=10001(bearust) groups=10001(bearust)'
 logs="$("${compose[@]}" logs bearust 2>&1)"
 if grep -Eqi 'PRIVATE KEY|BEGIN .*KEY|localhost-reloaded' <<<"$logs"; then

@@ -248,7 +248,7 @@ The plugin system (WASM sandbox) connects to the core engine through defined hoo
 
 ## 11. Deployment & Development Environment
 
-The project provides two clearly separated pairs of Docker configurations: one for **production**, one for **development**. Both are not intended to run simultaneously on the same machine without adjusting ports.
+The project provides two clearly separated pairs of Docker configurations: one for **production**, one for **development**. Both are not intended to run simultaneously on the same machine without adjusting ports. In both stacks, port 8080 is the data-plane proxy and port 8081 is the control plane; production serves the bundled management GUI from 8081, while development adds the hot-reloading frontend on 5183.
 
 ### 11.1 File structure
 
@@ -265,54 +265,40 @@ bearust/
 
 ### 11.2 `Dockerfile` (production)
 
-Multi-stage build: the GUI is built into static assets, the Rust binary is compiled in release mode, then both are combined into a minimal runtime image (non-root user, no build toolchain).
+The multi-stage build compiles the React frontend and Rust binary, then copies
+both into a small non-root runtime image. The runtime creates `/data`, the TLS
+mount, and the PID directory with ownership for UID/GID `10001`; Compose mounts
+the persistent paths as named volumes.
 
 ```dockerfile
-# ---------- Stage 1: Build GUI (React/Vue SPA) ----------
-FROM node:22-alpine AS gui-builder
-WORKDIR /gui
-COPY gui/package*.json ./
+FROM node:22-bookworm-slim AS frontend-builder
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
-COPY gui/ ./
+COPY frontend ./
 RUN npm run build
-# output: /gui/dist
 
-# ---------- Stage 2: Build Rust binary (data plane + control plane) ----------
-FROM rust:1.82-slim-bookworm AS rust-builder
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY Cargo.toml Cargo.lock ./
-COPY crates/ ./crates/
+FROM rust:1.97.1-bookworm AS builder
+ENV RUSTUP_TOOLCHAIN=1.97.1
+RUN apt-get update && apt-get install -y --no-install-recommends clang cmake make perl pkg-config && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY src ./src
+COPY crates ./crates
+COPY migrations ./migrations
 RUN cargo build --release --locked
 
-# ---------- Stage 3: Runtime image (small, no build toolchain) ----------
-FROM debian:bookworm-slim AS runtime
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd -r -u 1000 -m -d /home/bearust bearust
-
-COPY --from=rust-builder /app/target/release/bearust /usr/local/bin/bearust
-COPY --from=gui-builder /gui/dist /usr/share/bearust/gui
-
-RUN mkdir -p /data /etc/bearust && chown -R bearust:bearust /data /etc/bearust
-
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates netcat-openbsd && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 bearust && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin bearust \
+    && mkdir -p /data /etc/bearust/tls /run/bearust \
+    && chown -R bearust:bearust /data /etc/bearust/tls /run/bearust
+COPY --from=builder /src/target/release/bearust /usr/local/bin/bearust
+COPY --from=frontend-builder /frontend/dist /usr/share/bearust/frontend
 USER bearust
-WORKDIR /home/bearust
-
-EXPOSE 80 443 9443
-VOLUME ["/data", "/etc/bearust"]
-
-HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD bearust healthcheck || exit 1
-
+WORKDIR /run/bearust
 ENTRYPOINT ["bearust"]
-CMD ["serve", "--config", "/etc/bearust/config.toml"]
+CMD ["serve", "--config", "/etc/bearust/bearust.toml", "--json-logs"]
 ```
 
 ### 11.3 `Dockerfile.dev` (development)
@@ -321,20 +307,12 @@ Source code is **not** `COPY`-ed into the image; instead it is mounted via a vol
 
 ```dockerfile
 # Dockerfile.dev — development image, NOT for production.
-FROM rust:1.82-slim-bookworm
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# dev tools: cargo-watch for hot-reload, sqlx-cli for database migrations
-RUN cargo install cargo-watch --locked \
-    && cargo install sqlx-cli --no-default-features --features rustls,sqlite,postgres,mysql --locked
-
+FROM rust:1.97.1-bookworm
+ENV RUSTUP_TOOLCHAIN=1.97.1
+RUN apt-get update && apt-get install -y --no-install-recommends clang cmake make netcat-openbsd perl pkg-config && rm -rf /var/lib/apt/lists/* \
+    && cargo install cargo-watch --locked
 WORKDIR /app
-EXPOSE 80 443 9443
-
-ENTRYPOINT ["cargo", "watch", "-x", "run -- serve --config /etc/bearust/config.toml"]
+CMD ["cargo", "watch", "-x", "run -- serve --config /etc/bearust/bearust.toml"]
 ```
 
 ### 11.4 `docker-compose.yml` (production)
@@ -342,155 +320,139 @@ ENTRYPOINT ["cargo", "watch", "-x", "run -- serve --config /etc/bearust/config.t
 ```yaml
 services:
   bearust:
-    build: .
-    image: bearust:latest
-    container_name: bearust
-    restart: unless-stopped
+    image: "${BEARUST_IMAGE:-bearust:local}"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["serve", "--config", "/etc/bearust/bearust.toml", "--json-logs"]
     ports:
-      - "80:80"
-      - "443:443"
-      - "9443:9443"
+      - "${BEARUST_PORT:-8080}:8080"
+      - "127.0.0.1:${BEARUST_CONTROL_PORT:-8081}:8081"
     volumes:
+      - "${BEARUST_CONFIG:-./config/bearust.example.toml}:/etc/bearust/bearust.toml:ro"
       - bearust-data:/data
-      - ./config:/etc/bearust
+      - bearust-tls:/etc/bearust/tls
     environment:
-      DATABASE_URL: ${DATABASE_URL:-sqlite:///data/bearust.db}
-      NODE_ID: ${NODE_ID:-node-1}
-      CLUSTER_PEERS: ${CLUSTER_PEERS:-}
-      CLUSTER_BIND_PORT: 7000
+      RUST_LOG: "${RUST_LOG:-info}"
+      BEARUST_SETUP_TOKEN: "${BEARUST_SETUP_TOKEN:-}"
+      DATABASE_URL: "${DATABASE_URL:-sqlite:///data/bearust.sqlite}"
       LLM_API_URL: ${LLM_API_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
-      ADMIN_INITIAL_EMAIL: ${ADMIN_INITIAL_EMAIL:-admin@example.com}
-      ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-changeme123}
-      DEFAULT_LOCALE: ${DEFAULT_LOCALE:-en}
-      RUST_LOG: ${RUST_LOG:-info}
-    networks:
-      - bearust-net
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_REQUEST_TIMEOUT_SECONDS: ${LLM_REQUEST_TIMEOUT_SECONDS:-}
+      LLM_QUEUE_CAPACITY: ${LLM_QUEUE_CAPACITY:-}
+      LLM_RESPONSE_LIMIT_BYTES: ${LLM_RESPONSE_LIMIT_BYTES:-}
+      LLM_WORKER_COUNT: ${LLM_WORKER_COUNT:-}
+      LLM_CIRCUIT_FAILURE_THRESHOLD: ${LLM_CIRCUIT_FAILURE_THRESHOLD:-}
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/bearust/bearust.pid && nc -z 127.0.0.1 8080 && nc -z 127.0.0.1 8081"]
+    restart: unless-stopped
 
-  # enable with: docker compose --profile postgres up -d
+  # enable with: docker compose --profile postgres up -d --build
   postgres:
     image: postgres:16-alpine
-    container_name: bearust-postgres
-    profiles: ["postgres"]
-    restart: unless-stopped
+    profiles: [postgres]
     environment:
-      POSTGRES_USER: bearust
-      POSTGRES_PASSWORD: bearust
-      POSTGRES_DB: bearust
+      POSTGRES_USER: "${POSTGRES_USER:-bearust}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-change-me-in-development}"
+      POSTGRES_DB: "${POSTGRES_DB:-bearust}"
     volumes:
-      - bearust-pgdata:/var/lib/postgresql/data
-    networks:
-      - bearust-net
+      - postgres-data:/var/lib/postgresql/data
 
-  # enable with: docker compose --profile mysql up -d
   mysql:
     image: mysql:8.4
-    container_name: bearust-mysql
-    profiles: ["mysql"]
+    profiles: [mysql]
     restart: unless-stopped
     environment:
-      MYSQL_USER: bearust
-      MYSQL_PASSWORD: bearust
-      MYSQL_ROOT_PASSWORD: rootchangeme
-      MYSQL_DATABASE: bearust
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-bearust}"
+      MYSQL_USER: "${MYSQL_USER:-bearust}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:-change-me-in-development}"
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-change-me-in-development}"
     volumes:
-      - bearust-mysqldata:/var/lib/mysql
-    networks:
-      - bearust-net
+      - mysql-data:/var/lib/mysql
 
 volumes:
   bearust-data:
-  bearust-pgdata:
-  bearust-mysqldata:
-
-networks:
-  bearust-net:
-    driver: bridge
+  bearust-tls:
+  postgres-data:
+  mysql-data:
 ```
 
 ### 11.5 `docker-compose.dev.yml` (development)
 
-Consists of two main services: the Rust backend with hot-reload, and a GUI dev server with hot module reload — both independent so changes on one side never trigger a rebuild on the other.
+Consists of two services: the Rust backend with `cargo-watch` and the frontend
+Vite server with hot module reload. A contributor needs Docker only; the first
+command installs frontend dependencies inside the container, starts both
+services, and keeps all development state in named volumes.
 
 ```yaml
 services:
-  bearust-dev:
+  bearust:
     build:
       context: .
       dockerfile: Dockerfile.dev
-    container_name: bearust-dev
     ports:
-      - "8080:80"
-      - "8443:443"
-      - "9443:9443"
+      - "8080:8080"
+      - "127.0.0.1:8081:8081"
     volumes:
       - .:/app
-      - bearust-dev-cargo:/usr/local/cargo/registry
-      - bearust-dev-target:/app/target
-      - ./config.dev:/etc/bearust
+      - ./config/bearust.example.toml:/etc/bearust/bearust.toml:ro
       - bearust-dev-data:/data
+      - bearust-dev-tls:/etc/bearust/tls
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target:/app/target
     environment:
-      DATABASE_URL: ${DATABASE_URL:-sqlite:///data/bearust-dev.db}
-      NODE_ID: dev-node
-      CLUSTER_PEERS: ""
+      DATABASE_URL: ${DATABASE_URL:-sqlite:///data/bearust.sqlite}
+      BEARUST_SETUP_TOKEN: ${BEARUST_SETUP_TOKEN:-bearust-dev-setup}
       LLM_API_URL: ${LLM_API_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
-      ADMIN_INITIAL_EMAIL: dev@example.com
-      ADMIN_INITIAL_PASSWORD: dev123
-      DEFAULT_LOCALE: en
       RUST_LOG: debug
-      RUST_BACKTRACE: 1
-    networks:
-      - bearust-dev-net
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/bearust/bearust.pid && nc -z 127.0.0.1 8080 && nc -z 127.0.0.1 8081"]
 
-  gui-dev:
-    image: node:22-alpine
-    container_name: bearust-gui-dev
-    working_dir: /gui
+  frontend:
+    image: node:22-bookworm-slim
+    working_dir: /frontend
     volumes:
-      - ./gui:/gui
-      - bearust-dev-node-modules:/gui/node_modules
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+      - ./frontend:/frontend
+      - frontend-node-modules:/frontend/node_modules
+      - frontend-npm-cache:/root/.npm
+    command: sh -c "npm ci --prefer-offline --no-audit --no-fund && npm run dev:api -- --host 0.0.0.0 --port 5183"
     ports:
-      - "5173:5173"
+      - "5183:5183"
     environment:
-      VITE_API_URL: http://localhost:9443
-    networks:
-      - bearust-dev-net
+      VITE_API_PROXY_TARGET: http://bearust:8081
+      VITE_DEMO_MODE: "false"
+      VITE_DEV_SETUP_TOKEN: ${BEARUST_SETUP_TOKEN:-bearust-dev-setup}
 
-  # enable with: docker compose -f docker-compose.dev.yml --profile postgres up -d
-  postgres-dev:
+  # enable with: docker compose -f docker-compose.dev.yml --profile postgres up
+  postgres:
     image: postgres:16-alpine
-    container_name: bearust-postgres-dev
     profiles: ["postgres"]
-    ports:
-      - "5432:5432"     # exposed to host for GUI DB tools (DBeaver, TablePlus, etc.)
     environment:
       POSTGRES_USER: bearust
-      POSTGRES_PASSWORD: bearust
-      POSTGRES_DB: bearust_dev
+      POSTGRES_PASSWORD: change-me-in-development
+      POSTGRES_DB: bearust
     volumes:
-      - bearust-dev-pgdata:/var/lib/postgresql/data
-    networks:
-      - bearust-dev-net
+      - postgres-data:/var/lib/postgresql/data
 
 volumes:
-  bearust-dev-cargo:
-  bearust-dev-target:
-  bearust-dev-node-modules:
+  cargo-registry:
+  cargo-git:
+  cargo-target:
   bearust-dev-data:
-  bearust-dev-pgdata:
-
-networks:
-  bearust-dev-net:
-    driver: bridge
+  bearust-dev-tls:
+  frontend-node-modules:
+  frontend-npm-cache:
+  postgres-data:
 ```
 
 ### 11.6 `.env.example`
 
 ```bash
 # --- Database ---
-DATABASE_URL=sqlite:///data/bearust.db
+DATABASE_URL=sqlite:///data/bearust.sqlite
 # DATABASE_URL=postgres://bearust:bearust@postgres:5432/bearust
 # DATABASE_URL=mysql://bearust:bearust@mysql:3306/bearust
 
@@ -517,47 +479,55 @@ RUST_LOG=info
 ```bash
 git clone https://github.com/<org>/bearust.git
 cd bearust
-cp .env.example .env
-nano .env    # adjust ADMIN_INITIAL_PASSWORD, etc.
-docker compose up -d
+docker compose up -d --build
 ```
 
-Check status: `docker compose ps` and `docker compose logs -f bearust`. Access the management GUI at `https://<server-ip>:9443`, log in with the initial credentials from `.env`, then change the password immediately.
+Check status: `docker compose ps` and `docker compose logs -f bearust`. Access
+the management GUI at `http://127.0.0.1:8081` (or via an SSH tunnel/reverse
+proxy on a remote host); port 8080 is for proxied application traffic. Set
+`BEARUST_SETUP_TOKEN` in an untracked `.env` when a deterministic bootstrap
+token is required, then
+change the initial administrator password immediately.
 
 For an external database: `docker compose --profile postgres up -d` or `--profile mysql up -d` (with `DATABASE_URL` in `.env` adjusted accordingly).
 
 For multi-node: set a distinct `NODE_ID` and `CLUSTER_PEERS` on each host, and open port `7000` between nodes only (never expose it publicly). For VIP/HA, `keepalived` is installed and configured at the host level (see the VRRP configuration example under §7.5/FR-5.3) — it does not run inside the container.
 
-Update: `git pull && docker compose build && docker compose up -d` — data in the volume (`bearust-data`) is preserved and not rebuilt.
+Update: `git pull && docker compose up -d --build` — data in the named volume
+(`bearust-data`) is preserved and not rebuilt.
 
-SQLite backup: `docker compose exec bearust sqlite3 /data/bearust.db ".backup /data/backup-$(date +%F).db"`. Postgres backup: `docker compose exec postgres pg_dump -U bearust bearust > backup.sql`.
+SQLite backup: `docker compose exec bearust sqlite3 /data/bearust.sqlite ".backup /data/backup-$(date +%F).db"`. Postgres backup: `docker compose exec postgres pg_dump -U bearust bearust > backup.sql`.
 
 ### 11.8 Running development
 
 ```bash
 git clone https://github.com/<org>/bearust.git
 cd bearust
-cp .env.example .env
-docker compose -f docker-compose.dev.yml up
+docker compose -f docker-compose.dev.yml up --build
 ```
 
 Two services become active:
 
 | Service | Purpose | Access |
 |---|---|---|
-| `bearust-dev` | Rust backend, auto-rebuilds on any `.rs` change (`cargo-watch`) | `https://localhost:9443` (API/management), `http://localhost:8080` (traffic proxy) |
-| `gui-dev` | GUI frontend with hot module reload | `http://localhost:5173` |
+| `bearust` | Rust backend, auto-rebuilds on any `.rs` change (`cargo-watch`) | `http://localhost:8080` (proxy traffic), `http://127.0.0.1:8081` (control API) |
+| `frontend` | API-backed Vite frontend with hot module reload | `http://localhost:5183` |
 
-Live reload works automatically on both sides because source code is mounted rather than copied. Dependency caches (`bearust-dev-cargo`, `bearust-dev-target`, `bearust-dev-node-modules`) are stored in separate volumes so that the second build onward is much faster than the first.
+Live reload works automatically on both sides because source code is mounted
+rather than copied. Dependency caches and development state are stored in
+separate volumes so that the second build onward is much faster and cannot
+reuse production data.
 
-The dev database is separate from production (`bearust-dev.db`, or `postgres-dev` via `--profile postgres`), so it is safe to experiment with. Migrations: `docker compose -f docker-compose.dev.yml exec bearust-dev sqlx migrate run`.
+The dev database is separate from production (`bearust.sqlite` in the
+`bearust-dev-data` volume, or `postgres` via `--profile postgres`), so it is
+safe to experiment with. Migrations run automatically during startup.
 
 Testing & linting:
 ```bash
-docker compose -f docker-compose.dev.yml exec bearust-dev cargo test
-docker compose -f docker-compose.dev.yml exec bearust-dev cargo clippy --all-targets -- -D warnings
-docker compose -f docker-compose.dev.yml exec bearust-dev cargo fmt --check
-docker compose -f docker-compose.dev.yml exec gui-dev npm run lint
+docker compose -f docker-compose.dev.yml exec bearust cargo test
+docker compose -f docker-compose.dev.yml exec bearust cargo clippy --all-targets -- -D warnings
+docker compose -f docker-compose.dev.yml exec bearust cargo fmt --check
+docker compose -f docker-compose.dev.yml exec frontend npm test -- --run
 ```
 
 Full reset of the dev environment (safe, does not touch production data): `docker compose -f docker-compose.dev.yml down -v && docker compose -f docker-compose.dev.yml up --build`.
@@ -571,10 +541,10 @@ Brief contribution flow: fork & branch from `main` → develop using the dev com
 | Dockerfile | `Dockerfile` (multi-stage, optimized, release binary) | `Dockerfile.dev` (debug build, cargo-watch) |
 | Source code | `COPY`-ed into the image at build time | Mounted live via volume |
 | Rebuild | Manual (`docker compose build`) | Automatic on every file save |
-| Log level | `info` | `debug` + `RUST_BACKTRACE=1` |
+| Log level | `info` | `debug` |
 | GUI | Bundled as static files inside the image | Separate dev server with hot reload |
-| Port | 80 / 443 / 9443 | 8080 / 8443 / 9443 (backend) + 5173 (GUI dev) |
-| Default database | SQLite (`bearust.db`) | Separate SQLite (`bearust-dev.db`) or Postgres dev |
+| Port | 8080 (proxy) / 8081 (bundled GUI + API) | 8080 / 8081 (backend) + 5183 (GUI dev) |
+| Default database | SQLite in `bearust-data` | Separate SQLite in `bearust-dev-data` or Postgres dev |
 
 ---
 

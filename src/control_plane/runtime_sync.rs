@@ -84,7 +84,6 @@ impl RuntimeConfigReloader {
     }
 
     async fn apply_config(&self, next: Config) -> Result<(), ReloadError> {
-        let previous = self.runtime.load().config().clone();
         let previous_persisted = repository::get_runtime_config(&self.database)
             .await
             .map_err(|error| {
@@ -99,13 +98,17 @@ impl RuntimeConfigReloader {
             return Err(ReloadError::Failed(error.to_string()));
         }
         if let Err(error) = persist_config(&self.config_path, &next) {
-            // Do not leave live memory ahead of durable configuration.  The
-            // rollback is best effort but is still safer than serving a state
-            // that cannot survive the next process reload.
-            let _ = self.runtime.apply_config(previous).await;
-            let _ =
-                restore_persisted_runtime_config(&self.database, previous_persisted.as_ref()).await;
-            return Err(ReloadError::Failed(error));
+            // The control-plane database is the durable source of truth for
+            // runtime changes. Container deployments commonly mount the base
+            // TOML read-only (and a single-file bind mount cannot be replaced
+            // atomically), so failure to mirror it back must not reject an
+            // otherwise valid and already-persisted live update.
+            tracing::warn!(
+                event = "config_file_persist_skipped",
+                path = %self.config_path.display(),
+                reason = %error,
+                "runtime configuration remains persisted in the control-plane database"
+            );
         }
         Ok(())
     }

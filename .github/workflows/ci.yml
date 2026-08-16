@@ -48,5 +48,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker compose config
+      - run: docker compose -f docker-compose.dev.yml config
       - run: docker build -t bearust:test .
       - run: docker run --rm bearust:test --version
