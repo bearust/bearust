@@ -99,7 +99,7 @@ export function NavUser() {
             <DropdownMenuSeparator />
             <DropdownMenuItem>
               <BadgeCheck />
-              Admin workspace
+              {t("shell.adminWorkspace")}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <div className="space-y-2 px-2 py-2">

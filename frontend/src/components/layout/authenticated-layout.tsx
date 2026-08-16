@@ -22,15 +22,17 @@ export function AuthenticatedLayout() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const session = useQuery({ queryKey: ["me"], queryFn: api.me, enabled: !DEMO_MODE, staleTime: 30_000 });
+  const themePreference = useQuery({ queryKey: ["theme-preference"], queryFn: api.themePreference, enabled: !DEMO_MODE, staleTime: Infinity });
   const advisorStatus = useQuery({ queryKey: ["ai-advisor", "status"], queryFn: api.aiAdvisorStatus, enabled: !DEMO_MODE, staleTime: 30_000 });
   useEffect(() => {
     if (session.data) useAuthStore.getState().setUser(session.data);
+    if (themePreference.data) useAuthStore.getState().setTheme(themePreference.data.preferred_theme);
     useAuthStore.getState().setAiAdvisorEnabled(DEMO_MODE || advisorStatus.data?.enabled === true);
     if (session.error && (session.error as { status?: number }).status === 401) {
       useAuthStore.getState().reset();
       void navigate({ to: "/login" });
     }
-  }, [advisorStatus.data?.enabled, navigate, session.data, session.error]);
+  }, [advisorStatus.data?.enabled, navigate, session.data, session.error, themePreference.data]);
   useRealtimeUpdates({
     sessions: () => void queryClient.invalidateQueries({ queryKey: ["me"] }),
     aiAdvisor: () => void queryClient.invalidateQueries({ queryKey: ["ai-advisor", "status"] }),

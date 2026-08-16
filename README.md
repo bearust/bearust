@@ -107,7 +107,7 @@ The role matrix is:
 | Upload, activate, renew, or issue ACME certificates | Yes | Yes | No |
 | Manage users and roles | Yes | No | No |
 
-The backend remains authoritative even when the UI hides write controls or the admin-only Users section for non-admin users. Successful and denied user mutations are recorded as redacted audit events. Per-host permissions, custom permissions, and SSO/external identity providers remain future work.
+The backend remains authoritative even when the UI hides write controls or the admin-only Users section for non-admin users. Successful and denied user mutations are recorded as redacted audit events. Per-host proxy-host scopes and custom roles are supported; custom permission vocabularies and SSO/external identity providers remain future work.
 
 ### Phase 13A WASM plugins (optional and disabled by default)
 
@@ -397,12 +397,12 @@ Phase 11 localization is complete across its three increments: 11A adds the
 English-default i18n foundation and locale selector; 11B supplies complete
 Indonesian and Japanese catalogs; and 11C persists validated account
 preferences, applies locale-aware dashboard formatting, and documents the
-translation contribution workflow. Phase 12 (AI Advisor) is the next planned
-product phase.
+translation contribution workflow. Phase 12 (AI Advisor) is also complete as
+an optional, redacted, approval-gated service with periodic security summaries.
 
 ### Phase 4D.2 realtime updates
 
-The dashboard subscribes to `GET /api/events` using an authenticated session cookie. The endpoint uses Server-Sent Events (SSE) to deliver safe invalidation notifications for proxy hosts, certificates, users, roles, sessions, and audit activity; the dashboard reloads the corresponding proxy-host, certificate, user, role, and audit data, while session events are notified through the stream for future session-view consumers. Payloads never contain credentials, tokens, hashes, private keys, or request bodies. Delivery is process-local and bounded, so clients automatically reconnect after transient disconnects and receive a heartbeat roughly every 15 seconds. Cross-node fan-out and replay of events missed while disconnected are intentionally deferred until the multi-node phase.
+The dashboard subscribes to `GET /api/events` using an authenticated session cookie. The endpoint uses Server-Sent Events (SSE) to deliver safe invalidation notifications for proxy hosts, certificates, users, roles, sessions, and audit activity; the dashboard reloads the corresponding proxy-host, certificate, user, role, and audit data, while session events are notified through the stream for future session-view consumers. Payloads never contain credentials, tokens, hashes, private keys, or request bodies. Delivery to each process is bounded and process-local, while committed cluster events fan out across configured nodes and trigger bounded local catch-up. Clients automatically reconnect after transient disconnects and receive a heartbeat roughly every 15 seconds; replay of every event missed while disconnected remains intentionally deferred.
 
 ### Analytics dashboard
 
@@ -415,13 +415,15 @@ time-range filters, request/status cards, p50/p95/p99 latency and error-rate
 views, security-event panels, loading/error/empty states, and refreshes after
 the redacted `analytics.changed` SSE invalidation event.
 
-Analytics is process-local and resets on restart. It retains one-minute
-buckets for 24 hours (up to 1,440 buckets per host), returns at most 100 hosts
-and 1,440 timeseries buckets, and records bounded histograms rather than raw
-samples. Events contain aggregate status, latency, WAF, bot, and rate-limit
-counters only: raw IP addresses, complete URLs, headers, bodies, credentials,
-tokens, and secrets are never stored or returned. Collection is fail-open and
-cannot reject proxy traffic.
+Analytics uses a bounded in-memory ring for live collection and persists
+one-minute aggregate buckets in the control-plane database. It restores the
+configured window after restart, retains one-minute buckets for 1 hour to 7
+days (up to 10,080 buckets per host), returns at most 100 hosts and 10,080
+timeseries buckets, and records bounded histograms rather than raw samples.
+Events contain aggregate status, latency, WAF, bot, and rate-limit counters
+only: raw IP addresses, complete URLs, headers, bodies, credentials, tokens,
+and secrets are never stored or returned. Collection is fail-open and cannot
+reject proxy traffic.
 
 Prometheus is disabled by default. To enable it, add a `[prometheus]` table to
 the TOML configuration. The default safe bind is `127.0.0.1:9090`, with
@@ -431,9 +433,10 @@ exposes stable bounded labels (`proxy_host_id` and status class) and is capped
 at 256 KiB by default. Do not expose it publicly without an authenticated
 network boundary.
 
-Analytics history remains process-local and resets on restart. Durable history,
-Redis/cross-node aggregation and fan-out, per-route dimensions, custom
-retention, and alerting remain deferred to later phases. Phase 9 now adds the
+Durable minute-level history, administrator-configurable retention, and
+cross-node policy/invalidation synchronization are implemented. Long-term
+hourly/day rollups, Redis or cross-node metric aggregation, per-route
+dimensions, and alerting remain deferred to later phases. Phase 9 now adds the
 bounded self-learning layer: per-host traffic baselines, deterministic anomaly
 detection, and opt-in adaptive tuning. These controls are monitor-only by
 default, preserve bounded storage and sensitive-data redaction, and expose

@@ -112,6 +112,38 @@ fn out_of_order_stale_events_do_not_displace_recent_buckets() {
     assert_eq!(ts[1].timestamp, Utc.timestamp_opt(101 * 60, 0).unwrap());
 }
 
+#[test]
+fn persisted_buckets_restore_counters_histograms_and_dimensions() {
+    let source = AnalyticsCollector::with_limits(2, 120);
+    source.record_with_dimensions(
+        event(1, 100, 403, 250),
+        AnalyticsDimensionEvent {
+            endpoint: Some("/login".into()),
+            upstream: Some("10.0.0.2:8080".into()),
+            attacker_ip: Some("203.0.113.8".into()),
+            bytes: 128,
+            attack_type: Some("waf".into()),
+        },
+    );
+    let restored = AnalyticsCollector::with_limits(2, 120);
+    restored.restore_persistence(source.persistence_snapshot());
+
+    let summary = restored.summary(AnalyticsFilter {
+        proxy_host_id: Some(1),
+        ..Default::default()
+    });
+    assert_eq!(summary.requests, 1);
+    assert_eq!(summary.status_4xx, 1);
+    assert_eq!(summary.p95_ms, Some(250));
+    let dimensions = restored.dimensions(AnalyticsFilter {
+        proxy_host_id: Some(1),
+        ..Default::default()
+    });
+    assert_eq!(dimensions.bandwidth_bytes, 128);
+    assert_eq!(dimensions.top_endpoints[0].key, "/login");
+    assert_eq!(dimensions.attack_types[0].key, "waf");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_recording_is_safe() {
     let c = std::sync::Arc::new(AnalyticsCollector::new(8));

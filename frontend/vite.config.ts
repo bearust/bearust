@@ -23,5 +23,8 @@ export default defineConfig({
     strictPort: true,
     proxy: { '/api': 'http://localhost:8081' },
   },
-  test: { exclude: [...configDefaults.exclude, 'e2e/**'] },
+  test: {
+    exclude: [...configDefaults.exclude, 'e2e/**'],
+    setupFiles: ['./src/test-setup.ts'],
+  },
 });

@@ -48,6 +48,8 @@ struct SnapshotEnvelope {
     proxy_hosts: Vec<crate::control_plane::models::ProxyHost>,
     host_rate_limits: Vec<(i64, crate::control_plane::models::RateLimitConfig)>,
     #[serde(default)]
+    runtime_config: Option<crate::config::Config>,
+    #[serde(default)]
     command_receipts: Vec<repository::RaftCommandReceipt>,
 }
 
@@ -370,6 +372,9 @@ impl openraft::RaftSnapshotBuilder<crate::cluster_raft::BearustRaftConfig> for S
             host_rate_limits: repository::list_host_rate_limit_configs(&self.storage.pool)
                 .await
                 .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?,
+            runtime_config: repository::get_runtime_config(&self.storage.pool)
+                .await
+                .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, e))?,
             command_receipts: Vec::new(),
         };
         let newest_receipts = repository::list_recent_raft_command_receipts(
@@ -528,6 +533,10 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
             .execute(&mut *tx)
             .await
             .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        sqlx::query("DELETE FROM runtime_config WHERE id=1")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
         sqlx::query("DELETE FROM raft_command_receipts")
             .execute(&mut *tx)
             .await
@@ -588,6 +597,16 @@ impl openraft::storage::RaftStateMachine<crate::cluster_raft::BearustRaftConfig>
             .execute(&mut *tx)
             .await
             .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+        }
+        if let Some(config) = &envelope.runtime_config {
+            let payload = toml::to_string(config)
+                .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
+            sqlx::query("INSERT INTO runtime_config(id,payload,updated_at) VALUES(1,?,?)")
+                .bind(payload)
+                .bind(chrono::Utc::now().to_rfc3339())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| storage_error(ErrorSubject::Snapshot(None), ErrorVerb::Write, e))?;
         }
         tx.commit()
             .await

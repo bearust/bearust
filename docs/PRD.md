@@ -610,21 +610,21 @@ Rows expose only an actor label, event, redacted details, timestamp, and ID. Act
 
 Phase 4D.1 adds additive, idempotent persistence for the ten global permission keys and the built-in `admin`, `operator`, and `viewer` roles, plus administrator-managed custom role CRUD. Built-in roles remain immutable; assigned custom roles may have permissions changed immediately but cannot be deleted while referenced by users. Existing role strings and session cookies remain compatible, and unknown roles fail closed through centralized authorization.
 
-Administrators can revoke another user's active sessions through `POST /api/users/{id}/sessions/revoke`; self-revocation is rejected. Role, user, session, proxy-host, certificate, and authorization-denial paths record safe audit events. The dashboard includes admin-only role and session controls. Per-host scopes, audit export, system settings, realtime updates, and frontend theme work remain deferred to later Phase 4 increments.
+Administrators can revoke another user's active sessions through `POST /api/users/{id}/sessions/revoke`; self-revocation is rejected. Role, user, session, proxy-host, certificate, and authorization-denial paths record safe audit events. The dashboard includes admin-only role and session controls. Audit export, delegated role administration, and external identity providers remain deferred.
 
 ### Phase 4D.2 status: authenticated realtime updates
 
-Phase 4D.2 adds the authenticated `GET /api/events` Server-Sent Events (SSE) stream used by the dashboard to invalidate and reload proxy-host, certificate, user, role, and audit data without polling. Session changes are also emitted as invalidation notifications for session-view consumers. Session-cookie authentication is required, and event payloads are intentionally redacted. The hub is process-local with bounded delivery; clients receive periodic heartbeats and use bounded automatic reconnects after disconnects. Cross-node fan-out and replay of events missed during a disconnect are deferred to the multi-node phase.
+Phase 4D.2 adds the authenticated `GET /api/events` Server-Sent Events (SSE) stream used by the dashboard to invalidate and reload proxy-host, certificate, user, role, and audit data without polling. Session changes are also emitted as invalidation notifications for session-view consumers. Session-cookie authentication is required, and event payloads are intentionally redacted. Delivery to each process is bounded and process-local; the Phase 10 cluster event receiver now fans committed invalidations across nodes and performs bounded local catch-up. Clients receive periodic heartbeats and use bounded automatic reconnects; replay of every event missed during a disconnect remains deferred.
 
 ### Phase 4D.3 status: Tailwind v4 frontend design system
 
-Phase 4D.3 completes the frontend migration to Tailwind CSS v4 across all existing management pages. Shared semantic design tokens and accessible UI primitives provide consistent responsive layouts, focus states, and status treatments. Theme selection supports `system`, `light`, and `dark` modes with local persistence; account-level preference synchronization remains deferred to the future system-settings capability.
+Phase 4D.3 completes the frontend migration to Tailwind CSS v4 across all existing management pages. Shared semantic design tokens and accessible UI primitives provide consistent responsive layouts, focus states, and status treatments. Theme selection supports `system`, `light`, and `dark` modes with local persistence and validated account-level synchronization, with local fallback during backend maintenance.
 
 ### Phase 4E status: per-host RBAC scopes
 
 Phase 4E completes the first per-resource authorization increment. Custom roles can grant `proxy_hosts.read` and `proxy_hosts.write` for an explicit set of proxy-host IDs while retaining the existing global permissions. Scoped users see only assigned hosts and cannot create, read, update, or delete unassigned hosts; global administrators and legacy global role assignments remain backward-compatible. Scope replacements are validated and committed atomically, proxy-host deletion removes stale assignments, and role-scope mutations emit redacted audit records plus authenticated realtime invalidation events.
 
-Phase 4E deliberately keeps certificate permissions global and does not introduce per-certificate or per-upstream scopes. It also does not provide cross-node realtime delivery, event replay after disconnect, audit export, delegated role administration, or a general-purpose policy language; those capabilities remain future work in the multi-node and later control-plane phases.
+Phase 4E deliberately keeps certificate permissions global and does not introduce per-certificate or per-upstream scopes. It also does not provide event replay after disconnect, audit export, delegated role administration, or a general-purpose policy language; those capabilities remain future work in later control-plane phases.
 
 ### Phase 5 status: external database support
 
@@ -755,16 +755,17 @@ driven rule retraining remain deferred.
 
 ### Phase 8 status: bounded analytics dashboard
 
-Phase 8 delivers process-local operational analytics for proxy traffic and
-security decisions. A bounded one-minute ring buffer retains a configurable
-60 minutes to 7 days (default 24 hours) and resets on process restart. Summary
-and timeseries queries are authenticated, read-only endpoints for `admin`,
-`operator`, and `viewer` roles; host and bucket limits are bounded at 100 and
-10,080, and invalid or oversized ranges return `400`. Collection is fail-open
-and stores aggregate status, latency histograms, bandwidth, bounded endpoint
-and upstream rankings, security-event categories, and top attacker IPs for the
-configured process-local window. It never stores request bodies, headers,
-credentials, tokens, or complete URLs.
+Phase 8 delivers bounded operational analytics for proxy traffic and security
+decisions. A one-minute in-memory ring buffer retains a configurable 60 minutes
+to 7 days (default 24 hours), and aggregate buckets are durably persisted in
+the control-plane database and restored after restart. Summary and timeseries
+queries are authenticated, read-only endpoints for `admin`, `operator`, and
+`viewer` roles; host and bucket limits are bounded at 100 and 10,080, and
+invalid or oversized ranges return `400`. Collection is fail-open and stores
+aggregate status, latency histograms, bandwidth, bounded endpoint and upstream
+rankings, security-event categories, and top attacker IPs for the configured
+window. It never stores request bodies, headers, credentials, tokens, or
+complete URLs.
 
 The dashboard provides host/time filters, request and status cards, latency
 percentiles, error views, security-event panels, and loading/error/empty
@@ -777,8 +778,9 @@ proxy-host and status-class labels with a 256 KiB default cap.
 
 The dashboard exposes the bounded dimensions through `/api/analytics/dimensions`
 and the retention window is configurable by administrators through
-`/api/analytics/retention`. Durable historical rollups, Redis/cross-node
-aggregation and fan-out, and cross-node replay remain deferred to Phase 10–13.
+`/api/analytics/retention`. Long-term hourly/day rollups, Redis or cross-node
+metric aggregation, per-route dimensions, alerting, and cross-node replay
+remain deferred to later phases.
 
 ### Phase 9 status: self-learning (traffic baseline, anomaly detection, adaptive tuning)
 
@@ -799,10 +801,14 @@ Phase 10A delivers the cluster foundation for multi-node BeaRust deployments:
 
 Phase 10B adds bounded, authenticated OpenRaft storage and membership
 management for multi-node configuration state. Replicated commands are applied
-through the state machine with idempotent command receipts; single-node
-configurations remain compatible, and follower reads remain local. Cluster
-transport frames are size-limited and authenticated with the existing
-handshake; sensitive request data and raw database errors are not forwarded.
+through the state machine with idempotent command receipts; proxy topology,
+runtime configuration, and non-secret WAF, bot, IP, rate-limit, analytics
+retention, and adaptive-tuning policy snapshots converge across nodes. Secret
+fingerprint keys, password hashes, certificate material, and private keys never
+enter the Raft payload. Single-node configurations remain compatible, and
+follower reads remain local. Cluster transport frames are size-limited and
+authenticated with the existing handshake; sensitive request data and raw
+database errors are not forwarded.
 
 ### Phase 10C status: HA operations and keepalived/VIP guidance
 
@@ -867,16 +873,16 @@ gates. Running the full Rust suite end-to-end (previously blocked by disk
 exhaustion) surfaced one stale test assertion predating Phase 13A's
 `plugins.manage`/`plugins.read` permissions, now fixed. Mutating plugin
 endpoints (and all other mutating control-plane endpoints) use the existing
-authenticated RBAC/session contract with a `SameSite=Lax` cookie, but a
-dedicated CSRF token contract is a project-wide release follow-up, not
-specific to plugins.
+authenticated RBAC/session contract with a `SameSite=Lax` session cookie plus a
+dedicated `bearust_csrf` token mirrored in the `X-CSRF-Token` request header.
+Login, setup, and the bot challenge remain explicit bootstrap exceptions;
+legacy sessions without the token remain temporarily compatible during
+migration.
 
 The default is `plugins.enabled = false`. Phase 13A deliberately has no public
-SDK, traffic hooks, registry, remote download, signature verification, or
-trust-on-first-use behavior. Phase 13B is next and will define the public SDK
-and stable memory/serialization conventions. Phase 13C will add explicitly
-reviewed traffic hooks with input redaction and backpressure semantics. Phase
-14 remains deferred for registry distribution and signature verification.
+SDK or traffic hooks; those reviewed SDK, memory, and traffic-hook increments
+were delivered in Phases 13B–13G. Phase 14 adds optional manifest signing and
+trust-on-first-use pinning; registry distribution remains future work.
 
 ### Phase 13B status: plugin SDK and memory conventions
 

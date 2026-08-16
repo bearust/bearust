@@ -27,9 +27,7 @@ function LoginPage() {
       <Card className="gap-5">
         <CardHeader>
           <CardTitle className="text-lg tracking-tight">{t("auth.loginTitle")}</CardTitle>
-          <CardDescription>
-            Sign in to manage your BeaRust edge infrastructure.
-          </CardDescription>
+            <CardDescription>{t("shell.loginDescription")}</CardDescription>
         </CardHeader>
         <CardContent>
           <form
@@ -57,7 +55,7 @@ function LoginPage() {
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-4">
                 <Label htmlFor="login-password">{t("common.password")}</Label>
-                <span className="text-xs text-muted-foreground">{DEMO_MODE ? "Demo access enabled" : "Use your control-plane account"}</span>
+                <span className="text-xs text-muted-foreground">{DEMO_MODE ? t("shell.demoAccess") : t("shell.useControlPlaneAccount")}</span>
               </div>
               <Input id="login-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
             </div>
@@ -73,7 +71,7 @@ function LoginPage() {
         </CardContent>
         <CardFooter className="border-t pt-5">
           <p className="w-full text-center text-xs text-muted-foreground">
-            By continuing, you agree to BeaRust&apos;s terms and privacy policy.
+            {t("shell.termsNotice")}
           </p>
         </CardFooter>
       </Card>

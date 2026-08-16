@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 
 const MAX_ANALYSIS_RANGE_DAYS: i64 = 31;
 const ADVISOR_JOB_TTL_HOURS: i64 = 1;
+const PERIODIC_REPORT_TTL_HOURS: i64 = 24 * 31;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -277,6 +278,100 @@ pub(super) async fn create_analysis(
     state.realtime.publish("ai_advisor.changed");
     tokio::spawn(synchronize_job(state.clone(), user.id, job_id));
     (StatusCode::ACCEPTED, Json(job_view(record).unwrap())).into_response()
+}
+
+/// Queue the periodic security summary described by the PRD. The report is
+/// persisted as a normal advisor job, so it is visible in the same insights
+/// view and follows the same redaction, timeout, and circuit-breaker rules as
+/// an operator-requested analysis.
+pub(crate) async fn schedule_security_summary(
+    state: &AppState,
+) -> Result<Option<AdvisorJobId>, AdvisorErrorCode> {
+    if state.ai_advisor.status() != (AdvisorStatus { enabled: true }) {
+        return Ok(None);
+    }
+    // A configured cluster has one scheduler owner. This prevents every node
+    // from enqueueing the same 24-hour report into a shared control database;
+    // a node without an elected leader simply waits for the next interval.
+    let cluster = state.cluster.snapshot().await;
+    if cluster.cluster_enabled
+        && cluster.raft_leader_id.as_deref() != Some(cluster.local_node_id.as_str())
+    {
+        return Ok(None);
+    }
+    let owner = repository::list_users(&state.db)
+        .await
+        .map_err(|_| AdvisorErrorCode::ProviderUnavailable)?
+        .into_iter()
+        .find(|user| user.role == "admin" && !user.disabled);
+    let Some(owner) = owner else {
+        return Ok(None);
+    };
+    let now = Utc::now();
+    let input = AnalysisInput {
+        workflow: AdvisorWorkflow::SecuritySummary,
+        host_id: None,
+        from: Some(now - Duration::hours(24)),
+        to: Some(now),
+        command: None,
+    };
+    let (snapshot, config_version, config_hash) = advisor_snapshot(state, &input)
+        .await
+        .map_err(|_| AdvisorErrorCode::ProviderUnavailable)?;
+    let locale = owner.preferred_locale.as_deref().unwrap_or("en");
+    let prompt = build_workflow_prompt(input.workflow.clone(), &snapshot, locale)?;
+    let model = state
+        .ai_advisor
+        .config()
+        .map(|config| config.model.to_string())
+        .unwrap_or_else(|| "unavailable".into());
+    let job_id = AdvisorJobId::new();
+    let _record = repository::insert_advisor_job(
+        &state.db,
+        &repository::NewAdvisorJob {
+            job_id: job_id.clone(),
+            owner_id: owner.id,
+            workflow: input.workflow.clone(),
+            redacted_input: snapshot,
+            provider_model: model,
+            config_version,
+            config_hash,
+            created_at: now,
+            expires_at: now + Duration::hours(PERIODIC_REPORT_TTL_HOURS),
+        },
+    )
+    .await
+    .map_err(|_| AdvisorErrorCode::ProviderUnavailable)?;
+    let request = AdvisorRequest {
+        workflow: input.workflow,
+        host_id: input.host_id,
+        from: input.from,
+        to: input.to,
+        command: Some(prompt),
+    };
+    if let Err(error) = state.ai_advisor.enqueue_with_id(job_id.clone(), request) {
+        let _ = repository::claim_advisor_job(&state.db, &job_id, Utc::now()).await;
+        let _ = repository::finish_advisor_job(
+            &state.db,
+            &job_id,
+            AdvisorJobStatus::Failed,
+            None,
+            Some(error),
+            Utc::now(),
+        )
+        .await;
+        return Err(error);
+    }
+    audit::record_state(
+        state,
+        Some(owner.id),
+        "ai_advisor_periodic_report_requested",
+        &format!("job_id={};workflow=security_summary", job_id.0),
+    )
+    .await;
+    state.realtime.publish("ai_advisor.changed");
+    tokio::spawn(synchronize_job(state.clone(), owner.id, job_id.clone()));
+    Ok(Some(job_id))
 }
 
 pub(super) async fn list_insights(

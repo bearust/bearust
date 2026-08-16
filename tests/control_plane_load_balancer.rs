@@ -45,7 +45,11 @@ async fn state_with_runtime() -> (
     )
     .await
     .unwrap();
-    state.runtime = Some(Arc::clone(&runtime));
+    state = state.with_runtime(
+        Arc::clone(&runtime),
+        Arc::new(config_path),
+        Arc::new(directory.path().join("missing.pid")),
+    );
     (state, runtime, directory)
 }
 
@@ -122,5 +126,45 @@ async fn load_balancer_reads_and_applies_live_topology() {
     assert_eq!(updated.pools[0].name, "edge");
     assert_eq!(updated.routes[0].upstream_pool, "edge");
     assert_eq!(runtime.load().config().upstream_pools[0].name, "edge");
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn proxy_host_crud_materializes_a_live_runtime_route() {
+    let (state, runtime, directory) = state_with_runtime().await;
+    let app = router(state);
+    let response = app
+        .oneshot(
+            Request::post("/api/proxy-hosts")
+                .header("Cookie", "bearust_session=admin-session")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": "Status page",
+                        "domain": "status.example.test",
+                        "upstream_host": "127.0.0.1",
+                        "upstream_port": 19002,
+                        "tls_mode": "disabled",
+                        "certificate_id": null,
+                        "enabled": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let host: bearust::control_plane::models::ProxyHost =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let pool_name = format!("proxy-host-{}", host.id);
+    let snapshot = runtime.load();
+    let (route, _) = snapshot
+        .route("status.example.test", "/health")
+        .expect("proxy host should be active in the runtime");
+    assert_eq!(route.upstream_pool, pool_name);
+    assert!(snapshot.pool(&pool_name).is_some());
+    let persisted = std::fs::read_to_string(directory.path().join("bearust.toml")).unwrap();
+    assert!(persisted.contains(&pool_name));
     runtime.shutdown().await.unwrap();
 }

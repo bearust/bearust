@@ -272,6 +272,43 @@ fn quinn_server_config(
     Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_tls)))
 }
 
+fn bind_endpoint(
+    server_config: quinn::ServerConfig,
+    bind: SocketAddr,
+) -> Result<quinn::Endpoint, Http3Error> {
+    #[cfg(unix)]
+    {
+        // Pingora's TCP listener uses its upgrade handoff during a
+        // certificate reload. Reuse the UDP port during that short overlap
+        // so the replacement process can bring up HTTP/3 before the old
+        // process drains. QUIC's 4-tuple hashing keeps an existing connection
+        // on one socket while new connections can land on the replacement.
+        let socket = socket2::Socket::new(
+            socket2::Domain::for_address(bind),
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )
+        .map_err(Http3Error::Bind)?;
+        socket.set_reuse_address(true).map_err(Http3Error::Bind)?;
+        socket.set_reuse_port(true).map_err(Http3Error::Bind)?;
+        socket.bind(&bind.into()).map_err(Http3Error::Bind)?;
+        let runtime = quinn::default_runtime().ok_or_else(|| {
+            Http3Error::Bind(io::Error::other("no async runtime available for HTTP/3"))
+        })?;
+        quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(server_config),
+            socket.into(),
+            runtime,
+        )
+        .map_err(Http3Error::Bind)
+    }
+    #[cfg(not(unix))]
+    {
+        quinn::Endpoint::server(server_config, bind).map_err(Http3Error::Bind)
+    }
+}
+
 /// Runs the HTTP/3 listener until `shutdown` fires. Every request is
 /// evaluated against the WAF rule engine (when `waf` is provided), routed
 /// and load-balanced the same way the HTTP/1.1/HTTP/2 path is, and
@@ -291,7 +328,7 @@ pub async fn serve(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Http3Error> {
     let server_config = quinn_server_config(tls_config)?;
-    let endpoint = quinn::Endpoint::server(server_config, bind).map_err(Http3Error::Bind)?;
+    let endpoint = bind_endpoint(server_config, bind)?;
     let client = reqwest::Client::builder()
         .timeout(UPSTREAM_REQUEST_TIMEOUT)
         .build()

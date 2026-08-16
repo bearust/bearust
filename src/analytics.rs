@@ -122,6 +122,31 @@ pub struct AnalyticsSnapshot {
     pub timeseries: Vec<AnalyticsBucket>,
 }
 
+/// Durable representation of one aggregate bucket. The repository stores
+/// this as redacted JSON so the schema remains portable across supported
+/// database backends while preserving the histogram and bounded dimensions
+/// needed to restore the in-memory query surface.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PersistedAnalyticsBucket {
+    pub timestamp: DateTime<Utc>,
+    pub proxy_host_id: i64,
+    pub requests: u64,
+    pub status_2xx: u64,
+    pub status_3xx: u64,
+    pub status_4xx: u64,
+    pub status_5xx: u64,
+    pub waf_blocks: u64,
+    pub bot_blocks: u64,
+    pub bot_challenges: u64,
+    pub rate_limited: u64,
+    pub bandwidth_bytes: u64,
+    pub latency_histogram: [u64; 14],
+    pub top_endpoints: Vec<AnalyticsCount>,
+    pub top_upstreams: Vec<AnalyticsCount>,
+    pub top_attacker_ips: Vec<AnalyticsCount>,
+    pub attack_types: Vec<AnalyticsCount>,
+}
+
 #[derive(Default)]
 struct Bucket {
     timestamp: DateTime<Utc>,
@@ -303,6 +328,99 @@ impl AnalyticsCollector {
             timeseries: timeseries_from_buckets(buckets, &filter),
         }
     }
+
+    /// Export the bounded collector state for periodic durable persistence.
+    /// Only aggregate counters, histograms, and bounded dimension counts are
+    /// included; request bodies, headers, credentials, and full URLs never
+    /// enter this representation.
+    pub fn persistence_snapshot(&self) -> Vec<PersistedAnalyticsBucket> {
+        let Ok(state) = self.state.lock() else {
+            return Vec::new();
+        };
+        state
+            .hosts
+            .iter()
+            .flat_map(|(host, buckets)| {
+                buckets.iter().map(|bucket| PersistedAnalyticsBucket {
+                    timestamp: bucket.timestamp,
+                    proxy_host_id: *host,
+                    requests: bucket.requests,
+                    status_2xx: bucket.status[0],
+                    status_3xx: bucket.status[1],
+                    status_4xx: bucket.status[2],
+                    status_5xx: bucket.status[3],
+                    waf_blocks: bucket.security.waf_blocks,
+                    bot_blocks: bucket.security.bot_blocks,
+                    bot_challenges: bucket.security.bot_challenges,
+                    rate_limited: bucket.security.rate_limited,
+                    bandwidth_bytes: bucket.bandwidth_bytes,
+                    latency_histogram: bucket.histogram,
+                    top_endpoints: counts_from_map(&bucket.endpoints),
+                    top_upstreams: counts_from_map(&bucket.upstreams),
+                    top_attacker_ips: counts_from_map(&bucket.attacker_ips),
+                    attack_types: counts_from_map(&bucket.attack_types),
+                })
+            })
+            .collect()
+    }
+
+    /// Restore aggregate buckets loaded from the durable rollup store. The
+    /// same host, bucket, and dimension bounds as live collection apply when
+    /// importing data, so a damaged row cannot grow memory without limit.
+    pub fn restore_persistence(&self, persisted: Vec<PersistedAnalyticsBucket>) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.hosts.clear();
+        let max_buckets = self.retention_minutes();
+        for item in persisted {
+            if item.proxy_host_id <= 0 {
+                continue;
+            }
+            if !state.hosts.contains_key(&item.proxy_host_id) && state.hosts.len() >= self.max_hosts
+            {
+                continue;
+            }
+            let queue = state
+                .hosts
+                .entry(item.proxy_host_id)
+                .or_insert_with(VecDeque::new);
+            if queue.len() >= max_buckets {
+                continue;
+            }
+            let status_total = item
+                .status_2xx
+                .saturating_add(item.status_3xx)
+                .saturating_add(item.status_4xx)
+                .saturating_add(item.status_5xx);
+            let mut bucket = Bucket {
+                timestamp: item.timestamp,
+                requests: item.requests,
+                status: [
+                    item.status_2xx,
+                    item.status_3xx,
+                    item.status_4xx,
+                    item.status_5xx,
+                    item.requests.saturating_sub(status_total),
+                ],
+                security: SecurityCounters {
+                    waf_blocks: item.waf_blocks,
+                    bot_blocks: item.bot_blocks,
+                    bot_challenges: item.bot_challenges,
+                    rate_limited: item.rate_limited,
+                },
+                histogram: item.latency_histogram,
+                bandwidth_bytes: item.bandwidth_bytes,
+                ..Default::default()
+            };
+            restore_counts(&mut bucket.endpoints, item.top_endpoints);
+            restore_counts(&mut bucket.upstreams, item.top_upstreams);
+            restore_counts(&mut bucket.attacker_ips, item.top_attacker_ips);
+            restore_counts(&mut bucket.attack_types, item.attack_types);
+            queue.push_back(bucket);
+        }
+    }
+
     fn filtered(&self, f: &AnalyticsFilter) -> Vec<BucketView> {
         let mut out = if let Ok(state) = self.state.lock() {
             let mut captured = Vec::new();
@@ -468,6 +586,26 @@ fn increment_dimension(map: &mut BTreeMap<String, u64>, value: Option<&str>) {
         *count = count.saturating_add(1);
     } else if map.len() < MAX_DIMENSION_KEYS_PER_BUCKET {
         map.insert(value, 1);
+    }
+}
+
+fn counts_from_map(map: &BTreeMap<String, u64>) -> Vec<AnalyticsCount> {
+    let mut counts = map
+        .iter()
+        .map(|(key, count)| AnalyticsCount {
+            key: key.clone(),
+            count: *count,
+        })
+        .collect::<Vec<_>>();
+    sort_counts(&mut counts);
+    counts
+}
+
+fn restore_counts(map: &mut BTreeMap<String, u64>, counts: Vec<AnalyticsCount>) {
+    for count in counts.into_iter().take(MAX_TOP_DIMENSIONS) {
+        if count.key.len() <= MAX_DIMENSION_VALUE_LENGTH && !count.key.trim().is_empty() {
+            map.insert(count.key, count.count);
+        }
     }
 }
 

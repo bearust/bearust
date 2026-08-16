@@ -1,5 +1,6 @@
 //! Bounded bot-protection domain evaluator.
 use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 pub const MAX_FIELD_BYTES: usize = 256;
@@ -9,7 +10,8 @@ pub const MAX_TRUSTED_RULES: usize = 32;
 pub const MAX_TTL_SECONDS: u64 = 86_400;
 pub const MAX_SCORE: u16 = 100;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BotMode {
     Monitor,
     Challenge,
@@ -31,7 +33,7 @@ pub struct BotConfig {
     pub fingerprint_key: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BotRule {
     pub category: String,
     pub weight: u16,

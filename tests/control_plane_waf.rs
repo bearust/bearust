@@ -248,8 +248,11 @@ async fn waf_mutations_publish_redacted_audit_and_realtime_events() {
     );
     let first = events.recv().await.unwrap();
     let second = events.recv().await.unwrap();
+    let third = events.recv().await.unwrap();
     assert!(first.kind == "audit" || second.kind == "audit");
-    assert!(first.kind == "waf.changed" || second.kind == "waf.changed");
+    assert!(
+        first.kind == "waf.changed" || second.kind == "waf.changed" || third.kind == "waf.changed"
+    );
     let details: String = sqlx::query_scalar("SELECT details FROM audit_logs WHERE event='waf_config_updated' ORDER BY created_at DESC LIMIT 1").fetch_one(&db).await.unwrap();
     assert!(!details.contains("token"));
     assert!(!details.contains("body"));

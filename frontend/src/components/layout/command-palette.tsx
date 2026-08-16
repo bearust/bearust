@@ -10,10 +10,13 @@ import {
 } from "@/components/ui/command";
 import { NAV_ITEMS } from "./nav-data";
 import { useAuthStore } from "@/stores/auth-store";
+import { useTranslation } from "react-i18next";
+import { navTranslationKey } from "./nav-data";
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const aiAdvisorEnabled = useAuthStore((state) => state.aiAdvisorEnabled);
   const navItems = NAV_ITEMS.filter((item) => aiAdvisorEnabled || item.title !== "AI Advisor");
 
@@ -35,10 +38,10 @@ export function CommandPalette() {
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
-      <CommandInput placeholder="Jump to a BeaRust section..." />
+      <CommandInput placeholder={t("shell.commandPlaceholder")} />
       <CommandList>
-        <CommandEmpty>No results.</CommandEmpty>
-        <CommandGroup heading="Navigation">
+        <CommandEmpty>{t("shell.noResults")}</CommandEmpty>
+        <CommandGroup heading={t("shell.navigation")}>
           {navItems.map((item) => (
             (() => {
               const Icon = item.icon;
@@ -51,7 +54,7 @@ export function CommandPalette() {
                   }}
                 >
                   {Icon ? <Icon /> : null}
-                  <span>{item.title}</span>
+                  <span>{t(navTranslationKey(item.title))}</span>
                 </CommandItem>
               );
             })()

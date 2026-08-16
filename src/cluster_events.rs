@@ -229,6 +229,7 @@ impl AppliedStateLoader for SqlxAppliedStateLoader {
 pub struct ClusterEventReceiver {
     hub: Arc<RealtimeHub>,
     applied_state: Arc<dyn AppliedStateLoader>,
+    reloader: Option<Arc<dyn crate::control_plane::ConfigReloader>>,
     state: Mutex<ReceiverState>,
 }
 
@@ -237,8 +238,17 @@ impl ClusterEventReceiver {
         Self {
             hub,
             applied_state,
+            reloader: None,
             state: Mutex::new(ReceiverState::default()),
         }
+    }
+
+    pub fn with_reloader(
+        mut self,
+        reloader: Arc<dyn crate::control_plane::ConfigReloader>,
+    ) -> Self {
+        self.reloader = Some(reloader);
+        self
     }
 
     pub async fn accept(
@@ -285,6 +295,16 @@ impl ClusterEventReceiver {
 
         if catch_up {
             self.hub.publish_cluster_catch_up();
+        }
+        if let Some(reloader) = &self.reloader {
+            reloader
+                .refresh_from_database(if catch_up {
+                    "cluster.catch_up"
+                } else {
+                    event.event_type.as_str()
+                })
+                .await
+                .map_err(|_| ClusterEventError::AppliedStateUnavailable)?;
         }
         self.hub
             .publish_cluster_event(&event.event_type)
@@ -448,5 +468,11 @@ async fn run_peer_worker(
 }
 
 fn is_replicated_event_type(kind: &str) -> bool {
-    matches!(kind, "proxy_hosts.changed" | "rate_limit.changed")
+    matches!(
+        kind,
+        "proxy_hosts.changed"
+            | "rate_limit.changed"
+            | "runtime_config.changed"
+            | "security.changed"
+    )
 }

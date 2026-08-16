@@ -41,6 +41,8 @@ pub fn committed_event_kind(command: &ConfigCommand) -> Option<&'static str> {
         | ConfigCommand::UpdateProxyHost { .. }
         | ConfigCommand::DeleteProxyHost { .. } => Some("proxy_hosts.changed"),
         ConfigCommand::UpdateRuntimePolicy { .. } => Some("rate_limit.changed"),
+        ConfigCommand::UpdateRuntimeConfig { .. } => Some("runtime_config.changed"),
+        ConfigCommand::UpdatePolicyState { .. } => Some("security.changed"),
         ConfigCommand::Noop { .. } => None,
     }
 }
@@ -549,6 +551,8 @@ impl ConfigCommandGateway {
                 (Permission::ProxyHostsWrite, Some(("proxy_host", *host_id)))
             }
             ConfigCommand::UpdateRuntimePolicy { .. } => (Permission::SystemSettingsManage, None),
+            ConfigCommand::UpdateRuntimeConfig { .. } => (Permission::ProxyHostsWrite, None),
+            ConfigCommand::UpdatePolicyState { .. } => (Permission::SystemSettingsManage, None),
             ConfigCommand::Noop { .. } => return Err(ClusterWriteError::NotReplicatedCommand),
         };
         match repository::user_has_permission(&self.db, actor.user_id, permission.key(), scope)

@@ -6,6 +6,7 @@ import { DEMO_MODE } from "@/lib/demo";
 import { useAuthStore } from "@/stores/auth-store";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { useTranslation } from "react-i18next";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,6 +17,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 export function ProfileDropdown() {
+  const { t } = useTranslation();
   const user = useAuthStore((state) => state.user);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -35,7 +37,7 @@ export function ProfileDropdown() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="relative h-8 w-8 rounded-full p-0" aria-label="Open account menu">
+        <Button variant="ghost" className="relative h-8 w-8 rounded-full p-0" aria-label={t("shell.openAccountMenu")}>
           <Avatar className="h-8 w-8">
             <AvatarFallback className="bg-primary text-primary-foreground">{initials}</AvatarFallback>
           </Avatar>
@@ -51,20 +53,20 @@ export function ProfileDropdown() {
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={() => void navigate({ to: "/users" })}>
           <UserRound />
-          Account
+          {t("shell.account")}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => void navigate({ to: "/audit-log" })}>
           <Bell />
-          Activity log
+          {t("shell.activityLog")}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => void navigate({ to: "/settings" })}>
           <Settings />
-          Settings
+          {t("shell.settings")}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem variant="destructive" onClick={signOut}>
           <LogOut />
-          Sign out
+          {t("auth.signOut")}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

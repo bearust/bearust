@@ -310,8 +310,34 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         tracing::info!(event = "control_plane_start", bind = %config.server.control_bind, setup_token_configured = setup_token_from_env.is_some(), generated_setup_token = setup_token_from_env.is_none());
         let mut control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
-        control_state.runtime = Some(Arc::clone(&store));
-        control_state.runtime_config_path = Some(Arc::new(path.clone()));
+        control_state = control_state.with_runtime(
+            Arc::clone(&store),
+            Arc::new(path.clone()),
+            Arc::new(config.server.pid_file.clone()),
+        );
+        if let Some(persisted) = crate::control_plane::repository::get_runtime_config(
+            &control_state.db,
+        )
+        .await
+        .map_err(|error| AppError::Server(format!("load persisted runtime config: {error}")))?
+        {
+            control_state
+                .reloader
+                .apply_runtime_config(persisted)
+                .await
+                .map_err(|error| AppError::Server(format!("activate persisted runtime config: {error}")))?;
+        } else {
+            let existing_hosts = crate::control_plane::repository::list_hosts(&control_state.db)
+                .await
+                .map_err(|error| AppError::Server(format!("load proxy hosts: {error}")))?;
+            control_state
+                .reloader
+                .apply(crate::control_plane::models::DesiredConfig {
+                    proxy_hosts: existing_hosts,
+                })
+                .await
+                .map_err(|error| AppError::Server(format!("activate proxy hosts: {error}")))?;
+        }
         let plugin_manager = crate::plugin_runtime::PluginManager::new(config.plugins.clone());
         plugin_manager.attach_realtime(control_state.realtime.clone());
         plugin_manager.attach_audit_sink(Arc::new(
@@ -343,6 +369,29 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                     crate::ai_advisor::AiAdvisorService::disabled()
                 }),
         );
+        let ai_report_task = if control_state.ai_advisor.status().enabled {
+            let interval_hours = std::env::var("BEARUST_AI_REPORT_INTERVAL_HOURS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|hours| (1..=168).contains(hours))
+                .unwrap_or(24);
+            let state = control_state.clone();
+            Some(tokio::spawn(async move {
+                let delay = Duration::from_secs(interval_hours.saturating_mul(60 * 60));
+                loop {
+                    tokio::time::sleep(delay).await;
+                    if let Err(error) = crate::control_plane::ai_advisor::schedule_security_summary(
+                        &state,
+                    )
+                    .await
+                    {
+                        tracing::warn!(event = "ai_periodic_report_failed", code = ?error);
+                    }
+                }
+            }))
+        } else {
+            None
+        };
         control_state.prometheus = config.prometheus.clone();
         // Construct the Raft runtime only for an explicitly configured,
         // authenticated cluster. Construction does not bootstrap membership
@@ -397,7 +446,8 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                     config.cluster.node_id.clone(),
                     Duration::from_secs(config.cluster.timeout_seconds),
                 )),
-            ));
+            )
+            .with_reloader(control_state.reloader.clone()));
             cluster_service.set_event_handler(receiver);
             Some(
                 crate::cluster_events::ClusterEventFanout::start(
@@ -430,6 +480,26 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             .into_iter()
             .filter_map(|host| crate::router::normalize_host(&host.domain).map(|domain| (domain, host.id)))
             .collect::<HashMap<_, _>>();
+        let analytics_persistence_task = {
+            let database = control_state.db.clone();
+            let collector = control_state.analytics.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    let buckets = collector.persistence_snapshot();
+                    if let Err(error) = crate::control_plane::repository::persist_analytics_buckets(
+                        &database,
+                        &buckets,
+                        collector.retention_minutes(),
+                    )
+                    .await
+                    {
+                        tracing::warn!(event = "analytics_persistence_failed", error = %error);
+                    }
+                }
+            })
+        };
         let analytics_changed: Arc<dyn Fn() + Send + Sync> = {
             let realtime = realtime.clone();
             Arc::new(move || {
@@ -658,6 +728,12 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             .map_err(|error| AppError::Server(error.to_string()))?;
         reload_task.abort();
         control_task.abort();
+        analytics_persistence_task.abort();
+        let _ = analytics_persistence_task.await;
+        if let Some(task) = ai_report_task {
+            task.abort();
+            let _ = task.await;
+        }
         let _ = http3_shutdown_tx.send(true);
         if let Some(http3_task) = http3_task {
             let _ = tokio::time::timeout(

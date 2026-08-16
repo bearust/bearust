@@ -70,3 +70,31 @@ export type FlatNavItem = {
 export const NAV_ITEMS: FlatNavItem[] = flattenItems(sidebarData.navGroups).filter(
   (item): item is NavItem & { url: string } => "url" in item,
 );
+
+const NAV_TRANSLATION_KEYS: Record<string, string> = {
+  General: "shell.general",
+  Protection: "shell.protection",
+  Administration: "shell.administration",
+  Dashboard: "shell.dashboard",
+  Overview: "shell.overview",
+  Operations: "shell.operations",
+  "Proxy Hosts": "shell.proxyHosts",
+  "Proxy hosts": "shell.proxyHosts",
+  "Load Balancer": "shell.loadBalancer",
+  "Load balancer": "shell.loadBalancer",
+  Analytics: "shell.analytics",
+  Cluster: "shell.cluster",
+  Security: "shell.security",
+  "WAF rules": "shell.wafRules",
+  "Bot protection": "shell.botProtection",
+  "Rate limiting": "shell.rateLimiting",
+  "AI Advisor": "shell.aiAdvisor",
+  Plugins: "shell.plugins",
+  "Users & Roles": "shell.usersRoles",
+  "Audit Log": "shell.auditLog",
+  Settings: "shell.settings",
+};
+
+export function navTranslationKey(title: string) {
+  return NAV_TRANSLATION_KEYS[title] ?? title;
+}

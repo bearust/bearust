@@ -5,8 +5,8 @@ RUN npm ci
 COPY frontend ./
 RUN npm run build
 
-FROM rust:1.88-bookworm AS builder
-ENV RUSTUP_TOOLCHAIN=1.88.0
+FROM rust:1.97.1-bookworm AS builder
+ENV RUSTUP_TOOLCHAIN=1.97.1
 RUN apt-get update && apt-get install -y --no-install-recommends clang cmake make perl pkg-config && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./

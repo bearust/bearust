@@ -156,6 +156,17 @@ pub struct UserPreferencesPatch {
     pub preferred_locale: Option<Option<String>>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserThemePreference {
+    pub preferred_theme: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserThemePatch {
+    pub preferred_theme: Option<String>,
+}
+
 fn deserialize_optional_locale<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
 where
     D: Deserializer<'de>,

@@ -137,6 +137,16 @@ impl RateLimiterStore {
         }
     }
 
+    pub fn clear_host_policies(&self) {
+        if let Ok(mut policies) = self.host_policies.write() {
+            policies.clear();
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.entries.clear();
+            state.sequence = 0;
+        }
+    }
+
     pub fn policy(&self) -> RateLimitPolicy {
         self.policy.read().map(|p| p.clone()).unwrap_or_default()
     }

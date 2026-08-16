@@ -99,6 +99,70 @@ async fn committed_proxy_host_command_is_applied_atomically_and_idempotently() {
     assert_eq!(count, 1);
 }
 
+#[tokio::test]
+async fn policy_snapshot_command_converges_non_secret_control_plane_state() {
+    let pool = repository::connect("sqlite::memory:").await.unwrap();
+    repository::migrate(&pool).await.unwrap();
+    let mut policy = repository::load_replicated_policy_state(&pool)
+        .await
+        .unwrap();
+    policy.waf_mode = bearust::control_plane::models::WafMode::Block;
+    policy.rate_limit.enabled = true;
+    policy.analytics_retention_minutes = 60;
+    let command = ConfigCommand::UpdatePolicyState {
+        command_id: Uuid::new_v4(),
+        state: policy.clone(),
+    };
+
+    assert_eq!(
+        repository::apply_raft_command(&pool, &command)
+            .await
+            .unwrap(),
+        bearust::cluster_raft::CommandResult::Applied
+    );
+    assert_eq!(
+        repository::get_waf_config(&pool).await.unwrap().mode,
+        policy.waf_mode
+    );
+    assert!(
+        repository::get_rate_limit_config(&pool)
+            .await
+            .unwrap()
+            .enabled
+    );
+    assert_eq!(
+        repository::get_analytics_retention(&pool)
+            .await
+            .unwrap()
+            .retention_minutes,
+        60
+    );
+    assert_eq!(
+        repository::get_bot_config(&pool)
+            .await
+            .unwrap()
+            .fingerprint_key
+            .len(),
+        32
+    );
+    repository::seed_builtin_waf_rules(&pool).await.unwrap();
+    let builtin_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM waf_rules WHERE source='builtin'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(builtin_count, 4);
+
+    let mut state = ReplicatedConfig::default();
+    assert_eq!(
+        state.apply(&command).unwrap(),
+        bearust::cluster_raft::CommandResult::Applied
+    );
+    let snapshot = state.snapshot().unwrap();
+    let restored = ReplicatedConfig::from_snapshot(&snapshot).unwrap();
+    assert!(restored.has_applied(command.command_id()));
+}
+
 #[test]
 fn authenticated_rpc_frame_rejects_tampering_and_oversized_payloads() {
     let payload = br#"{"term":3,"commit_index":7}"#;

@@ -53,7 +53,9 @@ impl RealtimeHub {
         match kind {
             "proxy_hosts.changed" => Some(self.publish("proxy_hosts.changed")),
             "load_balancer.changed" => Some(self.publish("load_balancer.changed")),
+            "runtime_config.changed" => Some(self.publish("load_balancer.changed")),
             "rate_limit.changed" => Some(self.publish("rate_limit.changed")),
+            "security.changed" => Some(self.publish("security.changed")),
             "plugins.changed" => Some(self.publish("plugins.changed")),
             _ => None,
         }
@@ -65,6 +67,8 @@ impl RealtimeHub {
     pub fn publish_cluster_catch_up(&self) {
         self.publish("proxy_hosts.changed");
         self.publish("rate_limit.changed");
+        self.publish("load_balancer.changed");
+        self.publish("security.changed");
     }
 
     pub fn publish_committed(

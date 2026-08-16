@@ -12,6 +12,7 @@ pub mod plugins;
 pub mod rbac;
 pub mod realtime;
 pub mod repository;
+pub mod runtime_sync;
 use crate::acme::{AcmeEnvironment, AcmeManager, LetsEncryptClient};
 use crate::ai_advisor::AiAdvisorService;
 use crate::analytics::{AnalyticsCollector, AnalyticsFilter};
@@ -34,13 +35,14 @@ use crate::secrets::SecretStore;
 use crate::waf_store::WafStore;
 use async_trait::async_trait;
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::DefaultBodyLimit,
     extract::{
         rejection::{JsonRejection, PathRejection},
         Multipart, Path, Query, RawQuery, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
+    middleware::Next,
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -110,6 +112,38 @@ impl AppState {
 
     pub fn with_config_gateway(mut self, gateway: ConfigCommandGateway) -> Self {
         self.config_gateway = Some(gateway);
+        self
+    }
+
+    /// Attach the live data plane and replace the test/embedded no-op
+    /// reloader with the production runtime synchronizer.
+    pub fn with_runtime(
+        mut self,
+        runtime: Arc<crate::runtime::RuntimeStore>,
+        config_path: impl Into<Arc<std::path::PathBuf>>,
+        pid_file: impl Into<Arc<std::path::PathBuf>>,
+    ) -> Self {
+        let config_path = config_path.into();
+        self.runtime = Some(Arc::clone(&runtime));
+        self.runtime_config_path = Some(Arc::clone(&config_path));
+        self.reloader = Arc::new(
+            runtime_sync::RuntimeConfigReloader::new(
+                runtime,
+                self.db.clone(),
+                config_path,
+                pid_file,
+                Arc::clone(&self.runtime_config_lock),
+            )
+            .with_policy_stores(runtime_sync::RuntimePolicyStores {
+                waf: Arc::clone(&self.waf),
+                ip_security: Arc::clone(&self.ip_security),
+                bot: Arc::clone(&self.bot),
+                host_auth: Arc::clone(&self.host_auth),
+                rate_limiter: Arc::clone(&self.rate_limiter),
+                analytics: Arc::clone(&self.analytics),
+                adaptive_tuning: Arc::clone(&self.adaptive_tuning),
+            }),
+        );
         self
     }
 }
@@ -316,6 +350,15 @@ pub enum ReloadError {
 #[async_trait]
 pub trait ConfigReloader: Send + Sync {
     async fn apply(&self, desired: DesiredConfig) -> Result<(), ReloadError>;
+    async fn apply_runtime_config(
+        &self,
+        _config: crate::config::Config,
+    ) -> Result<(), ReloadError> {
+        Ok(())
+    }
+    async fn refresh_from_database(&self, _event_type: &str) -> Result<(), ReloadError> {
+        Ok(())
+    }
     async fn apply_certificate_change(&self, _certificate_id: i64) -> Result<(), ReloadError> {
         Ok(())
     }
@@ -394,6 +437,10 @@ pub async fn build_state(
     let analytics = Arc::new(AnalyticsCollector::default());
     if let Ok(retention) = repository::get_analytics_retention(&db).await {
         analytics.set_retention_minutes(retention.retention_minutes as usize);
+    }
+    let analytics_limit = crate::analytics::DEFAULT_MAX_HOSTS * analytics.retention_minutes();
+    if let Ok(buckets) = repository::load_analytics_buckets(&db, analytics_limit).await {
+        analytics.restore_persistence(buckets);
     }
 
     if let Ok(host_configs) = repository::list_host_rate_limit_configs(&db).await {
@@ -496,6 +543,10 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route(
             "/api/auth/me/preferences",
             axum::routing::patch(update_preferences),
+        )
+        .route(
+            "/api/auth/me/theme",
+            get(get_theme_preference).patch(update_theme_preference),
         )
         .route(
             "/api/bot/challenge",
@@ -648,9 +699,68 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
     } else {
         app
     };
-    app.layer(DefaultBodyLimit::max(3 * 1024 * 1024))
+    app.layer(axum::middleware::from_fn(csrf_guard))
+        .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
         .fallback_service(ServeDir::new("/usr/share/bearust/frontend"))
+}
+
+/// Protect cookie-authenticated mutations with a double-submit token. The
+/// token cookie is intentionally readable by the browser so the API client
+/// can echo it in `X-CSRF-Token`; it is never accepted as authentication.
+/// Requests without a token cookie are left compatible with pre-CSRF legacy
+/// sessions, while every session issued by the current login/setup flows has
+/// the cookie and is therefore protected.
+async fn csrf_guard(request: Request<Body>, next: Next) -> Response {
+    let path = request.uri().path();
+    let mutating = matches!(
+        request.method(),
+        &axum::http::Method::POST
+            | &axum::http::Method::PUT
+            | &axum::http::Method::PATCH
+            | &axum::http::Method::DELETE
+    );
+    let public = matches!(
+        path,
+        "/api/auth/login"
+            | "/api/setup/initialize"
+            | "/api/bot/challenge"
+            | "/api/bot/challenge/verify"
+    );
+    if !mutating || !path.starts_with("/api/") || public {
+        return next.run(request).await;
+    }
+    let Some(cookie) = request.headers().get(axum::http::header::COOKIE) else {
+        return next.run(request).await;
+    };
+    let Ok(cookie) = cookie.to_str() else {
+        return user_error(
+            StatusCode::FORBIDDEN,
+            "csrf_invalid",
+            "CSRF validation failed",
+        );
+    };
+    let csrf_cookie = cookie
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("bearust_csrf="));
+    let csrf_header = request
+        .headers()
+        .get("x-csrf-token")
+        .and_then(|value| value.to_str().ok());
+    if csrf_cookie.is_some() && csrf_cookie == csrf_header {
+        next.run(request).await
+    } else if csrf_cookie.is_none() {
+        // Sessions minted before the CSRF cookie was introduced remain
+        // usable for one migration window. New sessions always take the
+        // protected branch above.
+        next.run(request).await
+    } else {
+        user_error(
+            StatusCode::FORBIDDEN,
+            "csrf_invalid",
+            "CSRF validation failed",
+        )
+    }
 }
 
 /// Router for a dedicated Prometheus listener. Keep this surface limited to
@@ -949,6 +1059,11 @@ async fn update_bot_config(
             "Invalid bot configuration",
         );
     }
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(
         &s,
         Some(actor.id),
@@ -1027,6 +1142,11 @@ async fn create_bot_crawler(
             "Unable to reload bot policy",
         );
     };
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(
         &s,
         Some(actor.id),
@@ -1094,6 +1214,11 @@ async fn update_bot_crawler(
             "Unable to reload bot policy",
         );
     };
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(
         &s,
         Some(actor.id),
@@ -1142,6 +1267,11 @@ async fn delete_bot_crawler(
             "Unable to reload bot policy",
         );
     };
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(
         &s,
         Some(actor.id),
@@ -1258,6 +1388,11 @@ async fn import_bot_config(
             "Unable to reload bot policy",
         );
     }
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(&s, Some(actor.id), "bot_config_imported", "redacted").await;
     s.realtime.publish("bot.changed");
     StatusCode::OK.into_response()
@@ -1400,6 +1535,11 @@ async fn create_ip_security_rule(
             "Unable to activate IP security policy",
         );
     }
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(
         &s,
         Some(actor.id),
@@ -1506,6 +1646,11 @@ async fn update_ip_security_rule(
             "Unable to activate IP security policy",
         );
     }
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(
         &s,
         Some(actor.id),
@@ -1540,6 +1685,11 @@ async fn delete_ip_security_rule(
                     "Unable to activate IP security policy",
                 );
             }
+            let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            publish_committed_command(&s, &policy_command, &policy_receipt);
             audit::record_state(
                 &s,
                 Some(actor.id),
@@ -1736,6 +1886,11 @@ async fn update_rate_limit_config(
             refill_per_second: c.refill_per_second,
             key_scope: c.key_scope,
         });
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(
         &s,
         Some(actor.id),
@@ -1784,6 +1939,11 @@ async fn update_waf_config(
             "Unable to update WAF configuration",
         );
     }
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(&s, Some(actor.id), "waf_config_updated", "mode_changed").await;
     s.realtime.publish("waf.changed");
     Json(repository::get_waf_config(&s.db).await.unwrap()).into_response()
@@ -1871,6 +2031,11 @@ async fn create_waf_rule(
             "Unable to reload WAF rules",
         );
     }
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(
         &s,
         Some(actor.id),
@@ -1955,6 +2120,11 @@ async fn update_waf_rule(
             "Unable to reload WAF rules",
         );
     }
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(
         &s,
         Some(actor.id),
@@ -1994,6 +2164,11 @@ async fn delete_waf_rule(
         return user_error(StatusCode::NOT_FOUND, "not_found", "WAF rule not found");
     }
     let _ = s.waf.reload(&s.db).await;
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(
         &s,
         Some(actor.id),
@@ -2064,6 +2239,11 @@ async fn import_waf_rules(
             "Unable to reload WAF rules",
         );
     }
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(
         &s,
         Some(actor.id),
@@ -2151,6 +2331,45 @@ async fn submit_config_command(
     actor: &User,
 ) -> Result<CommitReceipt, ConfigSubmissionError> {
     submit_config_command_as(state, command, command_actor(actor)).await
+}
+
+/// Submit the complete non-secret policy snapshot after a local policy edit.
+/// The Raft state machine applies the same snapshot atomically on every node;
+/// the event receiver then reloads each node's immutable runtime store.
+async fn submit_policy_state(
+    state: &AppState,
+    actor: &User,
+) -> Result<(ConfigCommand, CommitReceipt), Response> {
+    let policy = repository::load_replicated_policy_state(&state.db)
+        .await
+        .map_err(|_| {
+            user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Database unavailable",
+            )
+        })?;
+    let command = ConfigCommand::UpdatePolicyState {
+        command_id: Uuid::new_v4(),
+        state: policy,
+    };
+    let receipt = match submit_config_command(state, command.clone(), actor).await {
+        Ok(receipt) => receipt,
+        Err(ConfigSubmissionError::LocalApplyPending(receipt)) => {
+            return Err(cluster_write_response(
+                ClusterWriteError::LocalApplyPending { receipt },
+            ))
+        }
+        Err(ConfigSubmissionError::Cluster(error)) => return Err(cluster_write_response(error)),
+        Err(ConfigSubmissionError::Database) => {
+            return Err(user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Database unavailable",
+            ))
+        }
+    };
+    Ok((command, receipt))
 }
 
 async fn submit_config_command_as(
@@ -3604,14 +3823,21 @@ async fn setup_initialize(
                 .is_ok()
             {
                 s.realtime.publish("sessions.changed");
+                let csrf = Uuid::new_v4().to_string();
                 let mut headers = HeaderMap::new();
-                headers.insert(
+                headers.append(
                     axum::http::header::SET_COOKIE,
                     format!(
                         "bearust_session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=86400"
                     )
-                    .parse()
-                    .unwrap(),
+                        .parse()
+                        .unwrap(),
+                );
+                headers.append(
+                    axum::http::header::SET_COOKIE,
+                    format!("bearust_csrf={csrf}; Secure; SameSite=Lax; Path=/; Max-Age=86400")
+                        .parse()
+                        .unwrap(),
                 );
                 return (StatusCode::CREATED, headers, Json(u)).into_response();
             }
@@ -3748,6 +3974,42 @@ async fn update_preferences(
             "database_error",
             "Database unavailable",
         ),
+    }
+}
+
+async fn get_theme_preference(State(s): State<AppState>, h: HeaderMap) -> Response {
+    let user = match current(&s, &h).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    match repository::get_user_theme_preference(&s.db, user.id).await {
+        Ok(preferred_theme) => Json(UserThemePreference { preferred_theme }).into_response(),
+        Err(_) => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
+    }
+}
+
+async fn update_theme_preference(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    input: Result<Json<UserThemePatch>, JsonRejection>,
+) -> Response {
+    let user = match current(&s, &h).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    let Json(input) = match input {
+        Ok(input) => input,
+        Err(_) => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid theme"),
+    };
+    match repository::update_user_theme_preference(&s.db, user.id, input.preferred_theme.as_deref())
+        .await
+    {
+        Ok(preferred_theme) => Json(UserThemePreference { preferred_theme }).into_response(),
+        Err(_) => user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid theme"),
     }
 }
 
@@ -4051,6 +4313,11 @@ async fn update_analytics_retention(
     };
     s.analytics
         .set_retention_minutes(config.retention_minutes as usize);
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
     audit::record_state(
         &s,
         Some(actor.id),
@@ -4502,6 +4769,11 @@ async fn update_tuning_policy(
             "Unable to update policy",
         );
     }
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &user).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
 
     audit::record_state(
         &s,
@@ -4874,6 +5146,12 @@ async fn emergency_disable_tuning(State(s): State<AppState>, h: HeaderMap) -> Re
         );
     }
     s.adaptive_tuning.set_emergency_disabled(next_state);
+
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &user).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
 
     audit::record_state(
         &s,
@@ -5622,7 +5900,6 @@ async fn update_load_balancer(
         )
             .into_response();
     };
-    let _config_guard = s.runtime_config_lock.lock().await;
     let previous = runtime.load().config().clone();
     let mut next = previous.clone();
     next.upstream_pools = request.pools;
@@ -5644,7 +5921,49 @@ async fn update_load_balancer(
         )
             .into_response();
     }
-    if let Err(error) = runtime.apply_config(next.clone()).await {
+    let command = ConfigCommand::UpdateRuntimeConfig {
+        command_id: Uuid::new_v4(),
+        config: Box::new(next.clone()),
+    };
+    let receipt = match submit_config_command(&s, command.clone(), &user).await {
+        Ok(receipt) => receipt,
+        Err(ConfigSubmissionError::LocalApplyPending(receipt)) => {
+            audit::record_state(
+                &s,
+                Some(user.id),
+                "load_balancer_update_pending",
+                "reason=local_apply_pending",
+            )
+            .await;
+            publish_committed_command(&s, &command, &receipt);
+            return cluster_write_response(ClusterWriteError::LocalApplyPending { receipt });
+        }
+        Err(ConfigSubmissionError::Cluster(error)) => {
+            audit::record_state(
+                &s,
+                Some(user.id),
+                "load_balancer_update_failed",
+                "reason=cluster_write_failed",
+            )
+            .await;
+            return cluster_write_response(error);
+        }
+        Err(ConfigSubmissionError::Database) => {
+            audit::record_state(
+                &s,
+                Some(user.id),
+                "load_balancer_update_failed",
+                "reason=database_error",
+            )
+            .await;
+            return user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Unable to persist load balancer configuration",
+            );
+        }
+    };
+    if let Err(error) = s.reloader.apply_runtime_config(next.clone()).await {
         audit::record_state(
             &s,
             Some(user.id),
@@ -5661,25 +5980,6 @@ async fn update_load_balancer(
         )
             .into_response();
     }
-    if let Some(path) = s.runtime_config_path.as_deref() {
-        if let Err(error) = persist_runtime_config(path, &next) {
-            audit::record_state(
-                &s,
-                Some(user.id),
-                "load_balancer_persistence_failed",
-                "reason=write_failed",
-            )
-            .await;
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorEnvelope {
-                    code: "config_persistence_failed".into(),
-                    message: error,
-                }),
-            )
-                .into_response();
-        }
-    }
     audit::record_state(
         &s,
         Some(user.id),
@@ -5691,7 +5991,7 @@ async fn update_load_balancer(
         ),
     )
     .await;
-    s.realtime.publish("load_balancer.changed");
+    publish_committed_command(&s, &command, &receipt);
     Json(load_balancer_snapshot(runtime)).into_response()
 }
 
@@ -5760,18 +6060,6 @@ fn load_balancer_snapshot(runtime: &crate::runtime::RuntimeStore) -> LoadBalance
             adaptive_weighting: true,
         },
     }
-}
-
-fn persist_runtime_config(
-    path: &std::path::Path,
-    config: &crate::config::Config,
-) -> Result<(), String> {
-    let serialized = toml::to_string_pretty(config)
-        .map_err(|error| format!("serialize configuration: {error}"))?;
-    let temporary = path.with_extension("control-plane.tmp");
-    std::fs::write(&temporary, serialized)
-        .map_err(|error| format!("write temporary configuration: {error}"))?;
-    std::fs::rename(&temporary, path).map_err(|error| format!("replace configuration: {error}"))
 }
 
 async fn upload_certificate(

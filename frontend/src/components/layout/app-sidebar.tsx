@@ -12,8 +12,10 @@ import { ShieldCheck } from "lucide-react";
 import { sidebarData } from "./nav-data";
 import { NavGroup } from "./nav-group";
 import { NavUser } from "./nav-user";
+import { useTranslation } from "react-i18next";
 
 export function AppSidebar({ aiEnabled = true }: { aiEnabled?: boolean }) {
+  const { t } = useTranslation();
   const navGroups = sidebarData.navGroups.map((group) => ({
     ...group,
     items: group.items.filter((item) => aiEnabled || item.title !== "AI Advisor"),
@@ -28,8 +30,8 @@ export function AppSidebar({ aiEnabled = true }: { aiEnabled?: boolean }) {
                 <ShieldCheck className="size-4" />
               </div>
               <div className="grid flex-1 text-start text-sm leading-tight group-data-[collapsible=icon]:hidden">
-                <span className="truncate font-semibold">BeaRust Control Plane</span>
-                <span className="truncate text-xs">Self-hosted edge security</span>
+                <span className="truncate font-semibold">{t("shell.brand")}</span>
+                <span className="truncate text-xs">{t("shell.tagline")}</span>
               </div>
             </SidebarMenuButton>
           </SidebarMenuItem>

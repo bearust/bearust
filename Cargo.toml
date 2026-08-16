@@ -35,6 +35,7 @@ pingora-error = "0.8.1"
 pingora-http = "0.8.1"
 pingora-proxy = "0.8.1"
 quinn = "0.11"
+socket2 = { version = "0.6", features = ["all"] }
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 rustls = { version = "0.23", features = ["ring"] }

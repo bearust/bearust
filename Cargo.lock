@@ -428,6 +428,7 @@ dependencies = [
  "serde_urlencoded",
  "sha2",
  "signal-hook",
+ "socket2",
  "sqlx",
  "tar",
  "tempfile",

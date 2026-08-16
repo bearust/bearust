@@ -4,8 +4,10 @@
 //! carry passwords, certificate private keys, request bodies, or database
 //! errors, and their `Debug` representation omits mutation payloads.
 
-use crate::control_plane::models::ProxyHost;
+use crate::bot_protection::{BotMode, BotRule, MAX_RULES, MAX_TRUSTED_RULES};
+use crate::control_plane::models::{IpSecurityRule, RateLimitConfig, WafMode, WafRule};
 use crate::rate_limit::RateLimitPolicy;
+use crate::{config::Config, control_plane::models::ProxyHost};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -93,6 +95,132 @@ pub enum ConfigCommand {
         host_id: i64,
         policy: RateLimitPolicy,
     },
+    /// Replicated native runtime topology. The TOML-shaped config is
+    /// validated before it enters the log and persisted by every state
+    /// machine, allowing followers to activate the same route snapshot.
+    UpdateRuntimeConfig {
+        command_id: Uuid,
+        config: Box<Config>,
+    },
+    /// Replicated security and control-plane policies. Secrets such as bot
+    /// fingerprint keys, password hashes, and certificate private keys are
+    /// deliberately excluded; each node keeps those local while policy
+    /// records converge through the state machine.
+    UpdatePolicyState {
+        command_id: Uuid,
+        state: ReplicatedPolicyState,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplicatedBotRule {
+    pub id: i64,
+    pub rule: BotRule,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplicatedTuningPolicy {
+    pub host_id: i64,
+    pub policy: crate::adaptive_tuning::TuningPolicy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplicatedPolicyState {
+    pub waf_mode: WafMode,
+    pub waf_rules: Vec<WafRule>,
+    pub bot_mode: BotMode,
+    pub bot_threshold: u16,
+    pub bot_ttl_seconds: u64,
+    pub bot_rules: Vec<ReplicatedBotRule>,
+    pub ip_security_rules: Vec<IpSecurityRule>,
+    pub rate_limit: RateLimitConfig,
+    pub analytics_retention_minutes: u32,
+    pub emergency_disabled: bool,
+    pub tuning_policies: Vec<ReplicatedTuningPolicy>,
+}
+
+impl ReplicatedPolicyState {
+    pub fn validate(&self) -> Result<(), CommandError> {
+        if self.bot_threshold == 0
+            || self.bot_threshold > 100
+            || self.bot_ttl_seconds == 0
+            || self.bot_ttl_seconds > crate::bot_protection::MAX_TTL_SECONDS
+            || self.bot_rules.len() > MAX_RULES
+            || self
+                .bot_rules
+                .iter()
+                .filter(|rule| {
+                    rule.rule.enabled
+                        && (rule.rule.trusted_user_agent.is_some()
+                            || rule.rule.trusted_domain.is_some())
+                })
+                .count()
+                > MAX_TRUSTED_RULES
+        {
+            return Err(CommandError::Invalid("invalid bot policy state".into()));
+        }
+        for rule in &self.bot_rules {
+            if rule.id <= 0
+                || rule.rule.category.is_empty()
+                || rule.rule.category.len() > crate::bot_protection::MAX_FIELD_BYTES
+                || rule.rule.weight > 100
+                || (rule.rule.category == "trusted_crawler"
+                    && (rule.rule.trusted_user_agent.is_none()
+                        || rule.rule.trusted_domain.is_none()))
+            {
+                return Err(CommandError::Invalid("invalid bot rule state".into()));
+            }
+        }
+        if !(crate::analytics::MIN_RETENTION_BUCKETS as u32
+            ..=crate::analytics::MAX_RETENTION_BUCKETS as u32)
+            .contains(&self.analytics_retention_minutes)
+            || self.rate_limit.updated_at.len() > 128
+        {
+            return Err(CommandError::Invalid("invalid policy retention".into()));
+        }
+        RateLimitPolicy {
+            enabled: self.rate_limit.enabled,
+            action: self.rate_limit.action,
+            capacity: self.rate_limit.capacity,
+            refill_per_second: self.rate_limit.refill_per_second,
+            key_scope: self.rate_limit.key_scope,
+        }
+        .validate()
+        .map_err(|error| CommandError::Invalid(error.to_string()))?;
+        crate::waf::compile_snapshot(
+            crate::control_plane::models::WafConfig {
+                mode: self.waf_mode,
+                updated_at: String::new(),
+            },
+            self.waf_rules.clone(),
+        )
+        .map_err(|error| CommandError::Invalid(error.to_string()))?;
+        if self.ip_security_rules.len() > crate::security_policy::MAX_IP_RULES
+            || self.tuning_policies.len() > 4096
+        {
+            return Err(CommandError::Invalid("policy state is too large".into()));
+        }
+        for rule in &self.ip_security_rules {
+            if rule.id <= 0
+                || rule.cidr.len() > 64
+                || !crate::security_policy::valid_cidr(&rule.cidr)
+                || rule.score < -100_000
+                || rule.score > 100_000
+            {
+                return Err(CommandError::Invalid("invalid IP security state".into()));
+            }
+        }
+        for policy in &self.tuning_policies {
+            if policy.host_id <= 0 {
+                return Err(CommandError::Invalid("invalid tuning host id".into()));
+            }
+            policy
+                .policy
+                .validate()
+                .map_err(|error| CommandError::Invalid(error.to_string()))?;
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for ConfigCommand {
@@ -116,6 +244,10 @@ impl fmt::Debug for ConfigCommand {
                 host_id,
                 ..
             } => ("UpdateRuntimePolicy", command_id, Some(*host_id)),
+            Self::UpdateRuntimeConfig { command_id, .. } => {
+                ("UpdateRuntimeConfig", command_id, None)
+            }
+            Self::UpdatePolicyState { command_id, .. } => ("UpdatePolicyState", command_id, None),
         };
         formatter
             .debug_struct(name)
@@ -198,7 +330,9 @@ impl ConfigCommand {
             | Self::CreateProxyHost { command_id, .. }
             | Self::UpdateProxyHost { command_id, .. }
             | Self::DeleteProxyHost { command_id, .. }
-            | Self::UpdateRuntimePolicy { command_id, .. } => *command_id,
+            | Self::UpdateRuntimePolicy { command_id, .. }
+            | Self::UpdateRuntimeConfig { command_id, .. }
+            | Self::UpdatePolicyState { command_id, .. } => *command_id,
         }
     }
 
@@ -227,6 +361,10 @@ impl ConfigCommand {
             Self::UpdateRuntimePolicy { policy, .. } => policy
                 .validate()
                 .map_err(|error| CommandError::Invalid(error.to_string()))?,
+            Self::UpdateRuntimeConfig { config, .. } => config
+                .validate()
+                .map_err(|error| CommandError::Invalid(error.to_string()))?,
+            Self::UpdatePolicyState { state, .. } => state.validate()?,
             _ => {}
         }
         Ok(())
@@ -256,6 +394,10 @@ impl ConfigCommand {
 pub struct ReplicatedConfig {
     proxy_hosts: BTreeMap<i64, ProxyHost>,
     runtime_policies: BTreeMap<i64, RateLimitPolicy>,
+    #[serde(default)]
+    runtime_config: Option<Config>,
+    #[serde(default)]
+    policy_state: Option<ReplicatedPolicyState>,
     applied_commands: BTreeSet<Uuid>,
 }
 
@@ -263,6 +405,10 @@ pub struct ReplicatedConfig {
 struct ConfigSnapshot {
     proxy_hosts: BTreeMap<i64, ProxyHost>,
     runtime_policies: BTreeMap<i64, RateLimitPolicy>,
+    #[serde(default)]
+    runtime_config: Option<Config>,
+    #[serde(default)]
+    policy_state: Option<ReplicatedPolicyState>,
     applied_commands: BTreeSet<Uuid>,
 }
 
@@ -322,6 +468,12 @@ impl ReplicatedConfig {
             } => {
                 self.runtime_policies.insert(*host_id, policy.clone());
             }
+            ConfigCommand::UpdateRuntimeConfig { config, .. } => {
+                self.runtime_config = Some((**config).clone());
+            }
+            ConfigCommand::UpdatePolicyState { state, .. } => {
+                self.policy_state = Some(state.clone());
+            }
         }
         Ok(CommandResult::Applied)
     }
@@ -330,6 +482,8 @@ impl ReplicatedConfig {
         let snapshot = ConfigSnapshot {
             proxy_hosts: self.proxy_hosts.clone(),
             runtime_policies: self.runtime_policies.clone(),
+            runtime_config: self.runtime_config.clone(),
+            policy_state: self.policy_state.clone(),
             applied_commands: self.applied_commands.clone(),
         };
         let payload = serde_json::to_vec(&snapshot).map_err(|_| CommandError::MalformedPayload)?;
@@ -348,6 +502,8 @@ impl ReplicatedConfig {
         Ok(Self {
             proxy_hosts: snapshot.proxy_hosts,
             runtime_policies: snapshot.runtime_policies,
+            runtime_config: snapshot.runtime_config,
+            policy_state: snapshot.policy_state,
             applied_commands: snapshot.applied_commands,
         })
     }

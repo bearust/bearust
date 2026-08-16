@@ -66,8 +66,20 @@ pub async fn login(
                 audit::record_state(&state, Some(user.id), "login_success", "session_created")
                     .await;
                 state.realtime.publish("sessions.changed");
+                let csrf = Uuid::new_v4().to_string();
                 let mut h = HeaderMap::new();
-                h.insert(header::SET_COOKIE,format!("bearust_session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=86400").parse().unwrap());
+                h.append(
+                    header::SET_COOKIE,
+                    format!("bearust_session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=86400")
+                        .parse()
+                        .unwrap(),
+                );
+                h.append(
+                    header::SET_COOKIE,
+                    format!("bearust_csrf={csrf}; Secure; SameSite=Lax; Path=/; Max-Age=86400")
+                        .parse()
+                        .unwrap(),
+                );
                 return (h, Json(user)).into_response();
             }
         }

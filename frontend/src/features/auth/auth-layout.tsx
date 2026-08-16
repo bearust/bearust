@@ -1,6 +1,8 @@
 import { ShieldCheck } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 export function AuthLayout({ children }: { children: React.ReactNode }) {
+  const { t } = useTranslation();
   return (
     <div className="relative grid min-h-svh lg:grid-cols-[0.9fr_1.1fr]">
       <aside className="relative hidden overflow-hidden border-e bg-muted/30 p-10 lg:flex lg:flex-col lg:justify-between">
@@ -10,27 +12,26 @@ export function AuthLayout({ children }: { children: React.ReactNode }) {
             <ShieldCheck className="size-5" />
           </span>
           <div>
-            <p className="font-semibold tracking-tight">BeaRust Control Plane</p>
-            <p className="text-xs text-muted-foreground">Self-hosted edge security</p>
+            <p className="font-semibold tracking-tight">{t("shell.brand")}</p>
+            <p className="text-xs text-muted-foreground">{t("shell.tagline")}</p>
           </div>
         </div>
         <div className="relative max-w-md space-y-4">
-          <p className="text-sm font-medium text-primary">Secure by default</p>
+          <p className="text-sm font-medium text-primary">{t("shell.secureByDefault")}</p>
           <h2 className="text-3xl font-semibold tracking-tight xl:text-4xl">
-            Protect every service at the edge.
+            {t("shell.protectEveryService")}
           </h2>
           <p className="text-sm leading-6 text-muted-foreground">
-            Manage proxy hosts, threat protection, and cluster health from one
-            focused control plane.
+            {t("shell.manageInfrastructure")}
           </p>
           <div className="grid grid-cols-3 gap-3 pt-4">
-            <AuthStat value="WAF" label="edge protection" />
-            <AuthStat value="RBAC" label="scoped access" />
-            <AuthStat value="SSE" label="live updates" />
+            <AuthStat value="WAF" label={t("shell.edgeProtection")} />
+            <AuthStat value="RBAC" label={t("shell.scopedAccess")} />
+            <AuthStat value="SSE" label={t("shell.liveUpdates")} />
           </div>
         </div>
         <p className="relative text-xs text-muted-foreground">
-          BeaRust · Self-hosted control plane
+          {t("shell.footer")}
         </p>
       </aside>
 

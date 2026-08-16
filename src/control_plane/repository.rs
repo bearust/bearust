@@ -1,7 +1,8 @@
+use crate::analytics::PersistedAnalyticsBucket;
 use crate::bot_protection::{
     BotConfig, BotMode, BotRule, MAX_FIELD_BYTES, MAX_RULES, MAX_TRUSTED_RULES, MAX_TTL_SECONDS,
 };
-use crate::cluster_raft::{CommandResult, ConfigCommand};
+use crate::cluster_raft::{CommandResult, ConfigCommand, ReplicatedBotRule, ReplicatedPolicyState};
 use crate::control_plane::models::{
     AcmeChallenge, AcmeEnvironment, AcmeRequest, AcmeStatus, AdvisorDraftDecision, AdvisorJobPage,
     AdvisorJobRecord, AnalyticsRetentionConfig, AuditLogItem, AuditLogPage, AuditLogQuery,
@@ -826,6 +827,138 @@ async fn apply_raft_command_inner(
                 .await?;
             CommandResult::Applied
         }
+        ConfigCommand::UpdateRuntimeConfig { config, .. } => {
+            let payload = toml::to_string(config)
+                .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+            sqlx::query("DELETE FROM runtime_config WHERE id=1")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO runtime_config(id,payload,updated_at) VALUES(1,?,?)")
+                .bind(payload)
+                .bind(chrono::Utc::now().to_rfc3339())
+                .execute(&mut *tx)
+                .await?;
+            CommandResult::Applied
+        }
+        ConfigCommand::UpdatePolicyState { state, .. } => {
+            let now = chrono::Utc::now().to_rfc3339();
+            let fingerprint_key: String =
+                sqlx::query_scalar("SELECT fingerprint_key FROM bot_config WHERE id=1")
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .unwrap_or_default();
+
+            sqlx::query("UPDATE waf_config SET mode=?,updated_at=? WHERE id=1")
+                .bind(waf_mode_value(state.waf_mode))
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM waf_rules")
+                .execute(&mut *tx)
+                .await?;
+            for rule in &state.waf_rules {
+                let builtin_key = builtin_key_for_rule(rule);
+                sqlx::query("INSERT INTO waf_rules(id,name,source,builtin_key,category,severity,enabled,action,matcher_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+                    .bind(rule.id)
+                    .bind(&rule.name)
+                    .bind(&rule.source)
+                    .bind(builtin_key)
+                    .bind(&rule.category)
+                    .bind(&rule.severity)
+                    .bind(rule.enabled as i64)
+                    .bind(waf_action_value(rule.action))
+                    .bind(&rule.matcher_json)
+                    .bind(if rule.created_at.is_empty() { now.clone() } else { rule.created_at.clone() })
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+
+            sqlx::query("UPDATE bot_config SET mode=?,threshold=?,ttl_seconds=?,fingerprint_key=?,updated_at=? WHERE id=1")
+                .bind(bot_mode_value(state.bot_mode))
+                .bind(state.bot_threshold as i64)
+                .bind(state.bot_ttl_seconds as i64)
+                .bind(&fingerprint_key)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM bot_rules")
+                .execute(&mut *tx)
+                .await?;
+            for item in &state.bot_rules {
+                sqlx::query("INSERT INTO bot_rules(id,category,weight,trusted_user_agent,trusted_domain,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
+                    .bind(item.id)
+                    .bind(&item.rule.category)
+                    .bind(item.rule.weight as i64)
+                    .bind(&item.rule.trusted_user_agent)
+                    .bind(&item.rule.trusted_domain)
+                    .bind(item.rule.enabled as i64)
+                    .bind(&now)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+
+            sqlx::query("DELETE FROM ip_security_rules")
+                .execute(&mut *tx)
+                .await?;
+            for rule in &state.ip_security_rules {
+                sqlx::query("INSERT INTO ip_security_rules(id,cidr,action,score,country_code,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
+                    .bind(rule.id)
+                    .bind(&rule.cidr)
+                    .bind(ip_security_action_value(rule.action))
+                    .bind(rule.score)
+                    .bind(&rule.country_code)
+                    .bind(rule.enabled as i64)
+                    .bind(if rule.created_at.is_empty() { now.clone() } else { rule.created_at.clone() })
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+
+            sqlx::query("UPDATE rate_limit_config SET enabled=?,action=?,capacity=?,refill_per_second=?,key_scope=?,updated_at=? WHERE id=1")
+                .bind(state.rate_limit.enabled as i64)
+                .bind(rate_limit_action_value(state.rate_limit.action))
+                .bind(state.rate_limit.capacity as i64)
+                .bind(state.rate_limit.refill_per_second)
+                .bind(rate_limit_scope_value(state.rate_limit.key_scope))
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("UPDATE analytics_config SET retention_minutes=?,updated_at=? WHERE id=1")
+                .bind(state.analytics_retention_minutes as i64)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                "UPDATE adaptive_tuning_global SET emergency_disabled=?,updated_at=? WHERE id=1",
+            )
+            .bind(state.emergency_disabled as i64)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+
+            sqlx::query("DELETE FROM adaptive_tuning_policies")
+                .execute(&mut *tx)
+                .await?;
+            for item in &state.tuning_policies {
+                let mode = match item.policy.mode {
+                    crate::adaptive_tuning::TuningMode::Monitor => "monitor",
+                    crate::adaptive_tuning::TuningMode::Recommend => "recommend",
+                    crate::adaptive_tuning::TuningMode::Enforce => "enforce",
+                };
+                sqlx::query("INSERT INTO adaptive_tuning_policies(host_id,mode,max_delta_percent,cooldown_seconds,min_confidence,updated_at) VALUES(?,?,?,?,?,?)")
+                    .bind(item.host_id)
+                    .bind(mode)
+                    .bind(item.policy.max_delta_percent as i64)
+                    .bind(item.policy.cooldown_seconds as i64)
+                    .bind(item.policy.min_confidence)
+                    .bind(&now)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            CommandResult::Applied
+        }
     };
 
     let applied_at = chrono::Utc::now().to_rfc3339();
@@ -853,6 +986,45 @@ async fn apply_raft_command_inner(
     }
     tx.commit().await?;
     Ok(result)
+}
+
+/// Return the last Raft-committed native runtime topology, if one has been
+/// written. The TOML payload is validated again at the persistence boundary
+/// so a damaged row can never be activated silently.
+pub async fn get_runtime_config(
+    pool: &DbPool,
+) -> Result<Option<crate::config::Config>, sqlx::Error> {
+    let Some(payload) =
+        sqlx::query_scalar::<_, String>("SELECT payload FROM runtime_config WHERE id=1")
+            .fetch_optional(pool)
+            .await?
+    else {
+        return Ok(None);
+    };
+    toml::from_str(&payload).map(Some).map_err(|error| {
+        sqlx::Error::Protocol(format!("invalid persisted runtime config: {error}"))
+    })
+}
+
+/// Persist the native runtime topology outside the Raft log. Replicated
+/// callers normally write it through `UpdateRuntimeConfig`; this helper is
+/// also used by the local runtime activator after proxy-host reconciliation.
+pub async fn set_runtime_config(
+    pool: &DbPool,
+    config: &crate::config::Config,
+) -> Result<(), sqlx::Error> {
+    let payload =
+        toml::to_string(config).map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM runtime_config WHERE id=1")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO runtime_config(id,payload,updated_at) VALUES(1,?,?)")
+        .bind(payload)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
 }
 
 fn deterministic_id(value: &str) -> i64 {
@@ -1243,6 +1415,21 @@ fn waf_rule_from_row(row: &sqlx::any::AnyRow) -> WafRule {
     }
 }
 
+fn builtin_key_for_rule(rule: &WafRule) -> Option<String> {
+    if rule.source != "builtin" {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(&rule.matcher_json)
+        .ok()
+        .and_then(|matcher| {
+            matcher
+                .get("builtin")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .map(|builtin| format!("builtin-{}", builtin.replace('_', "-")))
+}
+
 pub async fn get_waf_config(pool: &DbPool) -> Result<WafConfig, sqlx::Error> {
     let row = sqlx::query("SELECT mode,updated_at FROM waf_config WHERE id=1")
         .fetch_one(pool)
@@ -1535,6 +1722,113 @@ pub async fn update_analytics_retention(
         retention_minutes,
         updated_at,
     })
+}
+
+/// Build the non-secret policy snapshot used by the Raft configuration
+/// command. Password hashes, bot fingerprint keys, and certificate material
+/// are intentionally omitted from this payload.
+pub async fn load_replicated_policy_state(
+    pool: &DbPool,
+) -> Result<ReplicatedPolicyState, sqlx::Error> {
+    let waf = get_waf_config(pool).await?;
+    let bot = get_bot_config(pool).await?;
+    let bot_rules = list_bot_rule_records(pool)
+        .await?
+        .into_iter()
+        .map(|(id, rule)| ReplicatedBotRule { id, rule })
+        .collect();
+    let tuning_policies = list_tuning_policies(pool).await?;
+    let state = ReplicatedPolicyState {
+        waf_mode: waf.mode,
+        waf_rules: list_waf_rules(pool).await?,
+        bot_mode: bot.mode,
+        bot_threshold: bot.threshold,
+        bot_ttl_seconds: bot.ttl_seconds,
+        bot_rules,
+        ip_security_rules: list_ip_security_rules(pool).await?,
+        rate_limit: get_rate_limit_config(pool).await?,
+        analytics_retention_minutes: get_analytics_retention(pool).await?.retention_minutes,
+        emergency_disabled: get_emergency_disabled(pool).await?,
+        tuning_policies,
+    };
+    state
+        .validate()
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    Ok(state)
+}
+
+/// Load the bounded durable analytics window. Malformed rows are ignored so a
+/// damaged historical record cannot prevent the control plane from starting.
+pub async fn load_analytics_buckets(
+    pool: &DbPool,
+    limit: usize,
+) -> Result<Vec<PersistedAnalyticsBucket>, sqlx::Error> {
+    let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
+    let rows = sqlx::query(
+        "SELECT payload FROM analytics_buckets
+         ORDER BY bucket_timestamp DESC, proxy_host_id DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    let mut buckets = rows
+        .into_iter()
+        .filter_map(|row| {
+            let payload: String = row.get("payload");
+            serde_json::from_str::<PersistedAnalyticsBucket>(&payload).ok()
+        })
+        .collect::<Vec<_>>();
+    buckets.sort_by_key(|bucket| (bucket.timestamp, bucket.proxy_host_id));
+    Ok(buckets)
+}
+
+/// Upsert the current in-memory aggregate window and remove rows outside the
+/// configured retention boundary. The explicit update-then-insert sequence is
+/// supported by all database backends used by BeaRust and avoids a
+/// vendor-specific upsert dialect.
+pub async fn persist_analytics_buckets(
+    pool: &DbPool,
+    buckets: &[PersistedAnalyticsBucket],
+    retention_minutes: usize,
+) -> Result<(), sqlx::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(retention_minutes.max(1) as i64))
+        .to_rfc3339();
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM analytics_buckets WHERE bucket_timestamp < ?")
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?;
+    for bucket in buckets {
+        let payload = serde_json::to_string(bucket).map_err(|error| {
+            sqlx::Error::Protocol(format!("serialize analytics bucket: {error}"))
+        })?;
+        let timestamp = bucket.timestamp.to_rfc3339();
+        let updated = sqlx::query(
+            "UPDATE analytics_buckets SET payload=?,updated_at=?
+             WHERE proxy_host_id=? AND bucket_timestamp=?",
+        )
+        .bind(&payload)
+        .bind(&now)
+        .bind(bucket.proxy_host_id)
+        .bind(&timestamp)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if updated == 0 {
+            sqlx::query(
+                "INSERT INTO analytics_buckets(proxy_host_id,bucket_timestamp,payload,updated_at)
+                 VALUES(?,?,?,?)",
+            )
+            .bind(bucket.proxy_host_id)
+            .bind(timestamp)
+            .bind(payload)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    tx.commit().await
 }
 
 pub async fn seed_builtin_waf_rules(pool: &DbPool) -> Result<(), sqlx::Error> {
@@ -2945,6 +3239,40 @@ pub async fn update_user_preferred_locale(
     }))
 }
 
+pub async fn get_user_theme_preference(
+    pool: &DbPool,
+    user_id: i64,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT preferred_theme FROM user_preferences WHERE user_id=?")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+}
+
+pub async fn update_user_theme_preference(
+    pool: &DbPool,
+    user_id: i64,
+    preferred_theme: Option<&str>,
+) -> Result<Option<String>, sqlx::Error> {
+    if let Some(theme) = preferred_theme {
+        if !matches!(theme, "system" | "light" | "dark") {
+            return Err(sqlx::Error::Protocol("invalid theme preference".into()));
+        }
+    }
+    sqlx::query("DELETE FROM user_preferences WHERE user_id=?")
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    if let Some(theme) = preferred_theme {
+        sqlx::query("INSERT INTO user_preferences(user_id,preferred_theme) VALUES(?,?)")
+            .bind(user_id)
+            .bind(theme)
+            .execute(pool)
+            .await?;
+    }
+    Ok(preferred_theme.map(str::to_owned))
+}
+
 fn last_admin_error() -> sqlx::Error {
     sqlx::Error::Protocol("cannot remove the last active administrator".into())
 }
@@ -3365,6 +3693,38 @@ pub async fn update_tuning_policy(
         .execute(pool).await?;
 
     Ok(())
+}
+
+pub async fn list_tuning_policies(
+    pool: &DbPool,
+) -> Result<Vec<crate::cluster_raft::ReplicatedTuningPolicy>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT host_id,mode,max_delta_percent,cooldown_seconds,min_confidence
+         FROM adaptive_tuning_policies ORDER BY host_id LIMIT 4096",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let policy = crate::adaptive_tuning::TuningPolicy {
+                mode: match row.get::<String, _>("mode").as_str() {
+                    "recommend" => crate::adaptive_tuning::TuningMode::Recommend,
+                    "enforce" => crate::adaptive_tuning::TuningMode::Enforce,
+                    _ => crate::adaptive_tuning::TuningMode::Monitor,
+                },
+                max_delta_percent: row.get::<i64, _>("max_delta_percent") as u8,
+                cooldown_seconds: row.get::<i64, _>("cooldown_seconds") as u64,
+                min_confidence: row.get("min_confidence"),
+            };
+            policy
+                .validate()
+                .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+            Ok(crate::cluster_raft::ReplicatedTuningPolicy {
+                host_id: row.get("host_id"),
+                policy,
+            })
+        })
+        .collect()
 }
 
 pub async fn get_emergency_disabled(pool: &DbPool) -> Result<bool, sqlx::Error> {
