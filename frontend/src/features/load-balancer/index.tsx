@@ -71,6 +71,15 @@ const emptyRoute: RouteDraft = {
   upstream_pool: "",
 };
 
+const algorithmRequirements = [
+  { key: "round_robin", label: "Round robin", detail: "Deterministic rotation across healthy backends." },
+  { key: "least_connections", label: "Least connections", detail: "Prefers the backend with the fewest active requests." },
+  { key: "weighted", label: "Weighted", detail: "Static backend weights are not exposed by the current runtime contract." },
+  { key: "ip_hash", label: "IP hash", detail: "Client-affinity hashing is not exposed by the current runtime contract." },
+  { key: "adaptive_weight", label: "Adaptive weight", detail: "Response-time learning is not exposed by the current runtime contract." },
+  { key: "plugin", label: "Plugin", detail: "Delegates selection to the sandboxed balance.select hook." },
+] as const;
+
 const demoSnapshot: LoadBalancerSnapshot = {
   generation: 18,
   pools: [
@@ -339,7 +348,7 @@ export function LoadBalancer() {
           <CardHeader><CardTitle>Routing model</CardTitle><CardDescription>Every request resolves by host and longest matching path prefix.</CardDescription></CardHeader>
           <CardContent className="space-y-3">
             <div className="rounded-lg border bg-muted/30 p-4 text-sm"><div className="flex items-center gap-2 font-medium"><Route className="size-4 text-primary" />Virtual host routing</div><p className="mt-2 text-xs leading-5 text-muted-foreground">Routes are evaluated before backend selection. A more specific path wins, then the request is handed to the selected pool.</p></div>
-            <div className="space-y-2"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Runtime capabilities</p>{(snapshot?.capabilities.algorithms ?? []).map((algorithm) => <Capability key={algorithm} label={formatAlgorithm(algorithm)} value="Available" status="healthy" />)}<Capability label="Active TCP / HTTP checks" value={`${snapshot?.capabilities.health_checks.length ?? 0} types`} status="healthy" /><Capability label="Passive health telemetry" value={snapshot?.capabilities.passive_health ? "Available" : "Not exposed"} status={snapshot?.capabilities.passive_health ? "healthy" : "warning"} /><Capability label="Adaptive weighting" value={snapshot?.capabilities.adaptive_weighting ? "Available" : "Learning integration pending"} status={snapshot?.capabilities.adaptive_weighting ? "healthy" : "warning"} /></div>
+            <div className="space-y-2"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">PRD algorithm coverage</p>{algorithmRequirements.map((requirement) => { const available = snapshot?.capabilities.algorithms.includes(requirement.key) === true; return <div className="rounded-md border px-3 py-2" key={requirement.key}><div className="flex items-center justify-between gap-3"><span className="text-xs font-medium">{requirement.label}</span><StatusBadge status={available ? "healthy" : "warning"}>{available ? "Available" : "Not exposed"}</StatusBadge></div><p className="mt-1 text-[11px] leading-4 text-muted-foreground">{requirement.detail}</p></div>; })}<Capability label="Active TCP / HTTP checks" value={`${snapshot?.capabilities.health_checks.length ?? 0} types`} status="healthy" /><Capability label="Passive health telemetry" value={snapshot?.capabilities.passive_health ? "Available" : "Not exposed"} status={snapshot?.capabilities.passive_health ? "healthy" : "warning"} /><Capability label="Adaptive weighting" value={snapshot?.capabilities.adaptive_weighting ? "Available" : "Learning integration pending"} status={snapshot?.capabilities.adaptive_weighting ? "healthy" : "warning"} /></div>
             <Button variant="outline" className="w-full" asChild><Link to="/analytics">Review traffic and latency <ArrowRight /></Link></Button>
           </CardContent>
         </Card>

@@ -19,6 +19,7 @@ export const sidebarData: SidebarData = {
       title: "General",
       items: [
         { title: "Dashboard", url: "/", icon: LayoutDashboard },
+        { title: "Operations", url: "/operations", icon: Activity },
         { title: "Proxy Hosts", url: "/proxy-hosts", icon: Cable },
         { title: "Load Balancer", url: "/load-balancer", icon: Network },
         { title: "Analytics", url: "/analytics", icon: BarChart3 },
