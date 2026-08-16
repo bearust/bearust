@@ -33,13 +33,8 @@ test.describe("BeaRust shadcn-admin shell", () => {
     await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   });
 
-  test("supports team, theme, account, and proxy-host interactions", async ({ page }) => {
-    const teamButton = page.getByRole("button", { name: /BeaRust Control Plane/ });
-    await teamButton.click();
-    await expect(page.getByRole("menuitem", { name: /Production Cluster/ })).toBeVisible();
-    await page.getByRole("menuitem", { name: /Production Cluster/ }).click();
-    await expect(page.getByText("Production Cluster", { exact: true }).first()).toBeVisible();
-
+  test("supports theme, account, and proxy-host interactions", async ({ page }) => {
+    await expect(page.getByText("Self-hosted edge security").first()).toBeVisible();
     await page.getByRole("button", { name: "Change theme" }).click();
     await page.getByRole("menuitem", { name: "Dark" }).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");

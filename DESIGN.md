@@ -50,20 +50,18 @@ Light and dark mode are controlled through `data-theme` and the existing
 
 ## Components
 
-- **Shell:** `SidebarProvider`, `AppSidebar`, `NavGroup`, `TeamSwitcher`,
-  `Header`, `TopNav`, `Search`, `ThemeSwitch`, `ProfileDropdown`, and
+- **Shell:** `SidebarProvider`, `AppSidebar`, `NavGroup`, `Header`, `TopNav`,
+  `Search`, `ThemeSwitch`, `ProfileDropdown`, and
   `CommandPalette` establish the upstream template behavior.
 - **Surfaces:** upstream-compatible `Card`, `Tabs`, `Table`, `Badge`,
   `Dialog`, `DropdownMenu`, `Sheet`, `Tooltip`, and `Sidebar` primitives are
   reused before creating feature-specific components.
 - **Feature grammar:** `PageHeader`, `MetricCard`, and `StatusBadge` provide
   consistent page composition across dashboard, proxy hosts, security,
-  analytics, users, audit log, AI advisor, settings, cluster, plugins, and
-  support.
+  analytics, users, audit log, AI advisor, settings, cluster, and plugins.
 - **Interaction states:** buttons, menu items, tabs, dialogs, search,
-  filters, toggles, theme selection, team selection, API mutations, and
-  approval actions all have visible state changes. Disabled tabs are
-  intentionally presented as future product areas.
+  filters, toggles, theme selection, API mutations, and
+  approval actions all have visible state changes.
 - **Navigation:** grouped sidebar sections are General, Protection, and
   Administration. Security expands into WAF, bot protection, and rate
   limiting routes; mobile switches to the template’s off-canvas sidebar.
@@ -71,9 +69,9 @@ Light and dark mode are controlled through `data-theme` and the existing
 ## Layout
 
 Desktop uses a collapsible left sidebar and an inset, max-width content
-surface. The header keeps section navigation, command search, theme, alerts,
-and account controls in one compact row. Mobile keeps the header controls
-usable, hides nonessential notifications, and moves the sidebar off-canvas;
+surface. The header keeps section navigation, command search, theme, and
+account controls in one compact row. Mobile keeps the header controls usable
+and moves the sidebar off-canvas;
 tables and dense content may scroll inside their own bounded regions but the
 document itself must not overflow horizontally.
 

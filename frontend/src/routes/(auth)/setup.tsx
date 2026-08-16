@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { api } from "@/api";
 import { sanitizeError } from "@/lib/errors";
@@ -26,6 +27,7 @@ export const Route = createFileRoute("/(auth)/setup")({
 function SetupPage() {
   const { t } = useTranslation();
   const navigate = Route.useNavigate();
+  const queryClient = useQueryClient();
   const [email, setEmail] = useState(""),
     [password, setPassword] = useState(""),
     [token, setToken] = useState(""),
@@ -45,6 +47,7 @@ function SetupPage() {
               e.preventDefault();
               try {
                 await api.setup({ email, password, setup_token: token });
+                queryClient.setQueryData(["setup-status"], { initialized: true });
                 void navigate({ to: "/" });
               } catch (x) {
                 setError(sanitizeError(x));

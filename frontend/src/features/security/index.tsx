@@ -63,7 +63,7 @@ export function Security() {
     if (crawlerRows.status === "fulfilled") setCrawlers(crawlerRows.value);
     if (rate.status === "fulfilled") setRateConfig(rate.value);
     const rejected = results.find((result) => result.status === "rejected");
-    if (rejected?.status === "rejected" && results.every((result) => result.status === "rejected")) setError(sanitizeError(rejected.reason));
+    if (rejected?.status === "rejected") setError(sanitizeError(rejected.reason));
     setLoading(false);
   };
 

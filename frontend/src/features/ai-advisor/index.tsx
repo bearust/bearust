@@ -38,7 +38,7 @@ export function AiAdvisor() {
     if (results[0].status === "fulfilled") setStatus(results[0].value);
     if (results[1].status === "fulfilled") setJobs(results[1].value.items);
     const rejected = results.find((result) => result.status === "rejected");
-    if (rejected?.status === "rejected" && results.every((result) => result.status === "rejected")) setError(sanitizeError(rejected.reason));
+    if (rejected?.status === "rejected") setError(sanitizeError(rejected.reason));
     setLoading(false);
   };
   useEffect(() => { void refresh(); }, []);

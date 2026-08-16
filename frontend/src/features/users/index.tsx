@@ -57,7 +57,7 @@ export function Users() {
     if (results[0].status === "fulfilled") setUsers(results[0].value);
     if (results[1].status === "fulfilled") setRoles(results[1].value);
     const rejected = results.find((result) => result.status === "rejected");
-    if (rejected?.status === "rejected" && results.every((result) => result.status === "rejected")) setError(sanitizeError(rejected.reason));
+    if (rejected?.status === "rejected") setError(sanitizeError(rejected.reason));
     setLoading(false);
   };
   useEffect(() => { void refresh(); }, []);

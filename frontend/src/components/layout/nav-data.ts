@@ -5,7 +5,6 @@ import {
   Cable,
   FileClock,
   LayoutDashboard,
-  MessagesSquare,
   Network,
   ShieldCheck,
   Sparkles,
@@ -15,28 +14,6 @@ import type { ElementType } from "react";
 import type { NavGroup, NavItem, SidebarData } from "./types";
 
 export const sidebarData: SidebarData = {
-  user: {
-    name: "Rizalord",
-    email: "admin@bearust.local",
-    avatar: "",
-  },
-  teams: [
-    {
-      name: "BeaRust Control Plane",
-      logo: ShieldCheck,
-      plan: "Self-hosted edge security",
-    },
-    {
-      name: "Production Cluster",
-      logo: Network,
-      plan: "3 nodes · healthy",
-    },
-    {
-      name: "Homelab Sandbox",
-      logo: Cable,
-      plan: "Development workspace",
-    },
-  ],
   navGroups: [
     {
       title: "General",
@@ -68,7 +45,6 @@ export const sidebarData: SidebarData = {
       items: [
         { title: "Users & Roles", url: "/users", icon: Users },
         { title: "Audit Log", url: "/audit-log", icon: FileClock },
-        { title: "Support inbox", url: "/support", icon: MessagesSquare, badge: "3" },
       ],
     },
   ],

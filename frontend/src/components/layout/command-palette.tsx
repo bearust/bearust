@@ -9,10 +9,13 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { NAV_ITEMS } from "./nav-data";
+import { useAuthStore } from "@/stores/auth-store";
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
+  const aiAdvisorEnabled = useAuthStore((state) => state.aiAdvisorEnabled);
+  const navItems = NAV_ITEMS.filter((item) => aiAdvisorEnabled || item.title !== "AI Advisor");
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -36,7 +39,7 @@ export function CommandPalette() {
       <CommandList>
         <CommandEmpty>No results.</CommandEmpty>
         <CommandGroup heading="Navigation">
-          {NAV_ITEMS.map((item) => (
+          {navItems.map((item) => (
             (() => {
               const Icon = item.icon;
               return (

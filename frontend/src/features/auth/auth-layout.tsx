@@ -24,13 +24,13 @@ export function AuthLayout({ children }: { children: React.ReactNode }) {
             focused control plane.
           </p>
           <div className="grid grid-cols-3 gap-3 pt-4">
-            <AuthStat value="24" label="protected hosts" />
-            <AuthStat value="99.9%" label="edge uptime" />
-            <AuthStat value="3/3" label="healthy nodes" />
+            <AuthStat value="WAF" label="edge protection" />
+            <AuthStat value="RBAC" label="scoped access" />
+            <AuthStat value="SSE" label="live updates" />
           </div>
         </div>
         <p className="relative text-xs text-muted-foreground">
-          BeaRust · Demo shell ready for API integration
+          BeaRust · Self-hosted control plane
         </p>
       </aside>
 
