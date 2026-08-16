@@ -1,12 +1,11 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "./styles/theme.css";
-/* Latin + Latin Extended only: shipped locales are en/id/ja, and ja's
-   kanji/kana fall back to the platform's own CJK font regardless --
-   these two subsets cover every glyph these faces are actually asked to
-   render, without shipping unused Cyrillic/Greek/Vietnamese weights.
-   Self-hosted, never a Google Fonts CDN link: BeaRust targets
-   self-hosted, institutional, and air-gapped deployments. */
+
+@custom-variant dark (&:is([data-theme="dark"] *));
+
+/* BeaRust keeps the upstream shadcn-admin surface grammar while retaining
+   its amber identity and self-hosted font policy. */
 @import "@fontsource/roboto/latin-400.css";
 @import "@fontsource/roboto/latin-500.css";
 @import "@fontsource/roboto/latin-700.css";
@@ -18,139 +17,28 @@
 @import "@fontsource/roboto-mono/latin-ext-400.css";
 @import "@fontsource/roboto-mono/latin-ext-500.css";
 
-/*
- * "Material Admin" -- an elevation-based admin dashboard: tonal paper
- * surfaces raised off a grey ground with soft shadows, rounded corners,
- * and outlined form controls, in Material's own Roboto voice. Chosen by
- * direct brief pin (a named reference, "React Material Admin
- * Dashboard"), not the roll -- see DESIGN.md. BeaRust's amber stays the
- * primary color role throughout, standing in for Material's usual
- * blue/indigo primary.
- */
-
 :root {
-  color-scheme: dark;
   --font-display: "Roboto", system-ui, sans-serif;
   --font-body: "Roboto", system-ui, sans-serif;
-  --font-mono: "Roboto Mono", ui-monospace, "SFMono-Regular", monospace;
-
+  --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-page: var(--background);
+  --color-panel: var(--card);
+  --color-panel-muted: var(--muted);
+  --color-text: var(--foreground);
+  --color-text-muted: var(--muted-foreground);
+  --color-action: var(--primary);
+  --color-brand: var(--primary);
+  --color-focus: var(--ring);
+  --color-surface: var(--card);
+  --color-surface-muted: var(--muted);
   --radius-card: 0.75rem;
   --radius-control: 0.5rem;
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.36), 0 1px 3px rgba(0, 0, 0, 0.32);
-  --shadow-2: 0 3px 6px rgba(0, 0, 0, 0.4), 0 6px 12px rgba(0, 0, 0, 0.3);
-  --shadow-appbar: 0 1px 3px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.28);
-
-  /* Material dark: near-black ground, paper one tonal step up. */
-  --color-page: #111318;
-  --color-panel: #1a1d24;
-  --color-panel-muted: #232730;
-  --color-text: #e9eaec;
-  --color-text-muted: #9aa1ac;
-  --color-border: #2b303a;
-  --color-border-strong: #3c4250;
-  --color-focus: #f5a524;
-  --color-focus-offset: #111318;
-
-  --color-surface: #1a1d24;
-  --color-surface-muted: #232730;
-  --color-foreground: #e9eaec;
-  --color-muted: #9aa1ac;
-
-  --color-action: #f5a524;
-  --color-action-hover: #ffb84d;
-  --color-action-foreground: #201505;
-  --color-brand: #f5a524;
-
-  --color-success: #4caf50;
-  --color-success-border: #2e6b32;
-  --color-success-surface: #16261a;
-  --color-success-foreground: #86e08a;
-  --color-success-hover: #1b3020;
-
-  --color-warning: #f5a524;
-  --color-warning-border: #8a5f16;
-  --color-warning-surface: #241a0a;
-  --color-warning-foreground: #ffc966;
-  --color-warning-hover: #3a2810;
-
-  --color-danger: #ef5350;
-  --color-danger-border: #8a3230;
-  --color-danger-surface: #2c1618;
-  --color-danger-foreground: #ff9a97;
-  --color-danger-hover: #3d1c1e;
-
-  --color-info: #42a5f5;
-  --color-info-border: #1f5a8a;
-  --color-info-surface: #12212f;
-  --color-info-foreground: #90caf9;
-  --color-info-hover: #163349;
 }
-
-[data-theme="light"] {
-  color-scheme: light;
-  /* Material light: grey 100-ish ground, white paper raised above it. */
-  --color-page: #f2f3f5;
-  --color-panel: #ffffff;
-  --color-panel-muted: #eceef1;
-  --color-text: #1c2128;
-  --color-text-muted: #626975;
-  --color-border: #e1e3e8;
-  --color-border-strong: #c7cbd3;
-  --color-focus: #b87d05;
-  --color-focus-offset: #ffffff;
-
-  --color-surface: #ffffff;
-  --color-surface-muted: #eceef1;
-  --color-foreground: #1c2128;
-  --color-muted: #626975;
-
-  --color-action: #b87d05;
-  --color-action-hover: #966405;
-  --color-action-foreground: #fffaf0;
-  --color-brand: #b87d05;
-
-  --color-success: #1e8a4c;
-  --color-success-border: #86efac;
-  --color-success-surface: #eaf7ee;
-  --color-success-foreground: #146534;
-  --color-success-hover: #dcfce7;
-
-  --color-warning: #b87d05;
-  --color-warning-border: #eab84f;
-  --color-warning-surface: #fdf6e6;
-  --color-warning-foreground: #8a5f16;
-  --color-warning-hover: #f7e9c8;
-
-  --color-danger: #d32f2f;
-  --color-danger-border: #f0a8a8;
-  --color-danger-surface: #fdecea;
-  --color-danger-foreground: #9c2020;
-  --color-danger-hover: #f8dcdc;
-
-  --color-info: #1565c0;
-  --color-info-border: #90caf9;
-  --color-info-surface: #e8f1fc;
-  --color-info-foreground: #0d47a1;
-  --color-info-hover: #d3e6fa;
-
-  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
-  --shadow-2: 0 3px 6px rgba(16, 24, 40, 0.08), 0 6px 12px rgba(16, 24, 40, 0.08);
-  --shadow-appbar: 0 1px 2px rgba(16, 24, 40, 0.06), 0 2px 8px rgba(16, 24, 40, 0.06);
-}
-
-/*
- * bootstrapTheme() (theme.tsx) always resolves "system" to a concrete
- * light/dark and stamps document.documentElement.dataset.theme
- * synchronously before this SPA's first paint -- there is no SSR and
- * nothing renders before that runs, so data-theme is never absent in
- * practice. :root above is the dark values directly (the native
- * register); [data-theme="light"] is the only override needed.
- */
 
 @theme inline {
   --font-display: var(--font-display);
-  --font-mono: var(--font-mono);
   --font-body: var(--font-body);
+  --font-mono: var(--font-mono);
   --radius-card: var(--radius-card);
   --radius-control: var(--radius-control);
   --color-page: var(--color-page);
@@ -158,242 +46,120 @@
   --color-panel-muted: var(--color-panel-muted);
   --color-text: var(--color-text);
   --color-text-muted: var(--color-text-muted);
-  /* --color-foreground / --color-border are intentionally NOT
-     re-registered here: their values are identical to theme.css's
-     shadcn tokens of the same name in both light and dark, so letting
-     theme.css's @theme inline block be the sole registrant avoids a
-     Tailwind theme-key collision without changing anything this
-     Material layer renders (see DESIGN.md / final-review Finding 2). */
-  --color-border-strong: var(--color-border-strong);
+  --color-action: var(--color-action);
+  --color-brand: var(--color-brand);
   --color-focus: var(--color-focus);
-  --color-focus-offset: var(--color-focus-offset);
   --color-surface: var(--color-surface);
   --color-surface-muted: var(--color-surface-muted);
-  /* --color-muted collides with shadcn's --color-muted (theme.css),
-     but the two are semantically inverted here: this Material layer
-     uses it for muted TEXT, shadcn/ui expects a muted SURFACE. Register
-     it under a namespaced key instead so both token systems keep their
-     own value; App.tsx/ui.tsx now consume it via the *-legacy-muted
-     utilities. */
-  --color-legacy-muted: var(--color-muted);
-  --color-action: var(--color-action);
-  --color-action-hover: var(--color-action-hover);
-  --color-action-foreground: var(--color-action-foreground);
-  --color-brand: var(--color-brand);
-  --color-success: var(--color-success);
-  --color-success-border: var(--color-success-border);
-  --color-success-surface: var(--color-success-surface);
-  --color-success-foreground: var(--color-success-foreground);
-  --color-success-hover: var(--color-success-hover);
-  --color-warning: var(--color-warning);
-  --color-warning-border: var(--color-warning-border);
-  --color-warning-surface: var(--color-warning-surface);
-  --color-warning-foreground: var(--color-warning-foreground);
-  --color-warning-hover: var(--color-warning-hover);
-  --color-danger: var(--color-danger);
-  --color-danger-border: var(--color-danger-border);
-  --color-danger-surface: var(--color-danger-surface);
-  --color-danger-foreground: var(--color-danger-foreground);
-  --color-danger-hover: var(--color-danger-hover);
-  --color-info: var(--color-info);
-  --color-info-border: var(--color-info-border);
-  --color-info-surface: var(--color-info-surface);
-  --color-info-foreground: var(--color-info-foreground);
-  --color-info-hover: var(--color-info-hover);
 }
 
-html {
-  font-family: var(--font-body);
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  html {
+    @apply overflow-x-hidden;
+  }
+
+  body {
+    @apply min-h-svh w-full bg-background text-foreground;
+    font-family: var(--font-body);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  @media screen and (max-width: 767px) {
+    input,
+    select,
+    textarea {
+      font-size: 16px !important;
+    }
+  }
 }
 
-/* Every heading across ~15 sections already uses Tailwind size/weight
-   utilities with no font-family override -- one global rule gives the
-   whole app Material's own Roboto voice without touching every call
-   site. */
-h1,
-h2,
-h3,
-h4 {
-  font-family: var(--font-display);
-  letter-spacing: -0.005em;
+@utility container {
+  margin-inline: auto;
+  padding-inline: 2rem;
 }
 
-/* h3 doubles as a form-section subtitle -- Material's own sentence-case,
-   medium-weight subtitle convention, not an uppercase tracked label. */
-h3 {
-  font-size: 0.9375rem;
-  font-weight: 500;
-  color: var(--color-text);
-  margin-bottom: 0.75rem;
+@utility no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
 }
 
-body {
-  background-color: var(--color-page);
-  color: var(--color-text);
-}
-
-/* Tabular numerals everywhere data reads as a measurement, not prose. */
-.font-mono,
-[data-numeric] {
+@utility tabular-nums {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
 }
 
-/* Native checkboxes/radios appear a handful of times across sections
-   with no per-instance styling -- theme them from the palette rather
-   than shipping the browser's unthemed default control. */
-input[type="checkbox"],
-input[type="radio"] {
-  appearance: none;
-  width: 1.125rem;
-  height: 1.125rem;
-  border: 2px solid var(--color-border-strong);
-  background-color: transparent;
-  display: inline-grid;
-  place-content: center;
-  vertical-align: middle;
-  flex-shrink: 0;
-  transition: border-color 120ms ease-out, background-color 120ms ease-out;
-}
-input[type="checkbox"] {
-  border-radius: 0.25rem;
-}
-input[type="radio"] {
-  border-radius: 999px;
-}
-input[type="checkbox"]:checked,
-input[type="radio"]:checked {
-  border-color: var(--color-action);
-  background-color: var(--color-action);
-}
-input[type="checkbox"]:checked::after {
-  content: "";
-  width: 0.3rem;
-  height: 0.55rem;
-  border: solid var(--color-action-foreground);
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg) translate(-1px, -1px);
-}
-input[type="radio"]:checked::after {
-  content: "";
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 999px;
-  background-color: var(--color-action-foreground);
-}
-input[type="checkbox"]:focus-visible,
-input[type="radio"]:focus-visible {
-  outline: 2px solid var(--color-focus);
-  outline-offset: 2px;
-}
-
-/*
- * Every data table in the app is a bare <table> with no per-table
- * styling (App.tsx's ~15 sections all share this shape) -- global rules
- * give the whole dashboard a consistent Material data-table treatment
- * (sentence-case headers, grey header rule, hover tint) in one place,
- * rather than repeating utility classes at every call site.
- */
-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-thead th {
-  border-bottom: 1px solid var(--color-border);
-  background-color: var(--color-surface-muted);
-  padding: 0.625rem 0.75rem;
-  text-align: left;
-  font-family: var(--font-body);
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--color-muted);
-  white-space: nowrap;
-}
-thead th:first-child {
-  border-top-left-radius: var(--radius-control);
-}
-thead th:last-child {
-  border-top-right-radius: var(--radius-control);
-}
-tbody tr {
-  border-bottom: 1px solid var(--color-border);
-  transition: background-color 120ms ease-out;
-}
-tbody tr:last-child {
-  border-bottom: none;
-}
-tbody tr:hover {
-  background-color: var(--color-surface-muted);
-}
-tbody td {
-  padding: 0.75rem;
-  vertical-align: middle;
-}
-/* A Field/SelectField dropped into a table cell (e.g. a per-row role
-   picker) repeats its own label once per row, which is noise once the
-   column header already names it. Visually hide, not display:none --
-   the label stays in the accessibility tree for screen-reader users. */
-tbody td label {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
+.CollapsibleContent {
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
 }
 
-/* Theme browser surfaces the design system doesn't otherwise reach. */
+.CollapsibleContent[data-state="open"] {
+  animation: slideDown 220ms ease-out;
+}
+
+.CollapsibleContent[data-state="closed"] {
+  animation: slideUp 180ms ease-out;
+}
+
+@keyframes slideDown {
+  from { height: 0; }
+  to { height: var(--radix-collapsible-content-height); }
+}
+
+@keyframes slideUp {
+  from { height: var(--radix-collapsible-content-height); }
+  to { height: 0; }
+}
+
 ::selection {
-  background-color: var(--color-action);
-  color: var(--color-action-foreground);
+  background: var(--primary);
+  color: var(--primary-foreground);
 }
 
 * {
-  scrollbar-color: var(--color-border-strong) var(--color-panel);
+  scrollbar-color: var(--border) var(--background);
   scrollbar-width: thin;
 }
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
+
 ::-webkit-scrollbar-track {
-  background: var(--color-panel);
-}
-::-webkit-scrollbar-thumb {
-  background-color: var(--color-border-strong);
-  border-radius: 999px;
-  border: 2px solid var(--color-panel);
+  background: var(--background);
 }
 
-/* Respect users who request reduced motion while preserving state changes. */
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: 2px solid var(--background);
+  border-radius: 999px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
-    transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
   }
 }
 
-/*
- * The signature interaction: Material's own elevation change. A resting
- * card sits at shadow-1; an interactive one (nav item, clickable row,
- * a contained button) raises to shadow-2 on hover and settles back on
- * press, rather than fading, sliding, or tinting alone. One authored
- * moment, applied everywhere a surface responds to the pointer.
- */
-.elevate {
-  box-shadow: var(--shadow-1);
-  transition: box-shadow 160ms cubic-bezier(0.2, 0, 0, 1), transform 160ms cubic-bezier(0.2, 0, 0, 1);
-}
-.elevate:hover {
-  box-shadow: var(--shadow-2);
-}
-.elevate:active {
-  transform: scale(0.99);
+.metric-accent {
+  background: linear-gradient(90deg, var(--primary), color-mix(in srgb, var(--primary) 30%, transparent));
 }

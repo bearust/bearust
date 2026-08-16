@@ -7,9 +7,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { DEMO_MODE } from "@/lib/demo";
+import { AuthLayout } from "@/features/auth/auth-layout";
 
 export const Route = createFileRoute("/(auth)/setup")({
   beforeLoad: async ({ context }) => {
+    if (DEMO_MODE) throw redirect({ to: "/login" });
     const status = await context.queryClient.fetchQuery({
       queryKey: ["setup-status"],
       queryFn: api.status,
@@ -29,7 +32,7 @@ function SetupPage() {
     [error, setError] = useState("");
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-background px-4 py-8 text-foreground">
+    <AuthLayout>
       <Card className="mx-auto w-full max-w-lg">
         <CardHeader>
           <CardTitle>{t("auth.setupTitle")}</CardTitle>
@@ -71,6 +74,6 @@ function SetupPage() {
           </form>
         </CardContent>
       </Card>
-    </main>
+    </AuthLayout>
   );
 }

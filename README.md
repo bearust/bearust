@@ -41,6 +41,22 @@ npm ci --prefix frontend && npm run build --prefix frontend
 docker compose -f docker-compose.dev.yml up -d --build
 ```
 
+To review the frontend shell without a backend, run the demo dashboard directly:
+
+```sh
+npm ci --prefix frontend && npm --prefix frontend run dev
+```
+
+The default frontend dev mode is intentionally dummy-data-only for the current
+shell/template pass. `npm run dev:api --prefix frontend` keeps the API-backed
+development entry point available for the later integration phase:
+
+```sh
+npm --prefix frontend run dev:api
+```
+
+The frontend dev server is available at `http://localhost:5183`.
+
 Edit `config/bearust.example.toml` (or set `BEARUST_CONFIG`) for backends. Mount persistent `./data` and a read-only `./tls` directory (override with `BEARUST_DATA`/`BEARUST_TLS`). Reload with `docker compose kill -s HUP bearust` or `bearust reload --pid-file ./bearust.pid`. Configuration is TOML with `[server]`, `[health]`, `[[upstream_pools]]`, and `[[routes]]` tables.
 
 The management API is available at host `127.0.0.1:8081` in Docker Compose (the container binds `0.0.0.0:8081`, while the host port remains localhost-only). Set `BEARUST_SETUP_TOKEN` before startup, or read the generated one-time token from `./data/setup-token` and expose the management UI only through an HTTPS reverse proxy. Keep `./data` private because it contains the SQLite database and certificate material.

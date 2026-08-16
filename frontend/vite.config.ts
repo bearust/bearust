@@ -7,13 +7,21 @@ import { configDefaults } from 'vitest/config';
 
 export default defineConfig({
   plugins: [
-    tanstackRouter({ target: 'react', autoCodeSplitting: true }),
+    tanstackRouter({
+      target: 'react',
+      autoCodeSplitting: true,
+      routeFileIgnorePattern: '.*\\.test\\..*',
+    }),
     react(),
     tailwindcss(),
   ],
   resolve: {
     alias: { '@': path.resolve(__dirname, './src') },
   },
-  server: { proxy: { '/api': 'http://localhost:8081' } },
+  server: {
+    port: 5183,
+    strictPort: true,
+    proxy: { '/api': 'http://localhost:8081' },
+  },
   test: { exclude: [...configDefaults.exclude, 'e2e/**'] },
 });

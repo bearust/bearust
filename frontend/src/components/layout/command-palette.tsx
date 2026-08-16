@@ -9,12 +9,10 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { NAV_ITEMS } from "./nav-data";
-import { useAuthStore } from "@/stores/auth-store";
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
-  const isAdmin = useAuthStore((s) => s.user?.role === "admin");
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -23,27 +21,37 @@ export function CommandPalette() {
         setOpen((value) => !value);
       }
     };
+    const onOpen = () => setOpen(true);
     document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("bearust:open-command", onOpen);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("bearust:open-command", onOpen);
+    };
   }, []);
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen}>
-      <CommandInput placeholder="Jump to..." />
+      <CommandInput placeholder="Jump to a BeaRust section..." />
       <CommandList>
         <CommandEmpty>No results.</CommandEmpty>
         <CommandGroup heading="Navigation">
-          {NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin).map((item) => (
-            <CommandItem
-              key={item.url}
-              onSelect={() => {
-                setOpen(false);
-                void navigate({ to: item.url });
-              }}
-            >
-              <item.icon />
-              <span>{item.title}</span>
-            </CommandItem>
+          {NAV_ITEMS.map((item) => (
+            (() => {
+              const Icon = item.icon;
+              return (
+                <CommandItem
+                  key={item.url}
+                  onSelect={() => {
+                    setOpen(false);
+                    void navigate({ to: item.url });
+                  }}
+                >
+                  {Icon ? <Icon /> : null}
+                  <span>{item.title}</span>
+                </CommandItem>
+              );
+            })()
           ))}
         </CommandGroup>
       </CommandList>

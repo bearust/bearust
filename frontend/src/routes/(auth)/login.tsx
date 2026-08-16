@@ -4,9 +4,12 @@ import { useTranslation } from "react-i18next";
 import { api } from "@/api";
 import { sanitizeError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { DEMO_MODE, DEMO_USER } from "@/lib/demo";
+import { useAuthStore } from "@/stores/auth-store";
+import { AuthLayout } from "@/features/auth/auth-layout";
 
 export const Route = createFileRoute("/(auth)/login")({
   component: LoginPage,
@@ -15,54 +18,64 @@ export const Route = createFileRoute("/(auth)/login")({
 function LoginPage() {
   const { t } = useTranslation();
   const navigate = Route.useNavigate();
-  const [email, setEmail] = useState(""),
-    [password, setPassword] = useState(""),
-    [error, setError] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-background px-4 py-8 text-foreground">
-      <div className="w-full max-w-md">
-        <div className="mb-6 flex items-center justify-center gap-2.5">
-          <span aria-hidden="true" className="inline-block h-3 w-3 rounded-full bg-primary" />
-          <span className="font-display text-lg font-bold tracking-tight">{t("dashboard.brand")}</span>
-        </div>
-        <Card>
-          <CardHeader>
-            <CardTitle>{t("auth.loginTitle")}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <form
-              className="space-y-4"
-              onSubmit={async (e) => {
-                e.preventDefault();
-                try {
-                  await api.login({ email, password });
+    <AuthLayout>
+      <Card className="gap-5">
+        <CardHeader>
+          <CardTitle className="text-lg tracking-tight">{t("auth.loginTitle")}</CardTitle>
+          <CardDescription>
+            Sign in to manage your BeaRust edge infrastructure.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="space-y-4"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              try {
+                if (DEMO_MODE) {
+                  useAuthStore.getState().setUser(DEMO_USER);
                   void navigate({ to: "/" });
-                } catch (x) {
-                  setError(sanitizeError(x));
+                  return;
                 }
-              }}
-            >
-              <div className="space-y-1.5">
-                <Label htmlFor="login-email">{t("common.email")}</Label>
-                <Input id="login-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-              </div>
-              <div className="space-y-1.5">
+                await api.login({ email, password });
+                void navigate({ to: "/" });
+              } catch (exception) {
+                setError(sanitizeError(exception));
+              }
+            }}
+          >
+            <div className="space-y-2">
+              <Label htmlFor="login-email">{t("common.email")}</Label>
+              <Input id="login-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-4">
                 <Label htmlFor="login-password">{t("common.password")}</Label>
-                <Input id="login-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+                <span className="text-xs text-muted-foreground">Demo access enabled</span>
               </div>
-              {error && (
-                <p role="alert" className="text-sm text-destructive">
-                  {error}
-                </p>
-              )}
-              <Button type="submit" className="w-full">
-                {t("auth.signIn")}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
-      </div>
-    </main>
+              <Input id="login-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+            </div>
+            {error && (
+              <p role="alert" className="text-sm text-destructive">
+                {error}
+              </p>
+            )}
+            <Button type="submit" className="w-full">
+              {t("auth.signIn")}
+            </Button>
+          </form>
+        </CardContent>
+        <CardFooter className="border-t pt-5">
+          <p className="w-full text-center text-xs text-muted-foreground">
+            By continuing, you agree to BeaRust&apos;s terms and privacy policy.
+          </p>
+        </CardFooter>
+      </Card>
+    </AuthLayout>
   );
 }

@@ -1,19 +1,89 @@
-import type { LucideIcon } from "lucide-react";
-import { Cable, Sparkles, ShieldCheck, BarChart3, Users, ScrollText } from "lucide-react";
+import {
+  Activity,
+  BarChart3,
+  Cable,
+  FileClock,
+  LayoutDashboard,
+  MessagesSquare,
+  Network,
+  ShieldCheck,
+  Sparkles,
+  Users,
+} from "lucide-react";
+import type { ElementType } from "react";
+import type { NavGroup, NavItem, SidebarData } from "./types";
 
-export type NavItem = {
-  title: string;
-  labelKey: string;
-  url: string;
-  icon: LucideIcon;
-  adminOnly?: boolean;
+export const sidebarData: SidebarData = {
+  user: {
+    name: "Rizalord",
+    email: "admin@bearust.local",
+    avatar: "",
+  },
+  teams: [
+    {
+      name: "BeaRust Control Plane",
+      logo: ShieldCheck,
+      plan: "Self-hosted edge security",
+    },
+    {
+      name: "Production Cluster",
+      logo: Network,
+      plan: "3 nodes · healthy",
+    },
+    {
+      name: "Homelab Sandbox",
+      logo: Cable,
+      plan: "Development workspace",
+    },
+  ],
+  navGroups: [
+    {
+      title: "General",
+      items: [
+        { title: "Dashboard", url: "/", icon: LayoutDashboard },
+        { title: "Proxy Hosts", url: "/proxy-hosts", icon: Cable },
+        { title: "Analytics", url: "/analytics", icon: BarChart3 },
+      ],
+    },
+    {
+      title: "Protection",
+      items: [
+        {
+          title: "Security",
+          icon: ShieldCheck,
+          items: [
+            { title: "WAF rules", url: "/security?tab=waf", icon: ShieldCheck },
+            { title: "Bot protection", url: "/security?tab=bot", icon: Activity },
+            { title: "Rate limiting", url: "/security?tab=rate", icon: Activity },
+          ],
+        },
+        { title: "AI Advisor", url: "/ai-advisor", icon: Sparkles },
+      ],
+    },
+    {
+      title: "Administration",
+      items: [
+        { title: "Users & Roles", url: "/users", icon: Users },
+        { title: "Audit Log", url: "/audit-log", icon: FileClock },
+        { title: "Support inbox", url: "/support", icon: MessagesSquare, badge: "3" },
+      ],
+    },
+  ],
 };
 
-export const NAV_ITEMS: NavItem[] = [
-  { title: "Proxy Hosts", labelKey: "nav.proxyHosts", url: "/", icon: Cable },
-  { title: "AI Advisor", labelKey: "nav.aiAdvisor", url: "/ai-advisor", icon: Sparkles },
-  { title: "Security", labelKey: "nav.security", url: "/security", icon: ShieldCheck },
-  { title: "Analytics", labelKey: "nav.analytics", url: "/analytics", icon: BarChart3 },
-  { title: "Users & Roles", labelKey: "nav.users", url: "/users", icon: Users, adminOnly: true },
-  { title: "Audit Log", labelKey: "nav.audit", url: "/audit-log", icon: ScrollText },
-];
+function flattenItems(groups: NavGroup[]): NavItem[] {
+  return groups.flatMap((group) =>
+    group.items.flatMap((item) => (item.items ? item.items : item)),
+  );
+}
+
+export type FlatNavItem = {
+  title: string;
+  url: string;
+  icon?: ElementType;
+  badge?: string;
+};
+
+export const NAV_ITEMS: FlatNavItem[] = flattenItems(sidebarData.navGroups).filter(
+  (item): item is NavItem & { url: string } => "url" in item,
+);

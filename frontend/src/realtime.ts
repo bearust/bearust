@@ -42,6 +42,10 @@ export function useRealtimeUpdates(loaders: RealtimeLoaders): RealtimeStatus {
   loadersRef.current = loaders;
 
   useEffect(() => {
+    if (import.meta.env.VITE_DEMO_MODE === "true") {
+      setStatus("connected");
+      return;
+    }
     if (typeof EventSource === "undefined") {
       setStatus("disconnected");
       return;
