@@ -18,10 +18,12 @@ export type RealtimeLoaders = Partial<{
   adaptiveTuning: () => unknown | Promise<unknown>;
   aiAdvisor: () => unknown | Promise<unknown>;
   plugins: () => unknown | Promise<unknown>;
+  loadBalancer: () => unknown | Promise<unknown>;
 }>;
 
 const EVENT_LOADERS: Record<string, keyof RealtimeLoaders> = {
   "proxy_hosts.changed": "hosts",
+  "load_balancer.changed": "loadBalancer",
   "certificates.changed": "certificates",
   "users.changed": "users",
   "roles.changed": "roles",

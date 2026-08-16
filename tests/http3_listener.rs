@@ -879,6 +879,7 @@ fn build_rustls_server_config_reads_the_configured_cert_and_key() {
     // fixtures used elsewhere in this repo, since those are for the
     // Pingora TLS listener's own tests) -- confirms the PEM-loading
     // path this task added works end to end.
+    install_crypto_provider();
     let dir = tempfile::tempdir().unwrap();
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
     let cert_path = dir.path().join("cert.pem");

@@ -69,6 +69,12 @@ pub struct AppState {
     pub db: repository::DbPool,
     pub certificates: Arc<CertificateStore>,
     pub reloader: Arc<dyn ConfigReloader>,
+    /// The live data-plane runtime is attached by the production bootstrap.
+    /// Keeping this optional preserves deterministic embedded/test control
+    /// planes that do not own a proxy listener.
+    pub runtime: Option<Arc<crate::runtime::RuntimeStore>>,
+    pub runtime_config_path: Option<Arc<std::path::PathBuf>>,
+    pub runtime_config_lock: Arc<Mutex<()>>,
     pub setup_token: Arc<str>,
     pub auth_attempts: Arc<Mutex<HashMap<String, (Instant, u32)>>>,
     pub secrets: SecretStore,
@@ -402,6 +408,9 @@ pub async fn build_state(
         db,
         certificates,
         reloader,
+        runtime: None,
+        runtime_config_path: None,
+        runtime_config_lock: Arc::new(Mutex::new(())),
         setup_token: setup_token.into(),
         auth_attempts: Arc::new(Mutex::new(HashMap::new())),
         secrets,
@@ -578,6 +587,10 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route(
             "/api/proxy-hosts/{id}",
             get(get_host).patch(update_host).delete(remove_host),
+        )
+        .route(
+            "/api/load-balancer",
+            get(get_load_balancer).put(update_load_balancer),
         )
         .route(
             "/api/certificates",
@@ -4930,6 +4943,218 @@ async fn remove_host(
     }
     StatusCode::NO_CONTENT.into_response()
 }
+
+async fn get_load_balancer(State(s): State<AppState>, h: HeaderMap) -> Response {
+    let user = match current(&s, &h).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !authorize(
+        &s.db,
+        &user,
+        Permission::ProxyHostsRead,
+        ResourceContext::GLOBAL,
+    )
+    .await
+    .unwrap_or(false)
+    {
+        audit::record_state(
+            &s,
+            Some(user.id),
+            "authorization_denied",
+            "LoadBalancerRead",
+        )
+        .await;
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(runtime) = s.runtime.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorEnvelope {
+                code: "runtime_unavailable".into(),
+                message: "The live data-plane runtime is not attached".into(),
+            }),
+        )
+            .into_response();
+    };
+    Json(load_balancer_snapshot(runtime)).into_response()
+}
+
+async fn update_load_balancer(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Json(request): Json<LoadBalancerConfigRequest>,
+) -> Response {
+    let user = match current(&s, &h).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !authorize(
+        &s.db,
+        &user,
+        Permission::ProxyHostsWrite,
+        ResourceContext::GLOBAL,
+    )
+    .await
+    .unwrap_or(false)
+    {
+        audit::record_state(
+            &s,
+            Some(user.id),
+            "authorization_denied",
+            "LoadBalancerWrite",
+        )
+        .await;
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(runtime) = s.runtime.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorEnvelope {
+                code: "runtime_unavailable".into(),
+                message: "The live data-plane runtime is not attached".into(),
+            }),
+        )
+            .into_response();
+    };
+    let _config_guard = s.runtime_config_lock.lock().await;
+    let previous = runtime.load().config().clone();
+    let mut next = previous.clone();
+    next.upstream_pools = request.pools;
+    next.routes = request.routes;
+    if let Err(error) = next.validate() {
+        audit::record_state(
+            &s,
+            Some(user.id),
+            "load_balancer_update_denied",
+            "reason=invalid_config",
+        )
+        .await;
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorEnvelope {
+                code: "invalid_load_balancer_config".into(),
+                message: error.to_string(),
+            }),
+        )
+            .into_response();
+    }
+    if let Err(error) = runtime.apply_config(next.clone()).await {
+        audit::record_state(
+            &s,
+            Some(user.id),
+            "load_balancer_update_failed",
+            "reason=reload_failed",
+        )
+        .await;
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorEnvelope {
+                code: "reload_failed".into(),
+                message: error.to_string(),
+            }),
+        )
+            .into_response();
+    }
+    if let Some(path) = s.runtime_config_path.as_deref() {
+        if let Err(error) = persist_runtime_config(path, &next) {
+            audit::record_state(
+                &s,
+                Some(user.id),
+                "load_balancer_persistence_failed",
+                "reason=write_failed",
+            )
+            .await;
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorEnvelope {
+                    code: "config_persistence_failed".into(),
+                    message: error,
+                }),
+            )
+                .into_response();
+        }
+    }
+    audit::record_state(
+        &s,
+        Some(user.id),
+        "load_balancer_updated",
+        &format!(
+            "pool_count={};route_count={}",
+            next.upstream_pools.len(),
+            next.routes.len()
+        ),
+    )
+    .await;
+    s.realtime.publish("load_balancer.changed");
+    Json(load_balancer_snapshot(runtime)).into_response()
+}
+
+fn load_balancer_snapshot(runtime: &crate::runtime::RuntimeStore) -> LoadBalancerSnapshot {
+    let snapshot = runtime.load();
+    let pools = snapshot
+        .config()
+        .upstream_pools
+        .iter()
+        .map(|config| {
+            let candidates = snapshot
+                .pool(&config.name)
+                .map(|pool| pool.candidates())
+                .unwrap_or_default();
+            let backends = config
+                .backends
+                .iter()
+                .enumerate()
+                .map(|(index, backend)| {
+                    let candidate = candidates.get(index);
+                    LoadBalancerBackend {
+                        id: index,
+                        address: backend.address.to_string(),
+                        health_check: backend.health_check,
+                        health_path: backend.health_path.clone(),
+                        healthy: candidate.is_some_and(|value| value.healthy),
+                        inflight: candidate.map_or(0, |value| value.inflight),
+                    }
+                })
+                .collect();
+            LoadBalancerPool {
+                name: config.name.clone(),
+                algorithm: config.algorithm,
+                connect_timeout_seconds: config.connect_timeout_seconds,
+                request_timeout_seconds: config.request_timeout_seconds,
+                backends,
+            }
+        })
+        .collect();
+    LoadBalancerSnapshot {
+        generation: snapshot.generation(),
+        pools,
+        routes: snapshot.config().routes.clone(),
+        capabilities: LoadBalancerCapabilities {
+            algorithms: vec![
+                "round_robin".into(),
+                "least_connections".into(),
+                "plugin".into(),
+            ],
+            health_checks: vec!["tcp".into(), "http".into()],
+            passive_health: false,
+            adaptive_weighting: false,
+        },
+    }
+}
+
+fn persist_runtime_config(
+    path: &std::path::Path,
+    config: &crate::config::Config,
+) -> Result<(), String> {
+    let serialized = toml::to_string_pretty(config)
+        .map_err(|error| format!("serialize configuration: {error}"))?;
+    let temporary = path.with_extension("control-plane.tmp");
+    std::fs::write(&temporary, serialized)
+        .map_err(|error| format!("write temporary configuration: {error}"))?;
+    std::fs::rename(&temporary, path).map_err(|error| format!("replace configuration: {error}"))
+}
+
 async fn upload_certificate(
     State(s): State<AppState>,
     h: HeaderMap,

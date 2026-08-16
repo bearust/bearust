@@ -396,6 +396,50 @@ pub struct ProxyHost {
 pub struct DesiredConfig {
     pub proxy_hosts: Vec<ProxyHost>,
 }
+
+/// Read/write control-plane contract for the live upstream topology. The
+/// configuration fields mirror the native TOML model while backend health and
+/// in-flight counts are read-only runtime observations.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LoadBalancerConfigRequest {
+    pub pools: Vec<crate::config::PoolConfig>,
+    pub routes: Vec<crate::config::RouteConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LoadBalancerSnapshot {
+    pub generation: u64,
+    pub pools: Vec<LoadBalancerPool>,
+    pub routes: Vec<crate::config::RouteConfig>,
+    pub capabilities: LoadBalancerCapabilities,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LoadBalancerPool {
+    pub name: String,
+    pub algorithm: crate::config::Algorithm,
+    pub connect_timeout_seconds: u64,
+    pub request_timeout_seconds: u64,
+    pub backends: Vec<LoadBalancerBackend>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LoadBalancerBackend {
+    pub id: usize,
+    pub address: String,
+    pub health_check: crate::config::HealthCheckKind,
+    pub health_path: Option<String>,
+    pub healthy: bool,
+    pub inflight: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LoadBalancerCapabilities {
+    pub algorithms: Vec<String>,
+    pub health_checks: Vec<String>,
+    pub passive_health: bool,
+    pub adaptive_weighting: bool,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ErrorEnvelope {
     pub code: String,

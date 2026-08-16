@@ -310,6 +310,8 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         tracing::info!(event = "control_plane_start", bind = %config.server.control_bind, setup_token_configured = setup_token_from_env.is_some(), generated_setup_token = setup_token_from_env.is_none());
         let mut control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
+        control_state.runtime = Some(Arc::clone(&store));
+        control_state.runtime_config_path = Some(Arc::new(path.clone()));
         let plugin_manager = crate::plugin_runtime::PluginManager::new(config.plugins.clone());
         plugin_manager.attach_realtime(control_state.realtime.clone());
         plugin_manager.attach_audit_sink(Arc::new(

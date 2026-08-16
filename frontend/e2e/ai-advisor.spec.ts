@@ -64,4 +64,13 @@ test.describe("BeaRust shadcn-admin shell", () => {
     await page.getByRole("button", { name: "Export report" }).click();
     await expect(page.getByText("Report downloaded")).toBeVisible();
   });
+
+  test("shows upstream pools, health checks, and virtual host routes", async ({ page }) => {
+    await page.goto("/load-balancer");
+    await expect(page.getByRole("heading", { name: "Load Balancer" })).toBeVisible();
+    await expect(page.getByText("api-pool", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Healthy", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Virtual host routes", { exact: true })).toBeVisible();
+    await expect(page.getByText("api.bearust.local", { exact: true })).toBeVisible();
+  });
 });

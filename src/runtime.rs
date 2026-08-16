@@ -129,6 +129,32 @@ impl RuntimeStore {
         Ok(outcome)
     }
 
+    /// Apply a validated configuration supplied by the control plane without
+    /// waiting for a process signal. The candidate is built and its health
+    /// workers are started before the active snapshot is swapped, so a bad
+    /// pool or route can never partially replace live traffic configuration.
+    pub async fn apply_config(&self, config: Config) -> Result<ReloadOutcome, RuntimeError> {
+        config.validate()?;
+        let _guard = self.reload_lock.lock().await;
+        let old = self.load();
+        let candidate = RuntimeSnapshot::build(config, Some(&old))?;
+        let replacement = HealthSupervisor::start(
+            candidate.pools().collect(),
+            candidate.config().health.clone(),
+        )
+        .await?;
+        let outcome = ReloadOutcome {
+            old_generation: old.generation,
+            new_generation: candidate.generation,
+        };
+        self.current.store(Arc::new(candidate));
+        let old_supervisor = self.health.lock().await.replace(replacement);
+        if let Some(supervisor) = old_supervisor {
+            supervisor.shutdown().await?;
+        }
+        Ok(outcome)
+    }
+
     /// Stop health workers owned by this store.
     ///
     /// This is primarily useful for graceful shutdown and deterministic tests;

@@ -1,14 +1,14 @@
 mod error;
 use crate::analytics_prometheus::PrometheusConfig;
 pub use error::ConfigError;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub server: ServerConfig,
@@ -26,7 +26,7 @@ pub struct Config {
     pub plugins: PluginConfig,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginConfig {
     #[serde(default)]
@@ -109,7 +109,7 @@ impl PluginConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RateLimitConfig {
     #[serde(default)]
@@ -134,20 +134,20 @@ impl Default for RateLimitConfig {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitAction {
     #[default]
     Monitor,
     Block,
 }
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitKeyScope {
     #[default]
     ProxyHostIp,
 }
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub bind: SocketAddr,
@@ -170,14 +170,14 @@ pub struct ServerConfig {
     pub trusted_proxy_cidrs: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Http3Config {
     #[serde(default)]
@@ -200,7 +200,7 @@ fn default_http3_bind() -> SocketAddr {
         .parse()
         .expect("valid default HTTP/3 bind address")
 }
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthConfig {
     #[serde(default = "default_interval")]
@@ -222,7 +222,7 @@ impl Default for HealthConfig {
         }
     }
 }
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PoolConfig {
     pub name: String,
@@ -233,14 +233,14 @@ pub struct PoolConfig {
     pub request_timeout_seconds: u64,
     pub backends: Vec<BackendConfig>,
 }
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BackendConfig {
     pub address: SocketAddr,
     pub health_check: HealthCheckKind,
     pub health_path: Option<String>,
 }
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RouteConfig {
     pub name: String,
@@ -248,14 +248,14 @@ pub struct RouteConfig {
     pub path_prefix: String,
     pub upstream_pool: String,
 }
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Algorithm {
     RoundRobin,
     LeastConnections,
     Plugin,
 }
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthCheckKind {
     Tcp,
@@ -297,7 +297,7 @@ fn default_connect_timeout() -> u64 {
 fn default_request_timeout() -> u64 {
     30
 }
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ClusterConfig {
     #[serde(default = "default_node_id")]
@@ -337,7 +337,7 @@ impl Default for ClusterConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ClusterPeer {
     pub node_id: String,
@@ -450,7 +450,7 @@ impl Config {
         config.validate()?;
         Ok(config)
     }
-    fn validate(&self) -> Result<(), ConfigError> {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         if self.cluster.node_id.trim().is_empty()
             || self
                 .cluster

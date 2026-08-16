@@ -20,6 +20,7 @@ export const sidebarData: SidebarData = {
       items: [
         { title: "Dashboard", url: "/", icon: LayoutDashboard },
         { title: "Proxy Hosts", url: "/proxy-hosts", icon: Cable },
+        { title: "Load Balancer", url: "/load-balancer", icon: Network },
         { title: "Analytics", url: "/analytics", icon: BarChart3 },
         { title: "Cluster", url: "/cluster", icon: Network },
       ],

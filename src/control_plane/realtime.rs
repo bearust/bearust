@@ -52,6 +52,7 @@ impl RealtimeHub {
     pub fn publish_cluster_event(&self, kind: &str) -> Option<RealtimeEvent> {
         match kind {
             "proxy_hosts.changed" => Some(self.publish("proxy_hosts.changed")),
+            "load_balancer.changed" => Some(self.publish("load_balancer.changed")),
             "rate_limit.changed" => Some(self.publish("rate_limit.changed")),
             "plugins.changed" => Some(self.publish("plugins.changed")),
             _ => None,
