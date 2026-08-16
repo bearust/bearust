@@ -14,6 +14,8 @@ const links = [
   { title: "Proxy hosts", href: "/proxy-hosts" },
   { title: "Security", href: "/security" },
   { title: "Analytics", href: "/analytics" },
+  { title: "Cluster", href: "/cluster" },
+  { title: "Plugins", href: "/plugins" },
 ];
 
 export function TopNav({ className }: { className?: string }) {

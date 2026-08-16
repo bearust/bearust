@@ -42,7 +42,8 @@ function LoginPage() {
                   void navigate({ to: "/" });
                   return;
                 }
-                await api.login({ email, password });
+                const user = await api.login({ email, password });
+                useAuthStore.getState().setUser(user);
                 void navigate({ to: "/" });
               } catch (exception) {
                 setError(sanitizeError(exception));
@@ -56,7 +57,7 @@ function LoginPage() {
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-4">
                 <Label htmlFor="login-password">{t("common.password")}</Label>
-                <span className="text-xs text-muted-foreground">Demo access enabled</span>
+                <span className="text-xs text-muted-foreground">{DEMO_MODE ? "Demo access enabled" : "Use your control-plane account"}</span>
               </div>
               <Input id="login-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
             </div>

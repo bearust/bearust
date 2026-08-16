@@ -1,6 +1,8 @@
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
-const traffic = [
+export type TrafficPoint = { name: string; requests: number; blocked: number };
+
+const demoTraffic: TrafficPoint[] = [
   { name: "Mon", requests: 18200, blocked: 920 },
   { name: "Tue", requests: 22400, blocked: 1100 },
   { name: "Wed", requests: 19800, blocked: 870 },
@@ -10,10 +12,10 @@ const traffic = [
   { name: "Sun", requests: 35400, blocked: 1910 },
 ];
 
-export function TrafficChart() {
+export function TrafficChart({ data = demoTraffic }: { data?: TrafficPoint[] }) {
   return (
     <ResponsiveContainer width="100%" height={300}>
-      <AreaChart data={traffic} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+      <AreaChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
         <defs>
           <linearGradient id="requests-fill" x1="0" y1="0" x2="0" y2="1">
             <stop offset="5%" stopColor="var(--primary)" stopOpacity={0.28} />

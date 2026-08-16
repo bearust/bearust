@@ -11,11 +11,13 @@ export type RealtimeLoaders = Partial<{
   sessions: () => unknown | Promise<unknown>;
   waf: () => unknown | Promise<unknown>;
   rateLimit: () => unknown | Promise<unknown>;
+  bot: () => unknown | Promise<unknown>;
   analytics: () => unknown | Promise<unknown>;
   baseline: () => unknown | Promise<unknown>;
   anomaly: () => unknown | Promise<unknown>;
   adaptiveTuning: () => unknown | Promise<unknown>;
   aiAdvisor: () => unknown | Promise<unknown>;
+  plugins: () => unknown | Promise<unknown>;
 }>;
 
 const EVENT_LOADERS: Record<string, keyof RealtimeLoaders> = {
@@ -26,12 +28,14 @@ const EVENT_LOADERS: Record<string, keyof RealtimeLoaders> = {
   audit: "auditLogs",
   "sessions.changed": "sessions",
   "waf.changed": "waf",
+  "bot.changed": "bot",
   "rate_limit.changed": "rateLimit",
   "analytics.changed": "analytics",
   "baseline.changed": "baseline",
   "anomaly.changed": "anomaly",
   "adaptive_tuning.changed": "adaptiveTuning",
   "ai_advisor.changed": "aiAdvisor",
+  "plugins.changed": "plugins",
 };
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
@@ -84,6 +88,7 @@ export function useRealtimeUpdates(loaders: RealtimeLoaders): RealtimeStatus {
             if (numericId <= lastId) return;
             lastId = numericId;
           }
+          window.dispatchEvent(new CustomEvent("bearust:realtime", { detail: kind }));
           const loader = loadersRef.current[EVENT_LOADERS[kind]];
           if (loader) void Promise.resolve(loader()).catch(() => undefined);
         });

@@ -1,6 +1,7 @@
 import {
   Activity,
   BarChart3,
+  Blocks,
   Cable,
   FileClock,
   LayoutDashboard,
@@ -43,6 +44,7 @@ export const sidebarData: SidebarData = {
         { title: "Dashboard", url: "/", icon: LayoutDashboard },
         { title: "Proxy Hosts", url: "/proxy-hosts", icon: Cable },
         { title: "Analytics", url: "/analytics", icon: BarChart3 },
+        { title: "Cluster", url: "/cluster", icon: Network },
       ],
     },
     {
@@ -58,6 +60,7 @@ export const sidebarData: SidebarData = {
           ],
         },
         { title: "AI Advisor", url: "/ai-advisor", icon: Sparkles },
+        { title: "Plugins", url: "/plugins", icon: Blocks },
       ],
     },
     {

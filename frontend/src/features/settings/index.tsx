@@ -1,17 +1,40 @@
+import { useState } from "react";
 import { toast } from "sonner";
-import { Bell, LockKeyhole, Palette, Save, UserRound } from "lucide-react";
+import { Bell, Languages, LockKeyhole, Palette, Save, UserRound } from "lucide-react";
+import { DEMO_MODE } from "@/lib/demo";
+import { useAuthStore } from "@/stores/auth-store";
+import { normalizeLocale, useLocalePreference, type Locale } from "@/i18n";
+import { useTheme, type ThemeMode } from "@/theme";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Main } from "@/components/layout/main";
 import { PageHeader } from "@/components/page-header";
 
 export function Settings() {
-  return <Main><PageHeader title="Settings" description="Configure your local BeaRust workspace." /><Tabs defaultValue="profile" className="space-y-6"><TabsList><TabsTrigger value="profile"><UserRound />Profile</TabsTrigger><TabsTrigger value="appearance"><Palette />Appearance</TabsTrigger><TabsTrigger value="notifications"><Bell />Notifications</TabsTrigger><TabsTrigger value="security"><LockKeyhole />Security</TabsTrigger></TabsList><TabsContent value="profile"><Card><CardHeader><CardTitle>Profile</CardTitle><CardDescription>Update the identity shown in this prototype.</CardDescription></CardHeader><CardContent className="max-w-xl space-y-4"><div className="space-y-2"><Label htmlFor="profile-name">Display name</Label><Input id="profile-name" defaultValue="Rizalord" /></div><div className="space-y-2"><Label htmlFor="profile-email">Email</Label><Input id="profile-email" type="email" defaultValue="admin@bearust.local" /></div><Button onClick={() => toast.success("Profile saved locally")}><Save />Save changes</Button></CardContent></Card></TabsContent><TabsContent value="appearance"><Card><CardHeader><CardTitle>Appearance</CardTitle><CardDescription>Use the account menu or toolbar control to switch theme and language.</CardDescription></CardHeader><CardContent><div className="rounded-lg border bg-muted/30 p-6 text-sm text-muted-foreground">Theme preferences are stored locally in this browser.</div></CardContent></Card></TabsContent><TabsContent value="notifications"><Card><CardHeader><CardTitle>Notifications</CardTitle><CardDescription>Choose which operational events appear in your workspace.</CardDescription></CardHeader><CardContent className="space-y-3"><Preference label="Security events" /><Preference label="Certificate renewals" /><Preference label="Cluster health" /></CardContent></Card></TabsContent><TabsContent value="security"><Card><CardHeader><CardTitle>Security preferences</CardTitle><CardDescription>Dummy controls for the frontend-first phase.</CardDescription></CardHeader><CardContent><Button variant="outline" onClick={() => toast.info("Passkey enrollment is not connected yet")}><LockKeyhole />Enroll a passkey</Button></CardContent></Card></TabsContent></Tabs></Main>;
+  const user = useAuthStore((state) => state.user);
+  const { mode, resolved, setMode } = useTheme();
+  const { locale, setLocale } = useLocalePreference();
+  const [notifications, setNotifications] = useState({ security: true, certificates: true, cluster: true });
+  const [savingLocale, setSavingLocale] = useState(false);
+  const [localeMessage, setLocaleMessage] = useState("");
+
+  const saveLocale = async (next: Locale) => {
+    setSavingLocale(true); setLocaleMessage("");
+    try { await setLocale(next); if (!DEMO_MODE && user) useAuthStore.getState().setUser({ ...user, preferred_locale: next }); setLocaleMessage("Language preference saved to this account."); } catch { setLocaleMessage("Language changed locally; account preference could not be saved."); } finally { setSavingLocale(false); }
+  };
+
+  return <Main><PageHeader title="Settings" description="Manage account preferences and local control-plane behavior." action={<Badge variant="outline" className="gap-1.5 rounded-full"><span className={`size-1.5 rounded-full ${DEMO_MODE ? "bg-amber-500" : "bg-emerald-500"}`} />{DEMO_MODE ? "Local demo" : "Account settings"}</Badge>} />
+    <Tabs defaultValue="profile" className="space-y-6"><TabsList><TabsTrigger value="profile"><UserRound />Profile</TabsTrigger><TabsTrigger value="appearance"><Palette />Appearance</TabsTrigger><TabsTrigger value="notifications"><Bell />Notifications</TabsTrigger><TabsTrigger value="security"><LockKeyhole />Security</TabsTrigger></TabsList>
+      <TabsContent value="profile"><Card><CardHeader><CardTitle>Profile</CardTitle><CardDescription>Identity returned by the authenticated control-plane session.</CardDescription></CardHeader><CardContent className="max-w-xl space-y-4"><ReadOnly label="Email" value={user?.email ?? "—"} /><ReadOnly label="Role" value={user?.role ?? "—"} /><div className="space-y-2"><Label htmlFor="settings-locale">Preferred language</Label><select id="settings-locale" value={locale} onChange={(event) => void saveLocale(normalizeLocale(event.target.value))} disabled={savingLocale} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="en">English</option><option value="id">Bahasa Indonesia</option><option value="ja">日本語</option></select></div>{localeMessage && <p role="status" className="text-sm text-muted-foreground">{localeMessage}</p>}</CardContent></Card></TabsContent>
+      <TabsContent value="appearance"><Card><CardHeader><CardTitle>Appearance</CardTitle><CardDescription>Theme is stored locally so the control plane remains usable during backend maintenance.</CardDescription></CardHeader><CardContent className="max-w-xl space-y-4"><div className="space-y-2"><Label htmlFor="settings-theme">Theme</Label><select id="settings-theme" value={mode} onChange={(event) => setMode(event.target.value as ThemeMode)} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></div><p className="text-xs text-muted-foreground">Current resolved theme: {resolved}.</p></CardContent></Card></TabsContent>
+      <TabsContent value="notifications"><Card><CardHeader><CardTitle>Notifications</CardTitle><CardDescription>Local display preferences for operational signals.</CardDescription></CardHeader><CardContent className="max-w-xl space-y-3"><Preference label="Security events" checked={notifications.security} onChange={(checked) => setNotifications({ ...notifications, security: checked })} /><Preference label="Certificate renewals" checked={notifications.certificates} onChange={(checked) => setNotifications({ ...notifications, certificates: checked })} /><Preference label="Cluster health" checked={notifications.cluster} onChange={(checked) => setNotifications({ ...notifications, cluster: checked })} /><Button variant="outline" onClick={() => toast.success("Notification preferences saved locally")}><Save />Save local preferences</Button></CardContent></Card></TabsContent>
+      <TabsContent value="security"><Card><CardHeader><CardTitle>Security session</CardTitle><CardDescription>Session controls available from the authenticated account menu.</CardDescription></CardHeader><CardContent className="max-w-xl space-y-4"><div className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">Session logout calls the control-plane API. User session revocation is available to administrators from Users & Roles.</div><Button variant="outline" onClick={() => toast.info("Use Users & Roles to revoke another account's sessions")}><LockKeyhole />Review session controls</Button></CardContent></Card></TabsContent>
+    </Tabs>
+  </Main>;
 }
 
-function Preference({ label }: { label: string }) {
-  return <label className="flex items-center justify-between rounded-lg border p-4 text-sm"><span>{label}</span><input type="checkbox" defaultChecked className="size-4 accent-primary" /></label>;
-}
+function ReadOnly({ label, value }: { label: string; value: string }) { return <div className="space-y-2"><Label>{label}</Label><div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">{value}</div></div>; }
+function Preference({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) { return <label className="flex items-center justify-between rounded-lg border p-4 text-sm"><span>{label}</span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="size-4 accent-primary" /></label>; }

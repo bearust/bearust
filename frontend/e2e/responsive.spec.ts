@@ -20,13 +20,13 @@ for (const width of [390, 768, 1280]) {
   });
 }
 
-test("security controls preserve responsive layout and work as dummy interactions", async ({ page }) => {
+test("security controls preserve responsive layout and persist demo policy interactions", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 900 });
   await page.goto("/security?tab=waf");
   await expect(page.getByRole("heading", { name: "Security" })).toBeVisible();
-  const pauseButton = page.getByRole("button", { name: "Pause engine" });
+  const pauseButton = page.getByRole("button", { name: "Switch to monitor" });
   await pauseButton.click();
-  await expect(page.getByRole("button", { name: "Enable engine" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Enable blocking" })).toBeVisible();
   await expect.poll(() =>
     page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth),
   ).toBe(true);

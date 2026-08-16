@@ -11,9 +11,11 @@ header, command navigation, restrained cards, data tables, tabs, and Radix
 primitives. BeaRust’s amber security accent replaces the template’s default
 brand color while the structure remains recognizably shadcn-admin.
 
-The dashboard is intentionally a frontend-only demo surface for this phase.
-Every metric, host, event, and policy is visibly dummy data so the later API
-port does not get confused with a live backend integration.
+The shell supports two deliberate data modes: demo mode keeps the visual
+review environment deterministic, while API mode reads and mutates the live
+control-plane resources. Live screens expose their connection state and keep
+loading, empty, permission, and error states visible rather than silently
+falling back to fabricated operational data.
 
 ## Palette
 
@@ -56,11 +58,12 @@ Light and dark mode are controlled through `data-theme` and the existing
   reused before creating feature-specific components.
 - **Feature grammar:** `PageHeader`, `MetricCard`, and `StatusBadge` provide
   consistent page composition across dashboard, proxy hosts, security,
-  analytics, users, audit log, AI advisor, settings, and support.
+  analytics, users, audit log, AI advisor, settings, cluster, plugins, and
+  support.
 - **Interaction states:** buttons, menu items, tabs, dialogs, search,
-  filters, toggles, theme selection, team selection, and dummy toasts all
-  have visible state changes. Disabled tabs are intentionally presented as
-  future product areas.
+  filters, toggles, theme selection, team selection, API mutations, and
+  approval actions all have visible state changes. Disabled tabs are
+  intentionally presented as future product areas.
 - **Navigation:** grouped sidebar sections are General, Protection, and
   Administration. Security expands into WAF, bot protection, and rate
   limiting routes; mobile switches to the template’s off-canvas sidebar.
@@ -81,11 +84,10 @@ template-style sign-in card.
 
 ## Deferred
 
-- Replace dummy feature records and charts with the project API after the
-  shell and information architecture are approved.
-- Add authenticated live-session states and realtime data to the dashboard
-  once API wiring is intentionally started.
-- Add visual regression baselines if the team wants screenshot diffs in CI;
+- Extend the API-backed shell with any future backend capabilities that are
+  added to the PRD (for example plugin registry distribution or additional
+  deployment controls).
+- Add screenshot baselines if the team wants visual regression diffs in CI;
   this pass stores review screenshots in `.impeccable/review/`.
 
 [satnaing/shadcn-admin]: https://github.com/satnaing/shadcn-admin

@@ -54,18 +54,19 @@ test.describe("BeaRust shadcn-admin shell", () => {
     await expect(page.getByRole("dialog", { name: "Add proxy host" })).toBeVisible();
     await page.getByLabel("Display name").fill("Status page");
     await page.getByLabel("Domain").fill("status.bearust.local");
-    await page.getByLabel("Upstream target").fill("status:8080");
+    await page.getByLabel("Upstream host").fill("status");
+    await page.getByLabel("Upstream port").fill("8080");
     await page.getByRole("button", { name: "Create host" }).click();
     await expect(page.getByText("status.bearust.local", { exact: true })).toBeVisible();
-    await expect(page.getByText("Proxy host added")).toBeVisible();
+    await expect(page.getByText("Proxy host created")).toBeVisible();
   });
 
-  test("switches dashboard tabs and exports a dummy report", async ({ page }) => {
+  test("switches dashboard tabs and exports the live report shape", async ({ page }) => {
     await page.getByRole("tab", { name: "Analytics" }).click();
     await expect(page.getByText("Traffic analytics")).toBeVisible();
-    await expect(page.getByText("Unique visitors")).toBeVisible();
+    await expect(page.getByText("Successful responses")).toBeVisible();
 
     await page.getByRole("button", { name: "Export report" }).click();
-    await expect(page.getByText("Report prepared")).toBeVisible();
+    await expect(page.getByText("Report downloaded")).toBeVisible();
   });
 });

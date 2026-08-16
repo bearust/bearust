@@ -2,7 +2,7 @@ import type { Locale } from './i18n';
 
 export type Role=string;
 export type User={id:number;email:string;role:Role;disabled:boolean;preferred_locale?:Locale|null};
-export type PermissionKey='proxy_hosts.read'|'proxy_hosts.write'|'certificates.read'|'certificates.write'|'users.manage'|'roles.manage'|'audit_logs.read'|'audit_logs.export'|'system.settings.manage'|'sessions.revoke'|'bot_protection.manage';
+export type PermissionKey='proxy_hosts.read'|'proxy_hosts.write'|'certificates.read'|'certificates.write'|'users.manage'|'roles.manage'|'audit_logs.read'|'audit_logs.export'|'system.settings.manage'|'sessions.revoke'|'bot_protection.manage'|'ai_advisor.read'|'ai_advisor.request'|'ai_advisor.approve'|'plugins.read'|'plugins.manage';
 export type RolePermissionScope={permission:'proxy_hosts.read'|'proxy_hosts.write';proxy_host_ids:number[]};
 export type RoleRecord={id:number;slug:string;name:string;description:string;system_managed:boolean;permissions:PermissionKey[];scopes?:RolePermissionScope[]};
 export type Host={id:number;name:string;domain:string;upstream_host:string;upstream_port:number;tls_mode:string;certificate_id:number|null;enabled:boolean};
@@ -56,6 +56,11 @@ export type AdvisorInsight = AdvisorJob;
 export type AdvisorDraft = AdvisorJob & { workflow: 'configuration_draft'; redacted_result: AdvisorDraftResult | null };
 export type AdvisorJobPage = { items: AdvisorInsight[]; page: number; page_size: number; total: number };
 export type AdvisorAnalysisRequest = { workflow: AdvisorWorkflow; host_id?: number; from?: string; to?: string; command?: string };
+export type ClusterPeer = { node_id: string; status: 'healthy'|'unhealthy'|'unreachable'|'timeout'; latency_ms: number|null; error: string|null };
+export type ClusterSnapshot = { local_node_id: string; cluster_enabled: boolean; total_peers: number; healthy_peers: number; peers: ClusterPeer[]; timestamp: string; raft_role: 'standalone'|'leader'|'follower'|'candidate'|'unknown'; raft_leader_id: string|null; raft_term: number; raft_last_log_index: number; raft_commit_index: number; raft_quorum_available: boolean; raft_sync_state: string };
+export type PluginStatus = { id: string; display_name: string; abi_version: number; digest: string; enabled: boolean; loaded: boolean; last_error_code: string|null; created_at: string; updated_at: string; trust_status: string };
+export type PluginReloadResponse = { loaded: number; failed: number };
+export type PluginHealthResponse = { status: number; elapsed_ms: number; detail: string|null };
 
 export type ApiError = Error & { status: number; code?: string };
 
@@ -90,5 +95,6 @@ export const api={
  applyRecommendation:(id:number)=>request<void>(`/api/adaptive-tuning/recommendations/${id}/apply`,{method:'POST'}),
  rollbackRecommendation:(id:number)=>request<void>(`/api/adaptive-tuning/recommendations/${id}/rollback`,{method:'POST'}),
  emergencyDisableTuning:()=>request<{emergency_disabled:boolean}>('/api/adaptive-tuning/emergency-disable',{method:'POST'}),
- aiAdvisorStatus:()=>request<AdvisorStatus>('/api/ai-advisor/status'),startAiAnalysis:(x:AdvisorAnalysisRequest)=>request<AdvisorJob>('/api/ai-advisor/analyses',{method:'POST',body:JSON.stringify(x)}),listAiInsights:(query:{page?:number;page_size?:number}={})=>{const p=new URLSearchParams();for(const [k,v] of Object.entries(query)){if(v!==undefined)p.set(k,String(v))}const s=p.toString();return request<AdvisorJobPage>(`/api/ai-advisor/insights${s?`?${s}`:''}`)},approveAiDraft:(id:string)=>request<AdvisorDraft>(`/api/ai-advisor/drafts/${id}/approve`,{method:'POST'}),rejectAiDraft:(id:string)=>request<AdvisorDraft>(`/api/ai-advisor/drafts/${id}/reject`,{method:'POST'})
+ aiAdvisorStatus:()=>request<AdvisorStatus>('/api/ai-advisor/status'),startAiAnalysis:(x:AdvisorAnalysisRequest)=>request<AdvisorJob>('/api/ai-advisor/analyses',{method:'POST',body:JSON.stringify(x)}),listAiInsights:(query:{page?:number;page_size?:number}={})=>{const p=new URLSearchParams();for(const [k,v] of Object.entries(query)){if(v!==undefined)p.set(k,String(v))}const s=p.toString();return request<AdvisorJobPage>(`/api/ai-advisor/insights${s?`?${s}`:''}`)},approveAiDraft:(id:string)=>request<AdvisorDraft>(`/api/ai-advisor/drafts/${id}/approve`,{method:'POST'}),rejectAiDraft:(id:string)=>request<AdvisorDraft>(`/api/ai-advisor/drafts/${id}/reject`,{method:'POST'}),
+ clusterStatus:()=>request<ClusterSnapshot>('/api/cluster/status'),plugins:()=>request<PluginStatus[]>('/api/plugins'),reloadPlugins:()=>request<PluginReloadResponse>('/api/plugins/reload',{method:'POST'}),enablePlugin:(id:string)=>request<PluginStatus>(`/api/plugins/${encodeURIComponent(id)}/enable`,{method:'POST'}),disablePlugin:(id:string)=>request<PluginStatus>(`/api/plugins/${encodeURIComponent(id)}/disable`,{method:'POST'}),unloadPlugin:(id:string)=>request<void>(`/api/plugins/${encodeURIComponent(id)}`,{method:'DELETE'}),pluginHealthCheck:(id:string)=>request<PluginHealthResponse>(`/api/plugins/${encodeURIComponent(id)}/health-check`,{method:'POST'})
 };

@@ -47,9 +47,8 @@ To review the frontend shell without a backend, run the demo dashboard directly:
 npm ci --prefix frontend && npm --prefix frontend run dev
 ```
 
-The default frontend dev mode is intentionally dummy-data-only for the current
-shell/template pass. `npm run dev:api --prefix frontend` keeps the API-backed
-development entry point available for the later integration phase:
+The default frontend dev mode is a deterministic demo-data environment for
+visual review. The API-backed development entry point is available with:
 
 ```sh
 npm --prefix frontend run dev:api

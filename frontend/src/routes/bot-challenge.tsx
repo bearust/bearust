@@ -7,9 +7,11 @@ import { serverChallengeFingerprint, solveBotChallenge } from "@/features/bot-ch
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 
+type BotChallengeSearch = { fingerprint_prefix?: string };
+
 export const Route = createFileRoute("/bot-challenge")({
   component: BotChallengePage,
-  validateSearch: (search: Record<string, unknown>) => ({
+  validateSearch: (search: Record<string, unknown>): BotChallengeSearch => ({
     fingerprint_prefix: typeof search.fingerprint_prefix === "string" ? search.fingerprint_prefix : undefined,
   }),
 });
