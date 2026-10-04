@@ -690,6 +690,10 @@
     "review": "確認"
   },
   "analytics": {
+    "intervalLabel": "間隔",
+    "intervalMinute": "分 (UTC)",
+    "intervalHour": "時間 (UTC)",
+    "intervalDay": "日 (UTC)",
     "title": "分析",
     "description": "再起動後も保持される分単位テレメトリ、学習シグナル、ポリシー判断。",
     "filters": "分析フィルター",
@@ -1097,6 +1101,10 @@
     "clusterHealth": "クラスターの健全性",
     "saveLocalPreferences": "ローカル設定を保存",
     "notificationSaved": "通知設定をローカルに保存しました",
+    "notificationSaveError": "このブラウザーに通知設定を保存できませんでした。",
+    "securityChanged": "セキュリティポリシーが更新されました",
+    "certificatesChanged": "証明書が更新されました",
+    "clusterChanged": "クラスターの状態が更新されました",
     "sessionTitle": "セキュリティセッション",
     "sessionDescription": "認証済みアカウントメニューから利用できるセッション制御です。",
     "sessionInfo": "セッションのログアウトはコントロールプレーン API を呼び出します。他ユーザーのセッション失効はユーザーとロールから管理者が実行できます。",

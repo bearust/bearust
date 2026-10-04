@@ -121,7 +121,7 @@ async function changeI18nLocale(locale: Locale) {
   }
 }
 
-type LocalePreferenceValue = { locale: Locale; setLocale: (locale: Locale) => Promise<void> };
+type LocalePreferenceValue = { locale: Locale; setLocale: (locale: Locale) => Promise<boolean> };
 const LocalePreferenceContext = createContext<LocalePreferenceValue | null>(null);
 
 export function LocalePreferenceProvider({ accountLocale, children }: { accountLocale?: unknown; children: ReactNode }) {
@@ -136,7 +136,8 @@ export function LocalePreferenceProvider({ accountLocale, children }: { accountL
     setLocaleState(normalized);
     await changeI18nLocale(normalized);
     try { window.localStorage.setItem(LOCALE_STORAGE_KEY, normalized); } catch { /* storage is optional */ }
-    try { await api.updateLocalePreference(normalized); } catch { /* local preference remains available offline */ }
+    if (import.meta.env.VITE_DEMO_MODE === 'true') return true;
+    try { await api.updateLocalePreference(normalized); return true; } catch { return false; }
   };
   const value = useMemo(() => ({ locale, setLocale }), [locale]);
   return createElement(LocalePreferenceContext.Provider, { value }, children);

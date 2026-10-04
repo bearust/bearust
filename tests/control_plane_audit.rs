@@ -15,6 +15,52 @@ async fn pool() -> DbPool {
     pool
 }
 
+#[tokio::test]
+async fn audit_search_matches_actor_labels_with_consistent_totals() {
+    let db = pool().await;
+    let actor = repository::insert_user(&db, "auditor@example.test", "hash", "viewer")
+        .await
+        .unwrap();
+    insert_audit(
+        &db,
+        Some(actor.id),
+        "config_changed",
+        "host_id=7",
+        "2026-10-01T00:00:00Z",
+    )
+    .await;
+    insert_audit(
+        &db,
+        None,
+        "service_started",
+        "startup",
+        "2026-10-01T00:00:01Z",
+    )
+    .await;
+    for (search, expected_actor) in [
+        ("auditor@example.test", "auditor@example.test"),
+        ("system", "system"),
+    ] {
+        let result = repository::list_audit_logs(
+            &db,
+            &AuditLogQuery {
+                q: Some(search.into()),
+                event: None,
+                actor_id: None,
+                from: None,
+                to: None,
+                page: 1,
+                page_size: 25,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].actor, expected_actor);
+    }
+}
+
 async fn insert_audit(
     pool: &DbPool,
     user_id: Option<i64>,

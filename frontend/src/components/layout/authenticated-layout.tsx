@@ -7,6 +7,7 @@ import { DEMO_MODE } from "@/lib/demo";
 import { useAuthStore } from "@/stores/auth-store";
 import { LocalePreferenceProvider } from "@/i18n";
 import { useRealtimeUpdates } from "@/realtime";
+import { useOperationalNotifications } from "@/lib/notification-preferences";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "./app-sidebar";
 import { Header } from "./header";
@@ -19,6 +20,7 @@ import { SkipToMain } from "@/components/skip-to-main";
 export function AuthenticatedLayout() {
   const defaultOpen = getCookie("sidebar_state") !== "false";
   const user = useAuthStore((s) => s.user);
+  useOperationalNotifications(user?.id);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const session = useQuery({ queryKey: ["me"], queryFn: api.me, enabled: !DEMO_MODE, staleTime: 30_000 });

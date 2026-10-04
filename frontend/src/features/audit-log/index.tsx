@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { ChevronLeft, ChevronRight, Download, FileClock, RefreshCw, Search } from "lucide-react";
@@ -30,15 +30,25 @@ export function AuditLog() {
   const [to, setTo] = useState("");
   const [loading, setLoading] = useState(!DEMO_MODE);
   const [error, setError] = useState("");
+  const requestVersion = useRef(0);
 
   const refresh = async (nextPage = page.page) => {
     if (DEMO_MODE) return;
+    const version = ++requestVersion.current;
     setLoading(true); setError("");
     try {
-      setPage(await api.auditLogs({ q: query, event, from: toIso(from), to: toIso(to), page: nextPage, page_size: 25 }));
-    } catch (exception) { setError(sanitizeError(exception)); } finally { setLoading(false); }
+      const result = await api.auditLogs({ q: query, event, from: toIso(from), to: toIso(to), page: nextPage, page_size: 25 });
+      if (version === requestVersion.current) setPage(result);
+    } catch (exception) {
+      if (version === requestVersion.current) setError(sanitizeError(exception));
+    } finally {
+      if (version === requestVersion.current) setLoading(false);
+    }
   };
-  useEffect(() => { void refresh(1); }, [query, event, from, to]);
+  useEffect(() => {
+    void refresh(1);
+    return () => { requestVersion.current++; };
+  }, [query, event, from, to]);
   useRealtimeRefresh(["audit"], () => refresh(1));
 
   const visible = useMemo(() => DEMO_MODE ? page.items.filter((entry) => `${entry.actor} ${entry.event} ${entry.details}`.toLowerCase().includes(query.toLowerCase()) && (!event || entry.event.includes(event))) : page.items, [page.items, query, event]);
@@ -46,7 +56,7 @@ export function AuditLog() {
 
   const exportCsv = () => {
     const rows = [["timestamp", "actor", "event", "details"], ...visible.map((entry) => [entry.created_at, entry.actor, entry.event, entry.details])];
-    const csv = rows.map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(",")).join("\n");
+    const csv = rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     const anchor = document.createElement("a"); anchor.href = url; anchor.download = `bearust-audit-page-${page.page}.csv`; anchor.click(); URL.revokeObjectURL(url);
     toast.success(t("shell.auditCsvDownloaded"), { description: t("shell.auditExportDescription") });
@@ -61,3 +71,8 @@ export function AuditLog() {
 
 function toIso(value: string) { return value ? new Date(value).toISOString() : undefined; }
 function formatDate(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date); }
+function csvCell(value: string) {
+  // CSV quoting alone does not prevent spreadsheet formula evaluation.
+  const text = /^[\s\uFEFF]*[=+\-@]|^[\t\r\n]/.test(value) ? `'${value}` : value;
+  return `"${text.replaceAll('"', '""')}"`;
+}

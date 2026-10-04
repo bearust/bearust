@@ -51,7 +51,7 @@ export function ProfileDropdown() {
           </div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={() => void navigate({ to: "/users" })}>
+        <DropdownMenuItem onClick={() => void navigate({ to: "/settings" })}>
           <UserRound />
           {t("shell.account")}
         </DropdownMenuItem>

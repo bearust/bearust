@@ -16,7 +16,7 @@ use sha2::Sha256;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -111,7 +111,7 @@ pub enum RaftRole {
     Unknown,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RaftStatus {
     pub role: RaftRole,
     pub leader_id: Option<String>,
@@ -159,6 +159,8 @@ pub struct ClusterService {
     command_handler: Arc<RwLock<Option<Arc<dyn InternalCommandHandler>>>>,
     event_handler: Arc<RwLock<Option<Arc<dyn ClusterEventHandler>>>>,
     topology_transition_gate: tokio::sync::RwLock<bool>,
+    realtime: RwLock<Option<Arc<crate::control_plane::realtime::RealtimeHub>>>,
+    peer_statuses: Mutex<Option<Vec<(String, PeerStatus)>>>,
 }
 
 struct ClusterRpcHandlers {
@@ -203,6 +205,8 @@ impl ClusterService {
             command_handler: Arc::new(RwLock::new(None)),
             event_handler: Arc::new(RwLock::new(None)),
             topology_transition_gate: tokio::sync::RwLock::new(false),
+            realtime: RwLock::new(None),
+            peer_statuses: Mutex::new(None),
         }
     }
 
@@ -234,7 +238,25 @@ impl ClusterService {
 
     pub fn set_raft_status(&self, status: RaftStatus) {
         if let Ok(mut current) = self.raft_status.write() {
-            *current = status;
+            if *current != status {
+                *current = status;
+                drop(current);
+                self.publish_status_change();
+            }
+        }
+    }
+
+    pub fn attach_realtime(&self, hub: Arc<crate::control_plane::realtime::RealtimeHub>) {
+        if let Ok(mut current) = self.realtime.write() {
+            *current = Some(hub);
+        }
+    }
+
+    fn publish_status_change(&self) {
+        if let Ok(hub) = self.realtime.read() {
+            if let Some(hub) = hub.as_ref() {
+                hub.publish("cluster.changed");
+            }
         }
     }
 
@@ -467,6 +489,23 @@ impl ClusterService {
         // Run bounded concurrent health checks (peer count already capped at MAX_PEERS).
         let futures: Vec<_> = self.peers.iter().map(|p| self.check_peer(p)).collect();
         let peer_healths = futures_util::future::join_all(futures).await;
+        let statuses = peer_healths
+            .iter()
+            .map(|peer| (peer.node_id.clone(), peer.status))
+            .collect::<Vec<_>>();
+        let changed = if let Ok(mut previous) = self.peer_statuses.lock() {
+            if previous.as_ref() != Some(&statuses) {
+                *previous = Some(statuses);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if changed {
+            self.publish_status_change();
+        }
         let healthy_peers = peer_healths
             .iter()
             .filter(|p| p.status == PeerStatus::Healthy)
@@ -486,6 +525,33 @@ impl ClusterService {
             raft_commit_index: raft.commit_index,
             raft_quorum_available: raft.quorum_available,
             raft_sync_state: raft.sync_state,
+        }
+    }
+}
+
+/// Probe peer health out of band and invalidate SSE consumers only when a
+/// peer's state changes. Timestamps and probe latency never cause event loops.
+pub async fn monitor_cluster_health(
+    service: Arc<ClusterService>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    if service.is_single_node() {
+        return;
+    }
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            _ = interval.tick() => {
+                tokio::select! {
+                    _ = shutdown.changed() => break,
+                    _ = service.snapshot() => {},
+                }
+            }
         }
     }
 }

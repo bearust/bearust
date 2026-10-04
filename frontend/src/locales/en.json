@@ -694,6 +694,10 @@
     "review": "Review"
   },
   "analytics": {
+    "intervalLabel": "Interval",
+    "intervalMinute": "Minute (UTC)",
+    "intervalHour": "Hour (UTC)",
+    "intervalDay": "Day (UTC)",
     "title": "Analytics",
     "description": "Durable minute-level telemetry, learning signals, and policy decisions.",
     "filters": "Analytics filters",
@@ -1105,6 +1109,10 @@
     "clusterHealth": "Cluster health",
     "saveLocalPreferences": "Save local preferences",
     "notificationSaved": "Notification preferences saved locally",
+    "notificationSaveError": "Notification preferences could not be saved in this browser.",
+    "securityChanged": "Security policy updated",
+    "certificatesChanged": "Certificates updated",
+    "clusterChanged": "Cluster status updated",
     "sessionTitle": "Security session",
     "sessionDescription": "Session controls available from the authenticated account menu.",
     "sessionInfo": "Session logout calls the control-plane API. User session revocation is available to administrators from Users & Roles.",

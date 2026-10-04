@@ -2751,8 +2751,9 @@ fn audit_where(query: &AuditLogQuery) -> (String, Vec<AuditFilter>) {
         filters.push(AuditFilter::Text(to.to_owned()));
     }
     if let Some(q) = query.q.as_deref() {
-        predicates.push("(a.event LIKE ? OR a.details LIKE ?)");
+        predicates.push("(a.event LIKE ? OR a.details LIKE ? OR COALESCE(u.email, CASE WHEN a.user_id IS NULL THEN 'system' ELSE 'deleted-user' END) LIKE ?)");
         let pattern = format!("%{q}%");
+        filters.push(AuditFilter::Text(pattern.clone()));
         filters.push(AuditFilter::Text(pattern.clone()));
         filters.push(AuditFilter::Text(pattern));
     }

@@ -42,7 +42,8 @@ export type AnalyticsBucket={timestamp:string;proxy_host_id:number;requests:numb
 export type AnalyticsCount={key:string;count:number};
 export type AnalyticsDimensions={bandwidth_bytes:number;top_endpoints:AnalyticsCount[];top_upstreams:AnalyticsCount[];top_attacker_ips:AnalyticsCount[];attack_types:AnalyticsCount[]};
 export type AnalyticsRetentionConfig={retention_minutes:number;updated_at:string};
-export type AnalyticsQuery={proxy_host_id?:number;from?:string;to?:string;limit?:number};
+export type AnalyticsInterval='minute'|'hour'|'day';
+export type AnalyticsQuery={proxy_host_id?:number;from?:string;to?:string;limit?:number;interval?:AnalyticsInterval};
 
 export type BaselineWindow = '5m' | '1h' | '24h';
 export type BaselineStatus = 'warming_up' | 'ready';

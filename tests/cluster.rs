@@ -9,6 +9,75 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const TEST_SECRET: &str = "01234567890123456789012345678901";
 
+#[tokio::test]
+async fn cluster_raft_changes_publish_realtime_invalidations_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let cluster = Arc::new(ClusterService::new(&ClusterConfig::default()));
+    let state = bearust::control_plane::build_state("sqlite::memory:", directory.path(), "setup")
+        .await
+        .unwrap()
+        .with_cluster(cluster.clone());
+    let mut events = state.realtime.subscribe();
+    let status = bearust::cluster::RaftStatus {
+        role: RaftRole::Leader,
+        leader_id: Some("node1".into()),
+        term: 2,
+        last_log_index: 8,
+        commit_index: 7,
+        quorum_available: true,
+        sync_state: "leader_ready".into(),
+    };
+    cluster.set_raft_status(status.clone());
+    let event = tokio::time::timeout(std::time::Duration::from_millis(300), events.recv()).await;
+    assert!(
+        event.is_ok(),
+        "cluster role changes must invalidate connected dashboards"
+    );
+    assert_eq!(event.unwrap().unwrap().kind, "cluster.changed");
+    cluster.set_raft_status(status);
+    assert!(
+        events.try_recv().is_err(),
+        "unchanged status must not generate repeated notifications"
+    );
+}
+
+#[tokio::test]
+async fn cluster_peer_health_changes_publish_realtime_invalidations() {
+    let address = spawn_cluster_responder("node2").await;
+    let cluster = Arc::new(ClusterService::new(&ClusterConfig {
+        peers: vec![ClusterPeer {
+            node_id: "node2".into(),
+            address,
+        }],
+        auth_token: TEST_SECRET.into(),
+        ..ClusterConfig::default()
+    }));
+    let directory = tempfile::tempdir().unwrap();
+    let state = bearust::control_plane::build_state("sqlite::memory:", directory.path(), "setup")
+        .await
+        .unwrap()
+        .with_cluster(cluster.clone());
+    let mut events = state.realtime.subscribe();
+    assert_eq!(cluster.snapshot().await.healthy_peers, 1);
+    assert_eq!(
+        events
+            .try_recv()
+            .expect("initial peer status must be published")
+            .kind,
+        "cluster.changed"
+    );
+    assert_eq!(cluster.snapshot().await.healthy_peers, 0);
+    assert_eq!(
+        events
+            .try_recv()
+            .expect("unreachable peer must be published")
+            .kind,
+        "cluster.changed"
+    );
+    cluster.snapshot().await;
+    assert!(events.try_recv().is_err());
+}
+
 /// Helper: spawn a minimal cluster-protocol responder that performs the
 /// authenticated handshake exchange for one connection.
 async fn spawn_cluster_responder(peer_node_id: &'static str) -> SocketAddr {

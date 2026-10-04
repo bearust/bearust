@@ -254,7 +254,13 @@ async fn command_cluster() -> ControlPlaneCommandCluster {
 
     for (index, (node_id, bind)) in ids.iter().zip(addresses).enumerate() {
         let directory = Box::leak(Box::new(tempdir().unwrap()));
-        let mut state = build_state("sqlite::memory:", directory.path(), "setup-token")
+        // Shutdown can cancel an in-flight SQLite query and replace its connection.
+        // A file database preserves node state across that connection replacement.
+        let database_url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("node.sqlite").display()
+        );
+        let mut state = build_state(&database_url, directory.path(), "setup-token")
             .await
             .unwrap();
         sqlx::query(

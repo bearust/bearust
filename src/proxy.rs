@@ -266,10 +266,26 @@ impl BeaRustProxy {
                 Some(RateLimitDecision::Limited { .. })
             ),
         );
-        let proxy_host_id = ctx
+        let host = ctx
             .route
             .as_ref()
-            .and_then(|route| self.analytics_host_ids.get(&route.host).copied())
+            .map(|route| route.host.clone())
+            .or_else(|| {
+                session
+                    .req_header()
+                    .headers
+                    .get("host")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(normalize_host)
+            });
+        let proxy_host_id = host
+            .as_deref()
+            .and_then(|host| {
+                ctx.snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.proxy_host_id(host))
+                    .or_else(|| self.analytics_host_ids.get(host).copied())
+            })
             .unwrap_or(0);
         let endpoint = Some(session.req_header().uri.path().to_owned());
         let upstream = ctx.lease.as_ref().map(|lease| lease.address().to_string());
@@ -1080,10 +1096,8 @@ pub fn emit_rate_limit_telemetry(
 }
 
 pub fn route_key(route: &ResolvedRoute) -> i64 {
-    // Stable, non-sensitive identity for the configured proxy host.  The
-    // control-plane proxy-host id can replace this hash once it is wired into
-    // the runtime snapshot; paths deliberately do not participate so all
-    // routes on one host share the same client quota.
+    // Stable fallback identity for native TOML routes without a database ID.
+    // Paths deliberately do not participate so one host shares its quota.
     let mut hash = 0xcbf29ce484222325u64;
     for byte in route.host.bytes() {
         hash ^= u64::from(byte);
@@ -1102,6 +1116,7 @@ impl ProxyHttp for BeaRustProxy {
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         let snapshot = self.runtime.load();
+        ctx.snapshot = Some(Arc::clone(&snapshot));
         let host = session
             .req_header()
             .headers
@@ -1369,7 +1384,12 @@ impl ProxyHttp for BeaRustProxy {
                 // The store owns the live policy snapshot so control-plane
                 // mutations take effect for existing proxy workers without a
                 // listener restart.
-                let host_id = route_key(ctx.route.as_ref().expect("route must be set"));
+                let route = ctx.route.as_ref().expect("route must be set");
+                let host_id = ctx
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.proxy_host_id(&route.host))
+                    .unwrap_or_else(|| route_key(route));
                 let policy = store.host_policy(host_id);
                 let key = RateLimitKey {
                     proxy_host_id: host_id,

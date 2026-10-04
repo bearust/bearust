@@ -14,6 +14,100 @@ fn event(host: i64, minute: i64, status: u16, latency: u64) -> AnalyticsEvent {
 }
 
 #[test]
+fn interval_rollups_preserve_hosts_counters_histograms_and_apply_limit_last() {
+    use bearust::analytics::AnalyticsInterval;
+    let collector = AnalyticsCollector::with_limits(4, 10080);
+    for minute in [61, 62] {
+        let mut request = event(
+            1,
+            minute,
+            if minute == 61 { 200 } else { 403 },
+            if minute == 61 { 10 } else { 1000 },
+        );
+        request.security = SecurityCounters {
+            waf_blocks: 1,
+            bot_blocks: 2,
+            bot_challenges: 3,
+            rate_limited: 4,
+        };
+        collector.record_with_dimensions(
+            request,
+            AnalyticsDimensionEvent {
+                bytes: 100,
+                ..Default::default()
+            },
+        );
+    }
+    collector.record(event(2, 62, 500, 50));
+    collector.record(event(1, 120, 500, 50));
+    let rows = collector.timeseries(AnalyticsFilter {
+        interval: AnalyticsInterval::Hour,
+        ..Default::default()
+    });
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.timestamp.timestamp(), row.proxy_host_id, row.requests))
+            .collect::<Vec<_>>(),
+        vec![(3600, 1, 2), (3600, 2, 1), (7200, 1, 1)]
+    );
+    assert_eq!(
+        (rows[0].status_2xx, rows[0].status_4xx, rows[0].status_5xx),
+        (1, 1, 0)
+    );
+    assert_eq!(
+        (
+            rows[0].waf_blocks,
+            rows[0].bot_blocks,
+            rows[0].bot_challenges,
+            rows[0].rate_limited
+        ),
+        (2, 4, 6, 8)
+    );
+    assert_eq!(rows[0].bandwidth_bytes, 200);
+    assert_eq!(
+        (rows[0].p50_ms, rows[0].p95_ms, rows[0].p99_ms),
+        (Some(10), Some(1000), Some(1000))
+    );
+    let filtered = collector.timeseries(AnalyticsFilter {
+        proxy_host_id: Some(1),
+        from: Some(Utc.timestamp_opt(3600, 0).unwrap()),
+        to: Some(Utc.timestamp_opt(7199, 0).unwrap()),
+        interval: AnalyticsInterval::Hour,
+        limit: 1,
+    });
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].requests, 2);
+}
+
+#[test]
+fn daily_rollups_use_utc_boundaries_and_filter_source_minutes_before_grouping() {
+    use bearust::analytics::AnalyticsInterval;
+    let collector = AnalyticsCollector::with_limits(2, 10080);
+    for minute in [-1, 0, 1, 1439, 1440] {
+        collector.record(event(1, minute, 200, 10));
+    }
+    let rows = collector.timeseries(AnalyticsFilter {
+        interval: AnalyticsInterval::Day,
+        ..Default::default()
+    });
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.timestamp.timestamp(), row.requests))
+            .collect::<Vec<_>>(),
+        vec![(-86400, 1), (0, 3), (86400, 1)]
+    );
+    let rows = collector.timeseries(AnalyticsFilter {
+        interval: AnalyticsInterval::Day,
+        from: Some(Utc.timestamp_opt(60, 0).unwrap()),
+        to: Some(Utc.timestamp_opt(120, 0).unwrap()),
+        ..Default::default()
+    });
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].timestamp.timestamp(), 0);
+    assert_eq!(rows[0].requests, 1);
+}
+
+#[test]
 fn dimensions_roll_up_bandwidth_and_top_lists() {
     let c = AnalyticsCollector::new(2);
     c.record_with_dimensions(

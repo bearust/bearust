@@ -1,5 +1,14 @@
 import { expect, test } from "@playwright/test";
 
+test("analytics interval controls fit a mobile viewport and identify demo limitations", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await page.goto("/analytics");
+  await expect(page.getByRole("heading", { name: "Analytics" })).toBeVisible();
+  await expect(page.getByLabel("Interval", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Interval", { exact: true })).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+});
+
 for (const width of [390, 768, 1280]) {
   test(`dashboard shell is usable without page overflow at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });

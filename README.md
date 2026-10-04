@@ -400,7 +400,7 @@ The endpoint accepts these optional query parameters:
 - `event` — exact event name.
 - `actor_id` — numeric user ID (including actors whose account was later deleted).
 - `from` and `to` — RFC3339 timestamp bounds, inclusive.
-- `q` — text search across the event name and details.
+- `q` — text search across the actor label, event name, and details.
 - `page` — 1-based page number (default `1`).
 - `page_size` — rows per page (default `25`, limited to `1`–`100`).
 
@@ -433,6 +433,15 @@ an optional, redacted, approval-gated service with periodic security summaries.
 The dashboard subscribes to `GET /api/events` using an authenticated session cookie. The endpoint uses Server-Sent Events (SSE) to deliver safe invalidation notifications for proxy hosts, certificates, users, roles, sessions, and audit activity; the dashboard reloads the corresponding proxy-host, certificate, user, role, and audit data, while session events are notified through the stream for future session-view consumers. Payloads never contain credentials, tokens, hashes, private keys, or request bodies. Delivery to each process is bounded and process-local, while committed cluster events fan out across configured nodes and trigger bounded local catch-up. Clients automatically reconnect after transient disconnects and receive a heartbeat roughly every 15 seconds; replay of every event missed while disconnected remains intentionally deferred.
 
 ### Analytics dashboard
+
+`GET /api/analytics/timeseries` accepts `interval=minute|hour|day` (default
+`minute`). Buckets align to UTC boundaries and remain separated by proxy host.
+The `from`/`to` filters select source minute buckets before aggregation; `limit`
+selects the newest output buckets after aggregation. Counters and latency
+histograms are summed, then percentiles are recalculated from the combined
+histogram. The dashboard exposes an interval selector and UTC date labels.
+This is a query-time rollup of retained minute history, not additional long-term
+storage or cross-node aggregation; retention remains unchanged.
 
 The authenticated dashboard includes a read-only Analytics panel for proxy
 traffic and security aggregates. `admin`, `operator`, and `viewer` sessions

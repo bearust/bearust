@@ -28,6 +28,7 @@ pub struct RuntimeSnapshot {
     router: Router,
     pools: HashMap<String, Arc<PoolState>>,
     tls: Option<Arc<TlsSnapshot>>,
+    proxy_host_ids: HashMap<String, i64>,
 }
 
 impl RuntimeSnapshot {
@@ -53,13 +54,19 @@ impl RuntimeSnapshot {
             .map(TlsSnapshot::from_config)
             .transpose()?
             .map(Arc::new);
-        Ok(Self {
+        let proxy_host_ids = previous
+            .map(|snapshot| snapshot.proxy_host_ids.clone())
+            .unwrap_or_default();
+        let mut snapshot = Self {
             generation,
             router: Router::new(&config.routes),
             config: Arc::new(config),
             pools,
             tls,
-        })
+            proxy_host_ids: HashMap::new(),
+        };
+        snapshot.set_proxy_host_ids(proxy_host_ids);
+        Ok(snapshot)
     }
     pub fn generation(&self) -> u64 {
         self.generation
@@ -76,6 +83,29 @@ impl RuntimeSnapshot {
     }
     pub fn pool(&self, name: &str) -> Option<Arc<PoolState>> {
         self.pools.get(name).cloned()
+    }
+    pub fn proxy_host_id(&self, authority: &str) -> Option<i64> {
+        self.proxy_host_ids
+            .get(&crate::router::normalize_host(authority)?)
+            .copied()
+    }
+
+    fn set_proxy_host_ids(&mut self, ids: HashMap<String, i64>) {
+        // IDs come from the control-plane database, never from operator-
+        // supplied route names. Keep identity and routes in one atomic snapshot.
+        let routed_hosts: std::collections::HashSet<_> = self
+            .config
+            .routes
+            .iter()
+            .filter_map(|route| crate::router::normalize_host(&route.host))
+            .collect();
+        self.proxy_host_ids = ids
+            .into_iter()
+            .filter_map(|(host, id)| {
+                let host = crate::router::normalize_host(&host)?;
+                (id > 0 && routed_hosts.contains(&host)).then_some((host, id))
+            })
+            .collect();
     }
     pub fn pools(&self) -> impl Iterator<Item = Arc<PoolState>> + '_ {
         self.pools.values().cloned()
@@ -134,10 +164,30 @@ impl RuntimeStore {
     /// workers are started before the active snapshot is swapped, so a bad
     /// pool or route can never partially replace live traffic configuration.
     pub async fn apply_config(&self, config: Config) -> Result<ReloadOutcome, RuntimeError> {
+        self.apply_config_with_identity(config, None).await
+    }
+
+    pub async fn apply_config_with_host_ids(
+        &self,
+        config: Config,
+        host_ids: HashMap<String, i64>,
+    ) -> Result<ReloadOutcome, RuntimeError> {
+        self.apply_config_with_identity(config, Some(host_ids))
+            .await
+    }
+
+    async fn apply_config_with_identity(
+        &self,
+        config: Config,
+        host_ids: Option<HashMap<String, i64>>,
+    ) -> Result<ReloadOutcome, RuntimeError> {
         config.validate()?;
         let _guard = self.reload_lock.lock().await;
         let old = self.load();
-        let candidate = RuntimeSnapshot::build(config, Some(&old))?;
+        let mut candidate = RuntimeSnapshot::build(config, Some(&old))?;
+        if let Some(host_ids) = host_ids {
+            candidate.set_proxy_host_ids(host_ids);
+        }
         let replacement = HealthSupervisor::start(
             candidate.pools().collect(),
             candidate.config().health.clone(),

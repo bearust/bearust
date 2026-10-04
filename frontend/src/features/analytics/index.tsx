@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -18,6 +18,7 @@ import {
 import {
   api,
   type AnalyticsBucket,
+  type AnalyticsInterval,
   type AnalyticsDimensions,
   type AnalyticsSummary,
   type AnomalyRecord,
@@ -170,6 +171,8 @@ export function Analytics() {
   const user = useAuthStore((state) => state.user);
   const canWrite = user?.role === "admin";
   const [range, setRange] = useState("24h");
+  const [interval, setInterval] = useState<AnalyticsInterval>("minute");
+  const requestVersion = useRef(0);
   const [retentionMinutes, setRetentionMinutes] = useState(1440);
   const [hosts, setHosts] = useState<Host[]>(DEMO_MODE ? demoHosts : []);
   const [hostId, setHostId] = useState(DEMO_MODE ? "1" : "");
@@ -215,6 +218,7 @@ export function Analytics() {
   );
   const refresh = async () => {
     if (DEMO_MODE || (!hostId && hosts.length === 0)) return;
+    const version = ++requestVersion.current;
     setLoading(true);
     setError("");
     setPolicyLoaded(false);
@@ -227,6 +231,7 @@ export function Analytics() {
         limit: 10080,
       }),
       api.getAnalyticsTimeseries({
+        interval,
         ...(selected ? { proxy_host_id: selected } : {}),
         from,
         limit: 10080,
@@ -253,8 +258,9 @@ export function Analytics() {
       recommendationResult,
       policyResult,
     ] = results;
+    if (version !== requestVersion.current) return;
     if (summaryResult.status === "fulfilled") setSummary(summaryResult.value);
-    if (rowsResult.status === "fulfilled") setRows(rowsResult.value);
+    setRows(rowsResult.status === "fulfilled" ? rowsResult.value : []);
     if (dimensionsResult.status === "fulfilled")
       setDimensions(dimensionsResult.value);
     if (baselineResult.status === "fulfilled")
@@ -274,7 +280,8 @@ export function Analytics() {
   };
   useEffect(() => {
     void refresh();
-  }, [hostId, range, retentionMinutes, hosts.length]);
+    return () => { requestVersion.current += 1; };
+  }, [hostId, range, interval, retentionMinutes, hosts.length]);
   useRealtimeRefresh(
     [
       "analytics.changed",
@@ -288,11 +295,12 @@ export function Analytics() {
   const chartData = useMemo(
     () =>
       rows
-        .slice(-24)
         .map((row) => ({
           name: new Intl.DateTimeFormat(undefined, {
-            hour: "2-digit",
-            minute: "2-digit",
+            timeZone: "UTC",
+            month: "short",
+            day: "numeric",
+            ...(interval === "day" ? {} : { hour: "2-digit" as const, minute: "2-digit" as const }),
           }).format(new Date(row.timestamp)),
           requests: row.requests,
           blocked:
@@ -301,7 +309,7 @@ export function Analytics() {
             row.bot_challenges +
             row.rate_limited,
         })),
-    [rows],
+    [rows, interval],
   );
   const blocked = summary
     ? summary.waf_blocks +
@@ -447,6 +455,17 @@ export function Analytics() {
                   duration: formatDuration(retentionMinutes),
                 })}
               </option>
+            </select>
+            <select
+              aria-label={t("analytics.intervalLabel")}
+              value={interval}
+              onChange={(event) => setInterval(event.target.value as AnalyticsInterval)}
+              disabled={DEMO_MODE}
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+            >
+              <option value="minute">{t("analytics.intervalMinute")}</option>
+              <option value="hour">{t("analytics.intervalHour")}</option>
+              <option value="day">{t("analytics.intervalDay")}</option>
             </select>
             <Button
               variant="outline"

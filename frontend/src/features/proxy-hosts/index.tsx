@@ -229,7 +229,7 @@ export function ProxyHosts() {
   useEffect(() => {
     void refresh();
   }, []);
-  useRealtimeRefresh(["proxy_hosts.changed", "certificates.changed"], refresh);
+  useRealtimeRefresh(["proxy_hosts.changed", "certificates.changed", "security.changed"], refresh);
 
   const visibleHosts = useMemo(
     () =>

@@ -106,6 +106,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn with_cluster(mut self, cluster: Arc<crate::cluster::ClusterService>) -> Self {
+        cluster.attach_realtime(self.realtime.clone());
         self.cluster = cluster;
         self
     }
@@ -4122,6 +4123,7 @@ struct AnalyticsQuery {
     from: Option<String>,
     to: Option<String>,
     limit: Option<usize>,
+    interval: Option<crate::analytics::AnalyticsInterval>,
 }
 fn parse_analytics_query(raw: Option<String>) -> Result<AnalyticsQuery, ()> {
     raw.as_deref()
@@ -4134,6 +4136,7 @@ fn parse_analytics_query(raw: Option<String>) -> Result<AnalyticsQuery, ()> {
                 from: None,
                 to: None,
                 limit: None,
+                interval: None,
             })
         })
 }
@@ -4169,6 +4172,7 @@ fn analytics_filter(q: AnalyticsQuery) -> Result<AnalyticsFilter, ()> {
         from,
         to,
         limit: q.limit.unwrap_or(0),
+        interval: q.interval.unwrap_or_default(),
     })
 }
 async fn require_analytics_read(

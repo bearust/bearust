@@ -481,6 +481,10 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         };
         control_state = control_state.with_cluster(cluster_service.clone());
         let (cluster_shutdown_tx, cluster_shutdown_rx) = tokio::sync::watch::channel(false);
+        let cluster_health_task = tokio::spawn(crate::cluster::monitor_cluster_health(
+            cluster_service.clone(),
+            cluster_shutdown_rx.clone(),
+        ));
         let cluster_task = tokio::spawn(crate::cluster::run_cluster_listener(
             cluster_service,
             cluster_shutdown_rx,
@@ -491,12 +495,6 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let rate_limiter = control_state.rate_limiter.clone();
         let analytics = control_state.analytics.clone();
         let realtime = control_state.realtime.clone();
-        let analytics_host_ids = crate::control_plane::repository::list_hosts(&control_state.db)
-            .await
-            .map_err(|e| AppError::Server(format!("load proxy hosts for analytics: {e}")))?
-            .into_iter()
-            .filter_map(|host| crate::router::normalize_host(&host.domain).map(|domain| (domain, host.id)))
-            .collect::<HashMap<_, _>>();
         let analytics_persistence_task = {
             let database = control_state.db.clone();
             let collector = control_state.analytics.clone();
@@ -547,7 +545,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                 trusted_proxies: Some(Arc::new(trusted_proxies.clone())),
                 analytics: Some(Arc::new(crate::http3::AnalyticsContext {
                     collector: analytics.clone(),
-                    host_ids: Arc::new(analytics_host_ids.clone()),
+                    host_ids: Arc::new(HashMap::new()),
                     changed: Some(analytics_changed.clone()),
                 })),
                 rate_limit: Some(Arc::new(crate::http3::RateLimitContext {
@@ -669,7 +667,6 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                 .with_bot_store(bot_store, challenge_service)
                 .with_analytics(analytics)
                 .with_analytics_changed_notifier(analytics_changed)
-                .with_analytics_host_ids(analytics_host_ids)
                 .with_baseline(control_state.baseline.clone())
                 .with_anomaly(control_state.anomaly.clone())
                 .with_plugin_notify_sink(plugin_notify_sink)
@@ -793,6 +790,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             let _ = status_task.await;
         }
         let _ = cluster_shutdown_tx.send(true);
+        let _ = cluster_health_task.await;
         tokio::time::timeout(
             Duration::from_secs(config.server.graceful_shutdown_seconds),
             cluster_task,

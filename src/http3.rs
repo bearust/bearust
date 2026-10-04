@@ -23,14 +23,7 @@ use crate::rate_limit_store::{client_ip, IpNetSet, RateLimiterStore};
 use crate::runtime::RuntimeStore;
 use crate::waf_store::WafStore;
 use bytes::Buf;
-use std::{
-    collections::HashMap,
-    io,
-    net::SocketAddr,
-    path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, io, net::SocketAddr, path::Path, sync::Arc, time::Instant};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -46,15 +39,6 @@ pub enum Http3Error {
     #[error("HTTP/3 upstream HTTP client could not be constructed")]
     HttpClient(#[source] reqwest::Error),
 }
-
-/// Request timeout applied to every upstream `reqwest` request the H3
-/// listener makes. There is no single global constant for this in the
-/// codebase -- `PoolConfig::request_timeout_seconds` is configured per
-/// upstream pool (see `src/config/mod.rs`) and threaded into Pingora's own
-/// peer options in `src/proxy.rs` -- so this picks a value consistent with
-/// that config's typical default (30s, see e.g. the fixture pools in
-/// `src/proxy.rs`'s tests) rather than inventing an unrelated number.
-const UPSTREAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Hop-by-hop headers (RFC 9110 §7.6.1) that must never be forwarded
 /// verbatim by a proxy -- they describe the semantics of one specific
@@ -76,10 +60,9 @@ const HOP_BY_HOP_HEADERS: [&str; 8] = [
 
 /// Bundles what's needed to record a completion event for an H3 request,
 /// mirroring `BeaRustProxy::record_completion`'s dependencies
-/// (`src/proxy.rs`) without requiring any Pingora type: `host_ids` maps a
-/// normalized proxy-host name to its analytics id (built once at startup,
-/// same as `BeaRustProxy::analytics_host_ids`), and `changed` is the
-/// realtime-dashboard notifier, invoked after every recorded event.
+/// (`src/proxy.rs`) without requiring any Pingora type. Live host identities
+/// come from the request's runtime snapshot; `host_ids` is a fallback for
+/// embedded callers. `changed` notifies the realtime dashboard.
 pub struct AnalyticsContext {
     pub collector: Arc<AnalyticsCollector>,
     pub host_ids: Arc<HashMap<String, i64>>,
@@ -143,12 +126,40 @@ struct HandlerState {
     ip_security: Option<Arc<crate::security_policy::IpSecurityStore>>,
     host_auth: Option<Arc<crate::security_policy::HostAuthStore>>,
     trusted_proxies: Option<Arc<IpNetSet>>,
-    client: Arc<reqwest::Client>,
+    clients: UpstreamClients,
     analytics: Option<Arc<AnalyticsContext>>,
     rate_limit: Option<Arc<RateLimitContext>>,
     bot: Option<Arc<BotContext>>,
     plugin_manager: Option<Arc<PluginManager>>,
     plugin_notify: Option<Arc<NotificationSink>>,
+}
+
+#[derive(Default)]
+struct UpstreamClients {
+    clients: std::sync::Mutex<HashMap<std::time::Duration, reqwest::Client>>,
+}
+
+impl UpstreamClients {
+    fn get(&self, connect_timeout: std::time::Duration) -> Result<reqwest::Client, reqwest::Error> {
+        let mut clients = self
+            .clients
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(client) = clients.get(&connect_timeout) {
+            return Ok(client.clone());
+        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()?;
+        // Bound resources across arbitrary configuration reloads; in-flight clones survive.
+        if clients.len() >= 32 {
+            clients.clear();
+        }
+        clients.insert(connect_timeout, client.clone());
+        Ok(client)
+    }
 }
 
 /// The security-relevant flags for one completion event, mirroring
@@ -165,22 +176,19 @@ struct SecurityFlags {
 
 /// Records one completion event, reusing `src/proxy.rs`'s pure
 /// `completion_event`/`analytics_security_counters` helpers (they take no
-/// Pingora type, so they're directly callable here). `host` is looked up
-/// against `AnalyticsContext::host_ids` to find the proxy host id -- `None`
-/// or an unmapped host falls back to id `0`, matching
-/// `BeaRustProxy::record_completion`'s behavior when a request never
-/// resolved a route. A `None` `analytics` context (analytics disabled) is a
-/// no-op.
+/// Pingora type, so they're directly callable here). Identity is captured
+/// from the same runtime snapshot used for routing, including early security
+/// blocks. A `None` analytics context is a no-op.
 fn record_analytics_event(
     analytics: &Option<Arc<AnalyticsContext>>,
-    host: Option<&str>,
+    proxy_host_id: i64,
     status: u16,
     start: Instant,
     security: SecurityFlags,
 ) {
     record_analytics_event_with_dimensions(
         analytics,
-        host,
+        proxy_host_id,
         status,
         start,
         security,
@@ -190,16 +198,13 @@ fn record_analytics_event(
 
 fn record_analytics_event_with_dimensions(
     analytics: &Option<Arc<AnalyticsContext>>,
-    host: Option<&str>,
+    proxy_host_id: i64,
     status: u16,
     start: Instant,
     security: SecurityFlags,
     dimensions: AnalyticsDimensionEvent,
 ) {
     let Some(analytics) = analytics else { return };
-    let proxy_host_id = host
-        .and_then(|host| analytics.host_ids.get(host).copied())
-        .unwrap_or(0);
     let security = crate::proxy::analytics_security_counters(
         security.waf_blocked,
         security.bot_blocked,
@@ -329,17 +334,13 @@ pub async fn serve(
 ) -> Result<(), Http3Error> {
     let server_config = quinn_server_config(tls_config)?;
     let endpoint = bind_endpoint(server_config, bind)?;
-    let client = reqwest::Client::builder()
-        .timeout(UPSTREAM_REQUEST_TIMEOUT)
-        .build()
-        .map_err(Http3Error::HttpClient)?;
     let state = Arc::new(HandlerState {
         store,
         waf: options.waf,
         ip_security: options.ip_security,
         host_auth: options.host_auth,
         trusted_proxies: options.trusted_proxies,
-        client: Arc::new(client),
+        clients: UpstreamClients::default(),
         analytics: options.analytics,
         rate_limit: options.rate_limit,
         bot: options.bot,
@@ -769,6 +770,20 @@ async fn handle_request<S>(
     let path = req.uri().path().to_owned();
     let query = req.uri().query().unwrap_or_default().to_owned();
     let downstream_host = downstream_host(&req);
+    let snapshot = state.store.load();
+    let analytics_host_id = downstream_host
+        .as_deref()
+        .and_then(|host| {
+            snapshot.proxy_host_id(host).or_else(|| {
+                crate::router::normalize_host(host).and_then(|host| {
+                    state
+                        .analytics
+                        .as_ref()
+                        .and_then(|analytics| analytics.host_ids.get(&host).copied())
+                })
+            })
+        })
+        .unwrap_or(0);
     let headers = build_request_headers(&req, downstream_host.as_deref());
     let request_id = validated_request_id(
         headers
@@ -804,7 +819,7 @@ async fn handle_request<S>(
             let _ = stream.finish().await;
             record_analytics_event(
                 &state.analytics,
-                downstream_host.as_deref(),
+                analytics_host_id,
                 403,
                 start,
                 SecurityFlags::default(),
@@ -851,7 +866,7 @@ async fn handle_request<S>(
         let _ = stream.finish().await;
         record_analytics_event(
             &state.analytics,
-            downstream_host.as_deref(),
+            analytics_host_id,
             413,
             start,
             SecurityFlags::default(),
@@ -890,7 +905,7 @@ async fn handle_request<S>(
             let _ = stream.finish().await;
             record_analytics_event(
                 &state.analytics,
-                downstream_host.as_deref(),
+                analytics_host_id,
                 403,
                 start,
                 SecurityFlags {
@@ -954,7 +969,7 @@ async fn handle_request<S>(
             let _ = stream.finish().await;
             record_analytics_event(
                 &state.analytics,
-                downstream_host.as_deref(),
+                analytics_host_id,
                 403,
                 start,
                 SecurityFlags {
@@ -982,7 +997,7 @@ async fn handle_request<S>(
             let _ = stream.finish().await;
             record_analytics_event(
                 &state.analytics,
-                downstream_host.as_deref(),
+                analytics_host_id,
                 403,
                 start,
                 SecurityFlags {
@@ -996,7 +1011,6 @@ async fn handle_request<S>(
 
     // Not blocked (or WAF not configured): route and forward.
     let authority = downstream_host.as_deref().unwrap_or_default();
-    let snapshot = state.store.load();
     let Some((route, pool)) = snapshot.route(authority, &path) else {
         let resp = http::Response::builder()
             .status(http::StatusCode::NOT_FOUND)
@@ -1006,7 +1020,7 @@ async fn handle_request<S>(
         let _ = stream.finish().await;
         record_analytics_event(
             &state.analytics,
-            downstream_host.as_deref(),
+            analytics_host_id,
             404,
             start,
             SecurityFlags::default(),
@@ -1041,7 +1055,7 @@ async fn handle_request<S>(
             let _ = stream.finish().await;
             record_analytics_event(
                 &state.analytics,
-                Some(route.host.as_str()),
+                analytics_host_id,
                 401,
                 start,
                 SecurityFlags::default(),
@@ -1058,7 +1072,9 @@ async fn handle_request<S>(
     // here).
     if let Some(rate_limit) = &state.rate_limit {
         let ip = client_ip(remote_addr.ip(), req.headers(), &rate_limit.trusted_proxies);
-        let host_id = crate::proxy::route_key(route);
+        let host_id = snapshot
+            .proxy_host_id(&route.host)
+            .unwrap_or_else(|| crate::proxy::route_key(route));
         let policy = rate_limit.limiter.host_policy(host_id);
         let key = RateLimitKey {
             proxy_host_id: host_id,
@@ -1093,7 +1109,7 @@ async fn handle_request<S>(
                 let _ = stream.finish().await;
                 record_analytics_event(
                     &state.analytics,
-                    Some(route.host.as_str()),
+                    analytics_host_id,
                     429,
                     start,
                     SecurityFlags {
@@ -1133,7 +1149,7 @@ async fn handle_request<S>(
         let _ = stream.finish().await;
         record_analytics_event(
             &state.analytics,
-            Some(route.host.as_str()),
+            analytics_host_id,
             502,
             start,
             SecurityFlags::default(),
@@ -1178,10 +1194,32 @@ async fn handle_request<S>(
     append_forwarded_for(&mut outgoing_headers, remote_addr);
     set_header(&mut outgoing_headers, "x-request-id", request_id);
 
-    let mut builder = state.client.request(
-        reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET),
-        &target,
-    );
+    let client = match state.clients.get(pool.connect_timeout()) {
+        Ok(client) => client,
+        Err(_) => {
+            let resp = http::Response::builder()
+                .status(http::StatusCode::BAD_GATEWAY)
+                .body(())
+                .unwrap();
+            let _ = stream.send_response(resp).await;
+            let _ = stream.finish().await;
+            record_analytics_event(
+                &state.analytics,
+                analytics_host_id,
+                502,
+                start,
+                SecurityFlags::default(),
+            );
+            pool.record_result(lease.id(), 502, start.elapsed().as_millis() as u64);
+            return;
+        }
+    };
+    let mut builder = client
+        .request(
+            reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET),
+            &target,
+        )
+        .timeout(pool.request_timeout());
     for (name, value) in &outgoing_headers {
         builder = builder.header(name, value);
     }
@@ -1228,13 +1266,17 @@ async fn handle_request<S>(
                 content_encoding,
             );
 
+            let mut upstream_failed = false;
             if eligible {
                 let upstream_headers = upstream_resp.headers().clone();
                 let mut body_stream = upstream_resp.bytes_stream();
                 let mut buffer = Vec::new();
                 let mut oversized = false;
                 while let Some(chunk) = body_stream.next().await {
-                    let Ok(chunk) = chunk else { break };
+                    let Ok(chunk) = chunk else {
+                        upstream_failed = true;
+                        break;
+                    };
                     if buffer.len() + chunk.len() > crate::proxy::RESPONSE_BODY_TRANSFORM_CAP_BYTES
                     {
                         buffer.extend_from_slice(&chunk);
@@ -1252,11 +1294,21 @@ async fn handle_request<S>(
                     let _ = stream.send_response(resp).await;
                     let _ = stream.send_data(bytes::Bytes::from(buffer)).await;
                     while let Some(chunk) = body_stream.next().await {
-                        let Ok(chunk) = chunk else { break };
+                        let Ok(chunk) = chunk else {
+                            upstream_failed = true;
+                            break;
+                        };
                         if stream.send_data(chunk).await.is_err() {
                             break;
                         }
                     }
+                } else if upstream_failed {
+                    // Headers have not been sent: discard the incomplete body.
+                    let resp = http::Response::builder()
+                        .status(http::StatusCode::BAD_GATEWAY)
+                        .body(())
+                        .unwrap();
+                    let _ = stream.send_response(resp).await;
                 } else {
                     let transformed = crate::proxy::apply_transform_response_plugin(
                         state.plugin_manager.as_ref(),
@@ -1267,35 +1319,52 @@ async fn handle_request<S>(
                     let _ = stream.send_response(resp).await;
                     let _ = stream.send_data(bytes::Bytes::from(transformed)).await;
                 }
-                let _ = stream.finish().await;
+                if upstream_failed && oversized {
+                    stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+                } else {
+                    let _ = stream.finish().await;
+                }
             } else {
                 let resp = downstream_response_head(status, upstream_resp.headers(), false);
                 let _ = stream.send_response(resp).await;
                 let mut body_stream = upstream_resp.bytes_stream();
                 while let Some(chunk) = body_stream.next().await {
-                    let Ok(chunk) = chunk else { break };
+                    let Ok(chunk) = chunk else {
+                        upstream_failed = true;
+                        break;
+                    };
                     if stream.send_data(chunk).await.is_err() {
                         break;
                     }
                 }
-                let _ = stream.finish().await;
+                if upstream_failed {
+                    // A status already sent cannot become 502: signal incomplete delivery.
+                    stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+                } else {
+                    let _ = stream.finish().await;
+                }
             }
+            let completion_status = if upstream_failed {
+                502
+            } else {
+                status.as_u16()
+            };
             record_analytics_event_with_dimensions(
                 &state.analytics,
-                Some(route.host.as_str()),
-                status.as_u16(),
+                analytics_host_id,
+                completion_status,
                 start,
                 SecurityFlags::default(),
                 AnalyticsDimensionEvent {
                     endpoint: Some(path.clone()),
                     upstream: Some(lease.address().to_string()),
-                    bytes: response_bytes,
+                    bytes: if upstream_failed { 0 } else { response_bytes },
                     ..AnalyticsDimensionEvent::default()
                 },
             );
             pool.record_result(
                 lease.id(),
-                status.as_u16(),
+                completion_status,
                 start.elapsed().as_millis() as u64,
             );
         }
@@ -1308,7 +1377,7 @@ async fn handle_request<S>(
             let _ = stream.finish().await;
             record_analytics_event(
                 &state.analytics,
-                Some(route.host.as_str()),
+                analytics_host_id,
                 502,
                 start,
                 SecurityFlags::default(),
@@ -1321,6 +1390,43 @@ async fn handle_request<S>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn upstream_clients_follow_changed_connect_timeouts() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        // TCP succeeds, but TLS handshake never completes: connect timeout includes TLS.
+        let server = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            loop {
+                sockets.push(listener.accept().await.unwrap().0);
+            }
+        });
+        let clients = UpstreamClients::default();
+        let mut elapsed = Vec::new();
+        for milliseconds in [100, 800, 100] {
+            let timeout = std::time::Duration::from_millis(milliseconds);
+            let client = clients.get(timeout).unwrap();
+            let start = Instant::now();
+            let error = client
+                .get(format!("https://{address}/"))
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .await
+                .unwrap_err();
+            assert!(error.is_timeout());
+            assert!(start.elapsed() >= timeout);
+            assert!(
+                start.elapsed() < timeout + std::time::Duration::from_millis(700),
+                "connect deadline must change with the selected pool: {:?}",
+                start.elapsed()
+            );
+            elapsed.push(start.elapsed());
+        }
+        server.abort();
+        assert!(elapsed[1] > elapsed[0] + std::time::Duration::from_millis(400));
+        assert!(elapsed[1] > elapsed[2] + std::time::Duration::from_millis(400));
+    }
 
     #[test]
     fn build_inspection_context_matches_the_http1_http2_paths_field_shape() {

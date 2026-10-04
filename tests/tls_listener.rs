@@ -73,7 +73,7 @@ fn spawned_tls_listener_proxies_to_local_upstream() {
                     let mut request = [0u8; 2048];
                     let _ = stream.read(&mut request);
                     let _ = stream.write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello tls!",
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nhello tls!",
                     );
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -94,6 +94,7 @@ fn spawned_tls_listener_proxies_to_local_upstream() {
         format!(
             r#"[server]
 bind = "{proxy_addr}"
+control_bind = "127.0.0.1:0"
 pid_file = "{}"
 graceful_shutdown_seconds = 1
 [server.tls]
@@ -127,8 +128,9 @@ upstream_pool = "api"
     let mut child = Command::new(env!("CARGO_BIN_EXE_bearust"))
         .args(["serve", "--config"])
         .arg(&config_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .env("DATABASE_URL", "sqlite::memory:")
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
 
@@ -138,6 +140,7 @@ upstream_pool = "api"
         builder.build()
     };
     let mut response = None;
+    let mut last_body = String::new();
     for _ in 0..40 {
         if let Ok(stream) = TcpStream::connect(proxy_addr) {
             if let Ok(mut tls_stream) = connector.connect("localhost", stream) {
@@ -147,6 +150,7 @@ upstream_pool = "api"
                 {
                     let mut body = String::new();
                     let _ = tls_stream.read_to_string(&mut body);
+                    last_body.clone_from(&body);
                     if body.contains("200 OK") && body.ends_with("hello tls!") {
                         response = Some(body);
                         break;
@@ -155,6 +159,20 @@ upstream_pool = "api"
             }
         }
         thread::sleep(Duration::from_millis(100));
+    }
+    // Pingora's socket-transfer upgrade is Linux-only. Other Unix platforms
+    // still verify the real TLS request path, without asserting an unsupported reload.
+    if !cfg!(target_os = "linux") {
+        let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM);
+        let status = child.wait().unwrap();
+        stop_upstream.store(true, Ordering::Relaxed);
+        let _ = upstream_thread.join();
+        assert!(status.success(), "proxy exited unsuccessfully: {status}");
+        assert!(
+            response.is_some(),
+            "TLS proxy did not return upstream response: {last_body:?}"
+        );
+        return;
     }
     let updated = fs::read_to_string(&config_path)
         .unwrap()
@@ -193,7 +211,7 @@ upstream_pool = "api"
     assert!(status.success(), "proxy exited unsuccessfully: {status}");
     assert!(
         response.is_some(),
-        "TLS proxy did not return upstream response"
+        "TLS proxy did not return upstream response: {last_body:?}"
     );
     assert!(
         saw_replacement,

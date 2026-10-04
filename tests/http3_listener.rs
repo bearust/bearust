@@ -30,6 +30,336 @@ use std::sync::{
 
 mod support;
 
+async fn audit_h3_get(
+    client: &mut h3::client::SendRequest<h3_quinn::OpenStreams, bytes::Bytes>,
+    uri: &str,
+) -> (http::Response<()>, Vec<u8>) {
+    let request = http::Request::builder().uri(uri).body(()).unwrap();
+    let mut stream = client.send_request(request).await.unwrap();
+    stream.finish().await.unwrap();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv_response())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut body = Vec::new();
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        body.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+    }
+    (response, body)
+}
+
+#[tokio::test]
+async fn audit_http3_relays_redirects_without_contacting_the_location_target() {
+    install_crypto_provider();
+    let destination = spawn_counting_backend("redirect-destination").await;
+    let location = format!("http://{}/private", destination.address);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let redirect = location.clone();
+    let app = axum::Router::new().fallback(axum::routing::any(move || {
+        let location = redirect.clone();
+        async move {
+            (
+                http::StatusCode::FOUND,
+                [("location", location)],
+                "redirect-body",
+            )
+        }
+    }));
+    let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let store = runtime_store_routing_to("localhost", address);
+    let (tls, cert) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_stop, receiver) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(http3::serve(bind, tls, store, Default::default(), receiver));
+    let (driver, mut client) = connect_h3_client(bind, cert).await;
+    let (response, body) = audit_h3_get(&mut client, "https://localhost/redirect").await;
+    driver.abort();
+    server.abort();
+    upstream.abort();
+    let destination_requests = destination.request_count();
+    destination.shutdown().await;
+    assert_eq!(response.status(), http::StatusCode::FOUND);
+    assert_eq!(
+        response.headers().get("location").unwrap(),
+        location.as_str()
+    );
+    assert_eq!(body, b"redirect-body");
+    assert_eq!(destination_requests, 0);
+}
+
+#[tokio::test]
+async fn audit_http3_applies_the_selected_pool_request_timeout() {
+    install_crypto_provider();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new().fallback(axum::routing::any(|| async {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        "too-late"
+    }));
+    let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    // The test helper configures a one-second per-pool request timeout.
+    let store = runtime_store_routing_to("localhost", address);
+    let (tls, cert) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_stop, receiver) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(http3::serve(bind, tls, store, Default::default(), receiver));
+    let (driver, mut client) = connect_h3_client(bind, cert).await;
+    let (response, _) = audit_h3_get(&mut client, "https://localhost/slow").await;
+    driver.abort();
+    server.abort();
+    upstream.abort();
+    assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http3_rejects_truncated_upstream_bodies_in_streaming_and_transform_paths() {
+    install_crypto_provider();
+    for (transform, oversized) in [(false, false), (true, false), (true, true)] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut request = [0; 4096];
+                    if socket.read(&mut request).await.unwrap_or(0) > 0 {
+                        let length = if oversized {
+                            bearust::proxy::RESPONSE_BODY_TRANSFORM_CAP_BYTES + 1
+                        } else {
+                            7
+                        };
+                        let header = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", length + 100);
+                        let _ = socket.write_all(header.as_bytes()).await;
+                        let _ = socket.write_all(&vec![b'x'; length]).await;
+                    }
+                });
+            }
+        });
+        let store = runtime_store_routing_to("localhost", address);
+        let (tls, cert) = serve_tls_config();
+        let bind = reserve_udp_addr();
+        let (_stop, receiver) = tokio::sync::watch::channel(false);
+        let collector = Arc::new(AnalyticsCollector::default());
+        let options = http3::Http3Options {
+            plugin_manager: transform.then(transform_response_plugin_manager),
+            analytics: Some(Arc::new(AnalyticsContext {
+                collector: collector.clone(),
+                host_ids: Arc::new(std::collections::HashMap::from([(
+                    "localhost".to_owned(),
+                    7,
+                )])),
+                changed: None,
+            })),
+            ..Default::default()
+        };
+        let server = tokio::spawn(http3::serve(bind, tls, store, options, receiver));
+        let (driver, mut client) = connect_h3_client(bind, cert).await;
+        let mut stream = client
+            .send_request(
+                http::Request::builder()
+                    .uri("https://localhost/truncated")
+                    .body(())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        stream.finish().await.unwrap();
+        let response =
+            tokio::time::timeout(std::time::Duration::from_secs(3), stream.recv_response())
+                .await
+                .unwrap();
+        if transform && !oversized {
+            assert_eq!(response.unwrap().status(), http::StatusCode::BAD_GATEWAY);
+        } else if let Ok(response) = response {
+            assert_eq!(response.status(), http::StatusCode::OK);
+            let failed = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                loop {
+                    match stream.recv_data().await {
+                        Ok(Some(_)) => continue,
+                        Ok(None) => return false,
+                        Err(error) => {
+                            return matches!(
+                                error,
+                                h3::error::StreamError::RemoteTerminate {
+                                    code: h3::error::Code::H3_INTERNAL_ERROR,
+                                    ..
+                                }
+                            )
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                failed,
+                "truncated body must reset H3 rather than finish successfully"
+            );
+        } else {
+            assert!(matches!(
+                response.unwrap_err(),
+                h3::error::StreamError::RemoteTerminate {
+                    code: h3::error::Code::H3_INTERNAL_ERROR,
+                    ..
+                }
+            ));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let summary = collector.summary(AnalyticsFilter {
+                    proxy_host_id: Some(7),
+                    ..Default::default()
+                });
+                if summary.requests == 1 {
+                    assert_eq!(summary.status_5xx, 1);
+                    assert_eq!(summary.status_2xx, 0);
+                    assert_eq!(summary.bandwidth_bytes, 0);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        driver.abort();
+        server.abort();
+        upstream.abort();
+    }
+}
+
+#[tokio::test]
+async fn audit_http3_attributes_new_hosts_and_enforces_their_database_id_policy() {
+    use bearust::control_plane::{
+        build_state,
+        models::{DesiredConfig, ProxyHost},
+    };
+    install_crypto_provider();
+    let backend = spawn_counting_backend("live-host").await;
+    let store = empty_runtime_store();
+    let directory = tempfile::tempdir().unwrap();
+    let state = build_state("sqlite::memory:", directory.path(), "setup")
+        .await
+        .unwrap()
+        .with_runtime(
+            store.clone(),
+            Arc::new(directory.path().join("config.toml")),
+            Arc::new(directory.path().join("missing.pid")),
+        );
+    let collector = Arc::new(AnalyticsCollector::default());
+    let limiter = Arc::new(RateLimiterStore::new(
+        16,
+        std::time::Duration::from_secs(60),
+    ));
+    limiter.set_host_policy(
+        7,
+        RateLimitPolicy {
+            enabled: true,
+            action: RateLimitAction::Block,
+            capacity: 1,
+            refill_per_second: 0.001,
+            ..Default::default()
+        },
+    );
+    let (tls, cert) = serve_tls_config();
+    let bind = reserve_udp_addr();
+    let (_stop, receiver) = tokio::sync::watch::channel(false);
+    let server = tokio::spawn(http3::serve(
+        bind,
+        tls,
+        store.clone(),
+        http3::Http3Options {
+            analytics: Some(Arc::new(AnalyticsContext {
+                collector: collector.clone(),
+                host_ids: Arc::new(Default::default()),
+                changed: None,
+            })),
+            rate_limit: Some(Arc::new(RateLimitContext {
+                limiter,
+                trusted_proxies: Arc::new(IpNetSet::default()),
+            })),
+            ..Default::default()
+        },
+        receiver,
+    ));
+    // The listener starts before the host exists, as on a fresh installation.
+    let (driver, mut client) = connect_h3_client(bind, cert).await;
+    let mut host = repository::insert_host(
+        &state.db,
+        &ProxyHost {
+            id: 7,
+            name: "Live host".into(),
+            domain: "localhost".into(),
+            upstream_host: "127.0.0.1".into(),
+            upstream_port: backend.address.port(),
+            tls_mode: "disabled".into(),
+            certificate_id: None,
+            enabled: true,
+        },
+    )
+    .await
+    .unwrap();
+    state
+        .reloader
+        .apply(DesiredConfig {
+            proxy_hosts: vec![host.clone()],
+        })
+        .await
+        .unwrap();
+    store
+        .load()
+        .pool("proxy-host-7")
+        .unwrap()
+        .set_healthy(0.into(), true);
+    let (first, _) = audit_h3_get(&mut client, "https://localhost/first").await;
+    assert_eq!(first.status(), http::StatusCode::OK);
+    assert_eq!(
+        collector
+            .summary(AnalyticsFilter {
+                proxy_host_id: Some(7),
+                ..Default::default()
+            })
+            .requests,
+        1
+    );
+    let (second, _) = audit_h3_get(&mut client, "https://localhost/second").await;
+    assert_eq!(second.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    // Renaming a host keeps its ID and quota and moves its analytics mapping.
+    host.domain = "renamed.localhost".into();
+    repository::update_host(&state.db, host.id, &host)
+        .await
+        .unwrap();
+    state
+        .reloader
+        .apply(DesiredConfig {
+            proxy_hosts: vec![host],
+        })
+        .await
+        .unwrap();
+    store
+        .load()
+        .pool("proxy-host-7")
+        .unwrap()
+        .set_healthy(0.into(), true);
+    let (renamed, _) = audit_h3_get(&mut client, "https://renamed.localhost/third").await;
+    assert_eq!(renamed.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        collector
+            .summary(AnalyticsFilter {
+                proxy_host_id: Some(7),
+                ..Default::default()
+            })
+            .requests,
+        3
+    );
+    driver.abort();
+    server.abort();
+    assert_eq!(backend.request_count(), 1);
+    backend.shutdown().await;
+    store.shutdown().await.unwrap();
+}
+
 /// A minimal HTTP backend that counts every request it receives, for tests
 /// that must assert the upstream was (or was not) contacted at all -- e.g.
 /// C3's "an oversized body is rejected with 413 and the upstream receives

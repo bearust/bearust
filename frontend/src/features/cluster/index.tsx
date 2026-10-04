@@ -24,6 +24,7 @@ export function Cluster() {
     setLoading(true); setError("");
     try { setSnapshot(await api.clusterStatus()); } catch (exception) { setError(sanitizeError(exception)); } finally { setLoading(false); }
   };
+  // Health transitions arrive over SSE; polling also updates latency and timestamps.
   useEffect(() => { void refresh(); if (DEMO_MODE) return; const timer = window.setInterval(() => void refresh(), 15_000); return () => window.clearInterval(timer); }, []);
   useRealtimeRefresh(["cluster.changed"], refresh);
   const healthy = snapshot?.cluster_enabled ? snapshot.healthy_peers : 1;

@@ -46,6 +46,7 @@ fn json_logs_are_parseable_and_redacted_for_success_and_404() {
             r#"
 [server]
 bind = "{proxy_addr}"
+control_bind = "127.0.0.1:0"
 pid_file = "{}"
 graceful_shutdown_seconds = 1
 [health]
@@ -73,6 +74,7 @@ upstream_pool = "api"
     let mut child = Command::new(env!("CARGO_BIN_EXE_bearust"))
         .args(["serve", "--config"])
         .arg(&config_path)
+        .env("DATABASE_URL", "sqlite::memory:")
         .args(["--json-logs"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
+import { Link } from "@tanstack/react-router";
 import {
   Bell,
   Gauge,
@@ -12,6 +13,7 @@ import {
 import { api } from "@/api";
 import { DEMO_MODE } from "@/lib/demo";
 import { useAuthStore } from "@/stores/auth-store";
+import { readNotificationPreferences, saveNotificationPreferences } from "@/lib/notification-preferences";
 import { normalizeLocale, useLocalePreference, type Locale } from "@/i18n";
 import { useTheme, type ThemeMode } from "@/theme";
 import { Button } from "@/components/ui/button";
@@ -34,16 +36,24 @@ export function Settings() {
   const user = useAuthStore((state) => state.user);
   const { mode, resolved, setMode } = useTheme();
   const { locale, setLocale } = useLocalePreference();
-  const [notifications, setNotifications] = useState({
-    security: true,
-    certificates: true,
-    cluster: true,
-  });
+  const [notifications, setNotifications] = useState(() => readNotificationPreferences(user?.id));
+  const [notificationError, setNotificationError] = useState(false);
   const [savingLocale, setSavingLocale] = useState(false);
   const [localeMessage, setLocaleMessage] = useState("");
   const [retention, setRetention] = useState("1440");
   const [retentionMessage, setRetentionMessage] = useState("");
   const [savingRetention, setSavingRetention] = useState(false);
+
+  useEffect(() => {
+    setNotifications(readNotificationPreferences(user?.id));
+    setNotificationError(false);
+  }, [user?.id]);
+
+  const saveNotifications = () => {
+    const saved = saveNotificationPreferences(user?.id, notifications);
+    setNotificationError(!saved);
+    if (saved) toast.success(t("settings.notificationSaved"));
+  };
 
   useEffect(() => {
     if (DEMO_MODE || user?.role !== "admin") return;
@@ -57,12 +67,12 @@ export function Settings() {
     setSavingLocale(true);
     setLocaleMessage("");
     try {
-      await setLocale(next);
-      if (!DEMO_MODE && user)
+      const saved = await setLocale(next);
+      if (saved && !DEMO_MODE && user)
         useAuthStore.getState().setUser({ ...user, preferred_locale: next });
-      setLocaleMessage(t("settings.localeSaved"));
+      setLocaleMessage(saved ? "settings.localeSaved" : "settings.localeLocalOnly");
     } catch {
-      setLocaleMessage(t("settings.localeLocalOnly"));
+      setLocaleMessage("settings.localeLocalOnly");
     } finally {
       setSavingLocale(false);
     }
@@ -165,7 +175,7 @@ export function Settings() {
               </div>
               {localeMessage && (
                 <p role="status" className="text-sm text-muted-foreground">
-                  {localeMessage}
+                  {t(localeMessage)}
                 </p>
               )}
             </CardContent>
@@ -231,11 +241,12 @@ export function Settings() {
               />
               <Button
                 variant="outline"
-                onClick={() => toast.success(t("settings.notificationSaved"))}
+                onClick={saveNotifications}
               >
                 <Save />
                 {t("settings.saveLocalPreferences")}
               </Button>
+              {notificationError && <p role="alert" className="text-sm text-destructive">{t("settings.notificationSaveError")}</p>}
             </CardContent>
           </Card>
         </TabsContent>
@@ -251,13 +262,9 @@ export function Settings() {
               <div className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">
                 {t("settings.sessionInfo")}
               </div>
-              <Button
-                variant="outline"
-                onClick={() => toast.info(t("settings.revokeSessionNotice"))}
-              >
-                <LockKeyhole />
-                {t("settings.reviewSession")}
-              </Button>
+              {user?.role === "admin" && <Button variant="outline" asChild>
+                <Link to="/users"><LockKeyhole />{t("settings.reviewSession")}</Link>
+              </Button>}
             </CardContent>
           </Card>
         </TabsContent>

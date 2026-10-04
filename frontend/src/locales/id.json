@@ -694,6 +694,10 @@
     "review": "Tinjau"
   },
   "analytics": {
+    "intervalLabel": "Interval",
+    "intervalMinute": "Menit (UTC)",
+    "intervalHour": "Jam (UTC)",
+    "intervalDay": "Hari (UTC)",
     "title": "Analitik",
     "description": "Telemetry per menit yang tahan restart, sinyal pembelajaran, dan keputusan kebijakan.",
     "filters": "Filter analitik",
@@ -1105,6 +1109,10 @@
     "clusterHealth": "Kesehatan cluster",
     "saveLocalPreferences": "Simpan preferensi lokal",
     "notificationSaved": "Preferensi notifikasi disimpan secara lokal",
+    "notificationSaveError": "Preferensi notifikasi tidak dapat disimpan di browser ini.",
+    "securityChanged": "Kebijakan keamanan diperbarui",
+    "certificatesChanged": "Sertifikat diperbarui",
+    "clusterChanged": "Status klaster diperbarui",
     "sessionTitle": "Sesi keamanan",
     "sessionDescription": "Kontrol sesi tersedia dari menu akun terautentikasi.",
     "sessionInfo": "Logout sesi memanggil API control plane. Pencabutan sesi pengguna lain tersedia bagi administrator di Pengguna & Peran.",

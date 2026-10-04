@@ -68,6 +68,16 @@ pub struct AnalyticsFilter {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     pub limit: usize,
+    pub interval: AnalyticsInterval,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnalyticsInterval {
+    #[default]
+    Minute,
+    Hour,
+    Day,
 }
 
 impl AnalyticsFilter {
@@ -525,9 +535,56 @@ fn timeseries_from_buckets(
     buckets: Vec<BucketView>,
     filter: &AnalyticsFilter,
 ) -> Vec<AnalyticsBucket> {
-    let start = buckets.len().saturating_sub(filter.limit());
-    buckets
-        .into_iter()
+    let seconds = match filter.interval {
+        AnalyticsInterval::Minute => 60,
+        AnalyticsInterval::Hour => 3600,
+        AnalyticsInterval::Day => 86400,
+    };
+    let mut grouped = BTreeMap::<(DateTime<Utc>, i64), BucketView>::new();
+    for mut bucket in buckets {
+        bucket.timestamp = DateTime::from_timestamp(
+            bucket.timestamp.timestamp().div_euclid(seconds) * seconds,
+            0,
+        )
+        .unwrap_or(bucket.timestamp);
+        match grouped.entry((bucket.timestamp, bucket.host)) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(bucket);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let target = entry.get_mut();
+                target.requests = target.requests.saturating_add(bucket.requests);
+                for (sum, value) in target.status.iter_mut().zip(bucket.status) {
+                    *sum = sum.saturating_add(value);
+                }
+                for (sum, value) in target.histogram.iter_mut().zip(bucket.histogram) {
+                    *sum = sum.saturating_add(value);
+                }
+                target.security.waf_blocks = target
+                    .security
+                    .waf_blocks
+                    .saturating_add(bucket.security.waf_blocks);
+                target.security.bot_blocks = target
+                    .security
+                    .bot_blocks
+                    .saturating_add(bucket.security.bot_blocks);
+                target.security.bot_challenges = target
+                    .security
+                    .bot_challenges
+                    .saturating_add(bucket.security.bot_challenges);
+                target.security.rate_limited = target
+                    .security
+                    .rate_limited
+                    .saturating_add(bucket.security.rate_limited);
+                target.bandwidth_bytes = target
+                    .bandwidth_bytes
+                    .saturating_add(bucket.bandwidth_bytes);
+            }
+        }
+    }
+    let start = grouped.len().saturating_sub(filter.limit());
+    grouped
+        .into_values()
         .skip(start)
         .take(filter.limit())
         .map(|b| to_bucket(b, filter.proxy_host_id.unwrap_or(0)))

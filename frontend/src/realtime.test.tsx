@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useRealtimeUpdates } from "./realtime";
+import { useRealtimeRefresh } from "./hooks/use-realtime-refresh";
 
 type MockSource = {
   url: string;
@@ -37,6 +38,11 @@ function Harness({ loaders, onStatus }: { loaders: Parameters<typeof useRealtime
   const status = useRealtimeUpdates(loaders);
   onStatus(status);
   return <span>{status}</span>;
+}
+
+function PageHarness({ refresh }: { refresh: () => void }) {
+  useRealtimeRefresh(["security.changed", "waf.changed"], refresh);
+  return null;
 }
 
 describe("useRealtimeUpdates", () => {
@@ -98,5 +104,77 @@ describe("useRealtimeUpdates", () => {
     await act(async () => vi.advanceTimersByTime(30_001));
     expect(sources.length).toBe(2);
     root.unmount();
+  });
+
+  it("delivers security and cluster invalidations to the active pages", async () => {
+    vi.stubGlobal("EventSource", MockEventSource);
+    const seen: string[] = [];
+    const listener = (event: Event) => seen.push((event as CustomEvent<string>).detail);
+    window.addEventListener("bearust:realtime", listener);
+    const root = createRoot(document.body);
+    try {
+      await act(async () => root.render(<Harness loaders={{}} onStatus={() => {}} />));
+      await act(async () => {
+        sources[0].emit("security.changed", "1");
+        sources[0].emit("cluster.changed", "2");
+      });
+      expect(seen).toEqual(["security.changed", "cluster.changed"]);
+    } finally {
+      await act(async () => root.unmount());
+      window.removeEventListener("bearust:realtime", listener);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reloads missed data once per page and accepts reset ids after reconnect", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("EventSource", MockEventSource);
+    let pageRefreshes = 0;
+    let hostRefreshes = 0;
+    const root = createRoot(document.body);
+    try {
+      await act(async () => root.render(<>
+        <Harness loaders={{ hosts: () => { hostRefreshes++; } }} onStatus={() => {}} />
+        <PageHarness refresh={() => { pageRefreshes++; }} />
+      </>));
+      const first = sources[0];
+      await act(async () => {
+        first.onopen?.();
+        first.emit("proxy_hosts.changed", "100");
+        first.onerror?.();
+      });
+      await act(async () => vi.advanceTimersByTime(1_000));
+      await act(async () => sources[1].onopen?.());
+      expect(pageRefreshes).toBe(1);
+      expect(hostRefreshes).toBe(2);
+      await act(async () => sources[1].emit("proxy_hosts.changed", "1"));
+      expect(hostRefreshes).toBe(3);
+      // A late callback from the closed connection cannot advance the new cursor.
+      await act(async () => {
+        first.emit("proxy_hosts.changed", "101");
+        sources[1].emit("proxy_hosts.changed", "2");
+      });
+      expect(hostRefreshes).toBe(4);
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("resynchronizes pages after the server reports a lagged subscriber", async () => {
+    vi.stubGlobal("EventSource", MockEventSource);
+    let refreshes = 0;
+    const root = createRoot(document.body);
+    try {
+      await act(async () => root.render(<>
+        <Harness loaders={{}} onStatus={() => {}} />
+        <PageHarness refresh={() => { refreshes++; }} />
+      </>));
+      await act(async () => sources[0].emit("reconnect", "", { reason: "lagged" }));
+      expect(refreshes).toBe(1);
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
   });
 });

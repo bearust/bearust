@@ -5,12 +5,19 @@ export function useRealtimeRefresh(kinds: readonly string[], refresh: () => unkn
   refreshRef.current = refresh;
   const key = kinds.join("|");
   useEffect(() => {
+    const reload = () => {
+      void Promise.resolve().then(() => refreshRef.current()).catch(() => undefined);
+    };
     const listener = (event: Event) => {
       const kind = (event as CustomEvent<string>).detail;
       if (!kinds.includes(kind)) return;
-      void Promise.resolve(refreshRef.current()).catch(() => undefined);
+      reload();
     };
     window.addEventListener("bearust:realtime", listener);
-    return () => window.removeEventListener("bearust:realtime", listener);
+    window.addEventListener("bearust:realtime-resync", reload);
+    return () => {
+      window.removeEventListener("bearust:realtime", listener);
+      window.removeEventListener("bearust:realtime-resync", reload);
+    };
   }, [key]);
 }

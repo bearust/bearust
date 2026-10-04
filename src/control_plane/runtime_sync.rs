@@ -84,6 +84,13 @@ impl RuntimeConfigReloader {
     }
 
     async fn apply_config(&self, next: Config) -> Result<(), ReloadError> {
+        let host_ids = repository::list_hosts(&self.database)
+            .await
+            .map_err(|error| ReloadError::Failed(format!("load proxy host identities: {error}")))?
+            .into_iter()
+            .filter(|host| host.enabled)
+            .map(|host| (host.domain, host.id))
+            .collect();
         let previous_persisted = repository::get_runtime_config(&self.database)
             .await
             .map_err(|error| {
@@ -92,7 +99,11 @@ impl RuntimeConfigReloader {
         repository::set_runtime_config(&self.database, &next)
             .await
             .map_err(|error| ReloadError::Failed(format!("persist runtime config: {error}")))?;
-        if let Err(error) = self.runtime.apply_config(next.clone()).await {
+        if let Err(error) = self
+            .runtime
+            .apply_config_with_host_ids(next.clone(), host_ids)
+            .await
+        {
             let _ =
                 restore_persisted_runtime_config(&self.database, previous_persisted.as_ref()).await;
             return Err(ReloadError::Failed(error.to_string()));
