@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a reproducible problem in BeaRust
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please redact secrets (passwords, tokens, keys, cookies) from everything you paste.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong in one or two sentences?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal config, commands, and requests that trigger the bug.
+      placeholder: |
+        1. `docker compose up -d --build`
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Git commit, image tag, or `bearust --version` output.
+      placeholder: bearust 0.1.0 (commit abc1234)
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Docker Compose (SQLite)
+        - Docker Compose (PostgreSQL)
+        - Docker Compose (MySQL)
+        - Native binary
+        - Dev stack (docker-compose.dev.yml)
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste redacted logs. Never include DATABASE_URL passwords, setup tokens, API keys, or private keys.
+      render: shell

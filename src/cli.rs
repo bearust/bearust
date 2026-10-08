@@ -27,7 +27,12 @@ pub fn spawn_renewal_task(
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "bearust", version, about)]
+#[command(
+    name = "bearust",
+    version,
+    about = "Configuration-driven reverse proxy and load balancer",
+    long_about = "BeaRust routes HTTP traffic to backend pools with health checks, TLS, ACME automation, and an authenticated control plane.\n\nStart with `bearust serve --config <file>`, validate a file without binding any port via `bearust validate`, or reload a running server with `bearust reload`."
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -35,20 +40,28 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Start the proxy, control plane, and background tasks.
     Serve {
+        /// Path to the TOML configuration file.
         #[arg(long, default_value = "bearust.toml")]
         config: PathBuf,
+        /// Emit structured JSON logs instead of human-readable logs.
         #[arg(long, default_value_t = false)]
         json_logs: bool,
     },
+    /// Validate a configuration file without opening any listener.
     Validate {
+        /// Path to the TOML configuration file.
         #[arg(long, default_value = "bearust.toml")]
         config: PathBuf,
     },
+    /// Send a graceful reload signal to a running server via its pid file.
     Reload {
+        /// Path to the pid file written by `bearust serve`.
         #[arg(long, default_value = "./bearust.pid")]
         pid_file: PathBuf,
     },
+    /// Manage optional WASM plugins (sign, search, and install).
     Plugin {
         #[command(subcommand)]
         action: PluginCommand,
@@ -59,30 +72,40 @@ pub enum Command {
 pub enum PluginCommand {
     /// Generates a new Ed25519 signing keypair for signing plugins.
     Keygen {
+        /// Directory where `signing.key` is written (refuses to overwrite).
         #[arg(long)]
         out: PathBuf,
     },
     /// Signs a plugin directory's manifest + wasm module, writing plugin.sig.
     Sign {
+        /// Plugin directory containing `plugin.toml` and the wasm module.
         plugin_dir: PathBuf,
+        /// Path to the Ed25519 private key created by `plugin keygen`.
         #[arg(long)]
         key: PathBuf,
     },
     /// Searches the plugin registry index for plugins matching a query.
     Search {
+        /// Case-insensitive substring matched against id, name, and description.
         query: String,
+        /// Registry index URL (overrides `BEARUST_PLUGIN_REGISTRY_URL`).
         #[arg(long)]
         registry_url: Option<String>,
     },
     /// Downloads, verifies, and installs a plugin from the registry index.
     Install {
+        /// Plugin id as listed in the registry index.
         id: String,
+        /// Plugins directory the new `<id>/` bundle is installed into.
         #[arg(long)]
         out: PathBuf,
+        /// Skip the interactive confirmation prompt.
         #[arg(long, default_value_t = false)]
         yes: bool,
+        /// Overwrite an already-installed plugin directory with the same id.
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Registry index URL (overrides `BEARUST_PLUGIN_REGISTRY_URL`).
         #[arg(long)]
         registry_url: Option<String>,
     },

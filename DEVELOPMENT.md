@@ -16,7 +16,13 @@ command. The development setup token defaults to `bearust-dev-setup`.
 Native development is still supported with Rust 1.97.1, Cargo, clang, cmake,
 make, perl, pkg-config, and Node 22.
 
-Tests in `src/` and `tests/` cover routing, balancing, health, reload, logs, HTTP, WebSocket, and shutdown. Use `cargo test --locked`, `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings`.
+Tests in `src/` and `tests/` cover routing, balancing, health, reload, logs, HTTP, WebSocket, and shutdown. The repository pins its toolchain in `rust-toolchain.toml`, so plain `cargo` commands use the right compiler. Match CI exactly:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
+```
 
 External database integration tests are opt-in so the normal test suite never
 mutates a developer database. Start a PostgreSQL or MySQL instance, then run:
@@ -68,7 +74,7 @@ The deterministic fixture at
 `tests/fixtures/plugins/health_ok/health_ok.wat` is compiled in the integration
 test with the pinned `wat` crate. It exports the ABI version and health status
 `1`; it has no imports. A plugin directory contains `plugin.toml` plus one
-module, and the manifest fields/capabilities are documented in the README.
+module, and the manifest fields/capabilities are documented in [docs/manual.md](docs/manual.md).
 Do not copy arbitrary third-party WASM into tests or commit generated compiler
 caches.
 
@@ -101,8 +107,10 @@ the configured maxima. Errors are stable codes (`invalid_manifest`,
 `memory_limit`, `trap`, `not_found`, `io_error`, `signature_required`,
 `malformed_signature`, `invalid_signature`, `key_mismatch`,
 `trust_store_corrupt`). A plugin failure never fails proxy requests or
-prevents normal startup. There is still no remote download or registry;
-treat local modules as trusted reviewed inputs.
+prevents normal startup. Remote distribution is available through the
+community registry index (`bearust plugin search` / `bearust plugin
+install`, see [docs/manual.md](docs/manual.md)); treat every installed module as a reviewed
+input and confirm its trust-on-first-use pin on first load.
 
 ### Plugin manifest signing and trust-on-first-use (Phase 14)
 
@@ -128,7 +136,7 @@ as `"trusted"` once pinned). The trust store lives at
 each plugin ID; a later load with a different key for the same ID fails
 closed with `key_mismatch` rather than silently re-pinning. To simulate a
 legitimate key rotation while testing, remove that plugin's entry from
-`trusted-keys.json` and reload — see README.md and DEPLOY.md for the full
+`trusted-keys.json` and reload — see [docs/manual.md](docs/manual.md) and DEPLOY.md for the full
 recovery procedure and the threat-model boundary (the pin file lives next
 to the bundles it protects, so it defends the distribution channel, not
 against an attacker who already has write access to the plugins
@@ -164,17 +172,29 @@ The JSDOM tests retain structural responsive assertions; only the Playwright
 suite measures real document layout and horizontal overflow.
 
 For a release or cross-stack change, use the complete acceptance gate from the
-repository root:
+repository root (same commands CI runs, plus the locale validator):
 
 ```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
 npm run validate-locales --prefix frontend
-npm test --prefix frontend
+npm test --prefix frontend -- --run
 npm run build --prefix frontend
-cargo +stable test --all-targets -- --test-threads=1
-cargo +stable fmt --all -- --check
-cargo +stable clippy --all-targets -- -D warnings
 git diff --check
 ```
+
+Container-level coverage lives in `scripts/` and is intentionally outside the
+default `cargo`/`npm` suites because it needs a Docker daemon:
+
+```bash
+bash scripts/smoke-test.sh        # production image: plaintext + TLS proxy, control API
+bash scripts/dev-compose-smoke.sh # dev stack: backend + API-backed frontend
+bash scripts/check-legacy-classes.sh  # frontend guard against removed page-specific CSS hooks
+```
+
+Both smoke scripts use isolated Compose projects, ephemeral ports
+(`18080`/`18081`), and temporary volumes, then clean up after themselves.
 
 ## Phase 8 analytics checks
 
@@ -198,17 +218,18 @@ redacted `analytics.changed` SSE invalidation event.
 Focused verification commands:
 
 ```bash
-cargo +nightly fmt --all -- --check
-cargo +nightly check --all-targets
-cargo +nightly test --test analytics --test prometheus --test control_plane_analytics --test proxy_analytics
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo test --test analytics --test prometheus --test control_plane_analytics --test proxy_analytics
 npm test --prefix frontend -- --run src/analytics.test.tsx src/realtime.test.tsx
 npm run build --prefix frontend
 git diff --check
 ```
 
-Durable historical storage, Redis/cross-node aggregation and replay,
-per-route analytics, anomaly detection, adaptive tuning, custom retention, and
-alerting are intentionally deferred.
+Durable long-term rollups, Redis/cross-node metric aggregation and event
+replay, per-route analytics dimensions, and alerting are intentionally
+deferred. Anomaly detection, adaptive tuning, and administrator-configurable
+retention are implemented (Phase 9); see the self-learning section in [docs/manual.md](docs/manual.md).
 ## Basic WAF
 
 Migration `0004_basic_waf.sql` seeds four built-in rules and defaults to
@@ -220,6 +241,6 @@ fields and at most 8 KiB of body data.
 Focused checks:
 
 ```bash
-cargo +stable test --test waf_repository --test waf_engine --test proxy_waf --test control_plane_waf
+cargo test --test waf_repository --test waf_engine --test proxy_waf --test control_plane_waf
 npm test --prefix frontend -- --run waf.test.tsx
 ```

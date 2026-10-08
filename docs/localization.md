@@ -92,7 +92,7 @@ Run these commands from the repository root before requesting review:
 npm run validate-locales --prefix frontend
 npm test --prefix frontend
 npm run build --prefix frontend
-cargo +stable test --test control_plane_locale --test control_plane_users
+cargo test --test control_plane_locale --test control_plane_users
 git diff --check
 ```
 

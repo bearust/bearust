@@ -21,6 +21,36 @@ fn validate_reports_missing_file_actionably() {
 }
 
 #[test]
+fn help_documents_every_subcommand() {
+    let output = Command::new(env!("CARGO_BIN_EXE_bearust"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for command in ["serve", "validate", "reload", "plugin"] {
+        assert!(stdout.contains(command), "{stdout}");
+    }
+    // No subcommand may render without a description.
+    for line in stdout
+        .lines()
+        .skip_while(|line| !line.contains("Commands:"))
+    {
+        let trimmed = line.trim();
+        if ["serve", "validate", "reload", "plugin", "help"]
+            .iter()
+            .any(|command| trimmed.starts_with(command))
+            && !trimmed.starts_with("help")
+        {
+            assert!(
+                trimmed.len() > trimmed.split_whitespace().next().unwrap_or_default().len() + 1,
+                "subcommand without description: {trimmed:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn version_is_reported() {
     let output = Command::new(env!("CARGO_BIN_EXE_bearust"))
         .arg("--version")

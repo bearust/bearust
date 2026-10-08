@@ -94,11 +94,14 @@ max_output_bytes = 65536
 ```
 
 The directory layout is one child per plugin (`plugin.toml` and one `.wasm`
-module). Manifests use ABI version `1`, allow only `health_check`, and declare
-bounded memory pages, fuel, timeout, and output limits. The runtime provides no
-WASI, filesystem, network, environment, clock, random, database, or proxy
-request access. It canonicalizes module paths beneath the configured root and
-rejects traversal and symlink escapes.
+module). Manifests use ABI version `1`, declare one of the supported hook
+capabilities (`health_check`, `waf.detect`, `notify.waf_block`,
+`transform.request`, `transform.response`, `balance.select` — see
+[docs/PLUGIN_AUTHORING.md](docs/PLUGIN_AUTHORING.md)), and declare bounded
+memory pages, fuel, timeout, and output limits. The runtime provides no WASI,
+filesystem, network, environment, clock, random, database, or proxy request
+access. It canonicalizes module paths beneath the configured root and rejects
+traversal and symlink escapes.
 
 After startup, administrators can use the authenticated control-plane API:
 `GET /api/plugins` and `POST /api/plugins/reload` for status/reload,
@@ -110,8 +113,10 @@ manifest text, module bytes, runtime errors, request data, or secrets.
 
 Invalid configuration, compilation errors, traps, timeouts, fuel exhaustion,
 and memory limits disable/isolate the affected plugin. The proxy remains
-available and startup continues. Deploy only reviewed local modules; there is
-still no remote download or registry.
+available and startup continues. Deploy only reviewed modules: fetch them with
+`bearust plugin search`/`bearust plugin install` from a registry index you
+trust (see the registry section in [docs/manual.md](docs/manual.md)), verify the checksum and signature the
+CLI reports, and confirm the trust-on-first-use pin below before reloading.
 
 ### Plugin manifest signing and trust-on-first-use (Phase 14)
 

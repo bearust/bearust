@@ -1383,13 +1383,13 @@ impl ProxyHttp for BeaRustProxy {
                 let ip = client_ip(peer, &session.req_header().headers, &self.trusted_proxies);
                 // The store owns the live policy snapshot so control-plane
                 // mutations take effect for existing proxy workers without a
-                // listener restart.
-                let route = ctx.route.as_ref().expect("route must be set");
+                // listener restart. Reuse the route resolved above instead of
+                // re-reading it from the context.
                 let host_id = ctx
                     .snapshot
                     .as_ref()
                     .and_then(|snapshot| snapshot.proxy_host_id(&route.host))
-                    .unwrap_or_else(|| route_key(route));
+                    .unwrap_or_else(|| route_key(&route));
                 let policy = store.host_policy(host_id);
                 let key = RateLimitKey {
                     proxy_host_id: host_id,
@@ -1451,8 +1451,14 @@ impl ProxyHttp for BeaRustProxy {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let snapshot = ctx.snapshot.as_ref().expect("request_filter must run");
-        let route = ctx.route.as_ref().expect("route must be set");
+        // `request_filter` always resolves the route first; fail closed with
+        // a 500 instead of panicking if that invariant is ever violated.
+        let (Some(snapshot), Some(route)) = (ctx.snapshot.as_ref(), ctx.route.as_ref()) else {
+            return Err(pingora_core::Error::explain(
+                ErrorType::HTTPStatus(500),
+                "route resolution unavailable",
+            ));
+        };
         let Some(pool) = snapshot.pool(&route.upstream_pool) else {
             return Err(pingora_core::Error::explain(
                 ErrorType::HTTPStatus(503),

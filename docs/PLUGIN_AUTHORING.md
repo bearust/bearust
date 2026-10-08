@@ -27,13 +27,13 @@ filesystem, network, or WASI access — only the memory the host explicitly
 writes into and reads back from. Every invocation is bounded by the
 manifest's `[limits]` table (memory pages, fuel, a wall-clock timeout,
 and a maximum output size); the host never trusts plugin output beyond
-those bounds. See `README.md`'s "Phase 13A WASM plugins" section for how
+those bounds. See `manual.md`'s "WASM plugin runtime" section for how
 the host enforces this at the server-configuration level, and
-"Phase 14 plugin manifest signing and trust-on-first-use" for optional
+"Plugin manifest signing and trust-on-first-use" for optional
 cryptographic signing.
 
 There are two manifest ABI versions. `abi_version: 1` supports only a
-single `health_check` capability and is documented in `README.md`; this
+single `health_check` capability and is documented in `manual.md`; this
 guide does not cover it further. `abi_version: 2` is the actively
 developed ABI and the one this guide targets — it adds a shared
 alloc/dealloc memory convention (below) that every richer hook capability
@@ -145,7 +145,7 @@ yet. Later sections add a real capability to this same skeleton.
    lists any of `waf.detect`, `transform.request`, `transform.response`,
    `notify.waf_block`, `balance.select` — empty for now, since this
    skeleton doesn't implement one yet. `[limits]` values must stay within
-   the server's configured maxima (`README.md`'s `[plugins]` block), and
+   the server's configured maxima (`manual.md`'s `[plugins]` block), and
    `max_output_bytes` must also clear the floor manifest validation
    enforces for `abi_version: 2` and, once you add one, for each declared
    capability — see the [Limits and Failure
@@ -409,7 +409,7 @@ smaller value is rejected at load with `invalid_manifest`. The
 checked-in `tests/fixtures/plugins/transform_response_v2/plugin.toml`
 fixture uses exactly this floor value. Note that this floor is *larger*
 than BeaRust's default server-level `[plugins].max_output_bytes`
-(65536, per `README.md`); since the manifest's own limit can never
+(65536, per `manual.md`); since the manifest's own limit can never
 exceed the server's configured maximum, an operator running a
 `transform.response` plugin must also raise the server's
 `[plugins].max_output_bytes` to at least 1572864 (its ceiling is 2 MiB,
@@ -609,7 +609,7 @@ pub extern "C" fn bearust_balance_select(ptr: i32, len: i32) -> i64 {
 ## Limits and Failure Behavior
 
 Every invocation is bounded by the manifest's `[limits]` table, itself
-capped by the server's configured maxima (`README.md`'s `[plugins]`
+capped by the server's configured maxima (`manual.md`'s `[plugins]`
 block):
 
 | Field | Meaning |
@@ -661,8 +661,8 @@ relying on the host to tell you something went wrong.
 
 ## Signing and Sharing Your Plugin
 
-Signing is optional. See `README.md`'s "Phase 14 plugin manifest
-signing and trust-on-first-use" section for the full mechanism
+Signing is optional. See `manual.md`'s "Plugin manifest signing and
+trust-on-first-use" section for the full mechanism
 (trust-on-first-use pinning, key rotation, the threat model it does and
 doesn't cover) — this section only summarizes the two commands you run
 as a plugin author:
@@ -700,7 +700,7 @@ $ curl -b cookies.txt -X POST http://127.0.0.1:8081/api/plugins/reload
 ```
 
 (This requires an authenticated session with the `plugins.manage`
-permission — see `README.md`'s RBAC sections for obtaining
+permission — see `manual.md`'s RBAC section for obtaining
 `cookies.txt`.)
 
 Check load status, including the `trust_status` field added by
@@ -712,8 +712,8 @@ $ curl -b cookies.txt http://127.0.0.1:8081/api/plugins
 
 A plugin that fails to load reports a stable error code (`invalid_manifest`,
 `abi_mismatch`, `compile_failed`, `timeout`, `fuel_exhausted`,
-`memory_limit`, `trap`, and others — see `README.md`'s Phase 13A
-section for the full list) rather than a raw error message. If yours
+`memory_limit`, `trap`, and others — see `manual.md`'s WASM plugin
+runtime section for the full list) rather than a raw error message. If yours
 reports one of these, re-check the corresponding section above before
 assuming the host is at fault.
 
