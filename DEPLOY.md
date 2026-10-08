@@ -14,13 +14,31 @@ The default production deployment is intentionally one command:
 docker compose up -d --build
 ```
 
-It uses the local image tag `bearust:local`. To build the same image for a
-public registry, provide a tag explicitly and push it yourself:
+It uses the local image tag `bearust:local`. Bearust does not use Docker
+Hub; official images are published to the GitHub Container Registry at
+`ghcr.io/bearust/bearust` by the `Publish` workflow on every push to `main`
+(`:latest` plus `:sha-<commit>`) and on every `v*` tag (`:vX.Y.Z` and
+`:X.Y`). No manual build or push step is needed for releases.
+
+To deploy from a prebuilt image instead of building locally, set
+`BEARUST_IMAGE` and pull before starting:
 
 ```bash
-BEARUST_IMAGE=ghcr.io/your-account/bearust:latest docker compose build
-docker push ghcr.io/your-account/bearust:latest
+echo 'BEARUST_IMAGE=ghcr.io/bearust/bearust:latest' >> .env
+docker compose pull
+docker compose up -d
 ```
+
+While the package is private, each host must authenticate once with a token
+that has the `read:packages` scope:
+
+```bash
+echo "$CR_PAT" | docker login ghcr.io -u <github-username> --password-stdin
+```
+
+Pin production deployments to an immutable tag (`:vX.Y.Z` or
+`:sha-<commit>`) rather than `:latest`, and roll back by changing
+`BEARUST_IMAGE` to the previous tag and re-running `docker compose up -d`.
 
 For a custom certificate, copy the PEM chain and private key into the
 `bearust-tls` volume and reference them from `[server.tls]`. Keep private keys

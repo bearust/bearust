@@ -985,7 +985,7 @@ fn plugin_sign(plugin_dir: &Path, key_path: &Path) -> Result<(), AppError> {
 }
 
 const DEFAULT_PLUGIN_REGISTRY_URL: &str =
-    "https://raw.githubusercontent.com/rizalord/bearust-plugin-index/main/index.json";
+    "https://raw.githubusercontent.com/Bearust/bearust-plugin-index/main/index.json";
 
 fn resolve_registry_url(flag: Option<&str>) -> String {
     if let Some(url) = flag {

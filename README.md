@@ -1,12 +1,21 @@
-# Bearust
+<p align="center">
+  <img src="docs/logo.png" alt="Bearust logo" width="180" />
+</p>
 
-![Bearust](docs/logo.png)
+<h1 align="center">Bearust</h1>
 
-[![CI](https://github.com/rizalord/bearust/actions/workflows/ci.yml/badge.svg)](https://github.com/rizalord/bearust/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Rust](https://img.shields.io/badge/rust-1.97.1-orange.svg)](rust-toolchain.toml)
+<p align="center">
+  <strong>Open-source reverse proxy and load balancer with a built-in web dashboard.</strong>
+</p>
 
-Bearust is an open-source, configuration-driven **reverse proxy and load balancer** with a built-in web dashboard. Point it at your backends with a small TOML file and you get host/path routing, health-checked load balancing, TLS, a WAF, and live analytics — without learning a new DSL.
+<p align="center">
+  <a href="https://github.com/Bearust/bearust/actions/workflows/ci.yml"><img src="https://github.com/Bearust/bearust/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/Bearust/bearust/pkgs/container/bearust"><img src="https://img.shields.io/badge/ghcr.io-bearust%2Fbearust-blue?logo=docker" alt="Container image" /></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License" /></a>
+  <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.97.1-orange.svg" alt="Rust" /></a>
+</p>
+
+Point Bearust at your backends with a small TOML file and you get host/path routing, health-checked load balancing, TLS, a WAF, and live analytics — without learning a new DSL.
 
 ```text
                     ┌─────────────┐
@@ -15,6 +24,20 @@ Bearust is an open-source, configuration-driven **reverse proxy and load balance
   :8081 (dashboard) │  WAF · TLS  │
                     └─────────────┘
 ```
+
+## Contents
+
+- [Features](#features)
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Configuration essentials](#configuration-essentials)
+- [Dashboard and access control](#dashboard-and-access-control)
+- [Documentation](#documentation)
+- [Development](#development)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
 
 ## Features
 
@@ -44,7 +67,15 @@ Bearust is an open-source, configuration-driven **reverse proxy and load balance
 
 ## Quick start
 
-Prerequisite: Docker. One command starts the proxy and the dashboard:
+Prerequisite: Docker. The [docker-compose.yml](docker-compose.yml) file defines the whole stack:
+
+| Service | What it does | When it runs |
+| --- | --- | --- |
+| `bearust` | Proxy (`:8080`) + dashboard and control API (`127.0.0.1:8081`) | Always |
+| `postgres` | Control-plane database in a named volume | `--profile postgres` only |
+| `mysql` | Control-plane database in a named volume | `--profile mysql` only |
+
+SQLite is the default, so a basic deployment needs only the `bearust` service. Start it with one command (builds the image locally as `bearust:local`):
 
 ```sh
 docker compose up -d --build
@@ -64,14 +95,29 @@ docker compose up -d --build
 
 Open `http://127.0.0.1:8081`, create the first administrator account with the setup token, then add a proxy host pointing at your backend. That is the whole setup — no database to provision (SQLite lives in a Docker volume), and proxy hosts can be managed entirely from the dashboard.
 
-To use a TOML config file instead, edit `config/bearust.example.toml` (or point `BEARUST_CONFIG` at your own file) and reload without downtime:
+To switch to PostgreSQL or MySQL later, uncomment the matching `DATABASE_URL` block in [`.env.example`](.env.example) and start exactly one profile:
+
+```sh
+docker compose --profile postgres up -d --build
+# or
+docker compose --profile mysql up -d --build
+```
+
+To use a TOML config file instead of dashboard-managed hosts, edit `config/bearust.example.toml` (or point `BEARUST_CONFIG` at your own file) and reload without downtime:
 
 ```sh
 bearust validate --config ./config/bearust.example.toml
 docker compose kill -s HUP bearust
 ```
 
-See [DEPLOY.md](DEPLOY.md) for production hardening, external databases, and TLS/ACME rollout.
+Prefer a prebuilt image over a local build? Official images publish automatically to `ghcr.io/bearust/bearust` (Docker Hub is not used):
+
+```sh
+echo 'BEARUST_IMAGE=ghcr.io/bearust/bearust:latest' >> .env
+docker compose pull && docker compose up -d
+```
+
+For development with hot reload, use the separate [docker-compose.dev.yml](docker-compose.dev.yml) stack — see [Development](#development). For production hardening, external databases, and TLS/ACME rollout, see [DEPLOY.md](DEPLOY.md).
 
 ## How it works
 
