@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, expect, it, beforeEach } from "vitest";
 import { serverChallengeFingerprint, solveBotChallenge } from "./solve";
 import type { BotChallenge } from "@/api";

@@ -3,8 +3,19 @@ on: [push, pull_request]
 jobs:
   rust:
     runs-on: ubuntu-latest
+    env:
+      # Linking ~75 test binaries that each embed wasmtime exhausts the
+      # runner disk with default settings (ld dies with SIGBUS). These
+      # CI-only settings shrink artifacts without touching local builds.
+      CARGO_INCREMENTAL: 0
+      RUSTFLAGS: -C debuginfo=0
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
+          sudo apt-get clean
+          df -h /
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
