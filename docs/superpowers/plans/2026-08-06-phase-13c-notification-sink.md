@@ -1058,7 +1058,7 @@ git commit -m "feat: add NotificationSink background worker for the notify.waf_b
 
 **Interfaces:**
 - Consumes: `crate::plugin_notify::NotificationSink` (Task 4).
-- Produces: `BeaRustProxy::plugin_notify: Option<Arc<NotificationSink>>`, `BeaRustProxy::with_plugin_notify_sink(self, sink: Arc<NotificationSink>) -> Self` — used by `src/cli.rs`.
+- Produces: `BearustProxy::plugin_notify: Option<Arc<NotificationSink>>`, `BearustProxy::with_plugin_notify_sink(self, sink: Arc<NotificationSink>) -> Self` — used by `src/cli.rs`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1095,16 +1095,16 @@ Add the test itself, after `analytics_change_notifier_is_invoked`:
 Run: `cargo test --lib proxy::tests::waf_block_event_is_built_only_for_block_decisions`
 Expected: FAIL to compile — `waf_block_event` is not defined yet.
 
-- [ ] **Step 3: Add the `plugin_notify` field and builder to `BeaRustProxy`**
+- [ ] **Step 3: Add the `plugin_notify` field and builder to `BearustProxy`**
 
-In `src/proxy.rs`, add a field to the `BeaRustProxy` struct, right after `anomaly`:
+In `src/proxy.rs`, add a field to the `BearustProxy` struct, right after `anomaly`:
 
 ```rust
     pub anomaly: Option<Arc<crate::anomaly::AnomalyDetector>>,
     pub plugin_notify: Option<Arc<crate::plugin_notify::NotificationSink>>,
 ```
 
-In `BeaRustProxy::new`, add the matching initializer, right after `anomaly: None,`:
+In `BearustProxy::new`, add the matching initializer, right after `anomaly: None,`:
 
 ```rust
             anomaly: None,
@@ -1285,10 +1285,10 @@ In `src/cli.rs`, add this line right after the plugin reload block (right after 
             crate::plugin_notify::NotificationSink::spawn(control_state.plugin_manager.clone());
 ```
 
-Then add `.with_plugin_notify_sink(plugin_notify_sink)` to the `BeaRustProxy` builder chain, right after `.with_anomaly(control_state.anomaly.clone())`:
+Then add `.with_plugin_notify_sink(plugin_notify_sink)` to the `BearustProxy` builder chain, right after `.with_anomaly(control_state.anomaly.clone())`:
 
 ```rust
-            crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store).with_bot_store(bot_store, challenge_service)
+            crate::proxy::BearustProxy::new(store.clone()).with_waf_store(waf_store).with_bot_store(bot_store, challenge_service)
                 .with_analytics(analytics)
                 .with_analytics_changed_notifier(Arc::new(move || { realtime.publish("analytics.changed"); }))
                 .with_analytics_host_ids(analytics_host_ids)

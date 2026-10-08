@@ -898,7 +898,7 @@ git commit -m "feat: add transform.request plugin capability, export validation,
 - Modify: `src/proxy.rs`
 
 **Interfaces:**
-- Consumes: `crate::plugin_runtime::PluginManager::transform_plugin`/`CompiledPlugin::transform` (Task 3), `bearust_plugin_sdk::{TransformRequest, TransformResponse}` (Task 1), `PluginMetrics::record_transform_*` (Task 2). Reuses the existing `BeaRustProxy::plugin_manager: Option<Arc<PluginManager>>` field and `crate::waf::{MAX_NORMALIZED_METADATA_BYTES, MAX_NORMALIZED_HEADERS, MAX_NORMALIZED_FIELD_BYTES}` (Phase 13D) — no new field or builder method needed; `src/cli.rs` already wires `plugin_manager` into every `BeaRustProxy`.
+- Consumes: `crate::plugin_runtime::PluginManager::transform_plugin`/`CompiledPlugin::transform` (Task 3), `bearust_plugin_sdk::{TransformRequest, TransformResponse}` (Task 1), `PluginMetrics::record_transform_*` (Task 2). Reuses the existing `BearustProxy::plugin_manager: Option<Arc<PluginManager>>` field and `crate::waf::{MAX_NORMALIZED_METADATA_BYTES, MAX_NORMALIZED_HEADERS, MAX_NORMALIZED_FIELD_BYTES}` (Phase 13D) — no new field or builder method needed; `src/cli.rs` already wires `plugin_manager` into every `BearustProxy`.
 - Produces: `apply_transform_plugin(...)`, wired into `upstream_request_filter`, before the existing Host/X-Forwarded-For/X-Request-Id insertion code.
 
 - [ ] **Step 1: Add the failing tests**

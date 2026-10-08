@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Menyediakan manajemen user admin-only dan penegakan RBAC yang konsisten untuk tiga role bawaan BeaRust.
+**Goal:** Menyediakan manajemen user admin-only dan penegakan RBAC yang konsisten untuk tiga role bawaan Bearust.
 
 **Architecture:** Pertahankan control plane Axum dan repository SQLx yang ada. Tambahkan status akun pada model/schema, operasi repository terisolasi, endpoint user yang memakai permission `UsersManage`, lalu integrasikan UI Users admin-only melalui API client React yang sudah ada.
 

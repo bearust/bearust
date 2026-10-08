@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible problem in BeaRust
+description: Report a reproducible problem in Bearust
 labels: [bug]
 body:
   - type: markdown

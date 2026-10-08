@@ -1,7 +1,7 @@
 # Keepalived and VIP operations
 
-BeaRust does not manage host network interfaces and does not run `keepalived`
-inside the container. The host owns the VRRP virtual IP (VIP); BeaRust only
+Bearust does not manage host network interfaces and does not run `keepalived`
+inside the container. The host owns the VRRP virtual IP (VIP); Bearust only
 provides bounded, authenticated readiness signals. This separation is
 intentional: a compromised or partitioned application container must not be
 able to add or remove an address on the host.
@@ -102,9 +102,9 @@ vrrp_instance BEARUST_VIP {
 
 Set `priority` to 140 and 130 on node-2 and node-3 respectively. A failed
 check subtracts 60, so a healthy peer can take over. VRRP `auth_pass` protects
-VRRP advertisements; it is not the BeaRust `CLUSTER_AUTH_TOKEN`, and both must
+VRRP advertisements; it is not the Bearust `CLUSTER_AUTH_TOKEN`, and both must
 be rotated independently. Permit VRRP protocol 112 only between the three
-trusted hosts, and keep the BeaRust cluster listener on its separately
+trusted hosts, and keep the Bearust cluster listener on its separately
 firewalled peer network.
 
 ### Fencing and split-brain procedure
@@ -128,7 +128,7 @@ hide the failure and can cause divergent configuration commits.
 
 To roll back, stop keepalived on all hosts, remove the `vrrp_instance` and
 `vrrp_script` blocks, and restore the previous single-node listener routing.
-Keep BeaRust running without a VIP while validating the application directly.
+Keep Bearust running without a VIP while validating the application directly.
 Reinstall the script and restore the last known-good priorities only after
 quorum, peer authentication, and the cookie file have been verified.
 

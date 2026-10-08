@@ -1,10 +1,10 @@
-# BeaRust Phase 1 Implementation Plan
+# Bearust Phase 1 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a production-usable HTTP/1.1 and WebSocket reverse proxy with host/path routing, round-robin and least-connections balancing, active health checks, validated hot reload, CLI operations, and Docker delivery.
 
-**Architecture:** BeaRust is one modular Rust binary built on Pingora 0.8.1. Immutable runtime snapshots are published through `ArcSwap`; each request retains its starting snapshot while new requests see validated reloads. Routing, backend selection, probing, proxy callbacks, CLI lifecycle, and observability remain separate modules with explicit interfaces.
+**Architecture:** Bearust is one modular Rust binary built on Pingora 0.8.1. Immutable runtime snapshots are published through `ArcSwap`; each request retains its starting snapshot while new requests see validated reloads. Routing, backend selection, probing, proxy callbacks, CLI lifecycle, and observability remain separate modules with explicit interfaces.
 
 **Tech Stack:** Rust 1.84+, edition 2021; Pingora 0.8.1; Tokio; Clap; Serde/TOML; ArcSwap; tracing; Docker Compose; GitHub Actions.
 
@@ -19,7 +19,7 @@
 - A request may fail over once only before any bytes are sent upstream and is never retried after transmission starts.
 - A new backend is ineligible until it reaches the configured consecutive-success threshold.
 - Invalid reloads leave the active runtime snapshot unchanged.
-- `X-Request-ID` accepts only 1–128 characters from `[A-Za-z0-9._:-]`; otherwise BeaRust generates a UUID.
+- `X-Request-ID` accepts only 1–128 characters from `[A-Za-z0-9._:-]`; otherwise Bearust generates a UUID.
 - Production logs are JSON and never include request or response bodies.
 - Production containers run as a non-root user.
 - Every implementation task follows red-green-refactor TDD and ends in a focused commit.
@@ -713,7 +713,7 @@ git commit -m "feat: publish atomic runtime snapshots"
 
 **Interfaces:**
 - Consumes: `Arc<RuntimeStore>`.
-- Produces: `BeaRustProxy::new(runtime: Arc<RuntimeStore>)`.
+- Produces: `BearustProxy::new(runtime: Arc<RuntimeStore>)`.
 - Produces: `RequestContext` containing snapshot, matched route, backend lease, request ID, start time, and `upstream_started`.
 - Implements: `pingora_proxy::ProxyHttp<CTX = RequestContext>`.
 - Produces: `validated_request_id(value: Option<&[u8]>) -> String`.
@@ -749,7 +749,7 @@ Implement these callbacks against Pingora 0.8.1:
 
 ```rust
 #[async_trait::async_trait]
-impl pingora_proxy::ProxyHttp for BeaRustProxy {
+impl pingora_proxy::ProxyHttp for BearustProxy {
     type CTX = RequestContext;
 
     fn new_ctx(&self) -> Self::CTX;
@@ -806,7 +806,7 @@ Every request uses an explicit `Host` header and a five-second test timeout.
 
 - [ ] **Step 5: Write WebSocket integration test**
 
-Start an Axum WebSocket echo backend, connect through BeaRust using `tokio_tungstenite::connect_async` with the routed `Host`, send text and binary frames in both directions, assert equality, then close cleanly.
+Start an Axum WebSocket echo backend, connect through Bearust using `tokio_tungstenite::connect_async` with the routed `Host`, send text and binary frames in both directions, assert equality, then close cleanly.
 
 - [ ] **Step 6: Run proxy and WebSocket tests**
 
@@ -977,7 +977,7 @@ git commit -m "feat: add CLI reload and graceful shutdown"
 
 - [ ] **Step 1: Write failing log-contract tests**
 
-Start BeaRust with `--json-logs` and `RUST_LOG=info`, make one successful request and one unmatched request, then parse every stdout line as JSON. Assert `request_complete` contains `request_id`, `route`, `upstream`, `status`, and `latency_ms`; assert the unmatched request has status `404` and no internal error body. Send a body containing `super-secret-body` and assert that string never appears in stdout or stderr.
+Start Bearust with `--json-logs` and `RUST_LOG=info`, make one successful request and one unmatched request, then parse every stdout line as JSON. Assert `request_complete` contains `request_id`, `route`, `upstream`, `status`, and `latency_ms`; assert the unmatched request has status `404` and no internal error body. Send a body containing `super-secret-body` and assert that string never appears in stdout or stderr.
 
 - [ ] **Step 2: Run observability test and verify failure**
 
@@ -1196,7 +1196,7 @@ Expected: all commands exit `0`, all tests pass, and the image prints `bearust 0
 
 - [ ] **Step 2: Run the operator acceptance scenario**
 
-Start two labeled test backends, configure one round-robin route and one least-connections route, start BeaRust through Compose, then verify:
+Start two labeled test backends, configure one round-robin route and one least-connections route, start Bearust through Compose, then verify:
 
 ```bash
 curl --fail --header 'Host: api.example.com' http://127.0.0.1:8080/v1/whoami

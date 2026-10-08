@@ -93,7 +93,7 @@ const emptyForm: HostForm = {
 
 const emptyAuthForm: AuthForm = {
   enabled: false,
-  realm: "BeaRust protected host",
+  realm: "Bearust protected host",
   username: "",
   password: "",
 };

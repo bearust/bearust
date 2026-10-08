@@ -30,14 +30,14 @@ Status: Approved for implementation planning.
   lowest-ID-wins rule as `notify.waf_block` and `waf.detect`.
 - **No new ABI version.** This is another `abi_version: 2` capability,
   reusing the same alloc/write/call/read/dealloc memory convention.
-- **No override of BeaRust's own required headers.** `Host`,
+- **No override of Bearust's own required headers.** `Host`,
   `X-Forwarded-For`, and `X-Request-Id` are reasserted after the plugin
   runs, regardless of what the plugin returned for those keys.
 
 ## Architecture
 
 The hook runs synchronously inside `upstream_request_filter`, the existing
-stage where BeaRust already builds the final outbound `RequestHeader` and
+stage where Bearust already builds the final outbound `RequestHeader` and
 inserts `Host`/`X-Forwarded-For`/`X-Request-Id`. This stage runs after
 `request_filter` (WAF header-stage evaluation, routing, rate limiting) and
 after `upstream_peer` (backend selection), so the transform cannot affect

@@ -31,7 +31,7 @@ pub fn spawn_renewal_task(
     name = "bearust",
     version,
     about = "Configuration-driven reverse proxy and load balancer",
-    long_about = "BeaRust routes HTTP traffic to backend pools with health checks, TLS, ACME automation, and an authenticated control plane.\n\nStart with `bearust serve --config <file>`, validate a file without binding any port via `bearust validate`, or reload a running server with `bearust reload`."
+    long_about = "Bearust routes HTTP traffic to backend pools with health checks, TLS, ACME automation, and an authenticated control plane.\n\nStart with `bearust serve --config <file>`, validate a file without binding any port via `bearust validate`, or reload a running server with `bearust reload`."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -684,7 +684,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         server_config.graceful_shutdown_timeout_seconds =
             Some(config.server.graceful_shutdown_seconds);
         let ready_path = std::env::var_os("BEARUST_UPGRADE_READY").map(PathBuf::from);
-        let mut proxy_handler = crate::proxy::BeaRustProxy::new(store.clone()).with_waf_store(waf_store)
+        let mut proxy_handler = crate::proxy::BearustProxy::new(store.clone()).with_waf_store(waf_store)
                 .with_ip_security_store(control_state.ip_security.clone())
                 .with_host_auth_store(control_state.host_auth.clone())
                 .with_bot_store(bot_store, challenge_service)
@@ -722,7 +722,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         let mut execution_phase = server.watch_execution_phase();
         // Pingora owns SIGTERM/SIGINT so it can stop accepting connections
         // and drain in-flight requests using its graceful shutdown timeout.
-        // BeaRust handles SIGHUP independently for atomic config reloads.
+        // Bearust handles SIGHUP independently for atomic config reloads.
         let (done_tx, done_rx) = tokio::sync::watch::channel(false);
         #[cfg(unix)]
         let (term_tx, term_rx) = tokio::sync::oneshot::channel();

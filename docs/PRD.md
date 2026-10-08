@@ -1,5 +1,5 @@
 # Product Requirements Document (PRD)
-# BeaRust — Open Source Reverse Proxy, Load Balancer & WAF
+# Bearust — Open Source Reverse Proxy, Load Balancer & WAF
 
 | | |
 |---|---|
@@ -13,9 +13,9 @@
 
 ## 1. Executive Summary
 
-BeaRust is an open source project that combines a **reverse proxy, load balancer, and Web Application Firewall (WAF)** into a single platform, built with Rust for performance and memory safety. The product draws technology concepts from Nginx Plus, F5, and SafeLine WAF on the proxy/security side, and from Nginx Proxy Manager on the ease-of-use side (GUI-first, single-command Docker installation).
+Bearust is an open source project that combines a **reverse proxy, load balancer, and Web Application Firewall (WAF)** into a single platform, built with Rust for performance and memory safety. The product draws technology concepts from Nginx Plus, F5, and SafeLine WAF on the proxy/security side, and from Nginx Proxy Manager on the ease-of-use side (GUI-first, single-command Docker installation).
 
-Key differentiators of BeaRust:
+Key differentiators of Bearust:
 - **All-in-one**: proxy + LB + WAF + management GUI + RBAC in a single product, instead of stitching together several separate tools.
 - **Easy to install**: single Docker Compose command, default SQLite with no external database setup required.
 - **Extensible**: WASM-sandboxed plugin system, letting the community build extensions without compromising the security of the core process.
@@ -32,7 +32,7 @@ Today, getting a full combination of reverse proxy + load balancer + WAF + manag
 - Paying for expensive enterprise licenses such as F5 or Nginx Plus, which is unrealistic for individuals, startups, or institutions with limited budgets (e.g. educational institutions).
 - Open source WAF options like ModSecurity + OWASP CRS are known for high false-positive rates because they are purely regex-based; alternatives like SafeLine are strong but lock some advanced features (multi-node clustering, advanced dynamic protection) behind a paid Pro edition.
 
-BeaRust targets this gap: **a truly complete (not artificially limited) open source WAF + proxy + LB, easy to install, and extensible by the community through plugins.**
+Bearust targets this gap: **a truly complete (not artificially limited) open source WAF + proxy + LB, easy to install, and extensible by the community through plugins.**
 
 ---
 
@@ -45,9 +45,9 @@ BeaRust targets this gap: **a truly complete (not artificially limited) open sou
 5. Offer optional AI-based intelligence that is genuinely opt-in and never compromises the reliability of the core product when disabled.
 
 ### Non-goals for v1
-- Becoming a global CDN / edge network (BeaRust is a near-origin WAF+proxy, not a CDN replacement).
+- Becoming a global CDN / edge network (Bearust is a near-origin WAF+proxy, not a CDN replacement).
 - Supporting non-HTTP protocols beyond WebSocket passthrough (i.e. not a generic TCP database proxy) in the initial release.
-- 100% configuration syntax compatibility with existing Nginx/HAProxy setups (BeaRust has its own configuration format/GUI).
+- 100% configuration syntax compatibility with existing Nginx/HAProxy setups (Bearust has its own configuration format/GUI).
 
 ---
 
@@ -89,7 +89,7 @@ BeaRust targets this gap: **a truly complete (not artificially limited) open sou
 
 ## 6. Positioning vs Competitors
 
-| Aspect | BeaRust | Nginx Proxy Manager | SafeLine WAF | F5 / Nginx Plus |
+| Aspect | Bearust | Nginx Proxy Manager | SafeLine WAF | F5 / Nginx Plus |
 |---|---|---|---|---|
 | License | Open source, free | Open source, free | Open source (advanced features paid Pro) | Commercial, expensive |
 | Built-in WAF | Yes (signature + semantic) | No | Yes (semantic engine) | Yes |
@@ -598,7 +598,7 @@ Phase 4E deliberately keeps certificate permissions global and does not introduc
 
 ### Phase 5 status: external database support
 
-Phase 5 is complete for the control-plane database layer. BeaRust supports
+Phase 5 is complete for the control-plane database layer. Bearust supports
 SQLite (the default, including existing file-backed installations), PostgreSQL,
 and MySQL through `DATABASE_URL`; the repository and services use a database-
 agnostic pool and portable SQL. Versioned SQLx migrations are applied
@@ -636,7 +636,7 @@ Phase 5.
 | Dependency on external LLMs disrupts the traffic path | Medium | AI Advisor designed to be out-of-band, async, with strict timeouts & a circuit breaker |
 | Config sync across nodes fails during network partitions | Medium | Use a proven Raft implementation (`openraft`), explicitly test partition scenarios before releasing the multi-node feature |
 | Localization becomes a maintenance burden as languages grow | Medium | Externalize all strings from day one, provide a clear community translation contribution process rather than centralizing translation work |
-| Project name/branding changes later on | Low | Confirm final naming (`BeaRust`) availability on GitHub/crates.io before the first public release |
+| Project name/branding changes later on | Low | Confirm final naming (`Bearust`) availability on GitHub/crates.io before the first public release |
 
 ---
 
@@ -646,7 +646,7 @@ Phase 5.
 2. Community governance structure: who has merge rights, what is the review process for external contributions (including plugins)?
 3. Will there be a paid "Pro" edition in the future (additional enterprise features), or will all features remain free forever?
 4. Final GUI frontend framework (React vs Vue) — needs to be decided before Phase 3.
-5. ~~HTTP/3 support target — included in v1 or deferred to a later release?~~ **Resolved:** deferred out of v1, then delivered as an opt-in, off-by-default increment in Phase 15 (a separate QUIC listener alongside, not replacing, the existing HTTP/1.1/HTTP/2 path) — see `### Phase 15 status` below and `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`. Phase 15 is now complete: `Alt-Svc` advertisement, analytics, rate limiting, bot protection/challenge evaluation, and all five plugin hooks (`waf.detect`, `notify.waf_block`, `transform.request`, `balance.select`, `transform.response`) all run on the H3 path, matching the existing HTTP/1.1/HTTP/2 listener's behavior. Upstream HTTP/3 (forwarding requests from BeaRust to backends over H3) was investigated and deliberately **not** implemented — see `### Phase 15 status: upstream HTTP/3 (not implemented)` below for the rationale.
+5. ~~HTTP/3 support target — included in v1 or deferred to a later release?~~ **Resolved:** deferred out of v1, then delivered as an opt-in, off-by-default increment in Phase 15 (a separate QUIC listener alongside, not replacing, the existing HTTP/1.1/HTTP/2 path) — see `### Phase 15 status` below and `docs/superpowers/specs/2026-08-14-phase-15-http3-listener-design.md`. Phase 15 is now complete: `Alt-Svc` advertisement, analytics, rate limiting, bot protection/challenge evaluation, and all five plugin hooks (`waf.detect`, `notify.waf_block`, `transform.request`, `balance.select`, `transform.response`) all run on the H3 path, matching the existing HTTP/1.1/HTTP/2 listener's behavior. Upstream HTTP/3 (forwarding requests from Bearust to backends over H3) was investigated and deliberately **not** implemented — see `### Phase 15 status: upstream HTTP/3 (not implemented)` below for the rationale.
 6. Data privacy policy for the AI Advisor feature (default sensitive-data redaction: opt-in or opt-out?).
 7. Translation tooling/workflow for localization: a lightweight file-based approach (JSON/YAML per locale reviewed via PR) vs a dedicated translation management platform — to be decided before Phase 11.
 
@@ -675,7 +675,7 @@ Phase 5.
 *This document is a living document — it will be updated as technical decisions and project scope evolve.*
 ### Phase 6 status: basic WAF
 
-Phase 6 is complete for the basic in-process WAF scope. BeaRust persists and
+Phase 6 is complete for the basic in-process WAF scope. Bearust persists and
 seeds common attack signatures; supports monitor-only and block modes; validates
 bounded custom rules; exposes admin CRUD and TOML import/export; publishes
 immutable proxy snapshots; records redacted audit events; emits SSE
@@ -761,11 +761,11 @@ Phase 9 delivers a complete three-stage self-learning framework:
 
 ### Phase 10A status: cluster foundation (node identity, peer configuration, bounded health)
 
-Phase 10A delivers the cluster foundation for multi-node BeaRust deployments:
+Phase 10A delivers the cluster foundation for multi-node Bearust deployments:
 - **Node Identity & Peer Configuration**: Explicit `NODE_ID`, `CLUSTER_PEERS`, and shared `CLUSTER_AUTH_TOKEN` configuration parsed via environment variables or TOML (`[cluster]` section). Validates non-empty node IDs, rejects malformed, duplicate, or self-referential peer definitions, enforces a 64-peer bound, and defaults to single-node operation (`peers = []`) when omitted.
 - **Bounded Peer Health Service**: `ClusterService` executes an authenticated HMAC challenge-response handshake over out-of-band TCP connections with bounded timeouts and concurrency. Peer failures (authentication failure, connection refused, timeout, unreachable) produce per-peer unhealthy snapshots without causing process errors or affecting proxy request paths.
 - **Authenticated Status API**: `GET /api/cluster/status` exposes authenticated local node identity, cluster status, and redacted peer health snapshots. Responses omit raw connection strings, secrets, and credentials.
-- **Delivered in Phases 10B–10C**: Raft consensus/state replication, leader election, authenticated write forwarding, committed cross-node invalidation fan-out, and documented host-level keepalived/VIP operation. BeaRust does not execute keepalived or mutate host interfaces.
+- **Delivered in Phases 10B–10C**: Raft consensus/state replication, leader election, authenticated write forwarding, committed cross-node invalidation fan-out, and documented host-level keepalived/VIP operation. Bearust does not execute keepalived or mutate host interfaces.
 
 ### Phase 10B status: durable Raft configuration synchronization
 
@@ -822,7 +822,7 @@ results, queues, and telemetry are bounded and redacted.
 
 ### Phase 13A status: WASM plugin runtime foundation (complete, acceptance gate passing)
 
-The Phase 13A implementation is complete. BeaRust now has an optional,
+The Phase 13A implementation is complete. Bearust now has an optional,
 deny-by-default local
 `wasmtime` runtime with versioned `plugin.toml` validation, canonicalized path
 containment, the health-check-only ABI, fuel/memory/timeout/output limits,
@@ -1020,7 +1020,7 @@ phase).
 Phase 13F is complete and adds the plugin system's first response-mutating
 hook: a plugin can rewrite the full response body before it is sent to the
 downstream client. It overrides two previously-unused `ProxyHttp` methods,
-`response_filter` and `response_body_filter`, on `BeaRustProxy`.
+`response_filter` and `response_body_filter`, on `BearustProxy`.
 
 Discovered during implementation planning: `pingora-proxy 0.8.1` sends the
 response header task to the downstream client as soon as `response_filter`
@@ -1065,7 +1065,7 @@ the full buffered body (and the response status, informational only) via
 synchronous `ProxyHttp` method (unlike the request-side hooks, which are
 `async fn` and could use `spawn_blocking`). `block_in_place` lets the
 blocking wasmtime call run without stalling the calling worker thread's
-other queued tasks, requiring BeaRust's Tokio runtime to be multi-threaded
+other queued tasks, requiring Bearust's Tokio runtime to be multi-threaded
 (already the case: `rt-multi-thread` is enabled).
 
 Fail-open covers every error class: no plugin manager, no active plugin, a
@@ -1208,14 +1208,14 @@ index declares a signer for that entry — cross-checks it against the
 signature actually embedded in the archive before writing any file. The
 index is deliberately never a source of trust: a successful install
 still goes through the exact same trust-on-first-use pinning flow a
-manually-placed plugin already goes through the next time BeaRust
+manually-placed plugin already goes through the next time Bearust
 reloads plugins from disk.
 
-The default index points at BeaRust's own community index repository;
+The default index points at Bearust's own community index repository;
 `--registry-url` or `BEARUST_PLUGIN_REGISTRY_URL` overrides it for a
 private or self-hosted index. There is no `bearust plugin publish`
 command — contributing an entry is a pull request to the index
-repository itself, reviewed by its maintainers, not a BeaRust CLI
+repository itself, reviewed by its maintainers, not a Bearust CLI
 feature. A GUI surface for browsing/installing from the registry,
 plugin upgrade/version-management commands, and the index repository's
 own governance all remain out of scope; see
@@ -1274,9 +1274,9 @@ HTTP/1.1/HTTP/2 listener's `response_filter` inserts an `Alt-Svc:
 h3=":<port>"; ma=86400` header (`<port>` taken from `server.http3.bind`,
 computed once at startup) into every response, replacing rather than
 merging with any `Alt-Svc` the upstream itself sent (the client is
-talking to BeaRust's own TLS frontend, not the upstream, so only
-BeaRust's own H3 offer is meaningful to it). The header is omitted
-entirely when HTTP/3 is disabled — `BeaRustProxy`'s `http3_alt_svc`
+talking to Bearust's own TLS frontend, not the upstream, so only
+Bearust's own H3 offer is meaningful to it). The header is omitted
+entirely when HTTP/3 is disabled — `BearustProxy`'s `http3_alt_svc`
 field defaults to `None` and existing deployments are unaffected. No
 other behavior changes; this is a single additive response header.
 
@@ -1450,7 +1450,7 @@ test exactly.
 
 ### Phase 15 status: upstream HTTP/3 (not implemented)
 
-Forwarding requests from BeaRust to its own backends over HTTP/3
+Forwarding requests from Bearust to its own backends over HTTP/3
 (rather than the HTTP/1.1/HTTP/2 `reqwest` client the H3 listener
 already uses) was investigated and deliberately not implemented, after
 a feasibility spike against a real scratch build confirmed two blocking
@@ -1469,7 +1469,7 @@ concerns:
 
 Beyond the technical risk, the real-world value is close to zero: HTTP/3
 is overwhelmingly a client-facing/edge protocol, and essentially no
-backend origin servers speak it. BeaRust's upstream connections are
+backend origin servers speak it. Bearust's upstream connections are
 also currently always plaintext `http://`; HTTP/3 requires TLS, so
 supporting it would additionally require backend TLS+QUIC termination
 -- a materially larger architecture change in service of a capability

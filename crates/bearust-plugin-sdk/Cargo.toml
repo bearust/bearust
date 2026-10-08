@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-description = "SDK for building BeaRust WASM plugins"
+description = "SDK for building Bearust WASM plugins"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

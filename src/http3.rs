@@ -59,7 +59,7 @@ const HOP_BY_HOP_HEADERS: [&str; 8] = [
 ];
 
 /// Bundles what's needed to record a completion event for an H3 request,
-/// mirroring `BeaRustProxy::record_completion`'s dependencies
+/// mirroring `BearustProxy::record_completion`'s dependencies
 /// (`src/proxy.rs`) without requiring any Pingora type. Live host identities
 /// come from the request's runtime snapshot; `host_ids` is a fallback for
 /// embedded callers. `changed` notifies the realtime dashboard.
@@ -70,7 +70,7 @@ pub struct AnalyticsContext {
 }
 
 /// Bundles what's needed to apply rate limiting to an H3 request, mirroring
-/// `BeaRustProxy`'s `rate_limiter`/`trusted_proxies` fields (`src/proxy.rs`)
+/// `BearustProxy`'s `rate_limiter`/`trusted_proxies` fields (`src/proxy.rs`)
 /// without requiring any Pingora type.
 pub struct RateLimitContext {
     pub limiter: Arc<RateLimiterStore>,
@@ -78,7 +78,7 @@ pub struct RateLimitContext {
 }
 
 /// Bundles what's needed to apply bot protection to an H3 request, mirroring
-/// `BeaRustProxy`'s `bot`/`challenges` fields (`src/proxy.rs`) without
+/// `BearustProxy`'s `bot`/`challenges` fields (`src/proxy.rs`) without
 /// requiring any Pingora type.
 pub struct BotContext {
     pub store: Arc<BotStore>,
@@ -1036,7 +1036,7 @@ async fn handle_request<S>(
         if auth.protected(&route.host) && !auth.authorized(&route.host, authorization) {
             let realm = auth
                 .realm(&route.host)
-                .unwrap_or_else(|| "BeaRust protected host".into())
+                .unwrap_or_else(|| "Bearust protected host".into())
                 .replace('"', "'")
                 .chars()
                 .filter(|ch| !ch.is_ascii_control())

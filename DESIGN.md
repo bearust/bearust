@@ -4,11 +4,11 @@
 
 ## World
 
-**“BeaRust shadcn-admin”** — a calm, dense control-plane UI built on the
+**“Bearust shadcn-admin”** — a calm, dense control-plane UI built on the
 layout and component grammar of [satnaing/shadcn-admin]. The application
 uses a persistent grouped sidebar, inset content surface, compact sticky
 header, command navigation, restrained cards, data tables, tabs, and Radix
-primitives. BeaRust’s amber security accent replaces the template’s default
+primitives. Bearust’s amber security accent replaces the template’s default
 brand color while the structure remains recognizably shadcn-admin.
 
 The shell supports two deliberate data modes: demo mode keeps the visual

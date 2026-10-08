@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace BeaRust's router-less, single-file frontend shell with a TanStack Router + TanStack Query + Zustand + shadcn/ui shell — dependencies, theming tokens, auth guard, sidebar/topbar layout, and command palette — with no product features ported yet (Setup/Login/Bot-Challenge are the only screens; the authenticated area shows a single placeholder landing route).
+**Goal:** Replace Bearust's router-less, single-file frontend shell with a TanStack Router + TanStack Query + Zustand + shadcn/ui shell — dependencies, theming tokens, auth guard, sidebar/topbar layout, and command palette — with no product features ported yet (Setup/Login/Bot-Challenge are the only screens; the authenticated area shows a single placeholder landing route).
 
-**Architecture:** Four new layers replace `App.tsx`: `routes/` (TanStack Router, file-based, thin), `stores/` (Zustand — `auth-store.ts`), `components/ui/` (vendored shadcn/ui primitives), `components/layout/` (sidebar/topbar shell). `api.ts`, `theme.tsx`, `i18n.ts`, `realtime.ts` are reused unchanged. This is Phase 0+1 of a larger migration; each of BeaRust's 15 feature sections becomes its own follow-up plan once this shell is verified working end-to-end.
+**Architecture:** Four new layers replace `App.tsx`: `routes/` (TanStack Router, file-based, thin), `stores/` (Zustand — `auth-store.ts`), `components/ui/` (vendored shadcn/ui primitives), `components/layout/` (sidebar/topbar shell). `api.ts`, `theme.tsx`, `i18n.ts`, `realtime.ts` are reused unchanged. This is Phase 0+1 of a larger migration; each of Bearust's 15 feature sections becomes its own follow-up plan once this shell is verified working end-to-end.
 
 **Tech Stack:** React 19 (already in use), TypeScript, Vite, Tailwind CSS v4 (already in use), `@tanstack/react-router` + `@tanstack/router-plugin`, `@tanstack/react-query`, `zustand`, Radix UI primitives, `class-variance-authority`, `clsx`, `tailwind-merge`, `lucide-react`, `sonner`, `cmdk`.
 
@@ -113,9 +113,9 @@ export function cn(...inputs: ClassValue[]) {
 }
 ```
 
-- [ ] **Step 2: Add the shadcn/ui token layer, mapped to BeaRust's amber brand**
+- [ ] **Step 2: Add the shadcn/ui token layer, mapped to Bearust's amber brand**
 
-Create `frontend/src/styles/theme.css` (light values reuse the neutrals already established for BeaRust's dashboard; `--primary`/`--ring`/`--sidebar-primary` are BeaRust's amber, not shadcn-admin's default slate):
+Create `frontend/src/styles/theme.css` (light values reuse the neutrals already established for Bearust's dashboard; `--primary`/`--ring`/`--sidebar-primary` are Bearust's amber, not shadcn-admin's default slate):
 
 ```css
 :root {
@@ -216,7 +216,7 @@ Create `frontend/src/styles/theme.css` (light values reuse the neutrals already 
 }
 ```
 
-Theme selection (`.dark` class vs. default) is driven by BeaRust's existing `bootstrapTheme()`/`ThemeProvider` (`theme.tsx`) — Task 8 adds a `dark:` class binding driven by `document.documentElement.dataset.theme`, not a rewrite of the theme system itself.
+Theme selection (`.dark` class vs. default) is driven by Bearust's existing `bootstrapTheme()`/`ThemeProvider` (`theme.tsx`) — Task 8 adds a `dark:` class binding driven by `document.documentElement.dataset.theme`, not a rewrite of the theme system itself.
 
 - [ ] **Step 3: Import the new token layer and `tw-animate-css` from the main stylesheet**
 
@@ -238,7 +238,7 @@ Run: `npx tsc --noEmit` (no new errors), `npm run build` (succeeds), then open `
 
 ```bash
 git add src/lib/utils.ts src/styles/theme.css src/styles.css
-git commit -m "feat: add shadcn/ui token layer mapped to BeaRust's amber brand"
+git commit -m "feat: add shadcn/ui token layer mapped to Bearust's amber brand"
 ```
 
 ---
@@ -257,7 +257,7 @@ git commit -m "feat: add shadcn/ui token layer mapped to BeaRust's amber brand"
 - Consumes: `cn` from `@/lib/utils` (Task 2).
 - Produces: `Button`/`buttonVariants`, `Input`, `Label`, `Card`/`CardHeader`/`CardTitle`/`CardDescription`/`CardContent`/`CardFooter`/`CardAction`, `Separator`, `Avatar`/`AvatarImage`/`AvatarFallback` — used by Tasks 4, 5, 9, 11.
 
-These six files are framework-neutral shadcn/ui primitives with zero BeaRust-specific logic — vendor them verbatim from the reference template already cloned locally, then verify each compiles standalone.
+These six files are framework-neutral shadcn/ui primitives with zero Bearust-specific logic — vendor them verbatim from the reference template already cloned locally, then verify each compiles standalone.
 
 - [ ] **Step 1: Copy the six files verbatim**
 
@@ -353,7 +353,7 @@ git commit -m "feat: vendor shadcn/ui sidebar/dropdown-menu/sheet primitives"
 - Create: `frontend/src/components/ui/sonner.tsx`
 
 **Interfaces:**
-- Consumes: `cn` (Task 2), `useTheme` from `@/theme` (BeaRust's own, **not** the reference template's `@/context/theme-provider`).
+- Consumes: `cn` (Task 2), `useTheme` from `@/theme` (Bearust's own, **not** the reference template's `@/context/theme-provider`).
 - Produces: `Command`/`CommandDialog`/`CommandInput`/`CommandList`/`CommandEmpty`/`CommandGroup`/`CommandItem`/`CommandShortcut` — used by Task 12. `Dialog`/`DialogContent`/`DialogTrigger` — a dependency of `command.tsx`'s `CommandDialog`. `Toaster` — used by Task 8 (`__root.tsx`).
 
 - [ ] **Step 1: Copy `command.tsx` and `dialog.tsx` verbatim**
@@ -365,9 +365,9 @@ cp /tmp/shadcn-admin-ref/src/components/ui/dialog.tsx frontend/src/components/ui
 
 Run: `npm install @radix-ui/react-dialog` if `tsc` reports it missing (Task 1 already installs it — this is a safety check, not a new dependency).
 
-- [ ] **Step 2: Add `sonner.tsx`, adapted to BeaRust's own theme hook**
+- [ ] **Step 2: Add `sonner.tsx`, adapted to Bearust's own theme hook**
 
-Create `frontend/src/components/ui/sonner.tsx` (differs from the reference template only in the import and the destructured field — BeaRust's `useTheme()` returns `{ mode, resolved, setMode }`, not `{ theme }`):
+Create `frontend/src/components/ui/sonner.tsx` (differs from the reference template only in the import and the destructured field — Bearust's `useTheme()` returns `{ mode, resolved, setMode }`, not `{ theme }`):
 
 ```tsx
 import { Toaster as Sonner, type ToasterProps } from "sonner";

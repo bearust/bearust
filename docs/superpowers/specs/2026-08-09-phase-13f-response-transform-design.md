@@ -45,7 +45,7 @@ Status: Approved for implementation planning.
 
 The hook spans two existing (currently unoverridden) `ProxyHttp` methods,
 confirmed present in `pingora-proxy 0.8.1`'s trait definition (not newly
-introduced — `BeaRustProxy` simply doesn't override them yet):
+introduced — `BearustProxy` simply doesn't override them yet):
 
 - `response_filter` (`async fn`) — runs once per response, header-only,
   before the response is sent to the client.
@@ -58,7 +58,7 @@ not apply here. The plugin call instead uses
 `tokio::task::block_in_place`, which lets a synchronous call block the
 current worker thread while Tokio migrates other queued tasks off it —
 preserving the "don't stall the whole runtime" property `spawn_blocking`
-gives the async hooks, without needing `async fn`. This assumes BeaRust's
+gives the async hooks, without needing `async fn`. This assumes Bearust's
 Tokio runtime is multi-threaded; confirming that (and picking a fallback
 offload strategy if not) is an implementation-plan verification step, not
 a design change.
@@ -178,7 +178,7 @@ an operator is permitted to configure.
 
 ### `src/proxy.rs`
 
-- `BeaRustProxy`'s per-request `CTX` gains buffering state: a byte buffer
+- `BearustProxy`'s per-request `CTX` gains buffering state: a byte buffer
   accumulator, a buffering-mode flag, and the captured response status for
   the eventual `TransformResponseRequest`.
 - New `response_filter` override: eligibility check (plugin present +
@@ -208,7 +208,7 @@ own counters.
 ## Data flow
 
 `response_filter` and `response_body_filter` share state through
-`BeaRustProxy`'s per-request `CTX` struct (already how WAF/routing state
+`BearustProxy`'s per-request `CTX` struct (already how WAF/routing state
 flows between hooks in this codebase) — no new global or cross-request
 state is introduced.
 
@@ -289,5 +289,5 @@ state is introduced.
   custom load-balancing hooks.
 - **Streaming/chunked response transform** remains out of scope
   indefinitely unless a concrete need for it emerges — the 1 MiB
-  full-buffer model covers BeaRust's typical API/JSON/HTML traffic per the
+  full-buffer model covers Bearust's typical API/JSON/HTML traffic per the
   PRD's stated scope.

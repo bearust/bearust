@@ -1,4 +1,4 @@
-# BeaRust Phase 1 Design
+# Bearust Phase 1 Design
 
 **Date:** 2026-07-18
 **Status:** Approved for implementation planning
@@ -20,7 +20,7 @@ Phase 1 does not include the GUI, database persistence, TLS termination, ACME, H
 
 ## 2. Architecture
 
-BeaRust Phase 1 is a single Rust binary implemented as a modular monolith on top of Pingora. A single process keeps deployment and debugging simple, while internal boundaries allow the data plane and control plane to be separated in a future phase.
+Bearust Phase 1 is a single Rust binary implemented as a modular monolith on top of Pingora. A single process keeps deployment and debugging simple, while internal boundaries allow the data plane and control plane to be separated in a future phase.
 
 The binary contains these modules:
 
@@ -48,7 +48,7 @@ Runtime configuration is held behind an atomic, shared snapshot. Each accepted r
 
 ## 3. Configuration
 
-BeaRust uses TOML. The default configuration filename in examples is `bearust.toml`.
+Bearust uses TOML. The default configuration filename in examples is `bearust.toml`.
 
 ```toml
 [server]
@@ -118,9 +118,9 @@ Path-prefix matching respects segment boundaries: `/api` matches `/api` and `/ap
 
 Weighted balancing is not part of Phase 1 and no weight field is accepted.
 
-When an upstream connection fails before any request bytes are forwarded, BeaRust may try one other healthy backend. A request is never retried after transmission begins, preventing duplicate execution of non-idempotent requests.
+When an upstream connection fails before any request bytes are forwarded, Bearust may try one other healthy backend. A request is never retried after transmission begins, preventing duplicate execution of non-idempotent requests.
 
-If a route has no healthy backend, BeaRust immediately returns `503 Service Unavailable`. Internal upstream details are not exposed in client error bodies.
+If a route has no healthy backend, Bearust immediately returns `503 Service Unavailable`. Internal upstream details are not exposed in client error bodies.
 
 ## 6. Proxy Semantics
 
@@ -131,7 +131,7 @@ Phase 1 supports:
 - WebSocket upgrade and bidirectional passthrough.
 - Configurable connection and request timeouts per upstream pool.
 
-BeaRust preserves the original `Host` header and maintains:
+Bearust preserves the original `Host` header and maintains:
 
 - `X-Forwarded-For`, appending the immediate client address.
 - `X-Forwarded-Proto`, set to `http` in Phase 1.
@@ -183,7 +183,7 @@ PID-file creation fails rather than overwriting a file that points to a live pro
 
 ## 10. Observability
 
-Logs are structured JSON in production and human-readable in development. Each request log includes request ID, matched route, chosen upstream, response status, latency, and error category when applicable. A client-supplied request ID is accepted only when it is 1–128 characters long and contains ASCII letters, digits, `.`, `_`, `:`, or `-`; otherwise BeaRust generates a new ID.
+Logs are structured JSON in production and human-readable in development. Each request log includes request ID, matched route, chosen upstream, response status, latency, and error category when applicable. A client-supplied request ID is accepted only when it is 1–128 characters long and contains ASCII letters, digits, `.`, `_`, `:`, or `-`; otherwise Bearust generates a new ID.
 
 Lifecycle logs cover startup, shutdown, configuration reload outcome, and health transitions. Sensitive request or response bodies are never logged. Prometheus metrics and long-term analytics remain outside Phase 1.
 
@@ -221,7 +221,7 @@ bearust/
 └── docs/
 ```
 
-Phase 1 starts as one application crate. Workspace extraction is deferred until a real reusable crate boundary appears. The existing BeaRust logo is used in the README and documentation; GUI work remains out of scope.
+Phase 1 starts as one application crate. Workspace extraction is deferred until a real reusable crate boundary appears. The existing Bearust logo is used in the README and documentation; GUI work remains out of scope.
 
 ## 12. Deployment
 
@@ -231,7 +231,7 @@ Delivery includes:
 - A multi-stage production image with a minimal runtime and non-root user.
 - Docker Compose configuration that mounts the TOML configuration read-only.
 - A development image with source mounting and automatic rebuild.
-- A container health check that verifies the BeaRust process is running and its listener is accepting connections.
+- A container health check that verifies the Bearust process is running and its listener is accepting connections.
 
 The production container persists no application database in Phase 1. Example configuration is safe for local evaluation and clearly marks values that must change for real deployment.
 
@@ -276,12 +276,12 @@ GitHub Actions runs formatting, linting, tests, and the production container bui
 Phase 1 is complete when a user can:
 
 1. Copy the example TOML configuration.
-2. Start BeaRust natively or with `docker compose up`.
+2. Start Bearust natively or with `docker compose up`.
 3. Route HTTP/1.1 and WebSocket traffic by domain and path prefix.
 4. Observe round-robin and least-connections distribution across healthy backends.
 5. Observe unhealthy backends leave rotation and recover after successful probes.
 6. Receive deterministic `404` and `503` responses for routing and availability failures.
 7. Validate and reload configuration without interrupting active requests.
-8. Stop BeaRust gracefully.
+8. Stop Bearust gracefully.
 
 All required verification commands must pass, and the implementation documentation must describe local development, production deployment, configuration, and operational reload.

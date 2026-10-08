@@ -1,6 +1,6 @@
-# Contributing to BeaRust
+# Contributing to Bearust
 
-Thanks for helping improve BeaRust. Bug reports, translations, documentation, and code contributions are all welcome.
+Thanks for helping improve Bearust. Bug reports, translations, documentation, and code contributions are all welcome.
 
 ## Ways to contribute
 

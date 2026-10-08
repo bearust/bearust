@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Write `docs/PLUGIN_AUTHORING.md`, a single onboarding document that lets an external Rust developer build, test, and sign a BeaRust WASM plugin for any of the six existing hook capabilities without reading host source or per-phase design specs.
+**Goal:** Write `docs/PLUGIN_AUTHORING.md`, a single onboarding document that lets an external Rust developer build, test, and sign a Bearust WASM plugin for any of the six existing hook capabilities without reading host source or per-phase design specs.
 
 **Architecture:** One new Markdown file with seven ordered sections (overview, quickstart, memory convention, per-hook reference, limits/failure behavior, signing/sharing, local testing), plus a one-line cross-link added to `README.md`'s existing plugin section. Every technical claim is drawn from a specific existing source file (SDK crate, per-phase design specs, `src/plugin_runtime.rs`, fixture manifests) — never invented or recalled from memory.
 
@@ -41,12 +41,12 @@ Read (do not skip — every fact below must trace back to these):
 - [ ] **Step 2: Write the file header and table of contents**
 
 ```markdown
-# BeaRust Plugin Authoring Guide
+# Bearust Plugin Authoring Guide
 
-This guide shows how to build a BeaRust WASM plugin in Rust: the shared
+This guide shows how to build a Bearust WASM plugin in Rust: the shared
 memory convention every plugin uses, a worked example for each hook
 capability, resource limits and failure behavior, signing, and how to
-test a plugin locally against a running BeaRust instance.
+test a plugin locally against a running Bearust instance.
 
 It assumes working knowledge of Rust. It does not cover WASM or
 WebAssembly concepts from first principles.
@@ -67,7 +67,7 @@ WebAssembly concepts from first principles.
 ```markdown
 ## Overview
 
-A BeaRust plugin is a WebAssembly module loaded from a directory that
+A Bearust plugin is a WebAssembly module loaded from a directory that
 contains a `plugin.toml` manifest and a compiled `.wasm` module. Plugins
 run inside a sandboxed [Wasmtime](https://wasmtime.dev/) instance with no
 filesystem, network, or WASI access — only the memory the host explicitly
@@ -169,7 +169,7 @@ yet. Later sections add a real capability to this same skeleton.
    skeleton doesn't implement one yet. `[limits]` values must stay within
    the server's configured maxima (`README.md`'s `[plugins]` block).
 
-7. Assemble the plugin directory under BeaRust's configured plugins
+7. Assemble the plugin directory under Bearust's configured plugins
    directory (`./plugins` by default):
 
    ```text
@@ -179,7 +179,7 @@ yet. Later sections add a real capability to this same skeleton.
        └── my_plugin.wasm
    ```
 
-8. Reload plugins on a running BeaRust instance (see
+8. Reload plugins on a running Bearust instance (see
    [Testing Your Plugin Locally](#testing-your-plugin-locally) for the
    full authenticated request) and confirm it loaded before adding real
    hook logic.
@@ -534,7 +534,7 @@ pub extern "C" fn bearust_transform_response(ptr: i32, len: i32) -> i64 {
 
 The example above uses the `base64` crate for illustration; add it to
 your plugin's own `Cargo.toml` if you need to inspect or modify the
-decoded body (`base64 = "0.22"` matches the version BeaRust's host uses).
+decoded body (`base64 = "0.22"` matches the version Bearust's host uses).
 ```
 
 - [ ] **Step 3: Append the `### notify.waf_block` subsection**
@@ -547,7 +547,7 @@ as a fire-and-forget notification whenever the built-in WAF blocks a
 request — this hook cannot influence the block decision itself (see
 `waf.detect` above for that). The event never carries raw headers,
 body, query string, or client IP — only the same redacted fields
-BeaRust's own audit/tracing output already uses.
+Bearust's own audit/tracing output already uses.
 
 **Export:** `bearust_notify_waf_block(ptr: i32, len: i32) -> i32` — note
 this returns a plain `i32` status (`0` = success, nonzero =
@@ -684,7 +684,7 @@ git commit -m "docs: add transform.response, notify.waf_block, and balance.selec
 Read:
 - `README.md` lines 108–116 (server-level `[plugins]` maxima: `max_module_bytes`, `max_memory_pages`, `max_fuel`, `invocation_timeout_ms`, `max_output_bytes`)
 - `src/plugin_runtime.rs` — search for `map_runtime_error` and the doc comments on the `detect`/`transform`/`transform_response`/`balance_select`/`notify_waf_block` methods (already read in Tasks 2–3) confirming each returns `PluginError` on trap/timeout/fuel exhaustion/malformed output
-- `src/proxy.rs` — search for `apply_transform_plugin`, `waf_detect_request` (or its caller), `apply_load_balancer_plugin` to confirm each hook's caller falls back to BeaRust's built-in behavior on any `PluginError` (fail-open), and that `balance.select`'s fallback is the pool's own configured algorithm
+- `src/proxy.rs` — search for `apply_transform_plugin`, `waf_detect_request` (or its caller), `apply_load_balancer_plugin` to confirm each hook's caller falls back to Bearust's built-in behavior on any `PluginError` (fail-open), and that `balance.select`'s fallback is the pool's own configured algorithm
 
 - [ ] **Step 2: Write the section**
 
@@ -704,7 +704,7 @@ block):
 
 If a plugin traps, times out, exhausts its fuel, or returns malformed or
 oversized output, the host never propagates that failure to the client
-request. Instead, each hook's caller falls back to BeaRust's built-in
+request. Instead, each hook's caller falls back to Bearust's built-in
 behavior for that request, as if the plugin capability weren't
 configured at all:
 
@@ -720,7 +720,7 @@ configured at all:
   (round robin, least connections, etc.) for that selection.
 
 This is a deliberate fail-open design: a broken or slow plugin degrades
-BeaRust to its behavior *without* that plugin, rather than failing
+Bearust to its behavior *without* that plugin, rather than failing
 traffic. Write your plugin logic knowing that any panic, infinite loop
 (caught by the fuel/timeout bounds), or malformed response you produce
 is silently ignored by the host, not surfaced to your plugin's caller —
@@ -787,16 +787,16 @@ wrote ./plugins/my-plugin/plugin.sig
 `keygen` generates an Ed25519 keypair once; `sign` reads your plugin's
 manifest and compiled module and writes a `plugin.sig` file next to
 them, covering both against tampering. Keep `signing.key` private —
-anyone who has it can produce signatures a BeaRust instance will accept
+anyone who has it can produce signatures a Bearust instance will accept
 as coming from you, for any plugin ID that instance hasn't already
 pinned to a different key.
 
-There is no community plugin registry yet — BeaRust doesn't provide a
+There is no community plugin registry yet — Bearust doesn't provide a
 place to publish, discover, or fetch plugins by ID. For now, share your
 plugin directory (`plugin.toml`, the compiled `.wasm` module, and
 `plugin.sig` if signed) through whatever channel you already use — a
 Git repository, a release artifact, an internal file share. Anyone
-installing it copies that directory under their own BeaRust instance's
+installing it copies that directory under their own Bearust instance's
 configured plugins directory and reloads.
 ```
 
@@ -805,7 +805,7 @@ configured plugins directory and reloads.
 ```markdown
 ## Testing Your Plugin Locally
 
-With `[plugins].enabled = true` and a running BeaRust instance, reload
+With `[plugins].enabled = true` and a running Bearust instance, reload
 after adding or changing a plugin directory:
 
 ```console
@@ -846,7 +846,7 @@ backend) — there is no standalone invoke-by-capability endpoint for
 these in this increment.
 
 If you're debugging a manifest or directory-layout problem, the fixture
-manifests under `tests/fixtures/plugins/` in the BeaRust repository are
+manifests under `tests/fixtures/plugins/` in the Bearust repository are
 known-good references for every capability this guide covers — compare
 your `plugin.toml` against the one matching your capability (e.g.
 `tests/fixtures/plugins/waf_detect_v2/plugin.toml` for `waf.detect`).

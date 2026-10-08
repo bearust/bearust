@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test.describe("BeaRust shadcn-admin shell", () => {
+test.describe("Bearust shadcn-admin shell", () => {
   test.beforeEach(async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto("/");
@@ -8,7 +8,7 @@ test.describe("BeaRust shadcn-admin shell", () => {
 
   test("renders the dashboard shell and opens command navigation", async ({ page }) => {
     await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
-    await expect(page.getByText("BeaRust Control Plane")).toBeVisible();
+    await expect(page.getByText("Bearust Control Plane")).toBeVisible();
     await expect(page.getByText("Demo data")).toBeVisible();
     await expect(page.getByText("Traffic overview")).toBeVisible();
     await expect(page.getByText("Recent security events")).toBeVisible();
@@ -16,7 +16,7 @@ test.describe("BeaRust shadcn-admin shell", () => {
     await page.getByRole("button", { name: /Search anything/i }).click();
     const commandDialog = page.getByRole("dialog");
     await expect(commandDialog).toBeVisible();
-    await commandDialog.getByPlaceholder("Jump to a BeaRust section...").fill("proxy");
+    await commandDialog.getByPlaceholder("Jump to a Bearust section...").fill("proxy");
     await expect(commandDialog.getByText("Proxy Hosts")).toBeVisible();
     await commandDialog.getByText("Proxy Hosts").click();
     await expect(page).toHaveURL(/\/proxy-hosts$/);

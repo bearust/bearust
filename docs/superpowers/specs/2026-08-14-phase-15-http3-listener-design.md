@@ -4,7 +4,7 @@
 
 Resolve PRD Open Question #5 ("HTTP/3 support target — included in v1 or
 deferred to a later release?") by adding an opt-in HTTP/3 (QUIC) listener
-on the client-facing side of BeaRust, running alongside the existing
+on the client-facing side of Bearust, running alongside the existing
 Pingora-based TCP listener rather than replacing it. A browser connecting
 over HTTP/3 gets routed and WAF-inspected the same way a browser
 connecting over HTTP/1.1 or HTTP/2 already is; the request is then
@@ -262,5 +262,5 @@ where compatibility is load-bearing, e.g. `clap`, `openraft`).
   parity with the HTTP/1.1/HTTP/2 path.
 - `Alt-Svc` advertisement on existing HTTP/1.1/HTTP/2 responses for
   automatic client upgrade.
-- Upstream HTTP/3 (BeaRust-to-backend).
+- Upstream HTTP/3 (Bearust-to-backend).
 - Live TLS material reload for the H3 listener.

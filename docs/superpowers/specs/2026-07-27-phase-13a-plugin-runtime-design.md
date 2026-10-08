@@ -2,7 +2,7 @@
 
 **Status:** Design approved; implementation plan pending review
 
-**Scope:** Phase 13A of the BeaRust roadmap. This increment establishes a
+**Scope:** Phase 13A of the Bearust roadmap. This increment establishes a
 secure, optional WASM runtime and lifecycle control. It does not implement the
 public plugin SDK, traffic hooks, or a community registry.
 

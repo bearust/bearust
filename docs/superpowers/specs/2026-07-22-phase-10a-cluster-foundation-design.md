@@ -2,7 +2,7 @@
 
 ## Goal
 
-Prepare BeaRust for safe multi-node operation by defining node identity, peer
+Prepare Bearust for safe multi-node operation by defining node identity, peer
 configuration, authenticated control-plane transport, and observable cluster
 health without replicating configuration yet.
 

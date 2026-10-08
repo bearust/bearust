@@ -40,7 +40,7 @@ multi-node operation.
 
 ### Non-goals
 
-- Running keepalived inside the BeaRust container.
+- Running keepalived inside the Bearust container.
 - Replicating users, passwords, sessions, private keys, provider credentials,
   audit history, or arbitrary database tables through Raft.
 - Treating realtime events as a source of truth or implementing durable event
@@ -111,12 +111,12 @@ metrics/state and reloads the affected resource.
 
 ### Keepalived/VIP boundary
 
-Keepalived runs on the host and owns the VRRP VIP. BeaRust supplies a documented
+Keepalived runs on the host and owns the VRRP VIP. Bearust supplies a documented
 health-check script/API that reports whether the node is eligible to serve the
 VIP: authenticated cluster status, leader/quorum state, listener readiness, and
 local proxy readiness. The procedure includes priority/preemption settings,
 fencing guidance, and a rule that only one healthy eligible node may hold the
-VIP. BeaRust does not manipulate host interfaces or execute keepalived itself.
+VIP. Bearust does not manipulate host interfaces or execute keepalived itself.
 
 ## Interfaces
 

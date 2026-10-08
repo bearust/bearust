@@ -2,7 +2,7 @@
 
 **Status:** Design approved; implementation plan pending review
 
-**Scope:** Phase 13B of the BeaRust roadmap. This increment adds a public
+**Scope:** Phase 13B of the Bearust roadmap. This increment adds a public
 `bearust-plugin-sdk` crate and a stable JSON-over-linear-memory convention for
 passing structured data between the host and a plugin. It does not add any
 traffic hooks, new capabilities, or host imports — the only host-facing

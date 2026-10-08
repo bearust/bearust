@@ -1438,7 +1438,7 @@ Insert (matching the existing `###`-level heading style):
 `bearust plugin search <query>` and `bearust plugin install <id>` fetch a
 static, HTTPS-hosted JSON index of published plugins and let an operator
 install one without manually downloading and extracting an archive. The
-default index URL points at BeaRust's own community index; override it
+default index URL points at Bearust's own community index; override it
 with `--registry-url <url>` or the `BEARUST_PLUGIN_REGISTRY_URL`
 environment variable to use a private or self-hosted index instead —
 there is no requirement to use the default.
@@ -1467,7 +1467,7 @@ same ID.
 The index is a catalog and a transport-integrity check, not a new source
 of trust: `install` never pins a key or loads a module. Trust is decided
 exactly the way it already is for a manually-placed plugin — the first
-time BeaRust reloads plugins from disk, the installed plugin's signature
+time Bearust reloads plugins from disk, the installed plugin's signature
 (if any) goes through the same trust-on-first-use pinning described
 above. There is no `bearust plugin publish` command; contributing an
 entry to the community index is a pull request to that index's own
@@ -1508,14 +1508,14 @@ index declares a signer for that entry — cross-checks it against the
 signature actually embedded in the archive before writing any file. The
 index is deliberately never a source of trust: a successful install
 still goes through the exact same trust-on-first-use pinning flow a
-manually-placed plugin already goes through the next time BeaRust
+manually-placed plugin already goes through the next time Bearust
 reloads plugins from disk.
 
-The default index points at BeaRust's own community index repository;
+The default index points at Bearust's own community index repository;
 `--registry-url` or `BEARUST_PLUGIN_REGISTRY_URL` overrides it for a
 private or self-hosted index. There is no `bearust plugin publish`
 command — contributing an entry is a pull request to the index
-repository itself, reviewed by its maintainers, not a BeaRust CLI
+repository itself, reviewed by its maintainers, not a Bearust CLI
 feature. A GUI surface for browsing/installing from the registry,
 plugin upgrade/version-management commands, and the index repository's
 own governance all remain out of scope; see

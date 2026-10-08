@@ -1,6 +1,6 @@
-# BeaRust operator manual
+# Bearust operator manual
 
-Detailed operator reference for BeaRust: accounts and RBAC, audit logs, realtime events, analytics, WAF and rate limiting, WASM plugins, HTTP/3, and multi-node clustering. For installation and first run, start with the [README](../README.md); for deployment hardening see [DEPLOY.md](../DEPLOY.md).
+Detailed operator reference for Bearust: accounts and RBAC, audit logs, realtime events, analytics, WAF and rate limiting, WASM plugins, HTTP/3, and multi-node clustering. For installation and first run, start with the [README](../README.md); for deployment hardening see [DEPLOY.md](../DEPLOY.md).
 
 ## Contents
 
@@ -189,7 +189,7 @@ key_scope = "proxy_host_ip"
 Phase 13A provides a local, health-check-only WASM runtime foundation. Plugins
 are not loaded unless `[plugins].enabled = true`; the default directory is
 `./plugins`. With plugins disabled, a missing directory, an invalid manifest, or
-a failed invocation, BeaRust starts normally and proxy traffic is unaffected.
+a failed invocation, Bearust starts normally and proxy traffic is unaffected.
 
 Configuration limits are bounded by the server and can be lowered per
 deployment:
@@ -320,14 +320,14 @@ tampered *distribution channel* (a corrupted download, a compromised
 mirror) — it does **not** protect against an attacker who already has write
 access to the plugins directory, since they could edit or delete the pin
 file too. Ensure the plugins directory is owned and writable only by the
-account running BeaRust.
+account running Bearust.
 
 ## Community plugin registry
 
 `bearust plugin search <query>` and `bearust plugin install <id>` fetch a
 static, HTTPS-hosted JSON index of published plugins and let an operator
 install one without manually downloading and extracting an archive. The
-default index URL points at BeaRust's own community index; override it
+default index URL points at Bearust's own community index; override it
 with `--registry-url <url>` or the `BEARUST_PLUGIN_REGISTRY_URL`
 environment variable to use a private or self-hosted index instead —
 there is no requirement to use the default.
@@ -356,7 +356,7 @@ same ID.
 The index is a catalog and a transport-integrity check, not a new source
 of trust: `install` never pins a key or loads a module. Trust is decided
 exactly the way it already is for a manually-placed plugin — the first
-time BeaRust reloads plugins from disk, the installed plugin's signature
+time Bearust reloads plugins from disk, the installed plugin's signature
 (if any) goes through the same trust-on-first-use pinning described
 above. There is no `bearust plugin publish` command; contributing an
 entry to the community index is a pull request to that index's own
@@ -364,7 +364,7 @@ repository, reviewed by its maintainers.
 
 ## HTTP/3 listener
 
-BeaRust can optionally accept client-facing HTTP/3 (QUIC) connections
+Bearust can optionally accept client-facing HTTP/3 (QUIC) connections
 alongside the existing Pingora-based HTTP/1.1/HTTP/2 listener. It is
 off by default and requires TLS to already be configured:
 
@@ -442,7 +442,7 @@ place, so the risk isn't worth the near-zero real-world value; see
 
 ## Multi-node cluster and HA operations
 
-BeaRust includes an explicit node identity and cluster peer foundation for multi-node deployments. Setting `CLUSTER_PEERS` (or configuring `[cluster]` in TOML) together with a shared `CLUSTER_AUTH_TOKEN` (at least 32 bytes) enables authenticated, out-of-band peer connectivity checks without affecting proxy request handling or single-node operations.
+Bearust includes an explicit node identity and cluster peer foundation for multi-node deployments. Setting `CLUSTER_PEERS` (or configuring `[cluster]` in TOML) together with a shared `CLUSTER_AUTH_TOKEN` (at least 32 bytes) enables authenticated, out-of-band peer connectivity checks without affecting proxy request handling or single-node operations.
 
 - `NODE_ID`: Unique node identifier (defaults to `node1`).
 - `CLUSTER_PEERS`: Comma-separated `node_id=host:port` peer list (defaults to empty, preserving single-node behavior).
@@ -450,7 +450,7 @@ BeaRust includes an explicit node identity and cluster peer foundation for multi
 
 Phase 10B adds durable Raft-backed configuration replication. Phase 10C adds
 leader-aware write forwarding, committed cross-node invalidations, bounded
-failover/quorum coverage, and the host-level keepalived/VIP procedure. BeaRust
+failover/quorum coverage, and the host-level keepalived/VIP procedure. Bearust
 never changes host interfaces or runs keepalived inside a container; follow
 [the keepalived operations guide](keepalived.md) for the readiness check,
 fencing procedure, and three-node VRRP example.

@@ -51,7 +51,7 @@
 
 - [ ] **Step 1: Add failing tests** asserting one event per completed request, status/latency capture, and no request failure when collector recording returns a bounded error.
 - [ ] **Step 2: Run `cargo +nightly test --test proxy_analytics` and confirm failure.**
-- [ ] **Step 3: Add `with_analytics(Arc<AnalyticsCollector>)` to `BeaRustProxy` and record completion after response status is known.**
+- [ ] **Step 3: Add `with_analytics(Arc<AnalyticsCollector>)` to `BearustProxy` and record completion after response status is known.**
 - [ ] **Step 4: Map security decisions to aggregate counters only; do not pass IP, URL, headers, body, or token data.**
 - [ ] **Step 5: Run focused proxy analytics and existing proxy WAF/bot/rate-limit tests.**
 - [ ] **Step 6: Commit `feat: instrument proxy analytics`.**

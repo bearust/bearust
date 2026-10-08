@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a safe, read-only audit-log API and dashboard viewer for all authenticated BeaRust roles.
+**Goal:** Add a safe, read-only audit-log API and dashboard viewer for all authenticated Bearust roles.
 
 **Architecture:** Keep audit writes in `control_plane::audit`, add focused query/DTO functions in the repository and a read-only Axum handler. The handler authenticates once, validates bound filters, and returns paginated redacted rows. The React dashboard consumes the endpoint through a typed API method and renders a self-contained Audit Log section.
 

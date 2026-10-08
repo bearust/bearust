@@ -2,7 +2,7 @@
 
 ## Goal
 
-Rebuild the BeaRust management UI on the architecture of the
+Rebuild the Bearust management UI on the architecture of the
 [shadcn-admin](https://github.com/satnaing/shadcn-admin) template —
 TanStack Router, TanStack Query, Zustand, and shadcn/ui (Radix + CVA +
 Tailwind) — replacing the current router-less, single-file (`App.tsx`,
@@ -29,7 +29,7 @@ new router, and a shadcn/ui-based command palette (Ctrl+K).
 Out of scope: any backend/API change (`api.ts`'s surface is frozen —
 see Data layer below), any change to i18n copy or key names (en/id/ja
 catalogs carry over verbatim), any new product feature, and every
-demo-only piece of the shadcn-admin template that has no BeaRust
+demo-only piece of the shadcn-admin template that has no Bearust
 equivalent (tasks, chats, apps gallery, multi-team switcher, Clerk
 auth pages). Font choice (currently Roboto/Roboto Mono, from the prior
 Material pass) is not reconsidered here.
@@ -77,7 +77,7 @@ content) of shadcn-admin's own `auth-store.ts`.
 
 Navigation: `/setup`, `/login`, `/bot-challenge` are public routes.
 `_authenticated/` holds `index` (Proxy Hosts, default landing route,
-preserving today's priority — it's BeaRust's actual core mechanism),
+preserving today's priority — it's Bearust's actual core mechanism),
 `ai-advisor`, `security` (single route, tabbed — WAF / Bot Protection
 / Rate Limit, replacing today's three-section "Security" nav group;
 chosen over three separate routes to keep the sidebar at 6 items),
@@ -102,7 +102,7 @@ of sync with each other.
 
 Centralizing hooks here (rather than inlining `useQuery`/`useMutation`
 per component) was chosen over the alternative specifically because
-BeaRust has real, no-mock backend data on every one of 13 resources
+Bearust has real, no-mock backend data on every one of 13 resources
 (unlike most of the template's own demo features, which use static
 fake data) — a single, named, testable hook per resource keeps 13
 query-key namespaces from drifting, and gives the SSE realtime wiring

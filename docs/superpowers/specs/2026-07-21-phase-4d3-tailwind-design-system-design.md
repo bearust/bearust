@@ -2,7 +2,7 @@
 
 ## Goal
 
-Migrate the existing BeaRust management UI to Tailwind CSS v4 and establish a consistent, responsive, accessible design system across all current pages without changing control-plane behavior or API contracts.
+Migrate the existing Bearust management UI to Tailwind CSS v4 and establish a consistent, responsive, accessible design system across all current pages without changing control-plane behavior or API contracts.
 
 ## Scope
 
@@ -16,7 +16,7 @@ Tailwind CSS v4 will be the sole styling system for application components. The 
 
 Design tokens will be declared in the main CSS entrypoint using Tailwind v4 theme variables and semantic CSS variables. Tokens include:
 
-- Brand: BeaRust gold `#D99906` with accessible foreground/hover variants.
+- Brand: Bearust gold `#D99906` with accessible foreground/hover variants.
 - Surfaces: page, panel, elevated panel, input, and inverse surfaces.
 - Content: primary, muted, inverse, and disabled text.
 - Borders and focus ring.

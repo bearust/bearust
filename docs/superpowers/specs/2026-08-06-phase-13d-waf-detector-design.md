@@ -31,7 +31,7 @@
 At both existing WAF evaluation call sites — header-stage (`request_filter`,
 before the body is available) and body-stage (`request_body_filter`, once
 the body is buffered) — after `waf::evaluate()` produces its `Evaluation`,
-BeaRust checks whether an enabled plugin declares the `"waf.detect"`
+Bearust checks whether an enabled plugin declares the `"waf.detect"`
 capability. If so, it builds a `WafDetectRequest` from the same bounded
 fields the rule engine itself inspected (method, path, query, headers,
 body) and invokes the plugin's `bearust_waf_detect` export via

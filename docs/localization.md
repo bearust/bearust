@@ -1,6 +1,6 @@
 # Localization contribution guide
 
-BeaRust currently supports these dashboard locale codes:
+Bearust currently supports these dashboard locale codes:
 
 - `en` — English, the source and fallback catalog
 - `id` — Indonesian

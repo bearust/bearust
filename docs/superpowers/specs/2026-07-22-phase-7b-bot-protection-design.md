@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add bounded, deterministic bot protection to BeaRust without external network
+Add bounded, deterministic bot protection to Bearust without external network
 calls in the proxy request path. Monitor-only remains the default, while admins
 can select challenge or block behavior.
 

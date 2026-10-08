@@ -1784,7 +1784,7 @@ pub async fn load_analytics_buckets(
 
 /// Upsert the current in-memory aggregate window and remove rows outside the
 /// configured retention boundary. The explicit update-then-insert sequence is
-/// supported by all database backends used by BeaRust and avoids a
+/// supported by all database backends used by Bearust and avoids a
 /// vendor-specific upsert dialect.
 pub async fn persist_analytics_buckets(
     pool: &DbPool,

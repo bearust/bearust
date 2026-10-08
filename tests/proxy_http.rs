@@ -3,7 +3,7 @@ use bearust::{
     config::{
         Algorithm, BackendConfig, Config, HealthCheckKind, PoolConfig, RouteConfig, ServerConfig,
     },
-    proxy::{http_service, BeaRustProxy},
+    proxy::{http_service, BearustProxy},
     runtime::{RuntimeSnapshot, RuntimeStore},
 };
 use pingora_core::server::{configuration::ServerConf, Server};
@@ -86,7 +86,7 @@ async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() 
     drop(listener);
     let mut server = Server::new(None).unwrap();
     let conf = Arc::new(ServerConf::default());
-    let mut service = http_service(BeaRustProxy::new(Arc::clone(&runtime)), &conf);
+    let mut service = http_service(BearustProxy::new(Arc::clone(&runtime)), &conf);
     service.add_tcp(&address.to_string());
     server.add_service(service);
     server.bootstrap();

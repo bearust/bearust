@@ -23,7 +23,7 @@ operator setting it up for the first time.
 
 ## Product Purpose
 
-BeaRust combines a reverse proxy, load balancer, and Web Application Firewall
+Bearust combines a reverse proxy, load balancer, and Web Application Firewall
 into a single self-hosted platform, with a full management GUI and RBAC so a
 small team (or a single operator) can run production-grade edge infrastructure
 without stitching together several separate tools. The dashboard is the
@@ -46,7 +46,7 @@ safety, positioned against Nginx Proxy Manager (Node.js), SafeLine WAF
 
 ## Operating Context
 
-An operator self-hosts BeaRust (single Docker Compose command, SQLite by
+An operator self-hosts Bearust (single Docker Compose command, SQLite by
 default, external MySQL/PostgreSQL optional) and manages it entirely through
 this dashboard: proxy host CRUD, TLS/Let's Encrypt certificates, WAF rules and
 mode (signature + semantic detection), bot protection policy and challenge

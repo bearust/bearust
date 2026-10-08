@@ -2,11 +2,11 @@
 
 ## Goals
 
-Let a BeaRust operator discover and install third-party plugins without
+Let a Bearust operator discover and install third-party plugins without
 manually locating a download URL, extracting an archive, and copying
 files by hand: `bearust plugin search <query>` and
 `bearust plugin install <id>`. The registry is a static, versioned JSON
-index — not a hosted service BeaRust must operate — and it never becomes
+index — not a hosted service Bearust must operate — and it never becomes
 a new source of trust: every plugin installed through it still goes
 through the exact TOFU signing/pinning flow
 (`docs/superpowers/specs/2026-08-12-phase-14-plugin-signing-trust-design.md`)
@@ -18,7 +18,7 @@ that a manually-placed plugin already goes through.
   registry — the index is a static file over plain HTTPS.
 - No `bearust plugin publish` command. Contributing an entry to the
   index is a manual pull request to the (separate) index repository,
-  reviewed by its maintainers — not a BeaRust CLI feature.
+  reviewed by its maintainers — not a Bearust CLI feature.
 - No GUI trust surface — this is a CLI-only increment, consistent with
   `plugin keygen`/`plugin sign` from the prior increment.
 - The index treating a listed plugin as pre-vetted or automatically
@@ -68,7 +68,7 @@ atomic write into <plugins-directory>/<id>/
 ```
 
 **Why the index is not a trust source:** the index is fetched over plain
-HTTPS from a repository BeaRust doesn't control the contents of beyond
+HTTPS from a repository Bearust doesn't control the contents of beyond
 review at merge time, so treating a checksum/public-key match against
 the index as sufficient trust would let anyone who can get a malicious
 entry merged (or anyone who can serve a spoofed index to an operator
@@ -79,7 +79,7 @@ check — and its `signer_public_key` field is cross-checked against the
 signature actually embedded in the downloaded tarball, so a mismatched
 or absent signature is caught before any file is written. Whether that
 signer is *trusted* is still decided entirely by the pre-existing TOFU
-pin store the first time (or every time, for later loads) BeaRust
+pin store the first time (or every time, for later loads) Bearust
 reloads plugins from disk.
 
 ## Components
@@ -196,7 +196,7 @@ feature promoted into the main dependency declaration (currently
 
 `version` exists only at this index/catalog level — `plugin.toml` itself
 has no version field (confirmed against `PluginManifest` in
-`src/plugin_runtime.rs`), so a plugin's identity inside BeaRust remains
+`src/plugin_runtime.rs`), so a plugin's identity inside Bearust remains
 just its `id`; the index's `version` is catalog metadata, not something
 the runtime ever reads.
 
@@ -224,7 +224,7 @@ and prompt for confirmation unless `--yes` → atomically write the
 plugin directory (temp directory + rename, the same pattern
 `TrustStore::persist` already uses) → print success and remind the
 operator to call `POST /api/plugins/reload`. Installing is a pure
-filesystem operation; it never talks to a running BeaRust server
+filesystem operation; it never talks to a running Bearust server
 process, matching `plugin keygen`/`plugin sign`'s existing behavior.
 
 ## Error Handling

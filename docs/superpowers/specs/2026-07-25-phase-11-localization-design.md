@@ -1,4 +1,4 @@
-# BeaRust Phase 11 — Localization Design
+# Bearust Phase 11 — Localization Design
 
 **Date:** 2026-07-25  
 **Status:** Proposed  
@@ -6,7 +6,7 @@
 
 ## Goal
 
-Make the BeaRust management GUI localization-ready and deliver English,
+Make the Bearust management GUI localization-ready and deliver English,
 Indonesian, and Japanese translations without hardcoding user-facing text in
 React components. English remains the default and fallback locale.
 

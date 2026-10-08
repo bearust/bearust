@@ -1,9 +1,9 @@
-# BeaRust Plugin Authoring Guide
+# Bearust Plugin Authoring Guide
 
-This guide shows how to build a BeaRust WASM plugin in Rust: the shared
+This guide shows how to build a Bearust WASM plugin in Rust: the shared
 memory convention every plugin uses, a worked example for each hook
 capability, resource limits and failure behavior, signing, and how to
-test a plugin locally against a running BeaRust instance.
+test a plugin locally against a running Bearust instance.
 
 It assumes working knowledge of Rust. It does not cover WASM or
 WebAssembly concepts from first principles.
@@ -20,7 +20,7 @@ WebAssembly concepts from first principles.
 
 ## Overview
 
-A BeaRust plugin is a WebAssembly module loaded from a directory that
+A Bearust plugin is a WebAssembly module loaded from a directory that
 contains a `plugin.toml` manifest and a compiled `.wasm` module. Plugins
 run inside a sandboxed [Wasmtime](https://wasmtime.dev/) instance with no
 filesystem, network, or WASI access — only the memory the host explicitly
@@ -72,9 +72,9 @@ yet. Later sections add a real capability to this same skeleton.
    `bearust-plugin-sdk` is not published on crates.io — in this repository
    it's a path-only workspace member (see this repo's own `Cargo.toml`).
    The path above is illustrative for a plugin crate checked out next to a
-   clone of BeaRust; a real external plugin author will need to vendor the
+   clone of Bearust; a real external plugin author will need to vendor the
    crate (e.g. via a `git` dependency pinned to a commit, or a local path
-   into a copy of this repository) until/unless BeaRust publishes it
+   into a copy of this repository) until/unless Bearust publishes it
    somewhere a version specifier like `"0.1"` could actually resolve
    against.
 
@@ -160,7 +160,7 @@ yet. Later sections add a real capability to this same skeleton.
    more memory pages, than these floor values — if your plugin traps or
    reports `fuel_exhausted` during testing, raise both here first.
 
-7. Assemble the plugin directory under BeaRust's configured plugins
+7. Assemble the plugin directory under Bearust's configured plugins
    directory (`./plugins` by default):
 
    ```text
@@ -170,7 +170,7 @@ yet. Later sections add a real capability to this same skeleton.
        └── my_plugin.wasm
    ```
 
-8. Reload plugins on a running BeaRust instance (see
+8. Reload plugins on a running Bearust instance (see
    [Testing Your Plugin Locally](#testing-your-plugin-locally) for the
    full authenticated request) and confirm it loaded before adding real
    hook logic.
@@ -408,7 +408,7 @@ least 1572864 bytes (1.5 MiB, `MIN_TRANSFORM_RESPONSE_INPUT_BYTES`) — a
 smaller value is rejected at load with `invalid_manifest`. The
 checked-in `tests/fixtures/plugins/transform_response_v2/plugin.toml`
 fixture uses exactly this floor value. Note that this floor is *larger*
-than BeaRust's default server-level `[plugins].max_output_bytes`
+than Bearust's default server-level `[plugins].max_output_bytes`
 (65536, per `manual.md`); since the manifest's own limit can never
 exceed the server's configured maximum, an operator running a
 `transform.response` plugin must also raise the server's
@@ -475,7 +475,7 @@ pub extern "C" fn bearust_transform_response(ptr: i32, len: i32) -> i64 {
 
 The example above uses the `base64` crate for illustration; add it to
 your plugin's own `Cargo.toml` if you need to inspect or modify the
-decoded body (`base64 = "0.22"` matches the version BeaRust's host uses).
+decoded body (`base64 = "0.22"` matches the version Bearust's host uses).
 
 ### notify.waf_block
 
@@ -484,7 +484,7 @@ as a fire-and-forget notification whenever the built-in WAF blocks a
 request — this hook cannot influence the block decision itself (see
 `waf.detect` above for that). The event never carries raw headers,
 body, query string, or client IP — only the same redacted fields
-BeaRust's own audit/tracing output already uses.
+Bearust's own audit/tracing output already uses.
 
 A plugin declaring `notify.waf_block` must set `max_output_bytes` to at
 least 1024 bytes (`MIN_NOTIFY_INPUT_BYTES`) — a smaller value is
@@ -621,7 +621,7 @@ block):
 
 If a plugin traps, times out, exhausts its fuel, or returns malformed or
 oversized output, the host never propagates that failure to the client
-request. Instead, each hook's caller falls back to BeaRust's built-in
+request. Instead, each hook's caller falls back to Bearust's built-in
 behavior for that request, as if the plugin capability weren't
 configured at all:
 
@@ -651,7 +651,7 @@ If you need to combine logic from two plugins for the same capability,
 you currently have to merge that logic into a single plugin yourself.
 
 This is a deliberate fail-open design: a broken or slow plugin degrades
-BeaRust to its behavior *without* that plugin, rather than failing
+Bearust to its behavior *without* that plugin, rather than failing
 traffic. Write your plugin logic knowing that any panic, infinite loop
 (caught by the fuel/timeout bounds), or malformed response you produce
 is silently ignored by the host, not surfaced to your plugin's caller —
@@ -677,21 +677,21 @@ wrote ./plugins/my-plugin/plugin.sig
 `keygen` generates an Ed25519 keypair once; `sign` reads your plugin's
 manifest and compiled module and writes a `plugin.sig` file next to
 them, covering both against tampering. Keep `signing.key` private —
-anyone who has it can produce signatures a BeaRust instance will accept
+anyone who has it can produce signatures a Bearust instance will accept
 as coming from you, for any plugin ID that instance hasn't already
 pinned to a different key.
 
-There is no community plugin registry yet — BeaRust doesn't provide a
+There is no community plugin registry yet — Bearust doesn't provide a
 place to publish, discover, or fetch plugins by ID. For now, share your
 plugin directory (`plugin.toml`, the compiled `.wasm` module, and
 `plugin.sig` if signed) through whatever channel you already use — a
 Git repository, a release artifact, an internal file share. Anyone
-installing it copies that directory under their own BeaRust instance's
+installing it copies that directory under their own Bearust instance's
 configured plugins directory and reloads.
 
 ## Testing Your Plugin Locally
 
-With `[plugins].enabled = true` and a running BeaRust instance, reload
+With `[plugins].enabled = true` and a running Bearust instance, reload
 after adding or changing a plugin directory:
 
 ```console
@@ -732,7 +732,7 @@ backend) — there is no standalone invoke-by-capability endpoint for
 these in this increment.
 
 If you're debugging a manifest or directory-layout problem, the fixture
-manifests under `tests/fixtures/plugins/` in the BeaRust repository are
+manifests under `tests/fixtures/plugins/` in the Bearust repository are
 known-good references for every capability this guide covers — compare
 your `plugin.toml` against the one matching your capability (e.g.
 `tests/fixtures/plugins/waf_detect_v2/plugin.toml` for `waf.detect`).

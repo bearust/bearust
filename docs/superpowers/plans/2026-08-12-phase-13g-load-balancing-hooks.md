@@ -1413,7 +1413,7 @@ Expected: FAIL — none of `load_balance_request`, `apply_load_balancer_plugin`,
 
 - [ ] **Step 3: Add the module-level constant and the two helper functions**
 
-Add to `src/proxy.rs`, directly after the `apply_transform_response_plugin` function (i.e. after its closing `}`, before the `should_buffer_response_for_transform`/whatever follows -- place it as its own new section, e.g. directly before `impl ProxyHttp for BeaRustProxy`):
+Add to `src/proxy.rs`, directly after the `apply_transform_response_plugin` function (i.e. after its closing `}`, before the `should_buffer_response_for_transform`/whatever follows -- place it as its own new section, e.g. directly before `impl ProxyHttp for BearustProxy`):
 
 ```rust
 /// Backend candidates sent to a `balance.select` plugin are capped at this

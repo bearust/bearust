@@ -21,6 +21,6 @@ Reports are reviewed by the maintainers, who will confirm receipt, investigate, 
 
 ## Scope notes
 
-BeaRust's threat model assumes the operator keeps the control plane (`:8081`) loopback-only or behind an authenticated boundary, keeps `/data` (sessions, ACME credentials, certificate material) private with the documented file modes, and deploys only reviewed WASM plugins. Reports about deployments that ignore this documented guidance (for example, an internet-exposed unauthenticated dashboard) are still welcome as hardening ideas but may be handled as documentation improvements rather than security fixes.
+Bearust's threat model assumes the operator keeps the control plane (`:8081`) loopback-only or behind an authenticated boundary, keeps `/data` (sessions, ACME credentials, certificate material) private with the documented file modes, and deploys only reviewed WASM plugins. Reports about deployments that ignore this documented guidance (for example, an internet-exposed unauthenticated dashboard) are still welcome as hardening ideas but may be handled as documentation improvements rather than security fixes.
 
 When sharing any diagnostic output, redact `DATABASE_URL` passwords, `BEARUST_SETUP_TOKEN`, API keys, private keys, and session cookies.

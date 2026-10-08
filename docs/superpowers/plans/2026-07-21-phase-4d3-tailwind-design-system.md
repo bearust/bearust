@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Migrate every existing BeaRust UI page to Tailwind CSS v4 with shared semantic tokens, responsive layouts, accessible controls, and system/light/dark themes.
+**Goal:** Migrate every existing Bearust UI page to Tailwind CSS v4 with shared semantic tokens, responsive layouts, accessible controls, and system/light/dark themes.
 
 **Architecture:** Tailwind v4 is loaded from the frontend CSS entrypoint. Semantic CSS variables define the design tokens and are switched by a root `data-theme` attribute. A small React theme provider owns mode selection and local-storage persistence; presentational components consume Tailwind utilities and token classes without changing existing API/state behavior.
 

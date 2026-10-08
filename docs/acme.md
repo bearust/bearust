@@ -1,6 +1,6 @@
 # ACME certificate automation
 
-BeaRust can issue, activate, inspect, and renew Let's Encrypt certificates from
+Bearust can issue, activate, inspect, and renew Let's Encrypt certificates from
 the authenticated control plane. The issue endpoint returns a job envelope;
 certificate metadata and renewal state are available from the status endpoint.
 Private keys, account credentials, and Cloudflare tokens are never included in
@@ -29,7 +29,7 @@ Create a Cloudflare API token restricted to the target zone with:
 - `Zone:Zone:Read`
 
 Do not use a global API key. Enter the token only in the authenticated issue
-request. BeaRust stores it under `/data/secrets` with restrictive permissions;
+request. Bearust stores it under `/data/secrets` with restrictive permissions;
 rotate it by issuing the next request with the replacement token. Wildcard and
 non-wildcard names may be requested according to the ACME hostname validation
 rules.

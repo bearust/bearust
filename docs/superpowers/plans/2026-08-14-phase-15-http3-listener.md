@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an opt-in HTTP/3 (QUIC) listener to BeaRust that runs a client request through the existing WAF rule engine and routes/forwards it to the same upstream backends the HTTP/1.1/HTTP/2 path already uses, without modifying Pingora's `ProxyHttp` implementation.
+**Goal:** Add an opt-in HTTP/3 (QUIC) listener to Bearust that runs a client request through the existing WAF rule engine and routes/forwards it to the same upstream backends the HTTP/1.1/HTTP/2 path already uses, without modifying Pingora's `ProxyHttp` implementation.
 
 **Architecture:** A new, independent listener stack in `src/http3.rs` built on `quinn` (QUIC transport) + `h3`/`h3-quinn` (HTTP/3 framing), running alongside Pingora's existing TCP listener. It shares the same TLS certificate/key files, the same `Arc<RuntimeStore>` for host routing and backend selection, and the same `Arc<WafStore>` for WAF rule evaluation — reusing `waf::evaluate` and `RuntimeSnapshot::route`/`PoolState::select` exactly as `src/proxy.rs` already does, without going through Pingora's request/session types at all.
 

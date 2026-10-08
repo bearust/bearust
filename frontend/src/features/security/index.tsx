@@ -94,7 +94,7 @@ const demoRules: WafRule[] = [
   {
     id: 3,
     name: "Path traversal",
-    source: "BeaRust semantic",
+    source: "Bearust semantic",
     category: "path_traversal",
     severity: "medium",
     enabled: true,

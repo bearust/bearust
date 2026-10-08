@@ -1,4 +1,4 @@
-# BeaRust Phase 2 — TLS & Certificate Automation Design
+# Bearust Phase 2 — TLS & Certificate Automation Design
 
 ## Goal
 
@@ -47,7 +47,7 @@ cert_path = "/etc/bearust/tls/fullchain.pem"
 key_path = "/etc/bearust/tls/privkey.pem"
 ```
 
-`server.tls` is optional. When omitted, BeaRust starts the existing plain HTTP
+`server.tls` is optional. When omitted, Bearust starts the existing plain HTTP
 listener. Certificate records used by the control plane contain a stable name,
 the covered hostnames, source (`custom` or `letsencrypt`), certificate/key
 locations, expiry, and activation state. Secrets such as private keys and DNS

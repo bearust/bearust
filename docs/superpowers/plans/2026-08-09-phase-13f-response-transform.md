@@ -4,7 +4,7 @@
 
 **Goal:** Add `transform.response`, the plugin system's first response-mutating hook: a plugin can rewrite the full response body (headers untouched) before it reaches the downstream client.
 
-**Architecture:** Override two currently-unused `pingora_proxy::ProxyHttp` methods on `BeaRustProxy` — `response_filter` (async, strips `Content-Length` and marks eligibility) and `response_body_filter` (sync, buffers the body up to a 1 MiB cap and invokes the plugin via `tokio::task::block_in_place` at `end_of_stream`). Mirrors Phase 13E's ABI/memory/selection/fail-open conventions exactly; adds no new ABI version.
+**Architecture:** Override two currently-unused `pingora_proxy::ProxyHttp` methods on `BearustProxy` — `response_filter` (async, strips `Content-Length` and marks eligibility) and `response_body_filter` (sync, buffers the body up to a 1 MiB cap and invokes the plugin via `tokio::task::block_in_place` at `end_of_stream`). Mirrors Phase 13E's ABI/memory/selection/fail-open conventions exactly; adds no new ABI version.
 
 **Tech Stack:** Rust, wasmtime 27.0.0, pingora-proxy 0.8.1, tokio (multi-thread runtime, `rt-multi-thread` feature already enabled), base64 0.22.
 
@@ -1245,7 +1245,7 @@ Add to `src/proxy.rs`, directly after the `apply_transform_plugin` function (i.e
 /// Response bodies larger than this are never handed to a
 /// `transform.response` plugin -- fail open to unmodified passthrough
 /// instead. Bounds per-request proxy memory from a single large upstream
-/// response; matches the design spec's chosen cap for BeaRust's typical
+/// response; matches the design spec's chosen cap for Bearust's typical
 /// API/JSON/HTML traffic.
 const RESPONSE_BODY_TRANSFORM_CAP_BYTES: usize = 1024 * 1024;
 
@@ -1370,7 +1370,7 @@ fn apply_transform_response_plugin(
 
 - [ ] **Step 5: Add the `response_filter` and `response_body_filter` overrides**
 
-In `src/proxy.rs`, inside `impl ProxyHttp for BeaRustProxy`, add the following two methods directly after `request_body_filter` (i.e. after its closing `}`, before `logging`):
+In `src/proxy.rs`, inside `impl ProxyHttp for BearustProxy`, add the following two methods directly after `request_body_filter` (i.e. after its closing `}`, before `logging`):
 
 ```rust
     async fn response_filter(
@@ -1460,7 +1460,7 @@ Append to the end of `docs/PRD.md` (directly after the existing Phase 13E status
 Phase 13F is complete and adds the plugin system's first response-mutating
 hook: a plugin can rewrite the full response body before it is sent to the
 downstream client. It overrides two previously-unused `ProxyHttp` methods,
-`response_filter` and `response_body_filter`, on `BeaRustProxy`.
+`response_filter` and `response_body_filter`, on `BearustProxy`.
 
 Discovered during implementation planning: `pingora-proxy 0.8.1` sends the
 response header task to the downstream client as soon as `response_filter`
@@ -1491,7 +1491,7 @@ the full buffered body (and the response status, informational only) via
 synchronous `ProxyHttp` method (unlike the request-side hooks, which are
 `async fn` and could use `spawn_blocking`). `block_in_place` lets the
 blocking wasmtime call run without stalling the calling worker thread's
-other queued tasks, requiring BeaRust's Tokio runtime to be multi-threaded
+other queued tasks, requiring Bearust's Tokio runtime to be multi-threaded
 (already the case: `rt-multi-thread` is enabled).
 
 Fail-open covers every error class: no plugin manager, no active plugin, a

@@ -101,7 +101,7 @@
 
 **Files:**
 - Modify: `src/proxy.rs`
-- Modify: `src/runtime.rs` or startup wiring that constructs `BeaRustProxy`
+- Modify: `src/runtime.rs` or startup wiring that constructs `BearustProxy`
 - Test: `tests/proxy_bot.rs`
 
 **Interfaces:**

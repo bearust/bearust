@@ -5,7 +5,7 @@
 
 ## Goal
 
-Add a basic, configurable Web Application Firewall to BeaRust's request path. The first increment protects common HTTP attack classes while preserving safe rollout: new installations run in `monitor-only` mode, and administrators can switch to blocking behavior.
+Add a basic, configurable Web Application Firewall to Bearust's request path. The first increment protects common HTTP attack classes while preserving safe rollout: new installations run in `monitor-only` mode, and administrators can switch to blocking behavior.
 
 ## Scope
 

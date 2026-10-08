@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add PostgreSQL and MySQL support to BeaRust's control plane while preserving SQLite as the default and keeping existing API behavior stable.
+**Goal:** Add PostgreSQL and MySQL support to Bearust's control plane while preserving SQLite as the default and keeping existing API behavior stable.
 
 **Architecture:** `control_plane::repository` will expose `sqlx::AnyPool`, validate supported URL schemes, and run ordered SQLx migrations. Repository queries will use portable SQL and small helpers for generated IDs and conflict-safe seeds; handlers and services will remain database-agnostic.
 

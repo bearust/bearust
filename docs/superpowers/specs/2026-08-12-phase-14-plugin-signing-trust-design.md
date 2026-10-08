@@ -142,7 +142,7 @@ to actually produce a valid signature:
 
 - **`src/cli.rs`**: new `plugin` subcommand group (`keygen`, `sign`) as
   described in Architecture. These are local, offline, file-in/file-out
-  operations — no network calls, no interaction with a running BeaRust
+  operations — no network calls, no interaction with a running Bearust
   instance or its config.
 
 - **`src/config/mod.rs`**: `PluginConfig` gains `require_signature: bool`

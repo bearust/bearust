@@ -148,13 +148,13 @@ $ bearust plugin sign ./plugins/health-ok --key ./keys/signing.key
 module. Keep `signing.key` off the deployed host entirely — sign in CI or on
 a workstation and ship only `plugin.toml`, the module, and `plugin.sig`.
 
-The first time BeaRust loads a signed plugin ID, it pins that plugin's
+The first time Bearust loads a signed plugin ID, it pins that plugin's
 public key into `<directory>/trusted-keys.json`. Every subsequent load must
 match the pinned key; a mismatch fails closed with `key_mismatch` in the
 plugin's `last_error_code` and in `plugin_startup_failed`/reload audit logs.
 Because the trust store is written at runtime, **the plugin directory cannot
 be fully read-only** if signing is in use — mount it read-write and owned
-only by the account running BeaRust, or pre-seed `trusted-keys.json`
+only by the account running Bearust, or pre-seed `trusted-keys.json`
 read-only with the expected pins and mount only that file read-only if you
 want to lock pinning down entirely.
 

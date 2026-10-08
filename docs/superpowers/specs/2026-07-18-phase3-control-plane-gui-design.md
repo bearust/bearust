@@ -2,7 +2,7 @@
 
 ## Goal
 
-Deliver the first end-to-end management slice of BeaRust: first-run admin setup, RBAC-protected sessions, Proxy Host CRUD, and custom certificate upload/activation through a React/Vite/Tailwind GUI.
+Deliver the first end-to-end management slice of Bearust: first-run admin setup, RBAC-protected sessions, Proxy Host CRUD, and custom certificate upload/activation through a React/Vite/Tailwind GUI.
 
 ## Scope
 

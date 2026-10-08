@@ -3,7 +3,7 @@
 ## Goals
 
 Give an external developer everything needed to write, build, test, and
-sign a BeaRust WASM plugin in Rust, without reading the host source or the
+sign a Bearust WASM plugin in Rust, without reading the host source or the
 per-phase design specs first. The document is the single onboarding path
 for plugin authors; today that knowledge is scattered across six
 `docs/superpowers/specs/2026-08-*-phase-13*-design.md` files, `src/plugin_runtime.rs`
@@ -12,8 +12,8 @@ doc comments, and `crates/bearust-plugin-sdk/src/lib.rs`.
 ## Non-goals
 
 - Not a WASM/Rust tutorial from scratch — assumes working Rust knowledge.
-- Not a contribution process for submitting plugins *into the BeaRust
-  repository itself* (no CONTRIBUTING.md-style PR workflow). If BeaRust
+- Not a contribution process for submitting plugins *into the Bearust
+  repository itself* (no CONTRIBUTING.md-style PR workflow). If Bearust
   later wants first-party example plugins under version control, that is
   a separate, smaller follow-up.
 - Not registry documentation. No plugin registry, fetch/install tooling,
@@ -27,7 +27,7 @@ doc comments, and `crates/bearust-plugin-sdk/src/lib.rs`.
 
 ## Audience
 
-External developers building WASM plugins for their own BeaRust
+External developers building WASM plugins for their own Bearust
 deployment, writing in Rust against `bearust-plugin-sdk`. Not aimed at
 non-Rust guest languages (the ABI is language-agnostic in principle, but
 Rust + the SDK crate is the only supported path today, and the guide
@@ -75,7 +75,7 @@ Rust plugin author writes.
 
 ## Components (document outline)
 
-1. **Overview** — what a BeaRust plugin is, `abi_version: 2` as the
+1. **Overview** — what a Bearust plugin is, `abi_version: 2` as the
    recommended target (`abi_version: 0`, health-only, mentioned as legacy
    in one sentence with a pointer to the 13A spec, not otherwise covered),
    one paragraph on the sandbox model (WASM, fuel/timeout/memory limits,
@@ -104,7 +104,7 @@ Rust plugin author writes.
 5. **Limits & failure behavior** — `[limits]` fields
    (`memory_pages`/`fuel`/`invocation_timeout_ms`/`max_output_bytes`) and
    what happens on trap/timeout/fuel exhaustion/malformed output: each
-   hook's caller in `src/proxy.rs` falls back to BeaRust's built-in
+   hook's caller in `src/proxy.rs` falls back to Bearust's built-in
    behavior (fail-open) rather than failing the request, except
    `waf.detect`'s verdict can only ever escalate an existing decision,
    never suppress one. Stated once at the general level, with a
@@ -164,7 +164,7 @@ spec's implementation is considered complete:
 - A first-party example plugin crate (compiled and tested in CI) if
   drift between this guide's illustrative code and the real ABI becomes
   a recurring problem.
-- `CONTRIBUTING.md` for submitting plugins/hooks into the BeaRust repo
+- `CONTRIBUTING.md` for submitting plugins/hooks into the Bearust repo
   itself.
 - Community plugin registry and any documentation for it (Phase 14
   increment 3).

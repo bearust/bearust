@@ -2,7 +2,7 @@
 
 ## Goal
 
-Melengkapi control plane BeaRust dengan manajemen user dan penegakan role-based access control yang konsisten untuk role `admin`, `operator`, dan `viewer`.
+Melengkapi control plane Bearust dengan manajemen user dan penegakan role-based access control yang konsisten untuk role `admin`, `operator`, dan `viewer`.
 
 ## Scope
 

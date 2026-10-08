@@ -1,4 +1,4 @@
-# BeaRust Phase 12 — AI Advisor Design
+# Bearust Phase 12 — AI Advisor Design
 
 **Date:** 2026-07-25  
 **Status:** Proposed  

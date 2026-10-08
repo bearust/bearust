@@ -1,7 +1,7 @@
 use bearust::{
     analytics::{AnalyticsCollector, AnalyticsFilter},
     config::{Config, ServerConfig},
-    proxy::{analytics_security_counters, completion_event, BeaRustProxy},
+    proxy::{analytics_security_counters, completion_event, BearustProxy},
     runtime::{RuntimeSnapshot, RuntimeStore},
 };
 use std::sync::Arc;
@@ -33,7 +33,7 @@ fn proxy_builder_accepts_analytics_collector() {
     )
     .unwrap();
     let collector = Arc::new(AnalyticsCollector::default());
-    let _proxy = BeaRustProxy::new(Arc::new(RuntimeStore::new(snapshot)))
+    let _proxy = BearustProxy::new(Arc::new(RuntimeStore::new(snapshot)))
         .with_analytics(Arc::clone(&collector));
     assert_eq!(collector.summary(AnalyticsFilter::default()).requests, 0);
 }
@@ -83,5 +83,5 @@ fn analytics_event_path_is_fail_open_without_collector() {
         None,
     )
     .unwrap();
-    let _proxy = BeaRustProxy::new(Arc::new(RuntimeStore::new(snapshot)));
+    let _proxy = BearustProxy::new(Arc::new(RuntimeStore::new(snapshot)));
 }

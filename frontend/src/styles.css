@@ -4,7 +4,7 @@
 
 @custom-variant dark (&:is([data-theme="dark"] *));
 
-/* BeaRust keeps the upstream shadcn-admin surface grammar while retaining
+/* Bearust keeps the upstream shadcn-admin surface grammar while retaining
    its amber identity and self-hosted font policy. */
 @import "@fontsource/roboto/latin-400.css";
 @import "@fontsource/roboto/latin-500.css";

@@ -98,7 +98,7 @@ impl Default for RequestContext {
     }
 }
 
-pub struct BeaRustProxy {
+pub struct BearustProxy {
     pub runtime: Arc<RuntimeStore>,
     pub http01: Http01Store,
     pub waf: Option<Arc<WafStore>>,
@@ -119,7 +119,7 @@ pub struct BeaRustProxy {
     pub http3_alt_svc: Option<String>,
 }
 
-impl BeaRustProxy {
+impl BearustProxy {
     pub fn new(runtime: Arc<RuntimeStore>) -> Self {
         Self {
             runtime,
@@ -383,9 +383,9 @@ pub fn completion_event(
 }
 
 pub fn http_service(
-    proxy: BeaRustProxy,
+    proxy: BearustProxy,
     conf: &Arc<pingora_core::server::configuration::ServerConf>,
-) -> pingora_core::services::listening::Service<pingora_proxy::HttpProxy<BeaRustProxy, ()>> {
+) -> pingora_core::services::listening::Service<pingora_proxy::HttpProxy<BearustProxy, ()>> {
     pingora_proxy::http_proxy_service(conf, proxy)
 }
 
@@ -676,7 +676,7 @@ async fn apply_transform_plugin(
 /// Response bodies larger than this are never handed to a
 /// `transform.response` plugin -- fail open to unmodified passthrough
 /// instead. Bounds per-request proxy memory from a single large upstream
-/// response; matches the design spec's chosen cap for BeaRust's typical
+/// response; matches the design spec's chosen cap for Bearust's typical
 /// API/JSON/HTML traffic.
 pub const RESPONSE_BODY_TRANSFORM_CAP_BYTES: usize = 1024 * 1024;
 
@@ -684,7 +684,7 @@ pub const RESPONSE_BODY_TRANSFORM_CAP_BYTES: usize = 1024 * 1024;
 /// `Alt-Svc: <alt_svc>` into every response, when the HTTP/3 listener is
 /// enabled (`alt_svc` is `Some`). This replaces (rather than merges with)
 /// any `Alt-Svc` the upstream sent, since the client is talking to
-/// BeaRust's own TLS frontend, not directly to the upstream -- an
+/// Bearust's own TLS frontend, not directly to the upstream -- an
 /// upstream's own alternative-service offer is meaningless to it. A `None`
 /// `alt_svc` (HTTP/3 disabled) leaves the response untouched.
 fn apply_http3_alt_svc_header(response: &mut ResponseHeader, alt_svc: Option<&str>) {
@@ -829,7 +829,7 @@ fn accumulate_response_chunk(ctx: &mut RequestContext, chunk: &[u8]) -> Option<V
 /// counting a failure metric where applicable).
 ///
 /// Load-bearing runtime assumption: `block_in_place` is only valid on a
-/// real multi-thread tokio runtime. BeaRust's pingora `Server` is created
+/// real multi-thread tokio runtime. Bearust's pingora `Server` is created
 /// in `src/cli.rs` with no config override for `work_stealing`, which
 /// defaults to enabled and backs the server with a multi-thread runtime.
 /// If that default ever changes to a `NoSteal`/current-thread flavor,
@@ -1107,7 +1107,7 @@ pub fn route_key(route: &ResolvedRoute) -> i64 {
 }
 
 #[async_trait]
-impl ProxyHttp for BeaRustProxy {
+impl ProxyHttp for BearustProxy {
     type CTX = RequestContext;
 
     fn new_ctx(&self) -> Self::CTX {
@@ -1347,7 +1347,7 @@ impl ProxyHttp for BeaRustProxy {
             if auth.protected(&route.host) && !auth.authorized(&route.host, authorization) {
                 let realm = auth
                     .realm(&route.host)
-                    .unwrap_or_else(|| "BeaRust protected host".into())
+                    .unwrap_or_else(|| "Bearust protected host".into())
                     .replace('"', "'")
                     .chars()
                     .filter(|ch| !ch.is_ascii_control())

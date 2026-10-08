@@ -1,16 +1,16 @@
-# BeaRust
+# Bearust
 
-![BeaRust](docs/logo.png)
+![Bearust](docs/logo.png)
 
 [![CI](https://github.com/rizalord/bearust/actions/workflows/ci.yml/badge.svg)](https://github.com/rizalord/bearust/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange.svg)](rust-toolchain.toml)
 
-BeaRust is an open-source, configuration-driven **reverse proxy and load balancer** with a built-in web dashboard. Point it at your backends with a small TOML file and you get host/path routing, health-checked load balancing, TLS, a WAF, and live analytics — without learning a new DSL.
+Bearust is an open-source, configuration-driven **reverse proxy and load balancer** with a built-in web dashboard. Point it at your backends with a small TOML file and you get host/path routing, health-checked load balancing, TLS, a WAF, and live analytics — without learning a new DSL.
 
 ```text
                     ┌─────────────┐
-  clients ──────────▶ │   BeaRust   │ ──▶ backend pool (health-checked)
+  clients ──────────▶ │   Bearust   │ ──▶ backend pool (health-checked)
   :8080 (proxy)     │  ─────────  │     round-robin / least-connections
   :8081 (dashboard) │  WAF · TLS  │
                     └─────────────┘
@@ -55,7 +55,7 @@ docker compose up -d --build
 | Proxy (your app traffic) | `http://localhost:8080` |
 | Dashboard + control API (loopback-only) | `http://127.0.0.1:8081` |
 
-On first startup BeaRust generates a one-time setup token. For a deterministic token, set it before starting:
+On first startup Bearust generates a one-time setup token. For a deterministic token, set it before starting:
 
 ```sh
 echo 'BEARUST_SETUP_TOKEN=replace-with-a-long-random-value' > .env
@@ -165,7 +165,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for workflow and conventions.
 
 ## Roadmap
 
-BeaRust is built in phases tracked in [docs/PRD.md](docs/PRD.md): core proxy, TLS/ACME, dashboard, RBAC, external databases, WAF, analytics, self-learning, clustering, localization, AI advisor (optional), WASM plugins, and HTTP/3 are implemented. Deliberately deferred: SSO/federated identity, long-term metric rollups, cross-node analytics aggregation, and full Coraza/OWASP CRS grammar compatibility.
+Bearust is built in phases tracked in [docs/PRD.md](docs/PRD.md): core proxy, TLS/ACME, dashboard, RBAC, external databases, WAF, analytics, self-learning, clustering, localization, AI advisor (optional), WASM plugins, and HTTP/3 are implemented. Deliberately deferred: SSO/federated identity, long-term metric rollups, cross-node analytics aggregation, and full Coraza/OWASP CRS grammar compatibility.
 
 ## Contributing
 

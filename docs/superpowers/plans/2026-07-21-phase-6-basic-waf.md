@@ -67,12 +67,12 @@
 - Test: `tests/proxy_waf.rs`
 
 **Interfaces:**
-- Produces `WafStore::load(db)`, `WafStore::snapshot()`, and `WafStore::reload(db)`; `BeaRustProxy::with_waf_store(Arc<WafStore>)` consumes it.
+- Produces `WafStore::load(db)`, `WafStore::snapshot()`, and `WafStore::reload(db)`; `BearustProxy::with_waf_store(Arc<WafStore>)` consumes it.
 
 - [ ] **Step 1: Write failing proxy tests** that send a matching request in monitor mode (upstream receives it) and block mode (client receives generic 403 and upstream is not contacted).
 - [ ] **Step 2: Run `cargo test --test proxy_waf`** and confirm the proxy has no WAF store integration.
 - [ ] **Step 3: Implement `WafStore` with `ArcSwap<WafSnapshot>`**, loading persisted config/rules at startup and retaining the last valid snapshot when reload validation fails.
-- [ ] **Step 4: Add the store to `AppState`, initialize it after migrations/seeding, and pass the same `Arc<WafStore>` from CLI bootstrap into `BeaRustProxy`.
+- [ ] **Step 4: Add the store to `AppState`, initialize it after migrations/seeding, and pass the same `Arc<WafStore>` from CLI bootstrap into `BearustProxy`.
 - [ ] **Step 5: Integrate evaluation before route forwarding in `request_filter`; use Pingora's bounded body-filter hook for body bytes, and never buffer beyond the configured cap. Return 403 with a non-reflective body for effective blocks.
 - [ ] **Step 6: Run `cargo test --test proxy_waf` and the existing `cargo test --test proxy_http`; expect both to pass.
 - [ ] **Step 7: Commit with `git commit -m "feat: enforce waf decisions in proxy"`.**

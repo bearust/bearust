@@ -41,7 +41,7 @@ export function AuthLayout({ children }: { children: React.ReactNode }) {
             <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
               <ShieldCheck className="size-4" />
             </span>
-            <span className="font-semibold tracking-tight">BeaRust</span>
+            <span className="font-semibold tracking-tight">Bearust</span>
           </div>
           {children}
         </div>

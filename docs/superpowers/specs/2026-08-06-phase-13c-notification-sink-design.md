@@ -2,7 +2,7 @@
 
 **Status:** Design approved; implementation plan pending
 
-**Scope:** Phase 13C of the BeaRust roadmap. This increment adds the first
+**Scope:** Phase 13C of the Bearust roadmap. This increment adds the first
 plugin traffic hook: a WAF-block notification sink. It builds directly on
 Phase 13A's WASM plugin runtime and Phase 13B's `bearust-plugin-sdk` memory
 convention. It does not add request/response mutation, WAF detection, or

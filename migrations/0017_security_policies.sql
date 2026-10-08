@@ -13,7 +13,7 @@ CREATE INDEX IF NOT EXISTS idx_ip_security_rules_enabled ON ip_security_rules(en
 CREATE TABLE IF NOT EXISTS proxy_host_auth (
     host_id INTEGER PRIMARY KEY,
     enabled INTEGER NOT NULL DEFAULT 0,
-    realm VARCHAR(128) NOT NULL DEFAULT 'BeaRust protected host',
+    realm VARCHAR(128) NOT NULL DEFAULT 'Bearust protected host',
     username VARCHAR(128) NOT NULL DEFAULT '',
     password_hash TEXT NOT NULL DEFAULT '',
     updated_at VARCHAR(64) NOT NULL,

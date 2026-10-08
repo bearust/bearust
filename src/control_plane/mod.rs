@@ -5275,7 +5275,7 @@ async fn get_host_auth(
         Ok(None) => Json(ProxyHostAuth {
             host_id: id,
             enabled: false,
-            realm: "BeaRust protected host".into(),
+            realm: "Bearust protected host".into(),
             username: String::new(),
             updated_at: String::new(),
         })
@@ -5343,7 +5343,7 @@ async fn update_host_auth(
     let realm = input
         .realm
         .or_else(|| current.as_ref().map(|auth| auth.realm.clone()))
-        .unwrap_or_else(|| "BeaRust protected host".into())
+        .unwrap_or_else(|| "Bearust protected host".into())
         .trim()
         .to_owned();
     let username = input

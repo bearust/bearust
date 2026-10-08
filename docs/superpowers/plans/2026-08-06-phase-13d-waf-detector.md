@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let a WASM plugin declaring the `waf.detect` capability contribute an additional, escalate-only verdict to BeaRust's built-in WAF rule engine, synchronously, with fail-open behavior on any plugin error.
+**Goal:** Let a WASM plugin declaring the `waf.detect` capability contribute an additional, escalate-only verdict to Bearust's built-in WAF rule engine, synchronously, with fail-open behavior on any plugin error.
 
 **Architecture:** At both existing WAF evaluation call sites (`request_filter` header-stage, `request_body_filter` body-stage), after `waf::evaluate()` runs, the lowest-ID enabled plugin declaring `waf.detect` (if any) is invoked via `tokio::task::spawn_blocking` with the same bounded `InspectionContext` fields the rule engine itself inspected. Its verdict (`decision`, `category`, `score`) is merged into the `Evaluation` via a pure, most-severe-wins `merge_plugin_verdict` function that can only escalate, never downgrade. Any plugin failure counts a metric and leaves the rule engine's own decision untouched.
 
@@ -1041,7 +1041,7 @@ git commit -m "feat: add escalate-only merge_plugin_verdict to the WAF evaluator
 
 **Interfaces:**
 - Consumes: `crate::plugin_runtime::PluginManager::waf_detector_plugin`/`CompiledPlugin::detect` (Task 3), `crate::waf::merge_plugin_verdict` (Task 4), `bearust_plugin_sdk::WafDetectRequest` (Task 1), `PluginMetrics::record_waf_detect_*` (Task 2).
-- Produces: `BeaRustProxy::plugin_manager: Option<Arc<crate::plugin_runtime::PluginManager>>`, `BeaRustProxy::with_plugin_manager(...)` builder method, wired at both `request_filter` and `request_body_filter` call sites.
+- Produces: `BearustProxy::plugin_manager: Option<Arc<crate::plugin_runtime::PluginManager>>`, `BearustProxy::with_plugin_manager(...)` builder method, wired at both `request_filter` and `request_body_filter` call sites.
 
 - [ ] **Step 1: Add the failing tests**
 
@@ -1225,13 +1225,13 @@ In `src/proxy.rs`, add `PluginManager` to the existing `use crate::{...}` block 
     plugin_runtime::PluginManager,
 ```
 
-Add a new field to `BeaRustProxy` (after `pub plugin_notify: Option<Arc<crate::plugin_notify::NotificationSink>>,`):
+Add a new field to `BearustProxy` (after `pub plugin_notify: Option<Arc<crate::plugin_notify::NotificationSink>>,`):
 
 ```rust
     pub plugin_manager: Option<Arc<PluginManager>>,
 ```
 
-Initialize it in `BeaRustProxy::new` (after `plugin_notify: None,`):
+Initialize it in `BearustProxy::new` (after `plugin_notify: None,`):
 
 ```rust
             plugin_manager: None,

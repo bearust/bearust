@@ -1,4 +1,4 @@
-# BeaRust Phase 2 TLS & Certificate Automation Implementation Plan
+# Bearust Phase 2 TLS & Certificate Automation Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -72,7 +72,7 @@
 - `tls::settings(config: &TlsConfig) -> Result<TlsSettings, TlsError>`.
 - `cli::serve_proxy` creates a TLS listener when `server.tls` exists and the existing TCP listener otherwise.
 
-- [ ] **Step 1: Write a failing integration test** that starts BeaRust with a generated test certificate, performs an HTTPS request to a local upstream, and asserts the upstream response is returned.
+- [ ] **Step 1: Write a failing integration test** that starts Bearust with a generated test certificate, performs an HTTPS request to a local upstream, and asserts the upstream response is returned.
 - [ ] **Step 2: Run the test** in Rust 1.84.1 Docker and confirm failure because the server currently accepts plaintext only.
 - [ ] **Step 3: Implement `tls::settings`** using Pingora 0.8.1’s native TLS/rustls service API, loading the certificate chain and private key through the certificate store boundary.
 - [ ] **Step 4: Select the TLS service/listener based on `server.tls`** without changing route resolution or upstream behavior.

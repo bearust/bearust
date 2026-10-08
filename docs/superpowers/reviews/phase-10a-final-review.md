@@ -4,7 +4,7 @@
 
 Phase 10A establishes node identity, cluster peer configuration, an authenticated
 TCP cluster listener, bounded concurrent peer health checks, and a redacted status
-endpoint for BeaRust multi-node operations — while preserving single-node defaults
+endpoint for Bearust multi-node operations — while preserving single-node defaults
 and keeping all peer failures completely off the proxy request path.
 
 ## Verification Checklist

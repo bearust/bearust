@@ -4,7 +4,7 @@
 
 **Goal:** Add a bounded token-bucket rate limiter with monitor/block modes, authenticated control-plane management, safe client identity extraction, and redacted telemetry.
 
-**Architecture:** Add a pure `rate_limit` module for policy validation and token-bucket math, plus a bounded concurrent runtime store. Attach the store and immutable policy snapshot to `BeaRustProxy`; evaluate it after WAF/bot decisions and before upstream selection. Extend the existing control-plane repository, router, audit, realtime, and frontend patterns rather than introducing a second configuration system.
+**Architecture:** Add a pure `rate_limit` module for policy validation and token-bucket math, plus a bounded concurrent runtime store. Attach the store and immutable policy snapshot to `BearustProxy`; evaluate it after WAF/bot decisions and before upstream selection. Extend the existing control-plane repository, router, audit, realtime, and frontend patterns rather than introducing a second configuration system.
 
 **Tech Stack:** Rust, Tokio, ArcSwap, Axum, SQLx SQLite migrations, Pingora, React/TypeScript, Vitest.
 
@@ -60,7 +60,7 @@
 - Test: `tests/proxy_rate_limit.rs`
 
 **Interfaces:**
-- `BeaRustProxy::with_rate_limiter(store: Arc<RateLimiterStore>)`
+- `BearustProxy::with_rate_limiter(store: Arc<RateLimiterStore>)`
 - `RequestContext.rate_limit_decision: Option<RateLimitDecision>`
 
 - [ ] Add failing integration tests for monitor pass-through, block `429`, generic response body, `Retry-After`, WAF/bot precedence, and telemetry redaction.

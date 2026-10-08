@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add durable Raft coordination for BeaRust control-plane configuration so one
+Add durable Raft coordination for Bearust control-plane configuration so one
 leader is the source of truth, followers can recover after restart, and
 configuration writes are not acknowledged until the cluster commits them.
 
