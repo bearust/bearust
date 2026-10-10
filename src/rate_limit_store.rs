@@ -3,7 +3,7 @@ use crate::rate_limit::{Decision, RateLimitKey, RateLimitPolicy, TokenBucket};
 use http::{header, HeaderMap};
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::IpAddr,
     sync::{Mutex, RwLock},
     time::{Duration, Instant},
 };
@@ -276,6 +276,3 @@ fn parse_forwarded_for(value: &str) -> Option<IpAddr> {
     }
     part.parse().ok()
 }
-
-#[allow(dead_code)]
-fn _keep_ip_types_linked(_: Ipv4Addr, _: Ipv6Addr) {}

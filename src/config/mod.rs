@@ -169,6 +169,10 @@ pub struct ServerConfig {
     /// CIDRs whose forwarding headers may be used for client identity.
     #[serde(default)]
     pub trusted_proxy_cidrs: Vec<String>,
+    /// Optional MaxMind GeoLite2/GeoIP2 Country (or City) `.mmdb` file that
+    /// enables country-qualified IP security rules.
+    #[serde(default)]
+    pub geoip_database: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

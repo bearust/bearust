@@ -380,17 +380,15 @@ impl AdvisorConfig {
 
     /// Provider adapters should use this only to construct an authorization
     /// header and must never log or serialize the returned secret.
-    #[allow(dead_code)] // Used by the provider adapter added in the next increment.
     pub(crate) fn api_key(&self) -> &str {
         self.api_key.expose()
     }
 }
 
 #[derive(Clone)]
-struct Secret(#[allow(dead_code)] Arc<str>);
+struct Secret(Arc<str>);
 
 impl Secret {
-    #[allow(dead_code)]
     fn expose(&self) -> &str {
         &self.0
     }
@@ -402,8 +400,8 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// Optional advisor service. It intentionally owns no workers until the
-/// provider/queue increment attaches them; cloning simply clones an `Arc`.
+/// Optional advisor service. Provider workers exist only when an LLM endpoint
+/// is configured; cloning simply clones the shared `Arc`s.
 #[derive(Clone)]
 pub struct AiAdvisorService {
     config: Option<Arc<AdvisorConfig>>,

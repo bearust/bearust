@@ -212,3 +212,39 @@ async fn host_auth_secret_is_hashed_and_never_returned() {
     assert_eq!(auth["username"], "alice");
     assert!(auth.get("password_hash").is_none());
 }
+
+#[tokio::test]
+async fn country_wide_ip_rules_require_a_country_code() {
+    let (app, cookie) = app().await;
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/ip-security/rules",
+        &cookie,
+        r#"{"cidr":"*","action":"block","score":0,"country_code":"","enabled":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, rule) = request(
+        app.clone(),
+        "POST",
+        "/api/ip-security/rules",
+        &cookie,
+        r#"{"cidr":"*","action":"block","score":0,"country_code":" cn ","enabled":true}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(rule["country_code"], "CN");
+    let id = rule["id"].as_i64().unwrap();
+
+    let (status, _) = request(
+        app,
+        "PATCH",
+        &format!("/api/ip-security/rules/{id}"),
+        &cookie,
+        r#"{"country_code":null}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

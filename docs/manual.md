@@ -10,6 +10,7 @@ Detailed operator reference for Bearust: accounts and RBAC, audit logs, realtime
 - [Analytics dashboard](#analytics-dashboard)
 - [Self-learning](#self-learning-phase-9)
 - [WAF and rate limiting](#waf-and-rate-limiting)
+- [IP and country policies](#ip-and-country-policies)
 - [WASM plugin runtime](#wasm-plugin-runtime)
 - [Plugin manifest signing and trust-on-first-use](#plugin-manifest-signing-and-trust-on-first-use)
 - [Community plugin registry](#community-plugin-registry)
@@ -183,6 +184,32 @@ capacity = 100
 refill_per_second = 10.0
 key_scope = "proxy_host_ip"
 ```
+
+## IP and country policies
+
+IP policies (`Security → IP / Geo policy`, or `/api/ip-security/rules`) are
+evaluated before bot protection and the WAF, against the client IP derived
+with `server.trusted_proxy_cidrs`. Each rule has a CIDR, an action
+(`monitor`, `block`, `allow`), a reputation score, and an optional ISO 3166-1
+alpha-2 country code.
+
+Country matching needs a MaxMind GeoLite2/GeoIP2 Country (or City) database:
+
+```toml
+[server]
+geoip_database = "/data/GeoLite2-Country.mmdb"
+```
+
+The file is loaded once at startup; a missing or unreadable file stops the
+server rather than silently disabling geo rules. Without this setting, rules
+that carry a country code never match, and startup logs `geoip_rules_inert`.
+
+- A rule with a CIDR and a country matches only clients in both.
+- Use `*` as the CIDR together with a country code for a country-wide rule.
+  `*` without a country is rejected, so one rule can never match every client.
+- The most specific match wins: longer prefix first, and at equal prefix a
+  country-qualified rule beats an unqualified one. A `/24` allow rule
+  therefore overrides a `*` country block.
 
 ## WASM plugin runtime
 

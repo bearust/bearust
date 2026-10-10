@@ -198,7 +198,7 @@ fn serialized_output_is_bounded_and_over_large_input_is_rejected() {
 
 #[test]
 fn provider_guard_opens_allows_one_half_open_probe_and_recovers() {
-    let cooldown = Duration::from_millis(1);
+    let cooldown = Duration::from_millis(250);
     let guard = ProviderGuard::new(2, cooldown);
     let now = Instant::now();
 
@@ -209,14 +209,14 @@ fn provider_guard_opens_allows_one_half_open_probe_and_recovers() {
     guard.record_failure(now);
     assert!(!guard.allow_request());
 
-    thread::sleep(cooldown + Duration::from_millis(1));
+    thread::sleep(cooldown + Duration::from_millis(20));
     assert!(guard.allow_request());
     assert!(!guard.allow_request());
 
     guard.record_failure(Instant::now());
     assert!(!guard.allow_request());
 
-    thread::sleep(cooldown + Duration::from_millis(1));
+    thread::sleep(cooldown + Duration::from_millis(20));
     assert!(guard.allow_request());
     guard.record_success();
     assert!(guard.allow_request());

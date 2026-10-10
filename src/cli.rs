@@ -348,8 +348,17 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             }
         }
         tracing::info!(event = "control_plane_start", bind = %config.server.control_bind, setup_token_configured = setup_token_from_env.is_some(), generated_setup_token = setup_token_from_env.is_none());
+        if let Some(geoip_path) = &config.server.geoip_database {
+            let resolver = crate::security_policy::MaxMindCountryResolver::open(geoip_path)
+                .map_err(|e| AppError::Server(format!("{e} ({})", geoip_path.display())))?;
+            crate::security_policy::install_geoip(Arc::new(resolver));
+            tracing::info!(event = "geoip_enabled", path = %geoip_path.display());
+        }
         let mut control_state = crate::control_plane::build_state(&database_url, &config.server.certificate_store, setup_token)
             .await.map_err(|e| AppError::Server(format!("control plane: {e}")))?;
+        if control_state.ip_security.has_inert_country_rules() {
+            tracing::warn!(event = "geoip_rules_inert", "IP security rules with a country code are ignored until server.geoip_database is configured");
+        }
         control_state = control_state.with_runtime(
             Arc::clone(&store),
             Arc::new(path.clone()),

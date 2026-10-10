@@ -467,6 +467,7 @@ fn runtime_store_routing_to(host: &str, backend_addr: SocketAddr) -> Arc<Runtime
             tls: None,
             http3: Default::default(),
             trusted_proxy_cidrs: Vec::new(),
+            geoip_database: None,
         },
         health: Default::default(),
         upstream_pools: vec![PoolConfig {
@@ -518,6 +519,7 @@ fn runtime_store_routing_to_two_backends(
             tls: None,
             http3: Default::default(),
             trusted_proxy_cidrs: Vec::new(),
+            geoip_database: None,
         },
         health: Default::default(),
         upstream_pools: vec![PoolConfig {
@@ -574,6 +576,7 @@ fn empty_runtime_store() -> Arc<RuntimeStore> {
             tls: None,
             http3: Default::default(),
             trusted_proxy_cidrs: Vec::new(),
+            geoip_database: None,
         },
         health: Default::default(),
         upstream_pools: Vec::new(),

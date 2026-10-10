@@ -1,11 +1,9 @@
-//! Compile-time contract for the OpenRaft runtime integration.
+//! OpenRaft runtime integration: SQLx-backed storage adapters, the
+//! authenticated TCP RPC transport, and node bootstrap helpers.
 //!
-//! This module intentionally does not provide placeholder storage or network
-//! implementations.  OpenRaft 0.9's `storage-v2` API requires durable log,
-//! vote, commit, state-machine, snapshot, and all RPC transport operations;
-//! silently returning defaults here would make a node appear healthy while
-//! losing committed data.  The contract below keeps the dependency/API
-//! integration checked while the SQLx-backed adapters are implemented.
+//! Transport failures are surfaced to OpenRaft as `Unreachable` rather than
+//! defaulted, so a broken peer link can never be mistaken for a successful
+//! replication.
 
 use crate::cluster::ClusterService;
 use crate::cluster_raft::BearustRaftConfig;
@@ -642,10 +640,9 @@ impl<T> RaftRuntimeAdapters for T where
 
 /// Network factory for the authenticated cluster transport.
 ///
-/// The wire framing/authentication is implemented by `encode_rpc_frame` and
-/// `decode_rpc_frame`.  Actual TCP request/response dispatch is deliberately
-/// not implemented yet; each RPC returns `Unreachable` so OpenRaft cannot
-/// interpret a transport stub as a successful replication.
+/// Each RPC is framed and authenticated by `encode_rpc_frame` /
+/// `decode_rpc_frame` and sent over TCP; any transport failure is reported as
+/// `Unreachable` so OpenRaft never treats it as a successful replication.
 #[derive(Clone, Debug)]
 pub struct AuthenticatedRaftNetworkFactory {
     secret: Vec<u8>,

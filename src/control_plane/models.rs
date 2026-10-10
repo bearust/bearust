@@ -408,8 +408,20 @@ pub struct IpSecurityRulePatch {
     pub cidr: Option<String>,
     pub action: Option<IpSecurityAction>,
     pub score: Option<i32>,
+    /// Absent leaves the country unchanged; `null` clears it.
+    #[serde(default, deserialize_with = "deserialize_present")]
     pub country_code: Option<Option<String>>,
     pub enabled: Option<bool>,
+}
+
+/// Distinguishes an explicit `null` (`Some(None)`) from an absent field
+/// (`None`, via `#[serde(default)]`) in PATCH bodies.
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

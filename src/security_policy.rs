@@ -6,10 +6,61 @@
 use crate::control_plane::repository::{self, DbPool};
 use arc_swap::ArcSwap;
 use base64::Engine as _;
-use std::{collections::HashMap, net::IpAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    path::Path,
+    sync::{Arc, OnceLock},
+};
 
 pub const MAX_IP_RULES: usize = 2_048;
 pub const MAX_HOST_AUTH_RULES: usize = 4_096;
+
+/// Resolves a client address to an ISO 3166-1 alpha-2 country code.
+pub trait CountryResolver: Send + Sync {
+    fn country(&self, ip: IpAddr) -> Option<String>;
+}
+
+/// MaxMind DB (GeoLite2/GeoIP2 Country or City) backed resolver.
+pub struct MaxMindCountryResolver {
+    reader: maxminddb::Reader<Vec<u8>>,
+}
+
+impl MaxMindCountryResolver {
+    pub fn open(path: &Path) -> Result<Self, String> {
+        maxminddb::Reader::open_readfile(path)
+            .map(|reader| Self { reader })
+            .map_err(|error| format!("unable to open GeoIP database: {error}"))
+    }
+}
+
+impl CountryResolver for MaxMindCountryResolver {
+    fn country(&self, ip: IpAddr) -> Option<String> {
+        let record = self
+            .reader
+            .lookup(ip)
+            .ok()?
+            .decode::<maxminddb::geoip2::Country>()
+            .ok()??;
+        record
+            .country
+            .iso_code
+            .or(record.registered_country.iso_code)
+            .map(str::to_ascii_uppercase)
+    }
+}
+
+static GEOIP: OnceLock<Arc<dyn CountryResolver>> = OnceLock::new();
+
+/// Installs the process-wide GeoIP resolver used by country-qualified IP
+/// rules. Returns `false` when a resolver was already installed.
+pub fn install_geoip(resolver: Arc<dyn CountryResolver>) -> bool {
+    GEOIP.set(resolver).is_ok()
+}
+
+pub fn geoip_enabled() -> bool {
+    GEOIP.get().is_some()
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IpSecurityAction {
@@ -100,12 +151,34 @@ impl IpSecurityStore {
     }
 
     pub fn evaluate(&self, ip: IpAddr) -> IpSecurityDecision {
+        self.evaluate_with(ip, GEOIP.get().map(|resolver| resolver.as_ref()))
+    }
+
+    /// Country-qualified rules only match when a resolver is available and
+    /// reports the same country; without GeoIP they are skipped (fail open).
+    /// Among matches the longest prefix wins, and at equal prefix a
+    /// country-qualified rule beats an unqualified one.
+    fn evaluate_with(
+        &self,
+        ip: IpAddr,
+        resolver: Option<&dyn CountryResolver>,
+    ) -> IpSecurityDecision {
         let snapshot = self.current.load();
+        let mut client_country: Option<Option<String>> = None;
         let mut best: Option<&CompiledIpRule> = None;
         for rule in &snapshot.rules {
-            if rule.network.contains(ip)
-                && best.is_none_or(|current| rule.network.prefix > current.network.prefix)
-            {
+            if !rule.network.contains(ip) {
+                continue;
+            }
+            if let Some(expected) = &rule.country_code {
+                let actual = client_country
+                    .get_or_insert_with(|| resolver.and_then(|resolver| resolver.country(ip)));
+                if actual.as_deref() != Some(expected.as_str()) {
+                    continue;
+                }
+            }
+            let rank = |rule: &CompiledIpRule| (rule.network.prefix, rule.country_code.is_some());
+            if best.is_none_or(|current| rank(rule) > rank(current)) {
                 best = Some(rule);
             }
         }
@@ -120,6 +193,18 @@ impl IpSecurityStore {
         }
     }
 
+    /// True when enabled rules depend on a country but no GeoIP database is
+    /// installed, so those rules can never match.
+    pub fn has_inert_country_rules(&self) -> bool {
+        !geoip_enabled()
+            && self
+                .current
+                .load()
+                .rules
+                .iter()
+                .any(|rule| rule.country_code.is_some())
+    }
+
     pub fn snapshot(&self) -> Arc<IpSecuritySnapshot> {
         self.current.load_full()
     }
@@ -127,6 +212,25 @@ impl IpSecurityStore {
 
 pub fn valid_cidr(value: &str) -> bool {
     IpNetwork::parse(value).is_some()
+}
+
+/// Trims and upper-cases a country code; blank input means "no country".
+pub fn normalize_country_code(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_ascii_uppercase())
+        .filter(|value| !value.is_empty())
+}
+
+/// Validates a normalized IP rule. The `*` wildcard is only accepted together
+/// with a country code so a single rule can never match every client.
+pub fn valid_ip_rule(cidr: &str, score: i32, country_code: Option<&str>) -> bool {
+    valid_cidr(cidr)
+        && cidr.len() <= 64
+        && (-100_000..=100_000).contains(&score)
+        && (cidr.trim() != "*" || country_code.is_some())
+        && country_code.is_none_or(|country| {
+            country.len() == 2 && country.chars().all(|ch| ch.is_ascii_uppercase())
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -222,26 +326,41 @@ fn parse_basic_authorization(value: &str) -> Option<(String, String)> {
     Some((username.to_owned(), password.to_owned()))
 }
 
+/// `address == None` is the `*` wildcard matching every IPv4 and IPv6 client,
+/// used for country-wide rules.
 #[derive(Clone, Copy, Debug)]
 struct IpNetwork {
-    address: IpAddr,
+    address: Option<IpAddr>,
     prefix: u8,
 }
 
 impl IpNetwork {
     fn parse(value: &str) -> Option<Self> {
-        let (address, prefix) = value.trim().split_once('/')?;
+        let value = value.trim();
+        if value == "*" {
+            return Some(Self {
+                address: None,
+                prefix: 0,
+            });
+        }
+        let (address, prefix) = value.split_once('/')?;
         let address = address.parse().ok()?;
         let prefix = prefix.parse().ok()?;
         let valid = match address {
             IpAddr::V4(_) => prefix <= 32,
             IpAddr::V6(_) => prefix <= 128,
         };
-        valid.then_some(Self { address, prefix })
+        valid.then_some(Self {
+            address: Some(address),
+            prefix,
+        })
     }
 
     fn contains(self, ip: IpAddr) -> bool {
-        match (self.address, ip) {
+        let Some(address) = self.address else {
+            return true;
+        };
+        match (address, ip) {
             (IpAddr::V4(network), IpAddr::V4(value)) => {
                 let mask = if self.prefix == 0 {
                     0
@@ -292,6 +411,82 @@ mod tests {
         let decision = store.evaluate("198.51.100.20".parse().unwrap());
         assert_eq!(decision.rule_id, Some(2));
         assert!(decision.blocked);
+    }
+
+    struct FixedCountry(&'static str);
+
+    impl CountryResolver for FixedCountry {
+        fn country(&self, _ip: IpAddr) -> Option<String> {
+            Some(self.0.to_owned())
+        }
+    }
+
+    fn rule(
+        id: i64,
+        cidr: &str,
+        action: IpSecurityAction,
+        country: Option<&str>,
+    ) -> CompiledIpRule {
+        CompiledIpRule {
+            id,
+            network: IpNetwork::parse(cidr).unwrap(),
+            action,
+            score: 0,
+            country_code: country.map(str::to_owned),
+        }
+    }
+
+    fn store(rules: Vec<CompiledIpRule>) -> IpSecurityStore {
+        IpSecurityStore {
+            current: ArcSwap::from_pointee(IpSecuritySnapshot { rules }),
+        }
+    }
+
+    #[test]
+    fn country_rules_match_only_the_resolved_country() {
+        let store = store(vec![rule(1, "*", IpSecurityAction::Block, Some("CN"))]);
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        assert!(store.evaluate_with(ip, Some(&FixedCountry("CN"))).blocked);
+        assert!(!store.evaluate_with(ip, Some(&FixedCountry("US"))).blocked);
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(store.evaluate_with(v6, Some(&FixedCountry("CN"))).blocked);
+    }
+
+    #[test]
+    fn country_rules_are_inert_without_geoip() {
+        let store = store(vec![rule(1, "*", IpSecurityAction::Block, Some("CN"))]);
+        let decision = store.evaluate_with("203.0.113.9".parse().unwrap(), None);
+        assert_eq!(decision, IpSecurityDecision::default());
+    }
+
+    #[test]
+    fn specific_cidr_allow_overrides_country_block() {
+        let store = store(vec![
+            rule(1, "*", IpSecurityAction::Block, Some("CN")),
+            rule(2, "203.0.113.0/24", IpSecurityAction::Allow, None),
+            rule(3, "203.0.113.0/24", IpSecurityAction::Monitor, Some("CN")),
+        ]);
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        let decision = store.evaluate_with(ip, Some(&FixedCountry("CN")));
+        assert_eq!(decision.rule_id, Some(3));
+        assert!(!decision.blocked);
+        let decision = store.evaluate_with(ip, Some(&FixedCountry("DE")));
+        assert_eq!(decision.rule_id, Some(2));
+    }
+
+    #[test]
+    fn wildcard_requires_a_country() {
+        assert!(valid_cidr("*"));
+        assert!(!valid_cidr("**"));
+        assert!(valid_ip_rule("*", 0, Some("CN")));
+        assert!(!valid_ip_rule("*", 0, None));
+        assert!(valid_ip_rule("10.0.0.0/8", 0, None));
+        assert!(!valid_ip_rule("10.0.0.0/8", 0, Some("CHN")));
+        assert_eq!(
+            normalize_country_code(Some(" cn ".into())).as_deref(),
+            Some("CN")
+        );
+        assert_eq!(normalize_country_code(Some("  ".into())), None);
     }
 
     #[test]

@@ -52,7 +52,7 @@ Point Bearust at your backends with a small TOML file and you get host/path rout
 **Security**
 
 - Built-in WAF (SQLi, XSS, path traversal, command injection) — monitor-only by default
-- Bot protection with signed challenges, adaptive rate limiting, IP security policies
+- Bot protection with signed challenges, adaptive rate limiting, IP and GeoIP country policies
 - Authenticated control plane with RBAC (`admin` / `operator` / `viewer`), custom roles, and per-host scopes
 - Redacted audit log, JSON logs, and secrets that never leave `/data/secrets`
 

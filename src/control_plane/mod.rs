@@ -1504,14 +1504,8 @@ async fn create_ip_security_rule(
             )
         }
     };
-    if !crate::security_policy::valid_cidr(&input.cidr)
-        || input.cidr.len() > 64
-        || input.score < -100_000
-        || input.score > 100_000
-        || input.country_code.as_deref().is_some_and(|country| {
-            country.len() > 8 || country.chars().any(|ch| !ch.is_ascii_alphanumeric())
-        })
-    {
+    let country_code = crate::security_policy::normalize_country_code(input.country_code);
+    if !crate::security_policy::valid_ip_rule(&input.cidr, input.score, country_code.as_deref()) {
         return user_error(
             StatusCode::BAD_REQUEST,
             "invalid_input",
@@ -1523,9 +1517,7 @@ async fn create_ip_security_rule(
         cidr: input.cidr.trim().to_owned(),
         action: input.action,
         score: input.score,
-        country_code: input
-            .country_code
-            .map(|country| country.to_ascii_uppercase()),
+        country_code,
         enabled: input.enabled,
         created_at: String::new(),
         updated_at: String::new(),
@@ -1628,18 +1620,12 @@ async fn update_ip_security_rule(
         rule.score = score;
     }
     if let Some(country) = input.country_code {
-        rule.country_code = country.map(|value| value.to_ascii_uppercase());
+        rule.country_code = crate::security_policy::normalize_country_code(country);
     }
     if let Some(enabled) = input.enabled {
         rule.enabled = enabled;
     }
-    if !crate::security_policy::valid_cidr(&rule.cidr)
-        || rule.cidr.len() > 64
-        || rule.score < -100_000
-        || rule.score > 100_000
-        || rule.country_code.as_deref().is_some_and(|country| {
-            country.len() > 8 || country.chars().any(|ch| !ch.is_ascii_alphanumeric())
-        })
+    if !crate::security_policy::valid_ip_rule(&rule.cidr, rule.score, rule.country_code.as_deref())
     {
         return user_error(
             StatusCode::BAD_REQUEST,

@@ -51,6 +51,7 @@ async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() 
             tls: None,
             http3: Default::default(),
             trusted_proxy_cidrs: Vec::new(),
+            geoip_database: None,
         },
         health: Default::default(),
         upstream_pools: vec![PoolConfig {

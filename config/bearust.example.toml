@@ -5,6 +5,8 @@ control_bind = "0.0.0.0:8081"
 control_database = "/data/bearust.sqlite"
 pid_file = "/run/bearust/bearust.pid"
 certificate_store = "/data/certificates"
+# Optional MaxMind GeoLite2/GeoIP2 Country database for country-based IP rules.
+# geoip_database = "/data/GeoLite2-Country.mmdb"
 
 # Optional AI Advisor provider settings are supplied as environment variables,
 # never in this file. Leave LLM_API_URL/LLM_API_KEY unset to disable the advisor.

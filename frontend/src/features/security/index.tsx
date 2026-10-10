@@ -970,6 +970,9 @@ export function Security() {
               }
               placeholder={t("security.countryPlaceholder")}
             />
+            <p className="text-xs text-muted-foreground">
+              {t("security.countryHint")}
+            </p>
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
