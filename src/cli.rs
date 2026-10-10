@@ -709,8 +709,37 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         if let Some(alt_svc) = http3_alt_svc {
             proxy_handler = proxy_handler.with_http3_alt_svc(alt_svc);
         }
+        let sni_resolver = if let Some(https_bind) = config.server.https_bind {
+            // `server.tls`, when present, becomes the certificate served to
+            // clients whose hostname has no certificate of its own.
+            let fallback = match &config.server.tls {
+                Some(tls) => crate::sni::CertMaterial::from_files(&tls.cert_path, &tls.key_path)
+                    .map_err(|e| AppError::Server(format!("server.tls: {e}")))?,
+                None => crate::sni::CertMaterial::self_signed()
+                    .map_err(|e| AppError::Server(format!("default certificate: {e}")))?,
+            };
+            let resolver = Arc::new(crate::sni::SniResolver::new(fallback));
+            if let Err(error) = resolver.refresh(&control_state.db).await {
+                tracing::warn!(event = "sni_refresh_failed", error = %error);
+            }
+            resolver.spawn_refresh_loop(control_state.db.clone(), control_state.realtime.clone());
+            let public_port = config.server.https_public_port.unwrap_or(https_bind.port());
+            proxy_handler = proxy_handler.with_https_redirect(resolver.clone(), public_port);
+            tracing::info!(event = "https_listener_configured", bind = %https_bind, public_port);
+            Some((https_bind, resolver))
+        } else {
+            None
+        };
         let mut service = proxy::http_service(proxy_handler, &server.configuration);
-        if let Some(tls_config) = &config.server.tls {
+        if let Some((https_bind, resolver)) = &sni_resolver {
+            let mut tls = pingora_core::listeners::tls::TlsSettings::with_callbacks(Box::new(
+                crate::sni::SniCallbacks(resolver.clone()),
+            ))
+            .map_err(|e| AppError::Server(format!("HTTPS listener: {e}")))?;
+            tls.enable_h2();
+            service.add_tcp(&config.server.bind.to_string());
+            service.add_tls_with_settings(&https_bind.to_string(), None, tls);
+        } else if let Some(tls_config) = &config.server.tls {
             let tls = crate::tls::settings(tls_config)
                 .map_err(|error| AppError::Server(error.to_string()))?;
             service.add_tls_with_settings(&config.server.bind.to_string(), None, tls);

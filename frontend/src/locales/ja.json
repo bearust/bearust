@@ -852,6 +852,7 @@
     "upstreamHost": "アップストリームホスト",
     "port": "ポート",
     "tlsMode": "TLS モード",
+    "tlsHint": "TLS を有効にすると、選択した証明書、またはドメインを含む証明書を使って HTTPS で提供されます。証明書が利用可能になると、HTTP リクエストは自動的に HTTPS へリダイレクトされます。",
     "tlsDisabled": "無効",
     "certificate": "証明書",
     "selectCertificate": "証明書を選択",

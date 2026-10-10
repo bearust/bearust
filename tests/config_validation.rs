@@ -469,3 +469,10 @@ fn rejects_peer_list_exceeding_64_peers() {
         "expected peer count error, got: {err}"
     );
 }
+
+#[test]
+fn server_only_config_is_valid() {
+    let config = Config::parse("[server]\nbind = \"0.0.0.0:8080\"\n").unwrap();
+    assert!(config.upstream_pools.is_empty());
+    assert!(config.routes.is_empty());
+}

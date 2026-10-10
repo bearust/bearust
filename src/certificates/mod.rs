@@ -256,7 +256,7 @@ fn validate_name(name: &str) -> Result<(), CertificateError> {
     Ok(())
 }
 
-fn hostnames(cert: &X509) -> Vec<String> {
+pub(crate) fn hostnames(cert: &X509) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(names) = cert.subject_alt_names() {
         for n in names {
@@ -270,8 +270,11 @@ fn hostnames(cert: &X509) -> Vec<String> {
             .subject_name()
             .entries_by_nid(openssl::nid::Nid::COMMONNAME)
         {
-            if let Ok(s) = e.data().as_utf8() {
-                out.push(s.to_string());
+            // Names with interior NUL bytes are a known spoofing vector.
+            if let Ok(s) = e.data().to_string() {
+                if !s.contains('\0') {
+                    out.push(s);
+                }
             }
         }
     }

@@ -1,5 +1,11 @@
 [server]
+# Plain HTTP. Hosts with TLS enabled and a certificate are redirected to HTTPS.
 bind = "0.0.0.0:8080"
+# HTTPS with a per-host certificate selected by SNI (assign certificates to
+# proxy hosts in the dashboard). Unknown hostnames get a self-signed default.
+https_bind = "0.0.0.0:8443"
+# Port in redirect URLs; Docker Compose maps host 443 -> container 8443.
+https_public_port = 443
 # Container-reachable bind; Docker Compose publishes this port on host localhost only.
 control_bind = "0.0.0.0:8081"
 control_database = "/data/bearust.sqlite"

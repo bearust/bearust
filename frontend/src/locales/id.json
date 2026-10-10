@@ -856,6 +856,7 @@
     "upstreamHost": "Host hulu",
     "port": "Port",
     "tlsMode": "Mode TLS",
+    "tlsHint": "Jika TLS aktif, host dilayani lewat HTTPS memakai sertifikat yang dipilih, atau sertifikat lain yang mencakup domainnya. Begitu sertifikat tersedia, request HTTP otomatis dialihkan ke HTTPS.",
     "tlsDisabled": "Dinonaktifkan",
     "certificate": "Sertifikat",
     "selectCertificate": "Pilih sertifikat",

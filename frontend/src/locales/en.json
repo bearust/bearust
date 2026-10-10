@@ -856,6 +856,7 @@
     "upstreamHost": "Upstream host",
     "port": "Port",
     "tlsMode": "TLS mode",
+    "tlsHint": "With TLS enabled, the host is served on HTTPS using the selected certificate, or any certificate that covers its domain. Once a certificate is available, HTTP requests are redirected to HTTPS automatically.",
     "tlsDisabled": "Disabled",
     "certificate": "Certificate",
     "selectCertificate": "Select certificate",

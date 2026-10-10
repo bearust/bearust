@@ -4,9 +4,18 @@ The production image runs as UID/GID 10001, drops all capabilities, enables
 `no-new-privileges`, and uses a read-only root filesystem. The TOML config is
 mounted read-only; `/data` and `/etc/bearust/tls` are persistent named Docker
 volumes initialized with the correct ownership for UID 10001. `/tmp` and
-`/run/bearust` are tmpfs. `${BEARUST_PORT:-8080}` maps to the data-plane proxy
-port 8080, while the bundled management UI and control API are exposed
-loopback-only at `http://127.0.0.1:${BEARUST_CONTROL_PORT:-8081}`.
+`/run/bearust` are tmpfs. Ports follow the Nginx Proxy Manager layout:
+
+| Host port | Container port | Purpose |
+| --- | --- | --- |
+| `${BEARUST_HTTP_PORT:-80}` | 8080 | HTTP (redirects TLS hosts to HTTPS; serves ACME HTTP-01) |
+| `${BEARUST_HTTPS_PORT:-443}` | 8443 | HTTPS with per-host certificates (SNI) |
+| `127.0.0.1:${BEARUST_CONTROL_PORT:-81}` | 8081 | Dashboard and control API |
+
+The process inside the container still runs unprivileged on 8080/8443/8081;
+Docker publishes the privileged host ports. The dashboard is loopback-only
+by default — reach it with an SSH tunnel (`ssh -L 81:127.0.0.1:81 server`) or
+set `BEARUST_CONTROL_HOST=0.0.0.0` only behind a firewall or VPN.
 
 The default production deployment is intentionally one command:
 

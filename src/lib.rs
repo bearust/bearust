@@ -36,6 +36,7 @@ pub mod router;
 pub mod runtime;
 pub mod secrets;
 pub mod security_policy;
+pub mod sni;
 pub mod tls;
 pub mod waf;
 pub mod waf_store;

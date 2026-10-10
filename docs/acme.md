@@ -13,8 +13,11 @@ responses or structured logs.
 3. For HTTP-01, publish each hostname in public DNS and forward TCP port 80 to
    the proxy. The challenge path is `/.well-known/acme-challenge/<token>` and
    must not be intercepted by another proxy or authentication layer.
-4. Check the certificate status and confirm that activation/reload leaves the
-   proxy-host configuration serving the new certificate.
+4. Set the proxy host's TLS mode to Let's Encrypt (optionally pick the
+   certificate explicitly). With `server.https_bind` configured, the HTTPS
+   listener serves the certificate as soon as issuance completes — no
+   restart — and plain HTTP requests for the host are redirected to HTTPS.
+   ACME challenge paths are never redirected, so renewals keep working.
 5. Only after a successful staging run, repeat with `environment: production`.
 
 HTTP-01 cannot issue wildcard certificates. Use Cloudflare DNS-01 for names

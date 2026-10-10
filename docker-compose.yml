@@ -5,9 +5,12 @@ services:
       context: .
       dockerfile: Dockerfile
     command: ["serve", "--config", "/etc/bearust/bearust.toml", "--json-logs"]
+    # Same layout as Nginx Proxy Manager: 80 = HTTP, 443 = HTTPS, 81 = admin.
+    # The admin UI stays loopback-only unless BEARUST_CONTROL_HOST=0.0.0.0.
     ports:
-      - "${BEARUST_PORT:-8080}:8080"
-      - "127.0.0.1:${BEARUST_CONTROL_PORT:-8081}:8081"
+      - "${BEARUST_HTTP_PORT:-${BEARUST_PORT:-80}}:8080"
+      - "${BEARUST_HTTPS_PORT:-443}:8443"
+      - "${BEARUST_CONTROL_HOST:-127.0.0.1}:${BEARUST_CONTROL_PORT:-81}:8081"
     volumes:
       - "${BEARUST_CONFIG:-./config/bearust.example.toml}:/etc/bearust/bearust.toml:ro"
       - bearust-data:/data

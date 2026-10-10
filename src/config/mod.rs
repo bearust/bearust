@@ -14,7 +14,11 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub health: HealthConfig,
+    /// Optional: proxy hosts managed in the dashboard are added on top of
+    /// any file-defined pools and routes.
+    #[serde(default)]
     pub upstream_pools: Vec<PoolConfig>,
+    #[serde(default)]
     pub routes: Vec<RouteConfig>,
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
@@ -173,6 +177,15 @@ pub struct ServerConfig {
     /// enables country-qualified IP security rules.
     #[serde(default)]
     pub geoip_database: Option<PathBuf>,
+    /// Optional HTTPS listener. When set, `bind` serves plain HTTP (with
+    /// automatic redirects for HTTPS hosts) and this listener serves TLS with
+    /// a per-hostname certificate chosen by SNI.
+    #[serde(default)]
+    pub https_bind: Option<SocketAddr>,
+    /// Port clients use to reach `https_bind`, e.g. 443 when Docker maps
+    /// 443 -> 8443. Defaults to the `https_bind` port.
+    #[serde(default)]
+    pub https_public_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -468,6 +481,17 @@ impl Config {
         Ok(config)
     }
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if let Some(https_bind) = self.server.https_bind {
+            if https_bind == self.server.bind || https_bind == self.server.control_bind {
+                return err(
+                    "server.https_bind",
+                    "must differ from server.bind and server.control_bind",
+                );
+            }
+        }
+        if self.server.https_public_port == Some(0) {
+            return err("server.https_public_port", "must be positive");
+        }
         if self.cluster.node_id.trim().is_empty()
             || self
                 .cluster
@@ -560,12 +584,6 @@ impl Config {
             if value == 0 {
                 return err(name, "must be positive");
             }
-        }
-        if self.upstream_pools.is_empty() {
-            return err("upstream_pools", "must not be empty");
-        }
-        if self.routes.is_empty() {
-            return err("routes", "must not be empty");
         }
         if !(1..=1_000_000).contains(&self.rate_limit.capacity) {
             return err("rate_limit.capacity", "must be between 1 and 1000000");

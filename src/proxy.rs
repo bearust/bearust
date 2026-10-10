@@ -117,6 +117,9 @@ pub struct BearustProxy {
     pub plugin_notify: Option<Arc<crate::plugin_notify::NotificationSink>>,
     pub plugin_manager: Option<Arc<PluginManager>>,
     pub http3_alt_svc: Option<String>,
+    /// Set on the plain-HTTP listener when an HTTPS listener exists: hosts
+    /// with a usable certificate are redirected to `https_port`.
+    pub https_redirect: Option<(Arc<crate::sni::SniResolver>, u16)>,
 }
 
 impl BearustProxy {
@@ -140,6 +143,7 @@ impl BearustProxy {
             plugin_notify: None,
             plugin_manager: None,
             http3_alt_svc: None,
+            https_redirect: None,
         }
     }
     pub fn with_challenge_store(mut self, challenges: Http01Store) -> Self {
@@ -223,6 +227,14 @@ impl BearustProxy {
     /// means the HTTP/3 listener is disabled and no header is added.
     pub fn with_http3_alt_svc(mut self, value: String) -> Self {
         self.http3_alt_svc = Some(value);
+        self
+    }
+    pub fn with_https_redirect(
+        mut self,
+        resolver: Arc<crate::sni::SniResolver>,
+        https_port: u16,
+    ) -> Self {
+        self.https_redirect = Some((resolver, https_port));
         self
     }
 
@@ -1133,6 +1145,41 @@ impl ProxyHttp for BearustProxy {
         );
         let challenge_host = normalize_host(host).unwrap_or_default();
         let method = session.req_header().method.as_str();
+        if let Some((resolver, https_port)) = &self.https_redirect {
+            let is_tls = session
+                .digest()
+                .is_some_and(|digest| digest.ssl_digest.is_some());
+            if !is_tls
+                && !path.starts_with("/.well-known/acme-challenge/")
+                && resolver.redirects_to_https(&challenge_host)
+            {
+                let location = https_location(
+                    &challenge_host,
+                    *https_port,
+                    session
+                        .req_header()
+                        .uri
+                        .path_and_query()
+                        .map_or("/", |value| value.as_str()),
+                );
+                let mut response = ResponseHeader::build(301, Some(2)).map_err(|e| {
+                    pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string())
+                })?;
+                response.insert_header("Location", location).map_err(|e| {
+                    pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string())
+                })?;
+                response.insert_header("Content-Length", "0").map_err(|e| {
+                    pingora_core::Error::explain(ErrorType::HTTPStatus(500), e.to_string())
+                })?;
+                session
+                    .as_downstream_mut()
+                    .write_error_response(response, Bytes::new())
+                    .await?;
+                self.record_completion(session, ctx, Some(301));
+                ctx.completion_logged = true;
+                return Ok(true);
+            }
+        }
         if let (Some(policy), Some(peer)) = (
             &self.ip_security,
             session
@@ -1846,8 +1893,38 @@ fn error_status(error: &pingora_core::Error) -> u16 {
     }
 }
 
+/// `https://host[:port]/path?query`; the port is omitted when it is 443.
+fn https_location(host: &str, port: u16, path_and_query: &str) -> String {
+    let path_and_query = if path_and_query.starts_with('/') {
+        path_and_query
+    } else {
+        "/"
+    };
+    if port == 443 {
+        format!("https://{host}{path_and_query}")
+    } else {
+        format!("https://{host}:{port}{path_and_query}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn https_location_omits_default_port() {
+        assert_eq!(
+            super::https_location("app.example.com", 443, "/a?b=1"),
+            "https://app.example.com/a?b=1"
+        );
+        assert_eq!(
+            super::https_location("app.example.com", 8443, "/"),
+            "https://app.example.com:8443/"
+        );
+        assert_eq!(
+            super::https_location("app.example.com", 443, "*"),
+            "https://app.example.com/"
+        );
+    }
+
     use super::{
         accumulate_response_chunk, apply_http3_alt_svc_header, apply_load_balancer_plugin,
         apply_transform_plugin, apply_transform_response_plugin, apply_waf_detector, error_status,

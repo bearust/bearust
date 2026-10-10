@@ -20,8 +20,9 @@ Point Bearust at your backends with a small TOML file and you get host/path rout
 ```text
                     ┌─────────────┐
   clients ──────────▶ │   Bearust   │ ──▶ backend pool (health-checked)
-  :8080 (proxy)     │  ─────────  │     round-robin / least-connections
-  :8081 (dashboard) │  WAF · TLS  │
+  :80  (HTTP)       │  ─────────  │     round-robin / least-connections
+  :443 (HTTPS)      │  WAF · TLS  │
+  :81  (dashboard)  │             │
                     └─────────────┘
 ```
 
@@ -67,11 +68,59 @@ Point Bearust at your backends with a small TOML file and you get host/path rout
 
 ## Quick start
 
+### Minimal Docker Compose (no clone needed)
+
+Create an empty directory with these two files.
+
+`docker-compose.yml`:
+
+```yaml
+services:
+  bearust:
+    image: ghcr.io/bearust/bearust:latest
+    restart: unless-stopped
+    ports:
+      - "80:8080"              # HTTP
+      - "443:8443"             # HTTPS
+      - "127.0.0.1:81:8081"    # Dashboard (localhost only)
+    volumes:
+      - ./bearust.toml:/etc/bearust/bearust.toml:ro
+      - bearust-data:/data
+
+volumes:
+  bearust-data:
+```
+
+`bearust.toml`:
+
+```toml
+[server]
+bind = "0.0.0.0:8080"
+https_bind = "0.0.0.0:8443"
+https_public_port = 443
+control_bind = "0.0.0.0:8081"   # published on 127.0.0.1:81 by Compose
+control_database = "/data/bearust.sqlite"
+certificate_store = "/data/certificates"
+```
+
+That is the whole file: proxy hosts are managed from the dashboard, so no pools or routes are needed here.
+
+Start it and read the one-time setup token:
+
+```sh
+docker compose up -d
+docker compose exec bearust cat /data/setup-token
+```
+
+Open `http://127.0.0.1:81` (on a remote server: `ssh -L 81:127.0.0.1:81 user@server`), create the admin account with the token, and add your first proxy host. To get HTTPS, set the host's TLS mode to Let's Encrypt and issue a certificate. The domain's DNS must point at the server, with port 80 reachable.
+
+### Full stack from the repository
+
 Prerequisite: Docker. The [docker-compose.yml](docker-compose.yml) file defines the whole stack:
 
 | Service | What it does | When it runs |
 | --- | --- | --- |
-| `bearust` | Proxy (`:8080`) + dashboard and control API (`127.0.0.1:8081`) | Always |
+| `bearust` | HTTP (`:80`), HTTPS (`:443`), dashboard and control API (`127.0.0.1:81`) | Always |
 | `postgres` | Control-plane database in a named volume | `--profile postgres` only |
 | `mysql` | Control-plane database in a named volume | `--profile mysql` only |
 
@@ -83,8 +132,11 @@ docker compose up -d --build
 
 | What | Where |
 | --- | --- |
-| Proxy (your app traffic) | `http://localhost:8080` |
-| Dashboard + control API (loopback-only) | `http://127.0.0.1:8081` |
+| HTTP proxy (redirects to HTTPS once a host has a certificate) | `http://localhost` (port 80) |
+| HTTPS proxy (certificate chosen per host) | `https://localhost` (port 443) |
+| Dashboard + control API (loopback-only) | `http://127.0.0.1:81` |
+
+The layout matches Nginx Proxy Manager: add a proxy host, request a Let's Encrypt certificate (or upload one) and assign it to the host, and it is served over HTTPS immediately — no restart. Inside the container Bearust still listens unprivileged on 8080/8443/8081; Docker maps them to 80/443/81. Change the host ports with `BEARUST_HTTP_PORT`, `BEARUST_HTTPS_PORT`, and `BEARUST_CONTROL_PORT`.
 
 On first startup Bearust generates a one-time setup token. For a deterministic token, set it before starting:
 
@@ -93,7 +145,7 @@ echo 'BEARUST_SETUP_TOKEN=replace-with-a-long-random-value' > .env
 docker compose up -d --build
 ```
 
-Open `http://127.0.0.1:8081`, create the first administrator account with the setup token, then add a proxy host pointing at your backend. That is the whole setup — no database to provision (SQLite lives in a Docker volume), and proxy hosts can be managed entirely from the dashboard.
+Open `http://127.0.0.1:81`, create the first administrator account with the setup token, then add a proxy host pointing at your backend. That is the whole setup — no database to provision (SQLite lives in a Docker volume), and proxy hosts can be managed entirely from the dashboard.
 
 To switch to PostgreSQL or MySQL later, uncomment the matching `DATABASE_URL` block in [`.env.example`](.env.example) and start exactly one profile:
 
@@ -121,8 +173,8 @@ For development with hot reload, use the separate [docker-compose.dev.yml](docke
 
 ## How it works
 
-- **Data plane** (`:8080`): Pingora-based proxy. Every request flows through IP policy → bot check → WAF → routing → rate limit → load-balanced backend. Failures fail open where safe (analytics, plugins) and fail closed where it matters (auth, WAF blocks).
-- **Control plane** (`:8081`, loopback-only): authenticated REST API + bundled dashboard for hosts, certificates, WAF, users, analytics, and cluster status. Serves realtime updates over SSE.
+- **Data plane** (`:80` HTTP / `:443` HTTPS): Pingora-based proxy with per-host SNI certificates and automatic HTTP→HTTPS redirects. Every request flows through IP policy → bot check → WAF → routing → rate limit → load-balanced backend. Failures fail open where safe (analytics, plugins) and fail closed where it matters (auth, WAF blocks).
+- **Control plane** (`:81`, loopback-only): authenticated REST API + bundled dashboard for hosts, certificates, WAF, users, analytics, and cluster status. Serves realtime updates over SSE.
 - **State**: proxy hosts, users, certificates, and analytics buckets live in the control-plane database (SQLite/PostgreSQL/MySQL); TOML remains supported for file-driven deployments.
 
 ## Configuration essentials
@@ -131,7 +183,9 @@ Minimal TOML — one pool, one route:
 
 ```toml
 [server]
-bind = "0.0.0.0:8080"
+bind = "0.0.0.0:8080"          # HTTP
+https_bind = "0.0.0.0:8443"    # HTTPS (per-host certificates via SNI)
+https_public_port = 443        # port used in HTTP -> HTTPS redirects
 control_bind = "127.0.0.1:8081"
 
 [[upstream_pools]]
@@ -159,7 +213,7 @@ bearust reload --pid-file ./bearust.pid    # graceful reload of a running server
 bearust plugin search waf                  # browse the community plugin index
 ```
 
-Common environment variables: `BEARUST_CONFIG`, `BEARUST_PORT`, `BEARUST_CONTROL_PORT`, `BEARUST_SETUP_TOKEN`, `DATABASE_URL`, `RUST_LOG`. See [`.env.example`](.env.example) for the full list.
+Common environment variables: `BEARUST_CONFIG`, `BEARUST_HTTP_PORT`, `BEARUST_HTTPS_PORT`, `BEARUST_CONTROL_PORT`, `BEARUST_CONTROL_HOST`, `BEARUST_SETUP_TOKEN`, `DATABASE_URL`, `RUST_LOG`. See [`.env.example`](.env.example) for the full list.
 
 ## Dashboard and access control
 

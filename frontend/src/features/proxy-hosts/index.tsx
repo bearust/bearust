@@ -919,6 +919,9 @@ export function ProxyHosts() {
                 ))}
               </select>
             </div>
+            <p className="text-xs text-muted-foreground sm:col-span-2">
+              {t("proxyHosts.tlsHint")}
+            </p>
             <label className="flex items-center gap-2 text-sm sm:col-span-2">
               <input
                 type="checkbox"

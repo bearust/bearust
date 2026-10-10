@@ -11,6 +11,7 @@ Detailed operator reference for Bearust: accounts and RBAC, audit logs, realtime
 - [Self-learning](#self-learning-phase-9)
 - [WAF and rate limiting](#waf-and-rate-limiting)
 - [IP and country policies](#ip-and-country-policies)
+- [HTTP, HTTPS, and per-host certificates](#http-https-and-per-host-certificates)
 - [WASM plugin runtime](#wasm-plugin-runtime)
 - [Plugin manifest signing and trust-on-first-use](#plugin-manifest-signing-and-trust-on-first-use)
 - [Community plugin registry](#community-plugin-registry)
@@ -210,6 +211,37 @@ that carry a country code never match, and startup logs `geoip_rules_inert`.
 - The most specific match wins: longer prefix first, and at equal prefix a
   country-qualified rule beats an unqualified one. A `/24` allow rule
   therefore overrides a `*` country block.
+
+## HTTP, HTTPS, and per-host certificates
+
+Bearust mirrors the Nginx Proxy Manager model: one HTTP listener, one HTTPS
+listener, and a certificate per proxy host.
+
+```toml
+[server]
+bind = "0.0.0.0:8080"        # HTTP  (Compose publishes it as 80)
+https_bind = "0.0.0.0:8443"  # HTTPS (Compose publishes it as 443)
+https_public_port = 443      # port written into redirect URLs
+```
+
+- **Certificate selection (SNI).** For each TLS handshake, Bearust uses the
+  certificate explicitly assigned to the matching proxy host. Otherwise it
+  uses any stored, unexpired certificate whose names cover the hostname,
+  including wildcards such as `*.example.com`. Unknown hostnames receive
+  `server.tls` when configured, otherwise a generated self-signed
+  `bearust-default` certificate.
+- **No restarts.** The certificate index is rebuilt as soon as proxy hosts or
+  certificates change (upload, ACME issuance, renewal), and every 30 seconds
+  as a safety net.
+- **Automatic redirect.** A plain-HTTP request is answered with `301` to
+  `https://host[:https_public_port]/…` when the host is enabled, has a TLS
+  mode other than `disabled`, and a certificate is available for it. Hosts
+  still waiting for a certificate keep working over HTTP, and
+  `/.well-known/acme-challenge/` is never redirected.
+- **HTTP/2** is negotiated via ALPN on the HTTPS listener.
+- **Compatibility.** Without `https_bind`, the previous single-listener mode
+  is unchanged: `server.tls` (if set) makes `bind` itself a TLS listener. The
+  optional HTTP/3 listener still uses the single `server.tls` certificate.
 
 ## WASM plugin runtime
 
