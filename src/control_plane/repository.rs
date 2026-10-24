@@ -874,6 +874,9 @@ async fn apply_raft_command_inner(
                     .await?;
             }
 
+            if let Some(seclang) = &state.seclang {
+                update_seclang_config(&mut *tx, seclang).await?;
+            }
             sqlx::query("UPDATE bot_config SET mode=?,threshold=?,ttl_seconds=?,fingerprint_key=?,updated_at=? WHERE id=1")
                 .bind(bot_mode_value(state.bot_mode))
                 .bind(state.bot_threshold as i64)
@@ -1430,6 +1433,45 @@ fn builtin_key_for_rule(rule: &WafRule) -> Option<String> {
         .map(|builtin| format!("builtin-{}", builtin.replace('_', "-")))
 }
 
+pub async fn get_seclang_config(
+    pool: &DbPool,
+) -> Result<crate::control_plane::models::SecLangConfig, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT crs_enabled,paranoia_level,inbound_threshold,custom_rules,updated_at
+         FROM waf_seclang_config WHERE id=1",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(crate::control_plane::models::SecLangConfig {
+        crs_enabled: row.get::<i64, _>("crs_enabled") != 0,
+        paranoia_level: row.get::<i64, _>("paranoia_level").clamp(1, 4) as u8,
+        inbound_threshold: row.get::<i64, _>("inbound_threshold").clamp(1, 1000) as u16,
+        custom_rules: row.get("custom_rules"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+pub async fn update_seclang_config<'e, E>(
+    executor: E,
+    config: &crate::control_plane::models::SecLangConfig,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
+    sqlx::query(
+        "UPDATE waf_seclang_config SET crs_enabled=?,paranoia_level=?,inbound_threshold=?,
+         custom_rules=?,updated_at=? WHERE id=1",
+    )
+    .bind(i64::from(config.crs_enabled))
+    .bind(i64::from(config.paranoia_level))
+    .bind(i64::from(config.inbound_threshold))
+    .bind(&config.custom_rules)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 pub async fn get_waf_config(pool: &DbPool) -> Result<WafConfig, sqlx::Error> {
     let row = sqlx::query("SELECT mode,updated_at FROM waf_config WHERE id=1")
         .fetch_one(pool)
@@ -1750,6 +1792,7 @@ pub async fn load_replicated_policy_state(
         analytics_retention_minutes: get_analytics_retention(pool).await?.retention_minutes,
         emergency_disabled: get_emergency_disabled(pool).await?,
         tuning_policies,
+        seclang: Some(get_seclang_config(pool).await?),
     };
     state
         .validate()

@@ -692,7 +692,17 @@
     "countryHint": "Leave empty to match by CIDR only. Use * as the CIDR with a two-letter country code (e.g. CN) for a country-wide rule. Country matching requires server.geoip_database; without it, country rules never match.",
     "enableImmediately": "Enable policy immediately",
     "healthy": "Healthy",
-    "review": "Review"
+    "review": "Review",
+    "crsTitle": "OWASP Core Rule Set",
+    "crsDescription": "Evaluate the bundled OWASP CRS with anomaly scoring, plus your own SecLang rules. Blocking follows the WAF mode.",
+    "crsEnabled": "Enable OWASP CRS",
+    "crsParanoia": "Paranoia level",
+    "crsParanoiaHint": "Higher levels catch more attacks and cause more false positives.",
+    "crsThreshold": "Inbound anomaly threshold",
+    "crsCustomRules": "Custom SecLang rules",
+    "crsSave": "Save CRS settings",
+    "crsSaved": "CRS settings saved",
+    "crsActiveRules": "{{count}} rules active · CRS {{version}}"
   },
   "analytics": {
     "intervalLabel": "Interval",

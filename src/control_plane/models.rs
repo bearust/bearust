@@ -324,6 +324,35 @@ pub struct WafConfig {
     pub mode: WafMode,
     pub updated_at: String,
 }
+/// OWASP CRS and custom SecLang rule settings.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecLangConfig {
+    pub crs_enabled: bool,
+    /// CRS paranoia level, 1 (fewest false positives) to 4.
+    pub paranoia_level: u8,
+    /// CRS inbound anomaly score at which a request is blocked.
+    pub inbound_threshold: u16,
+    /// Additional SecLang directives evaluated after the CRS.
+    pub custom_rules: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+/// Upper bound on stored custom SecLang rules (fits a MySQL TEXT column).
+pub const MAX_CUSTOM_SECLANG_BYTES: usize = 60 * 1024;
+
+impl SecLangConfig {
+    pub fn validate_bounds(&self) -> Result<(), &'static str> {
+        if !(1..=4).contains(&self.paranoia_level)
+            || !(1..=1000).contains(&self.inbound_threshold)
+            || self.custom_rules.len() > MAX_CUSTOM_SECLANG_BYTES
+        {
+            return Err("invalid SecLang settings");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RateLimitConfig {
     pub enabled: bool,

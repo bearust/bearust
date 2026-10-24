@@ -692,7 +692,17 @@
     "countryHint": "Kosongkan untuk mencocokkan berdasarkan CIDR saja. Gunakan * sebagai CIDR bersama kode negara dua huruf (mis. CN) untuk aturan seluruh negara. Pencocokan negara memerlukan server.geoip_database; tanpanya, aturan negara tidak pernah cocok.",
     "enableImmediately": "Aktifkan kebijakan segera",
     "healthy": "Sehat",
-    "review": "Tinjau"
+    "review": "Tinjau",
+    "crsTitle": "OWASP Core Rule Set",
+    "crsDescription": "Jalankan OWASP CRS bawaan dengan skor anomali, ditambah rule SecLang Anda sendiri. Pemblokiran mengikuti mode WAF.",
+    "crsEnabled": "Aktifkan OWASP CRS",
+    "crsParanoia": "Tingkat paranoia",
+    "crsParanoiaHint": "Tingkat lebih tinggi menangkap lebih banyak serangan dan lebih banyak false positive.",
+    "crsThreshold": "Ambang skor anomali masuk",
+    "crsCustomRules": "Rule SecLang kustom",
+    "crsSave": "Simpan pengaturan CRS",
+    "crsSaved": "Pengaturan CRS disimpan",
+    "crsActiveRules": "{{count}} rule aktif · CRS {{version}}"
   },
   "analytics": {
     "intervalLabel": "Interval",

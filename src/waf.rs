@@ -1,4 +1,4 @@
-use crate::control_plane::models::{WafAction, WafConfig, WafMode, WafRule};
+use crate::control_plane::models::{SecLangConfig, WafAction, WafConfig, WafMode, WafRule};
 use regex::Regex;
 use serde::Deserialize;
 use std::sync::LazyLock;
@@ -104,6 +104,82 @@ pub struct SemanticSignal {
 pub struct WafSnapshot {
     pub mode: WafMode,
     pub rules: Vec<CompiledRule>,
+    /// OWASP CRS and custom SecLang rules, when enabled.
+    pub seclang: Option<std::sync::Arc<SecLangRuntime>>,
+}
+
+/// A compiled SecLang ruleset plus the `tx.` setup variables derived from
+/// [`SecLangConfig`] (paranoia level and anomaly threshold).
+#[derive(Debug)]
+pub struct SecLangRuntime {
+    pub config: SecLangConfig,
+    ruleset: crate::seclang::RuleSet,
+    setup: Vec<(String, String)>,
+}
+
+impl SecLangRuntime {
+    /// Compile the bundled CRS (when enabled) followed by custom rules.
+    /// Returns `None` when neither is configured.
+    pub fn compile(config: &SecLangConfig) -> Result<Option<Self>, String> {
+        config.validate_bounds().map_err(str::to_owned)?;
+        if !config.crs_enabled && config.custom_rules.trim().is_empty() {
+            return Ok(None);
+        }
+        let mut sources = Vec::new();
+        if config.crs_enabled {
+            sources.extend(
+                crate::seclang::crs::CONFIG_FILES
+                    .iter()
+                    .map(|(name, content)| crate::seclang::Source { name, content }),
+            );
+        }
+        if !config.custom_rules.trim().is_empty() {
+            sources.push(crate::seclang::Source {
+                name: "custom.conf",
+                content: &config.custom_rules,
+            });
+        }
+        let data = crate::seclang::crs::DATA_FILES
+            .iter()
+            .map(|(name, content)| ((*name).to_owned(), (*content).to_owned()))
+            .collect();
+        let ruleset =
+            crate::seclang::RuleSet::compile(&sources, &data).map_err(|error| error.to_string())?;
+        let level = config.paranoia_level.to_string();
+        Ok(Some(Self {
+            config: config.clone(),
+            ruleset,
+            setup: vec![
+                ("blocking_paranoia_level".into(), level.clone()),
+                ("detection_paranoia_level".into(), level),
+                (
+                    "inbound_anomaly_score_threshold".into(),
+                    config.inbound_threshold.to_string(),
+                ),
+            ],
+        }))
+    }
+
+    pub fn rule_count(&self) -> usize {
+        self.ruleset.rule_count()
+    }
+
+    fn evaluate(&self, context: &InspectionContext) -> crate::seclang::Outcome {
+        let uri = if context.query.is_empty() {
+            context.path.clone()
+        } else {
+            format!("{}?{}", context.path, context.query)
+        };
+        let request = crate::seclang::Request {
+            method: context.method.clone(),
+            uri,
+            protocol: "HTTP/1.1".into(),
+            headers: context.headers.clone(),
+            body: context.body.clone(),
+            remote_addr: String::new(),
+        };
+        self.ruleset.evaluate(&request, &self.setup)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -199,6 +275,7 @@ pub fn compile_snapshot(
     Ok(WafSnapshot {
         mode: config.mode,
         rules: compiled,
+        seclang: None,
     })
 }
 
@@ -477,6 +554,37 @@ pub fn evaluate(snapshot: &WafSnapshot, context: &InspectionContext) -> Evaluati
             (Some(WafDecision::Log), _) | (_, WafDecision::Log) => WafDecision::Log,
             _ => WafDecision::Allow,
         });
+    }
+    if let Some(runtime) = &snapshot.seclang {
+        let outcome = runtime.evaluate(context);
+        for rule in &outcome.matched {
+            matched_rule_ids.push(rule.id);
+            for tag in &rule.tags {
+                if let Some(category) = tag.strip_prefix("attack-") {
+                    let category = category.to_owned();
+                    if !categories.contains(&category) {
+                        categories.push(category);
+                    }
+                }
+            }
+        }
+        let action = if outcome.intervention.is_some() && !outcome.detection_only {
+            Some(match snapshot.mode {
+                WafMode::MonitorOnly => WafDecision::Log,
+                WafMode::Block => WafDecision::Block,
+            })
+        } else if !outcome.matched.is_empty() {
+            Some(WafDecision::Log)
+        } else {
+            None
+        };
+        if let Some(action) = action {
+            effective = Some(match (effective, action) {
+                (Some(WafDecision::Block), _) | (_, WafDecision::Block) => WafDecision::Block,
+                (Some(WafDecision::Log), _) | (_, WafDecision::Log) => WafDecision::Log,
+                _ => WafDecision::Allow,
+            });
+        }
     }
     let signals = semantic_signals(&normalized);
     let semantic_score = signals

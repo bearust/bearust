@@ -35,6 +35,7 @@ pub mod rate_limit_store;
 pub mod reload;
 pub mod router;
 pub mod runtime;
+pub mod seclang;
 pub mod secrets;
 pub mod security_policy;
 pub mod sni;

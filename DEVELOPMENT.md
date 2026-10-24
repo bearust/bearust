@@ -68,6 +68,31 @@ callback is `<redirect_base_url>/api/auth/sso/<slug>/callback`; the SAML ACS is
 `/api/auth/sso/<slug>/metadata`. SAML IdP metadata must contain a signing
 certificate, and responses must use SHA-256 or stronger signatures and digests.
 
+## OWASP CRS and SecLang
+
+`src/seclang` is a SecLang engine for request phases 1 and 2. The OWASP CRS
+4.7.0 request rules are vendored in `crs/` (Apache-2.0) and embedded in the
+binary; enable them under **Security → WAF → OWASP Core Rule Set** or
+`PUT /api/waf/seclang`. Blocking follows the WAF mode (monitor-only logs).
+Custom SecLang rules (up to 60 KB) are compiled before they are saved, so a
+bad rule is rejected with its line number. Settings replicate through the
+cluster policy state.
+
+Compatibility is measured with the CRS regression suite (go-ftw tests):
+
+```sh
+curl -L https://github.com/coreruleset/coreruleset/archive/refs/tags/v4.7.0.tar.gz | tar xz
+CRS_DIR=$PWD/coreruleset-4.7.0 cargo test --release --test crs_regression -- --ignored --nocapture
+```
+
+At the time of writing 3773/3779 request-phase tests pass (99.8%); the rest
+depend on HTTP-server behaviour (e.g. Content-Length with Transfer-Encoding)
+or thresholds the suite configures per test. A benign GET costs about 0.4 ms
+of CPU at paranoia level 1 (`crs_evaluation_latency` benchmark), so enabling
+CRS is a deliberate capacity trade-off. Not supported: response phases,
+persistent collections (`IP`, `GLOBAL`), and `exec`/`setenv` side effects.
+Unsupported operators, transformations, or actions fail rule loading.
+
 ## AI Advisor development
 
 Leave `LLM_API_URL` and `LLM_API_KEY` unset for the default disabled mode. For

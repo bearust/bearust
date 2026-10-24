@@ -14,6 +14,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
 COPY crates ./crates
 COPY migrations ./migrations
+COPY crs ./crs
 # SAML SSO needs libxmlsec1; the published image includes it.
 RUN cargo build --release --locked --features saml
 FROM debian:bookworm-slim

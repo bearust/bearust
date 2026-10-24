@@ -647,6 +647,10 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
             get(get_waf_config).patch(update_waf_config),
         )
         .route(
+            "/api/waf/seclang",
+            get(get_waf_seclang).put(update_waf_seclang),
+        )
+        .route(
             "/api/rate-limit/config",
             get(get_rate_limit_config).patch(update_rate_limit_config),
         )
@@ -1499,6 +1503,111 @@ async fn get_waf_config(State(s): State<AppState>, h: HeaderMap) -> impl IntoRes
     }
     match repository::get_waf_config(&s.db).await {
         Ok(config) => Json(config).into_response(),
+        Err(_) => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
+    }
+}
+
+#[derive(serde::Serialize)]
+struct SecLangStatus {
+    #[serde(flatten)]
+    config: crate::control_plane::models::SecLangConfig,
+    crs_version: &'static str,
+    /// Rules in the active compiled ruleset (0 when disabled).
+    active_rules: usize,
+}
+
+async fn seclang_status(s: &AppState) -> Result<SecLangStatus, sqlx::Error> {
+    Ok(SecLangStatus {
+        config: repository::get_seclang_config(&s.db).await?,
+        crs_version: crate::seclang::crs::VERSION,
+        active_rules: s
+            .waf
+            .snapshot()
+            .seclang
+            .as_ref()
+            .map_or(0, |runtime| runtime.rule_count()),
+    })
+}
+
+async fn get_waf_seclang(State(s): State<AppState>, h: HeaderMap) -> Response {
+    if let Err(response) = require_role_admin(&s, &h).await {
+        return response;
+    }
+    match seclang_status(&s).await {
+        Ok(status) => Json(status).into_response(),
+        Err(_) => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
+    }
+}
+
+/// Replace the OWASP CRS / custom SecLang settings. The ruleset is compiled
+/// before anything is stored, so an invalid custom rule is reported with its
+/// line and never reaches the proxy.
+async fn update_waf_seclang(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    input: Result<Json<crate::control_plane::models::SecLangConfig>, JsonRejection>,
+) -> Response {
+    let actor = match require_role_admin(&s, &h).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    let Ok(Json(config)) = input else {
+        return user_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Invalid SecLang settings",
+        );
+    };
+    let candidate = config.clone();
+    let compiled = tokio::task::spawn_blocking(move || {
+        crate::waf::SecLangRuntime::compile(&candidate).map(|_| ())
+    })
+    .await
+    .unwrap_or_else(|_| Err("SecLang compilation failed".into()));
+    if let Err(message) = compiled {
+        audit::record_state(&s, Some(actor.id), "waf_seclang_rejected", "invalid_rules").await;
+        return user_error(StatusCode::BAD_REQUEST, "invalid_rules", &message);
+    }
+    if repository::update_seclang_config(&s.db, &config)
+        .await
+        .is_err()
+        || s.waf.reload(&s.db).await.is_err()
+    {
+        return user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Unable to update SecLang settings",
+        );
+    }
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
+    audit::record_state(
+        &s,
+        Some(actor.id),
+        "waf_seclang_updated",
+        &serde_json::json!({
+            "crs_enabled": config.crs_enabled,
+            "paranoia_level": config.paranoia_level,
+            "inbound_threshold": config.inbound_threshold,
+            "custom_rules_bytes": config.custom_rules.len(),
+        })
+        .to_string(),
+    )
+    .await;
+    s.realtime.publish("waf.changed");
+    match seclang_status(&s).await {
+        Ok(status) => Json(status).into_response(),
         Err(_) => user_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "database_error",

@@ -62,6 +62,10 @@ wasmtime = "=27.0.0"
 maxminddb = "0.27"
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 samael = { version = "=0.0.22", optional = true }
+fancy-regex = "0.14"
+aho-corasick = "1"
+sha1 = "0.10"
+libinjectionrs = "0.1.1"
 
 [features]
 default = []
@@ -75,6 +79,7 @@ axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 rcgen = "0.13"
 reqwest = { version = "0.12", default-features = false, features = ["stream", "blocking"] }
+serde_yaml = "0.9"
 tempfile = "3"
 tokio-tungstenite = "0.27"
 tower = { version = "0.5", features = ["util"] }

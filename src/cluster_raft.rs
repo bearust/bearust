@@ -137,6 +137,10 @@ pub struct ReplicatedPolicyState {
     pub analytics_retention_minutes: u32,
     pub emergency_disabled: bool,
     pub tuning_policies: Vec<ReplicatedTuningPolicy>,
+    /// Absent in commands from nodes that predate SecLang support; such
+    /// commands leave the local SecLang settings unchanged.
+    #[serde(default)]
+    pub seclang: Option<crate::control_plane::models::SecLangConfig>,
 }
 
 impl ReplicatedPolicyState {
@@ -195,6 +199,11 @@ impl ReplicatedPolicyState {
             self.waf_rules.clone(),
         )
         .map_err(|error| CommandError::Invalid(error.to_string()))?;
+        if let Some(seclang) = &self.seclang {
+            seclang
+                .validate_bounds()
+                .map_err(|error| CommandError::Invalid(error.into()))?;
+        }
         if self.ip_security_rules.len() > crate::security_policy::MAX_IP_RULES
             || self.tuning_policies.len() > 4096
         {

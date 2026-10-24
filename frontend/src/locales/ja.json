@@ -688,7 +688,17 @@
     "countryHint": "CIDRのみで照合する場合は空欄にします。国全体のルールにはCIDRに * を指定し、2文字の国コード(例: CN)を入力します。国の照合には server.geoip_database が必要で、未設定の場合は国ルールは一致しません。",
     "enableImmediately": "ポリシーを直ちに有効化",
     "healthy": "正常",
-    "review": "確認"
+    "review": "確認",
+    "crsTitle": "OWASP Core Rule Set",
+    "crsDescription": "同梱の OWASP CRS をアノマリースコアリングで評価し、独自の SecLang ルールも適用します。ブロックは WAF モードに従います。",
+    "crsEnabled": "OWASP CRS を有効化",
+    "crsParanoia": "パラノイアレベル",
+    "crsParanoiaHint": "レベルを上げると検知が増え、誤検知も増えます。",
+    "crsThreshold": "インバウンド異常スコアのしきい値",
+    "crsCustomRules": "カスタム SecLang ルール",
+    "crsSave": "CRS 設定を保存",
+    "crsSaved": "CRS 設定を保存しました",
+    "crsActiveRules": "{{count}} 件のルールが有効 · CRS {{version}}"
   },
   "analytics": {
     "intervalLabel": "間隔",
