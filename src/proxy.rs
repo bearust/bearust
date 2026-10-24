@@ -1225,10 +1225,18 @@ impl ProxyHttp for BearustProxy {
                     value.to_str().ok().map(|value| (name, value.to_owned()))
                 })
                 .collect::<Vec<_>>();
-            // Trusted crawler bypass is intentionally deferred until a signed
-            // ingress marker is implemented. Client headers never verify origin.
-            let inspection = BotInspectionContext::new(method, &path, headers);
+            // A trusted-crawler bypass needs the claimed user-agent and a
+            // forward-confirmed reverse DNS match for the real client IP;
+            // client headers alone never verify origin.
             let snapshot = bot.snapshot();
+            let mut inspection = BotInspectionContext::new(method, &path, headers);
+            if let Some(peer) = session
+                .client_addr()
+                .and_then(|addr| addr.as_inet().map(|inet| inet.ip()))
+            {
+                let ip = client_ip(peer, &session.req_header().headers, &self.trusted_proxies);
+                inspection = bot.verify_crawler(&snapshot, inspection, ip);
+            }
             let mut evaluation = evaluate_bot(&snapshot, &inspection);
             let valid_clearance = session
                 .req_header()

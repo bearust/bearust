@@ -537,7 +537,7 @@
     "trustedCrawlers": "信頼済みクローラー",
     "userAgent": "ユーザーエージェント",
     "crawlerUserAgent": "クローラーのユーザーエージェント",
-    "crawlerDomain": "クローラーのドメイン",
+    "crawlerDomain": "クローラーの DNS ドメイン",
     "addCrawler": "信頼済みクローラーを追加",
     "challenge": "チャレンジ",
     "quickCheck": "ブラウザーの簡易チェック",
@@ -546,7 +546,7 @@
     "verifying": "検証中…",
     "verifyBrowser": "ブラウザーを検証",
     "anotherChallenge": "別のチャレンジを試す",
-    "crawlerDomainPlaceholder": "example.com"
+    "crawlerDomainPlaceholder": "googlebot.com"
   },
   "rateLimit": {
     "title": "レート制限",
@@ -660,7 +660,7 @@
     "ruleIdOptional": "ルール ID（任意）",
     "analystNote": "分析者メモ",
     "recordFalsePositive": "誤検知を記録",
-    "trustedCrawlerDescription": "グローバルなチャレンジポリシーを下げずに既知のクローラーを許可します。",
+    "trustedCrawlerDescription": "クローラーのドメイン（例: googlebot.com）に対する正引き確認付き逆引き DNS で IP が検証されたクローラーを許可します。",
     "disable": "無効化",
     "enable": "有効化",
     "endpointClientIp": "エンドポイント + クライアント IP ごと",

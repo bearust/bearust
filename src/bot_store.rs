@@ -21,6 +21,7 @@ pub struct BotStore {
     current: ArcSwap<BotSnapshot>,
     audit: RwLock<Option<Sink>>,
     telemetry_slots: Arc<Semaphore>,
+    crawler_verifier: RwLock<Option<Arc<crate::crawler_verify::CrawlerVerifier>>>,
 }
 impl BotStore {
     pub async fn load(db: &DbPool) -> Result<Self, String> {
@@ -35,8 +36,32 @@ impl BotStore {
             current: ArcSwap::from_pointee(snapshot),
             audit: RwLock::new(None),
             telemetry_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_DETECTIONS)),
+            crawler_verifier: RwLock::new(None),
         })
     }
+    /// Enable trusted-crawler bypass through FCrDNS verification.
+    pub fn set_crawler_verifier(&self, verifier: Arc<crate::crawler_verify::CrawlerVerifier>) {
+        if let Ok(mut current) = self.crawler_verifier.write() {
+            *current = Some(verifier);
+        }
+    }
+
+    /// Attach the verified crawler hostname for `client_ip` when the request
+    /// claims a trusted crawler's user-agent. Never blocks on DNS.
+    pub fn verify_crawler(
+        &self,
+        snapshot: &BotSnapshot,
+        context: crate::bot_protection::BotInspectionContext,
+        client_ip: std::net::IpAddr,
+    ) -> crate::bot_protection::BotInspectionContext {
+        if !context.claims_trusted_crawler(snapshot) {
+            return context;
+        }
+        let verifier = self.crawler_verifier.read().ok().and_then(|v| v.clone());
+        let host = verifier.and_then(|verifier| verifier.verified_host(client_ip));
+        context.with_verified_crawler_host(host)
+    }
+
     pub fn snapshot(&self) -> Arc<BotSnapshot> {
         self.current.load_full()
     }

@@ -541,7 +541,7 @@
     "trustedCrawlers": "Trusted crawlers",
     "userAgent": "User agent",
     "crawlerUserAgent": "Crawler user agent",
-    "crawlerDomain": "Crawler domain",
+    "crawlerDomain": "Crawler DNS domain",
     "addCrawler": "Add trusted crawler",
     "challenge": "Challenge",
     "quickCheck": "Quick browser check",
@@ -550,7 +550,7 @@
     "verifying": "Verifying…",
     "verifyBrowser": "Verify browser",
     "anotherChallenge": "Try another challenge",
-    "crawlerDomainPlaceholder": "example.com"
+    "crawlerDomainPlaceholder": "googlebot.com"
   },
   "rateLimit": {
     "title": "Rate limiting",
@@ -664,7 +664,7 @@
     "ruleIdOptional": "Rule ID (optional)",
     "analystNote": "Analyst note",
     "recordFalsePositive": "Record false positive",
-    "trustedCrawlerDescription": "Allow known crawlers without lowering the global challenge policy.",
+    "trustedCrawlerDescription": "Allow known crawlers whose IP is verified by forward-confirmed reverse DNS against the crawler's domain (e.g. googlebot.com).",
     "disable": "Disable",
     "enable": "Enable",
     "endpointClientIp": "Per endpoint + client IP",

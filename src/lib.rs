@@ -21,6 +21,7 @@ pub mod cluster_raft_runtime;
 pub mod cluster_raft_storage;
 pub mod config;
 pub mod control_plane;
+pub mod crawler_verify;
 pub mod health;
 pub mod http3;
 pub mod observability;

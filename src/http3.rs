@@ -931,11 +931,18 @@ async fn handle_request<S>(
             })
             .cloned()
             .collect();
-        // Trusted crawler bypass is intentionally deferred until a signed
-        // ingress marker is implemented, matching src/proxy.rs -- client
-        // headers never verify origin.
-        let inspection = BotInspectionContext::new(&method, &path, bot_headers);
+        // Trusted-crawler bypass requires FCrDNS verification of the real
+        // client IP, matching src/proxy.rs.
         let bot_snapshot = bot.store.snapshot();
+        let client = match &state.trusted_proxies {
+            Some(trusted) => client_ip(remote_addr.ip(), req.headers(), trusted),
+            None => remote_addr.ip(),
+        };
+        let inspection = bot.store.verify_crawler(
+            &bot_snapshot,
+            BotInspectionContext::new(&method, &path, bot_headers),
+            client,
+        );
         let mut evaluation = evaluate_bot(&bot_snapshot, &inspection);
         let valid_clearance = req
             .headers()

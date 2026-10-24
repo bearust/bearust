@@ -68,6 +68,9 @@ pub struct BotInspectionContext {
     pub path: String,
     pub headers: Vec<(String, String)>,
     valid: bool,
+    /// PTR hostname of the client IP, set only after forward-confirmed
+    /// reverse DNS succeeded (see `crate::crawler_verify`).
+    verified_crawler_host: Option<String>,
 }
 impl BotInspectionContext {
     pub fn new(method: &str, path: &str, headers: Vec<(String, String)>) -> Self {
@@ -103,7 +106,27 @@ impl BotInspectionContext {
             path,
             headers: selected,
             valid,
+            verified_crawler_host: None,
         }
+    }
+
+    pub fn with_verified_crawler_host(mut self, host: Option<String>) -> Self {
+        self.verified_crawler_host = host;
+        self
+    }
+
+    /// Whether any enabled trusted-crawler rule's user-agent matches, i.e.
+    /// whether verifying the client IP could change the decision.
+    pub fn claims_trusted_crawler(&self, snapshot: &BotSnapshot) -> bool {
+        let ua = self.header("user-agent").unwrap_or("");
+        snapshot.rules.iter().any(|rule| {
+            rule.enabled
+                && rule.category == "trusted_crawler"
+                && rule
+                    .trusted_user_agent
+                    .as_ref()
+                    .is_some_and(|v| contains_ci(ua, v))
+        })
     }
     pub fn fingerprint(&self, key: &[u8]) -> String {
         let mut h = Hmac::<Sha256>::new_from_slice(key).expect("fingerprint key is bounded");
@@ -199,24 +222,25 @@ pub fn compile_snapshot(
 
 pub fn evaluate(snapshot: &BotSnapshot, context: &BotInspectionContext) -> BotEvaluation {
     let ua = context.header("user-agent").unwrap_or("");
-    let domain = context.header("host").unwrap_or("");
-    let trusted = false;
+    let mut trusted = false;
     let mut score = 0u16;
     let mut categories = Vec::new();
     if context.valid {
         for rule in snapshot.rules.iter().filter(|r| r.enabled).take(MAX_RULES) {
             if rule.category == "trusted_crawler" {
+                // Both the claimed user-agent and the FCrDNS-verified host of
+                // the client IP must match; request fields alone never do.
                 let ua_ok = rule
                     .trusted_user_agent
                     .as_ref()
                     .is_some_and(|v| contains_ci(ua, v));
-                let domain_ok = rule
-                    .trusted_domain
-                    .as_ref()
-                    .is_some_and(|v| domain_matches(domain, v));
-                // Trusted-crawler bypass is deferred until signed ingress
-                // metadata is available; client request fields never suffice.
-                let _ = (ua_ok, domain_ok);
+                let host_ok = match (&context.verified_crawler_host, &rule.trusted_domain) {
+                    (Some(host), Some(domain)) => {
+                        crate::crawler_verify::host_in_domain(host, domain)
+                    }
+                    _ => false,
+                };
+                trusted |= ua_ok && host_ok;
                 continue;
             }
             let category = stable_category(&rule.category);
@@ -303,16 +327,4 @@ fn stable_category(value: &str) -> String {
 fn contains_ci(hay: &str, needle: &str) -> bool {
     hay.to_ascii_lowercase()
         .contains(&needle.trim().to_ascii_lowercase())
-}
-fn domain_matches(actual: &str, expected: &str) -> bool {
-    let a = actual.trim().trim_end_matches('.').to_ascii_lowercase();
-    let e = expected.trim().trim_end_matches('.').to_ascii_lowercase();
-    if a.is_empty() || e.is_empty() {
-        return false;
-    }
-    // Numeric IP hosts are never accepted as DNS identity assertions.
-    if a.parse::<std::net::IpAddr>().is_ok() || e.parse::<std::net::IpAddr>().is_ok() {
-        return false;
-    }
-    a == e || a.ends_with(&format!(".{e}"))
 }

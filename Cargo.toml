@@ -66,6 +66,7 @@ fancy-regex = "0.14"
 aho-corasick = "1"
 sha1 = "0.10"
 libinjectionrs = "0.1.1"
+hickory-resolver = { version = "0.24", features = ["tokio-runtime", "system-config"] }
 
 [features]
 default = []

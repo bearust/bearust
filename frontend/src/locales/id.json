@@ -541,7 +541,7 @@
     "trustedCrawlers": "Crawler tepercaya",
     "userAgent": "Agen pengguna",
     "crawlerUserAgent": "Agen pengguna crawler",
-    "crawlerDomain": "Domain crawler",
+    "crawlerDomain": "Domain DNS crawler",
     "addCrawler": "Tambah crawler tepercaya",
     "challenge": "Tantangan",
     "quickCheck": "Pemeriksaan browser cepat",
@@ -550,7 +550,7 @@
     "verifying": "Memverifikasi…",
     "verifyBrowser": "Verifikasi browser",
     "anotherChallenge": "Coba tantangan lain",
-    "crawlerDomainPlaceholder": "example.com"
+    "crawlerDomainPlaceholder": "googlebot.com"
   },
   "rateLimit": {
     "title": "Pembatasan laju",
@@ -664,7 +664,7 @@
     "ruleIdOptional": "ID rule (opsional)",
     "analystNote": "Catatan analis",
     "recordFalsePositive": "Catat false positive",
-    "trustedCrawlerDescription": "Izinkan crawler yang dikenal tanpa menurunkan kebijakan tantangan global.",
+    "trustedCrawlerDescription": "Izinkan crawler yang IP-nya terverifikasi lewat reverse DNS yang dikonfirmasi forward terhadap domain crawler (mis. googlebot.com).",
     "disable": "Nonaktifkan",
     "enable": "Aktifkan",
     "endpointClientIp": "Per endpoint + IP klien",

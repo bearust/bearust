@@ -593,6 +593,15 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         ));
         let waf_store = control_state.waf.clone();
         let bot_store = control_state.bot.clone();
+        match crate::crawler_verify::SystemResolver::from_system() {
+            Some(resolver) => bot_store.set_crawler_verifier(
+                crate::crawler_verify::CrawlerVerifier::new(Arc::new(resolver)),
+            ),
+            None => tracing::warn!(
+                event = "crawler_verification_unavailable",
+                detail = "no system DNS configuration; trusted crawlers are not bypassed"
+            ),
+        }
         let challenge_service = control_state.challenges.clone();
         let rate_limiter = control_state.rate_limiter.clone();
         let analytics = control_state.analytics.clone();

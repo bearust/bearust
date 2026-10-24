@@ -222,3 +222,35 @@ fn rejects_invalid_snapshot_limits() {
     )
     .is_err());
 }
+
+#[test]
+fn trusted_crawler_bypass_requires_matching_ua_and_fcrdns_verified_host() {
+    let snapshot = compile_snapshot(
+        config(BotMode::Block),
+        vec![
+            BotRule::trusted_crawler("Googlebot", "googlebot.com"),
+            BotRule::signal("method_unusual", 100),
+        ],
+    )
+    .unwrap();
+    let request =
+        |ua: &str| BotInspectionContext::new("TRACE", "/", vec![("User-Agent".into(), ua.into())]);
+    // Without verification the unusual method blocks, even with the right UA.
+    let unverified = request("Mozilla/5.0 (compatible; Googlebot/2.1)");
+    assert!(unverified.claims_trusted_crawler(&snapshot));
+    assert_eq!(evaluate(&snapshot, &unverified).action, BotAction::Block);
+    // Verified host in the crawler's domain: bypass.
+    let verified = request("Mozilla/5.0 (compatible; Googlebot/2.1)")
+        .with_verified_crawler_host(Some("crawl-66-249-66-1.googlebot.com".into()));
+    let evaluation = evaluate(&snapshot, &verified);
+    assert!(evaluation.trusted);
+    assert_eq!(evaluation.action, BotAction::Allow);
+    // A verified host of a different domain, or a non-crawler UA, does not.
+    let other_domain =
+        request("Googlebot/2.1").with_verified_crawler_host(Some("crawl.evilgooglebot.com".into()));
+    assert_eq!(evaluate(&snapshot, &other_domain).action, BotAction::Block);
+    let other_ua =
+        request("curl/8.0").with_verified_crawler_host(Some("crawl.googlebot.com".into()));
+    assert!(!other_ua.claims_trusted_crawler(&snapshot));
+    assert_eq!(evaluate(&snapshot, &other_ua).action, BotAction::Block);
+}
