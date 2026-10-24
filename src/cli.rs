@@ -443,9 +443,10 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         };
         control_state.prometheus = config.prometheus.clone();
         // Construct the Raft runtime only for an explicitly configured,
-        // authenticated cluster. Construction does not bootstrap membership
-        // or promote this node; those transitions remain explicit lifecycle
-        // operations. Keep the handle so shutdown can stop its tick task.
+        // authenticated cluster. Membership bootstrap runs explicitly
+        // below once the cluster service exists; construction alone does
+        // not claim quorum or leadership. Keep the handle so shutdown can
+        // stop its tick task.
         let raft_handle = if !config.cluster.auth_token.trim().is_empty() {
             let peer_ids = config
                 .cluster
@@ -482,6 +483,74 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             );
             cluster_service.set_command_handler(Arc::new(gateway.clone()));
             control_state = control_state.with_config_gateway(gateway);
+            // Bootstrap pristine Raft membership so a configured cluster
+            // can elect a leader; construction alone leaves every node a
+            // learner with empty membership. All nodes derive the same
+            // member set from their configured identity plus peer list
+            // (raft id = sorted position + 1, as in deterministic_raft_id).
+            // On restart, or after membership replicates from a peer,
+            // initialization errors because it is already persisted; that
+            // is logged and startup continues.
+            let mut member_ids: Vec<String> = config
+                .cluster
+                .peers
+                .iter()
+                .map(|peer| peer.node_id.clone())
+                .collect();
+            member_ids.push(config.cluster.node_id.clone());
+            member_ids.sort();
+            member_ids.dedup();
+            let mut members = std::collections::BTreeMap::new();
+            let mut local_raft_id = 1_u64;
+            for (index, id) in member_ids.iter().enumerate() {
+                let raft_id = (index + 1) as u64;
+                if *id == config.cluster.node_id {
+                    local_raft_id = raft_id;
+                }
+                let addr = if *id == config.cluster.node_id {
+                    config.cluster.bind.to_string()
+                } else {
+                    config
+                        .cluster
+                        .peers
+                        .iter()
+                        .find(|peer| &peer.node_id == id)
+                        .map(|peer| peer.address.to_string())
+                        .unwrap_or_default()
+                };
+                members.insert(raft_id, openraft::BasicNode::new(addr));
+            }
+            if members.len() == 2 {
+                tracing::warn!(
+                    event = "raft_two_member_cluster",
+                    detail = "two-member clusters have no fault tolerance; run at least three members"
+                );
+            }
+            let bootstrap = if members.len() == 1 {
+                crate::cluster_raft_runtime::bootstrap_single_node(
+                    raft,
+                    &cluster_service,
+                    local_raft_id,
+                    config.cluster.bind.to_string(),
+                )
+                .await
+                .map_err(|error| error.to_string())
+            } else {
+                crate::cluster_raft_runtime::initialize_membership(raft, &cluster_service, members)
+                    .await
+                    .map_err(|error| error.to_string())
+            };
+            match bootstrap {
+                Ok(()) => tracing::info!(
+                    event = "raft_membership_initialized",
+                    node_id = %config.cluster.node_id
+                ),
+                Err(error) => tracing::info!(
+                    event = "raft_membership_bootstrap_skipped",
+                    node_id = %config.cluster.node_id,
+                    reason = %error
+                ),
+            }
             cluster_status_task = Some(crate::cluster_raft_runtime::spawn_cluster_status_sync(
                 cluster_service.clone(),
                 raft.clone(),
