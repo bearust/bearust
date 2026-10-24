@@ -2898,6 +2898,37 @@ pub async fn list_audit_logs(
     })
 }
 
+/// Export matching audit rows, newest first, up to `limit`. Details are
+/// sanitized exactly as in the paginated listing.
+pub async fn export_audit_logs(
+    pool: &DbPool,
+    query: &AuditLogQuery,
+    limit: u32,
+) -> Result<Vec<AuditLogItem>, sqlx::Error> {
+    let (where_clause, filters) = audit_where(query);
+    let select_sql = format!(
+        "SELECT a.id, COALESCE(u.email, CASE WHEN a.user_id IS NULL THEN 'system' ELSE 'deleted-user' END) AS actor, a.event, a.details, a.created_at FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id{where_clause} ORDER BY a.created_at DESC, a.id DESC LIMIT ?"
+    );
+    let mut select = sqlx::query(&select_sql);
+    for filter in &filters {
+        select = match filter {
+            AuditFilter::Text(value) => select.bind(value),
+            AuditFilter::Actor(value) => select.bind(*value),
+        };
+    }
+    let rows = select.bind(i64::from(limit)).fetch_all(pool).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| AuditLogItem {
+            id: row.get("id"),
+            actor: row.get("actor"),
+            event: row.get("event"),
+            details: sanitize_audit_details(&row.get::<String, _>("details")),
+            created_at: row.get("created_at"),
+        })
+        .collect())
+}
+
 fn advisor_workflow(value: &str) -> Result<crate::ai_advisor::AdvisorWorkflow, sqlx::Error> {
     match value {
         "incident_explanation" => Ok(crate::ai_advisor::AdvisorWorkflow::IncidentExplanation),

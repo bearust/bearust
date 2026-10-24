@@ -55,6 +55,14 @@ export function AuditLog() {
   const totalPages = Math.max(1, Math.ceil(page.total / page.page_size));
 
   const exportCsv = () => {
+    if (!DEMO_MODE) {
+      // The server exports every matching row, not just this page.
+      const anchor = document.createElement("a");
+      anchor.href = api.auditExportUrl({ q: query, event, from: toIso(from), to: toIso(to) });
+      anchor.click();
+      toast.success(t("shell.auditCsvDownloaded"), { description: t("shell.auditExportDescription") });
+      return;
+    }
     const rows = [["timestamp", "actor", "event", "details"], ...visible.map((entry) => [entry.created_at, entry.actor, entry.event, entry.details])];
     const csv = rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));

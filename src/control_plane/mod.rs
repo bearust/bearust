@@ -670,6 +670,7 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route("/api/bot/config/import", post(import_bot_config))
         .route("/api/bot/config/export", get(export_bot_config))
         .route("/api/audit-logs", get(list_audit_logs))
+        .route("/api/audit-logs/export", get(export_audit_logs))
         .route("/api/users", get(list_users).post(create_user))
         .route(
             "/api/users/{id}",
@@ -4091,61 +4092,9 @@ async fn list_audit_logs(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let page = match params.page.as_deref().unwrap_or("1").parse::<u32>() {
-        Ok(value) if value >= 1 => value,
-        _ => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid page"),
-    };
-    let page_size = match params.page_size.as_deref().unwrap_or("25").parse::<u32>() {
-        Ok(value) if (1..=100).contains(&value) => value,
-        _ => {
-            return user_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_input",
-                "Invalid page size",
-            )
-        }
-    };
-    let actor_id = match params.actor_id.as_deref() {
-        None | Some("") => None,
-        Some(value) => match value.parse::<i64>() {
-            Ok(value) if value >= 0 => Some(value),
-            _ => return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid actor id"),
-        },
-    };
-    let from = match params.from.as_deref().filter(|value| !value.is_empty()) {
-        Some(value) => match normalize_audit_timestamp(value) {
-            Ok(value) => Some(value),
-            Err(_) => {
-                return user_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_input",
-                    "Invalid timestamp",
-                )
-            }
-        },
-        None => None,
-    };
-    let to = match params.to.as_deref().filter(|value| !value.is_empty()) {
-        Some(value) => match normalize_audit_timestamp(value) {
-            Ok(value) => Some(value),
-            Err(_) => {
-                return user_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_input",
-                    "Invalid timestamp",
-                )
-            }
-        },
-        None => None,
-    };
-    let query = AuditLogQuery {
-        event: params.event.filter(|value| !value.is_empty()),
-        actor_id,
-        from,
-        to,
-        q: params.q.filter(|value| !value.is_empty()),
-        page,
-        page_size,
+    let query = match audit_query(params) {
+        Ok(query) => query,
+        Err(response) => return response,
     };
     match repository::list_audit_logs(&s.db, &query).await {
         Ok(page) => Json(page).into_response(),
@@ -4155,6 +4104,196 @@ async fn list_audit_logs(
             "Database unavailable",
         ),
     }
+}
+
+/// Validate audit listing/export query parameters.
+fn audit_query(params: AuditLogParams) -> Result<AuditLogQuery, Response> {
+    let page = match params.page.as_deref().unwrap_or("1").parse::<u32>() {
+        Ok(value) if value >= 1 => value,
+        _ => {
+            return Err(user_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "Invalid page",
+            ))
+        }
+    };
+    let page_size = match params.page_size.as_deref().unwrap_or("25").parse::<u32>() {
+        Ok(value) if (1..=100).contains(&value) => value,
+        _ => {
+            return Err(user_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "Invalid page size",
+            ))
+        }
+    };
+    let actor_id = match params.actor_id.as_deref() {
+        None | Some("") => None,
+        Some(value) => match value.parse::<i64>() {
+            Ok(value) if value >= 0 => Some(value),
+            _ => {
+                return Err(user_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_input",
+                    "Invalid actor id",
+                ))
+            }
+        },
+    };
+    let from = match params.from.as_deref().filter(|value| !value.is_empty()) {
+        Some(value) => match normalize_audit_timestamp(value) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                return Err(user_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_input",
+                    "Invalid timestamp",
+                ))
+            }
+        },
+        None => None,
+    };
+    let to = match params.to.as_deref().filter(|value| !value.is_empty()) {
+        Some(value) => match normalize_audit_timestamp(value) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                return Err(user_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_input",
+                    "Invalid timestamp",
+                ))
+            }
+        },
+        None => None,
+    };
+    Ok(AuditLogQuery {
+        event: params.event.filter(|value| !value.is_empty()),
+        actor_id,
+        from,
+        to,
+        q: params.q.filter(|value| !value.is_empty()),
+        page,
+        page_size,
+    })
+}
+
+/// Maximum rows in one audit export.
+const AUDIT_EXPORT_LIMIT: u32 = 50_000;
+
+/// Download matching audit rows as CSV (default) or JSON Lines. Uses the
+/// listing filters; pagination parameters are ignored.
+async fn export_audit_logs(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Query(mut params): Query<AuditLogParams>,
+    RawQuery(raw): RawQuery,
+) -> Response {
+    let user = match current(&s, &h).await {
+        Ok(user) => user,
+        Err(status) => return status.into_response(),
+    };
+    if !authorize(
+        &s.db,
+        &user,
+        Permission::AuditLogsExport,
+        ResourceContext::GLOBAL,
+    )
+    .await
+    .unwrap_or(false)
+    {
+        audit::record_state(&s, Some(user.id), "authorization_denied", "AuditLogsExport").await;
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let format = raw
+        .as_deref()
+        .and_then(|raw| serde_urlencoded::from_str::<Vec<(String, String)>>(raw).ok())
+        .and_then(|pairs| {
+            pairs
+                .into_iter()
+                .find(|(k, _)| k == "format")
+                .map(|(_, v)| v)
+        })
+        .unwrap_or_else(|| "csv".into());
+    if !matches!(format.as_str(), "csv" | "jsonl") {
+        return user_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Invalid export format",
+        );
+    }
+    params.page = None;
+    params.page_size = None;
+    let query = match audit_query(params) {
+        Ok(query) => query,
+        Err(response) => return response,
+    };
+    let items = match repository::export_audit_logs(&s.db, &query, AUDIT_EXPORT_LIMIT).await {
+        Ok(items) => items,
+        Err(_) => {
+            return user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Database unavailable",
+            )
+        }
+    };
+    audit::record_state(
+        &s,
+        Some(user.id),
+        "audit_logs_exported",
+        &serde_json::json!({ "format": format, "rows": items.len() }).to_string(),
+    )
+    .await;
+    let (body, content_type) = if format == "jsonl" {
+        let mut body = String::new();
+        for item in &items {
+            body.push_str(&serde_json::to_string(item).unwrap_or_default());
+            body.push('\n');
+        }
+        (body, "application/x-ndjson")
+    } else {
+        let mut body = String::from("id,created_at,actor,event,details\r\n");
+        for item in &items {
+            let cells = [
+                item.id.to_string(),
+                csv_cell(&item.created_at),
+                csv_cell(&item.actor),
+                csv_cell(&item.event),
+                csv_cell(&item.details),
+            ];
+            body.push_str(&cells.join(","));
+            body.push_str("\r\n");
+        }
+        (body, "text/csv; charset=utf-8")
+    };
+    let filename = format!(
+        "bearust-audit-{}.{format}",
+        Utc::now().format("%Y%m%dT%H%M%SZ")
+    );
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type.to_owned()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_owned()),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// Quote a CSV cell and neutralize spreadsheet formula injection by
+/// prefixing cells that start with a formula trigger.
+fn csv_cell(value: &str) -> String {
+    let guarded = if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{value}")
+    } else {
+        value.to_owned()
+    };
+    format!("\"{}\"", guarded.replace('"', "\"\""))
 }
 
 #[derive(Debug, Deserialize)]

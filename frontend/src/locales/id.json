@@ -281,7 +281,7 @@
     "auditDescription": "Catatan perubahan control plane dan peristiwa keamanan yang dapat dicari dan dipaginasi.",
     "exportCsv": "Ekspor CSV",
     "auditCsvDownloaded": "CSV audit diunduh",
-    "auditExportDescription": "Halaman yang difilter saat ini telah diekspor.",
+    "auditExportDescription": "Semua event yang cocok dengan filter saat ini telah diekspor (maks. 50.000).",
     "activityHistory": "Riwayat aktivitas",
     "previewEventsLocal": "Peristiwa pratinjau tersimpan lokal di browser ini.",
     "matchingEvents": "{{count}} peristiwa yang cocok dikembalikan API.",

@@ -281,7 +281,7 @@
     "auditDescription": "A searchable, paginated record of control-plane changes and security events.",
     "exportCsv": "Export CSV",
     "auditCsvDownloaded": "Audit CSV downloaded",
-    "auditExportDescription": "The current filtered page was exported.",
+    "auditExportDescription": "Every event matching the current filters was exported (up to 50,000).",
     "activityHistory": "Activity history",
     "previewEventsLocal": "Preview events are local to this browser.",
     "matchingEvents": "{{count}} matching events returned by the API.",

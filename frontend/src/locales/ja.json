@@ -281,7 +281,7 @@
     "auditDescription": "コントロールプレーンの変更とセキュリティイベントを検索・ページングできる記録です。",
     "exportCsv": "CSV をエクスポート",
     "auditCsvDownloaded": "監査 CSV をダウンロードしました",
-    "auditExportDescription": "現在のフィルターページをエクスポートしました。",
+    "auditExportDescription": "現在のフィルターに一致するすべてのイベントをエクスポートしました（最大 50,000 件）。",
     "activityHistory": "アクティビティ履歴",
     "previewEventsLocal": "プレビューイベントはこのブラウザーに保存されます。",
     "matchingEvents": "API から一致するイベント {{count}} 件が返されました。",

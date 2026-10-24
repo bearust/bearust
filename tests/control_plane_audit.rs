@@ -473,3 +473,97 @@ async fn repository_lists_filtered_paginated_rows() {
     assert_eq!(text.total, 1);
     assert_eq!(text.items[0].event, "user_updated");
 }
+
+#[tokio::test]
+async fn audit_export_streams_filtered_redacted_csv_and_jsonl() {
+    let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+    let state = build_state("sqlite::memory:", dir.path(), "setup-token")
+        .await
+        .unwrap();
+    let db = state.db.clone();
+    let app = router(state);
+    assert_eq!(
+        request(app.clone(), "/api/audit-logs/export", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let setup = app.clone().oneshot(Request::builder().method("POST").uri("/api/setup/initialize")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#)).unwrap()).await.unwrap();
+    assert_eq!(setup.status(), StatusCode::CREATED);
+    let admin = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    insert_audit(
+        &db,
+        None,
+        "export_probe",
+        r#"{"note":"=HYPERLINK(\"x\")","password":"hunter2"}"#,
+        "2026-10-02T00:00:00Z",
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/audit-logs/export?event=export_probe")
+                .header("cookie", &admin)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/csv; charset=utf-8"
+    );
+    assert!(response.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .starts_with("attachment; filename=\"bearust-audit-"));
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let csv = String::from_utf8(body.to_vec()).unwrap();
+    let lines = csv.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "id,created_at,actor,event,details");
+    assert_eq!(lines.len(), 2, "{csv}");
+    assert!(lines[1].contains(r#""system","export_probe""#));
+    assert!(!csv.contains("hunter2"));
+    assert!(csv.contains("[REDACTED]"));
+
+    let (status, jsonl) = request(
+        app.clone(),
+        "/api/audit-logs/export?format=jsonl&event=export_probe",
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = jsonl
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["event"], "export_probe");
+
+    insert_audit(&db, None, "=SUM(A1)", "-1", "2026-10-03T00:00:00Z").await;
+    let (_, csv) = request(
+        app.clone(),
+        "/api/audit-logs/export?event=%3DSUM(A1)",
+        Some(&admin),
+    )
+    .await;
+    assert!(csv.contains(r#""'=SUM(A1)","'-1""#), "{csv}");
+
+    let (status, _) = request(
+        app.clone(),
+        "/api/audit-logs/export?format=xml",
+        Some(&admin),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // The export itself is audited.
+    let (_, listing) = request(
+        app.clone(),
+        "/api/audit-logs?event=audit_logs_exported",
+        Some(&admin),
+    )
+    .await;
+    assert!(listing.contains(r#""total":3"#), "{listing}");
+}

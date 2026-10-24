@@ -17,25 +17,20 @@ function page(details: string, actor = "admin@example.com"): AuditLogPage {
   return { items: [{ id: 1, actor, event: "proxy_host_created", details, created_at: "2026-10-01T00:00:00Z" }], page: 1, page_size: 25, total: 1 };
 }
 
-it("exports audit fields as text even when user-provided values look like spreadsheet formulas", async () => {
-  vi.spyOn(api, "auditLogs").mockResolvedValue(page("\t=1+1", '=HYPERLINK("https://example.test","click")'));
-  let downloaded: Blob | undefined;
-  vi.stubGlobal("URL", Object.assign(class extends URL {}, {
-    createObjectURL: (blob: Blob) => { downloaded = blob; return "blob:audit"; },
-    revokeObjectURL: () => {},
-  }));
-  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+it("exports every matching row through the server with the active filters", async () => {
+  vi.spyOn(api, "auditLogs").mockResolvedValue(page("mode=block"));
+  const hrefs: string[] = [];
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) { hrefs.push(this.getAttribute("href") ?? ""); });
   root = createRoot(document.body);
   await act(async () => root.render(<AuditLog />));
+  const input = document.querySelector<HTMLInputElement>('[aria-label="Filter event type"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "login_denied");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
   const exportButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Export CSV")!;
   await act(async () => exportButton.click());
-  const csv = await new Promise<string>((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.readAsText(downloaded!);
-  });
-  expect(csv).toContain('"\'=HYPERLINK(""https://example.test"",""click"")"');
-  expect(csv).toContain('"\'\t=1+1"');
+  expect(hrefs).toEqual(["/api/audit-logs/export?event=login_denied&format=csv"]);
 });
 
 it("keeps the latest filtered result when an earlier request finishes afterward", async () => {
