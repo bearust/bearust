@@ -613,6 +613,26 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                     {
                         tracing::warn!(event = "analytics_persistence_failed", error = %error);
                     }
+                    for granularity in [
+                        crate::analytics::RollupGranularity::Hour,
+                        crate::analytics::RollupGranularity::Day,
+                    ] {
+                        let rollups = collector.rollup_snapshot(granularity);
+                        if let Err(error) =
+                            crate::control_plane::repository::persist_analytics_rollups(
+                                &database,
+                                granularity,
+                                &rollups,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                event = "analytics_rollup_persistence_failed",
+                                granularity = granularity.as_str(),
+                                error = %error
+                            );
+                        }
+                    }
                 }
             })
         };

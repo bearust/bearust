@@ -443,6 +443,18 @@ pub async fn build_state(
     if let Ok(buckets) = repository::load_analytics_buckets(&db, analytics_limit).await {
         analytics.restore_persistence(buckets);
     }
+    for granularity in [
+        crate::analytics::RollupGranularity::Hour,
+        crate::analytics::RollupGranularity::Day,
+    ] {
+        let now = Utc::now();
+        let from = granularity.truncate(now) - granularity.memory_window();
+        if let Ok(rows) =
+            repository::load_analytics_rollups(&db, granularity, from, now, None).await
+        {
+            analytics.restore_rollups(granularity, rows);
+        }
+    }
 
     if let Ok(host_configs) = repository::list_host_rate_limit_configs(&db).await {
         for (host_id, cfg) in host_configs {
@@ -584,6 +596,7 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route("/api/analytics/summary", get(analytics_summary))
         .route("/api/analytics/timeseries", get(analytics_timeseries))
         .route("/api/analytics/dimensions", get(analytics_dimensions))
+        .route("/api/analytics/history", get(analytics_history))
         .route(
             "/api/analytics/retention",
             get(get_analytics_retention).patch(update_analytics_retention),
@@ -4256,6 +4269,101 @@ async fn analytics_dimensions(
         return r;
     }
     Json(s.analytics.dimensions(q)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnalyticsHistoryQuery {
+    proxy_host_id: Option<i64>,
+    from: String,
+    to: Option<String>,
+    interval: Option<crate::analytics::AnalyticsInterval>,
+    limit: Option<usize>,
+}
+
+/// Long-term history served from durable hourly/daily rollups. The range is
+/// bounded by the granularity's retention, so a request cannot scan more
+/// rows than the store keeps.
+async fn analytics_history(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    RawQuery(raw): RawQuery,
+) -> Response {
+    use crate::analytics::{AnalyticsInterval, RollupGranularity};
+    let invalid = || {
+        user_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Invalid analytics history query",
+        )
+    };
+    let Some(q) = raw
+        .as_deref()
+        .and_then(|raw| serde_urlencoded::from_str::<AnalyticsHistoryQuery>(raw).ok())
+    else {
+        return invalid();
+    };
+    let parse = |v: &str| DateTime::parse_from_rfc3339(v).map(|v| v.with_timezone(&Utc));
+    let Ok(from) = parse(&q.from) else {
+        return invalid();
+    };
+    let to = match q.to.as_deref().map(parse).transpose() {
+        Ok(to) => to.unwrap_or_else(Utc::now),
+        Err(_) => return invalid(),
+    };
+    let interval = q.interval.unwrap_or(AnalyticsInterval::Hour);
+    let granularity = match interval {
+        AnalyticsInterval::Minute => return invalid(),
+        AnalyticsInterval::Hour => RollupGranularity::Hour,
+        AnalyticsInterval::Day => RollupGranularity::Day,
+    };
+    if from > to
+        || to.signed_duration_since(from) > granularity.retention()
+        || q.proxy_host_id.is_some_and(|id| id <= 0)
+    {
+        return invalid();
+    }
+    if let Err(r) = require_analytics_read(&s, &h, q.proxy_host_id).await {
+        return r;
+    }
+    let mut rows = match repository::load_analytics_rollups(
+        &s.db,
+        granularity,
+        granularity.truncate(from),
+        to,
+        q.proxy_host_id,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(_) => {
+            return user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Database unavailable",
+            )
+        }
+    };
+    // Overlay the live in-memory window so the newest partial bucket is not
+    // up to one persistence interval stale.
+    for live in s.analytics.rollup_snapshot(granularity) {
+        if let Some(row) = rows
+            .iter_mut()
+            .find(|row| row.proxy_host_id == live.proxy_host_id && row.timestamp == live.timestamp)
+        {
+            *row = live;
+        } else {
+            rows.push(live);
+        }
+    }
+    let filter = AnalyticsFilter {
+        proxy_host_id: q.proxy_host_id,
+        from: Some(granularity.truncate(from)),
+        to: Some(to),
+        limit: q.limit.unwrap_or(0),
+        interval,
+    };
+    Json(crate::analytics::history_from_rollups(rows, &filter)).into_response()
 }
 
 async fn get_analytics_retention(State(s): State<AppState>, h: HeaderMap) -> Response {

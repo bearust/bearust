@@ -157,6 +157,57 @@ pub struct PersistedAnalyticsBucket {
     pub attack_types: Vec<AnalyticsCount>,
 }
 
+/// Hourly rollups are kept durably for 90 days and daily rollups for two
+/// years; only the most recent part of each lives in memory.
+pub const HOURLY_ROLLUP_RETENTION_DAYS: i64 = 90;
+pub const DAILY_ROLLUP_RETENTION_DAYS: i64 = 730;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RollupGranularity {
+    Hour,
+    Day,
+}
+
+impl RollupGranularity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hour => "hour",
+            Self::Day => "day",
+        }
+    }
+    fn seconds(self) -> i64 {
+        match self {
+            Self::Hour => 3_600,
+            Self::Day => 86_400,
+        }
+    }
+    pub fn truncate(self, ts: DateTime<Utc>) -> DateTime<Utc> {
+        let seconds = self.seconds();
+        DateTime::from_timestamp(ts.timestamp().div_euclid(seconds) * seconds, 0).unwrap_or(ts)
+    }
+    /// How far back rollups remain in memory before only the durable copy
+    /// is authoritative.
+    pub fn memory_window(self) -> Duration {
+        match self {
+            Self::Hour => Duration::hours(48),
+            Self::Day => Duration::days(3),
+        }
+    }
+    pub fn retention(self) -> Duration {
+        match self {
+            Self::Hour => Duration::days(HOURLY_ROLLUP_RETENTION_DAYS),
+            Self::Day => Duration::days(DAILY_ROLLUP_RETENTION_DAYS),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AnalyticsHistory {
+    pub summary: AnalyticsSummary,
+    pub timeseries: Vec<AnalyticsBucket>,
+    pub dimensions: AnalyticsDimensions,
+}
+
 #[derive(Default)]
 struct Bucket {
     timestamp: DateTime<Utc>,
@@ -173,6 +224,10 @@ struct Bucket {
 
 struct State {
     hosts: BTreeMap<i64, VecDeque<Bucket>>,
+    /// Recent hourly and daily rollups keyed by (host, bucket start). Only a
+    /// short in-memory window is kept; the durable store holds history.
+    hours: BTreeMap<(i64, DateTime<Utc>), Bucket>,
+    days: BTreeMap<(i64, DateTime<Utc>), Bucket>,
 }
 
 pub struct AnalyticsCollector {
@@ -195,6 +250,8 @@ impl AnalyticsCollector {
         Self {
             state: Mutex::new(State {
                 hosts: BTreeMap::new(),
+                hours: BTreeMap::new(),
+                days: BTreeMap::new(),
             }),
             max_hosts: max_hosts.clamp(1, DEFAULT_MAX_HOSTS),
             max_buckets: AtomicUsize::new(max_buckets.clamp(1, MAX_RETENTION_BUCKETS)),
@@ -232,9 +289,10 @@ impl AnalyticsCollector {
     ) {
         let minute = event.timestamp.timestamp().div_euclid(60) * 60;
         let ts = DateTime::<Utc>::from_timestamp(minute, 0).unwrap_or(event.timestamp);
-        let Ok(mut state) = self.state.lock() else {
+        let Ok(mut guard) = self.state.lock() else {
             return;
         };
+        let state = &mut *guard;
         if !state.hosts.contains_key(&event.proxy_host_id) {
             if state.hosts.len() >= self.max_hosts {
                 if let Some((&host, _)) = state
@@ -278,31 +336,25 @@ impl AnalyticsCollector {
             }
         };
         let bucket = q.get_mut(index).expect("bucket inserted or found");
-        bucket.requests += 1;
-        let class = match event.status_code {
-            200..=299 => 0,
-            300..=399 => 1,
-            400..=499 => 2,
-            500..=599 => 3,
-            _ => 4,
-        };
-        bucket.status[class] += 1;
-        bucket.security.waf_blocks += event.security.waf_blocks;
-        bucket.security.bot_blocks += event.security.bot_blocks;
-        bucket.security.bot_challenges += event.security.bot_challenges;
-        bucket.security.rate_limited += event.security.rate_limited;
-        bucket.bandwidth_bytes = bucket.bandwidth_bytes.saturating_add(dimensions.bytes);
-        increment_dimension(&mut bucket.endpoints, dimensions.endpoint.as_deref());
-        increment_dimension(&mut bucket.upstreams, dimensions.upstream.as_deref());
-        increment_dimension(&mut bucket.attacker_ips, dimensions.attacker_ip.as_deref());
-        increment_dimension(&mut bucket.attack_types, dimensions.attack_type.as_deref());
-        let idx = HISTOGRAM_BOUNDS
-            .iter()
-            .position(|b| event.latency_ms <= *b)
-            .unwrap_or(HISTOGRAM_BOUNDS.len() - 1);
-        bucket.histogram[idx] += 1;
+        apply_event(bucket, &event, &dimensions);
         while q.len() > max_buckets {
             q.pop_front();
+        }
+        let host = event.proxy_host_id;
+        for (granularity, map) in [
+            (RollupGranularity::Hour, &mut state.hours),
+            (RollupGranularity::Day, &mut state.days),
+        ] {
+            let start = granularity.truncate(event.timestamp);
+            if start < granularity.truncate(Utc::now()) - granularity.memory_window() {
+                continue;
+            }
+            let bucket = map.entry((host, start)).or_insert_with(|| Bucket {
+                timestamp: start,
+                ..Default::default()
+            });
+            apply_event(bucket, &event, &dimensions);
+            prune_rollups(map, granularity, self.max_hosts);
         }
     }
 
@@ -313,22 +365,7 @@ impl AnalyticsCollector {
         timeseries_from_buckets(self.filtered(&filter), &filter)
     }
     pub fn dimensions(&self, filter: AnalyticsFilter) -> AnalyticsDimensions {
-        let buckets = self.filtered(&filter);
-        let mut dimensions = AnalyticsDimensions::default();
-        for bucket in &buckets {
-            dimensions.bandwidth_bytes = dimensions
-                .bandwidth_bytes
-                .saturating_add(bucket.bandwidth_bytes);
-            merge_counts(&mut dimensions.top_endpoints, &bucket.endpoints);
-            merge_counts(&mut dimensions.top_upstreams, &bucket.upstreams);
-            merge_counts(&mut dimensions.top_attacker_ips, &bucket.attacker_ips);
-            merge_counts(&mut dimensions.attack_types, &bucket.attack_types);
-        }
-        sort_counts(&mut dimensions.top_endpoints);
-        sort_counts(&mut dimensions.top_upstreams);
-        sort_counts(&mut dimensions.top_attacker_ips);
-        sort_counts(&mut dimensions.attack_types);
-        dimensions
+        dimensions_from_buckets(&self.filtered(&filter))
     }
     pub fn snapshot(&self) -> AnalyticsSnapshot {
         let filter = AnalyticsFilter::default();
@@ -351,25 +388,9 @@ impl AnalyticsCollector {
             .hosts
             .iter()
             .flat_map(|(host, buckets)| {
-                buckets.iter().map(|bucket| PersistedAnalyticsBucket {
-                    timestamp: bucket.timestamp,
-                    proxy_host_id: *host,
-                    requests: bucket.requests,
-                    status_2xx: bucket.status[0],
-                    status_3xx: bucket.status[1],
-                    status_4xx: bucket.status[2],
-                    status_5xx: bucket.status[3],
-                    waf_blocks: bucket.security.waf_blocks,
-                    bot_blocks: bucket.security.bot_blocks,
-                    bot_challenges: bucket.security.bot_challenges,
-                    rate_limited: bucket.security.rate_limited,
-                    bandwidth_bytes: bucket.bandwidth_bytes,
-                    latency_histogram: bucket.histogram,
-                    top_endpoints: counts_from_map(&bucket.endpoints),
-                    top_upstreams: counts_from_map(&bucket.upstreams),
-                    top_attacker_ips: counts_from_map(&bucket.attacker_ips),
-                    attack_types: counts_from_map(&bucket.attack_types),
-                })
+                buckets
+                    .iter()
+                    .map(|bucket| persisted_from_bucket(*host, bucket))
             })
             .collect()
     }
@@ -398,37 +419,51 @@ impl AnalyticsCollector {
             if queue.len() >= max_buckets {
                 continue;
             }
-            let status_total = item
-                .status_2xx
-                .saturating_add(item.status_3xx)
-                .saturating_add(item.status_4xx)
-                .saturating_add(item.status_5xx);
-            let mut bucket = Bucket {
-                timestamp: item.timestamp,
-                requests: item.requests,
-                status: [
-                    item.status_2xx,
-                    item.status_3xx,
-                    item.status_4xx,
-                    item.status_5xx,
-                    item.requests.saturating_sub(status_total),
-                ],
-                security: SecurityCounters {
-                    waf_blocks: item.waf_blocks,
-                    bot_blocks: item.bot_blocks,
-                    bot_challenges: item.bot_challenges,
-                    rate_limited: item.rate_limited,
-                },
-                histogram: item.latency_histogram,
-                bandwidth_bytes: item.bandwidth_bytes,
-                ..Default::default()
-            };
-            restore_counts(&mut bucket.endpoints, item.top_endpoints);
-            restore_counts(&mut bucket.upstreams, item.top_upstreams);
-            restore_counts(&mut bucket.attacker_ips, item.top_attacker_ips);
-            restore_counts(&mut bucket.attack_types, item.attack_types);
+            let bucket = bucket_from_persisted(item);
             queue.push_back(bucket);
         }
+    }
+
+    /// Export recent in-memory hourly or daily rollups for durable upsert.
+    pub fn rollup_snapshot(&self, granularity: RollupGranularity) -> Vec<PersistedAnalyticsBucket> {
+        let Ok(state) = self.state.lock() else {
+            return Vec::new();
+        };
+        let map = match granularity {
+            RollupGranularity::Hour => &state.hours,
+            RollupGranularity::Day => &state.days,
+        };
+        map.iter()
+            .map(|((host, _), bucket)| persisted_from_bucket(*host, bucket))
+            .collect()
+    }
+
+    /// Seed the in-memory rollup window from durable rows so a restart does
+    /// not overwrite a partially aggregated hour or day with a smaller one.
+    pub fn restore_rollups(
+        &self,
+        granularity: RollupGranularity,
+        persisted: Vec<PersistedAnalyticsBucket>,
+    ) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let max_hosts = self.max_hosts;
+        let map = match granularity {
+            RollupGranularity::Hour => &mut state.hours,
+            RollupGranularity::Day => &mut state.days,
+        };
+        map.clear();
+        for item in persisted {
+            if item.proxy_host_id <= 0 || granularity.truncate(item.timestamp) != item.timestamp {
+                continue;
+            }
+            map.insert(
+                (item.proxy_host_id, item.timestamp),
+                bucket_from_persisted(item),
+            );
+        }
+        prune_rollups(map, granularity, max_hosts);
     }
 
     fn filtered(&self, f: &AnalyticsFilter) -> Vec<BucketView> {
@@ -454,6 +489,159 @@ impl AnalyticsCollector {
         out.sort_by_key(|b| b.timestamp);
         out
     }
+}
+
+fn persisted_from_bucket(host: i64, bucket: &Bucket) -> PersistedAnalyticsBucket {
+    PersistedAnalyticsBucket {
+        timestamp: bucket.timestamp,
+        proxy_host_id: host,
+        requests: bucket.requests,
+        status_2xx: bucket.status[0],
+        status_3xx: bucket.status[1],
+        status_4xx: bucket.status[2],
+        status_5xx: bucket.status[3],
+        waf_blocks: bucket.security.waf_blocks,
+        bot_blocks: bucket.security.bot_blocks,
+        bot_challenges: bucket.security.bot_challenges,
+        rate_limited: bucket.security.rate_limited,
+        bandwidth_bytes: bucket.bandwidth_bytes,
+        latency_histogram: bucket.histogram,
+        top_endpoints: counts_from_map(&bucket.endpoints),
+        top_upstreams: counts_from_map(&bucket.upstreams),
+        top_attacker_ips: counts_from_map(&bucket.attacker_ips),
+        attack_types: counts_from_map(&bucket.attack_types),
+    }
+}
+
+fn bucket_from_persisted(item: PersistedAnalyticsBucket) -> Bucket {
+    let status_total = item
+        .status_2xx
+        .saturating_add(item.status_3xx)
+        .saturating_add(item.status_4xx)
+        .saturating_add(item.status_5xx);
+    let mut bucket = Bucket {
+        timestamp: item.timestamp,
+        requests: item.requests,
+        status: [
+            item.status_2xx,
+            item.status_3xx,
+            item.status_4xx,
+            item.status_5xx,
+            item.requests.saturating_sub(status_total),
+        ],
+        security: SecurityCounters {
+            waf_blocks: item.waf_blocks,
+            bot_blocks: item.bot_blocks,
+            bot_challenges: item.bot_challenges,
+            rate_limited: item.rate_limited,
+        },
+        histogram: item.latency_histogram,
+        bandwidth_bytes: item.bandwidth_bytes,
+        ..Default::default()
+    };
+    restore_counts(&mut bucket.endpoints, item.top_endpoints);
+    restore_counts(&mut bucket.upstreams, item.top_upstreams);
+    restore_counts(&mut bucket.attacker_ips, item.top_attacker_ips);
+    restore_counts(&mut bucket.attack_types, item.attack_types);
+    bucket
+}
+
+/// Drop rollups that fell out of the in-memory window and, when more hosts
+/// than allowed are tracked, the least recently active hosts.
+fn prune_rollups(
+    map: &mut BTreeMap<(i64, DateTime<Utc>), Bucket>,
+    granularity: RollupGranularity,
+    max_hosts: usize,
+) {
+    let cutoff = granularity.truncate(Utc::now()) - granularity.memory_window();
+    map.retain(|(_, ts), _| *ts >= cutoff);
+    let mut latest = BTreeMap::<i64, DateTime<Utc>>::new();
+    for (host, ts) in map.keys() {
+        let entry = latest.entry(*host).or_insert(*ts);
+        *entry = (*entry).max(*ts);
+    }
+    if latest.len() > max_hosts {
+        let mut hosts = latest.into_iter().collect::<Vec<_>>();
+        hosts.sort_by_key(|(_, ts)| std::cmp::Reverse(*ts));
+        let keep = hosts
+            .into_iter()
+            .take(max_hosts)
+            .map(|(host, _)| host)
+            .collect::<std::collections::BTreeSet<_>>();
+        map.retain(|(host, _), _| keep.contains(host));
+    }
+}
+
+/// Build a summary, timeseries, and dimension view from durable rollup rows.
+/// Rows are filtered by host and time range before aggregation.
+pub fn history_from_rollups(
+    rows: Vec<PersistedAnalyticsBucket>,
+    filter: &AnalyticsFilter,
+) -> AnalyticsHistory {
+    let mut views = rows
+        .into_iter()
+        .filter(|row| {
+            filter.proxy_host_id.is_none_or(|h| h == row.proxy_host_id)
+                && filter.from.is_none_or(|from| row.timestamp >= from)
+                && filter.to.is_none_or(|to| row.timestamp <= to)
+        })
+        .map(|row| {
+            let host = row.proxy_host_id;
+            BucketView::from((host, &bucket_from_persisted(row)))
+        })
+        .collect::<Vec<_>>();
+    views.sort_by_key(|b| b.timestamp);
+    let summary = summary_from_buckets(&views);
+    let dimensions = dimensions_from_buckets(&views);
+    AnalyticsHistory {
+        summary,
+        timeseries: timeseries_from_buckets(views, filter),
+        dimensions,
+    }
+}
+
+fn dimensions_from_buckets(buckets: &[BucketView]) -> AnalyticsDimensions {
+    let mut dimensions = AnalyticsDimensions::default();
+    for bucket in buckets {
+        dimensions.bandwidth_bytes = dimensions
+            .bandwidth_bytes
+            .saturating_add(bucket.bandwidth_bytes);
+        merge_counts(&mut dimensions.top_endpoints, &bucket.endpoints);
+        merge_counts(&mut dimensions.top_upstreams, &bucket.upstreams);
+        merge_counts(&mut dimensions.top_attacker_ips, &bucket.attacker_ips);
+        merge_counts(&mut dimensions.attack_types, &bucket.attack_types);
+    }
+    sort_counts(&mut dimensions.top_endpoints);
+    sort_counts(&mut dimensions.top_upstreams);
+    sort_counts(&mut dimensions.top_attacker_ips);
+    sort_counts(&mut dimensions.attack_types);
+    dimensions
+}
+
+fn apply_event(bucket: &mut Bucket, event: &AnalyticsEvent, dimensions: &AnalyticsDimensionEvent) {
+    bucket.requests += 1;
+    let class = match event.status_code {
+        200..=299 => 0,
+        300..=399 => 1,
+        400..=499 => 2,
+        500..=599 => 3,
+        _ => 4,
+    };
+    bucket.status[class] += 1;
+    bucket.security.waf_blocks += event.security.waf_blocks;
+    bucket.security.bot_blocks += event.security.bot_blocks;
+    bucket.security.bot_challenges += event.security.bot_challenges;
+    bucket.security.rate_limited += event.security.rate_limited;
+    bucket.bandwidth_bytes = bucket.bandwidth_bytes.saturating_add(dimensions.bytes);
+    increment_dimension(&mut bucket.endpoints, dimensions.endpoint.as_deref());
+    increment_dimension(&mut bucket.upstreams, dimensions.upstream.as_deref());
+    increment_dimension(&mut bucket.attacker_ips, dimensions.attacker_ip.as_deref());
+    increment_dimension(&mut bucket.attack_types, dimensions.attack_type.as_deref());
+    let idx = HISTOGRAM_BOUNDS
+        .iter()
+        .position(|b| event.latency_ms <= *b)
+        .unwrap_or(HISTOGRAM_BOUNDS.len() - 1);
+    bucket.histogram[idx] += 1;
 }
 
 const HISTOGRAM_BOUNDS: [u64; 14] = [

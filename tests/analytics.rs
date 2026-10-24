@@ -255,3 +255,75 @@ async fn concurrent_recording_is_safe() {
     }
     assert_eq!(c.summary(AnalyticsFilter::default()).requests, 800);
 }
+
+#[test]
+fn hourly_and_daily_rollups_outlive_minute_retention_and_round_trip() {
+    use bearust::analytics::RollupGranularity;
+    let collector = AnalyticsCollector::with_limits(4, 60);
+    let now = Utc::now();
+    let hour = RollupGranularity::Hour.truncate(now);
+    // Two events in the current hour, one in the previous hour.
+    for (ts, status) in [
+        (hour, 200),
+        (hour + chrono::Duration::seconds(1), 500),
+        (hour - chrono::Duration::minutes(30), 200),
+    ] {
+        collector.record(AnalyticsEvent {
+            proxy_host_id: 7,
+            timestamp: ts,
+            status_code: status,
+            latency_ms: 20,
+            security: SecurityCounters::default(),
+        });
+    }
+    // An event outside the in-memory rollup window is not rolled up.
+    collector.record(AnalyticsEvent {
+        proxy_host_id: 7,
+        timestamp: now - chrono::Duration::days(30),
+        status_code: 200,
+        latency_ms: 1,
+        security: SecurityCounters::default(),
+    });
+    let hours = collector.rollup_snapshot(RollupGranularity::Hour);
+    let mut counts = hours
+        .iter()
+        .map(|b| (b.timestamp, b.requests, b.status_5xx))
+        .collect::<Vec<_>>();
+    counts.sort();
+    assert_eq!(
+        counts,
+        vec![(hour - chrono::Duration::hours(1), 1, 0), (hour, 2, 1)]
+    );
+    let days = collector.rollup_snapshot(RollupGranularity::Day);
+    assert_eq!(days.iter().map(|b| b.requests).sum::<u64>(), 3);
+
+    let restored = AnalyticsCollector::with_limits(4, 60);
+    restored.restore_rollups(RollupGranularity::Hour, hours);
+    restored.record(AnalyticsEvent {
+        proxy_host_id: 7,
+        timestamp: hour,
+        status_code: 200,
+        latency_ms: 20,
+        security: SecurityCounters::default(),
+    });
+    let current = restored
+        .rollup_snapshot(RollupGranularity::Hour)
+        .into_iter()
+        .find(|b| b.timestamp == hour)
+        .unwrap();
+    assert_eq!(
+        current.requests, 3,
+        "restart must continue the partial hour"
+    );
+
+    let history = bearust::analytics::history_from_rollups(
+        restored.rollup_snapshot(RollupGranularity::Hour),
+        &AnalyticsFilter {
+            proxy_host_id: Some(7),
+            interval: bearust::analytics::AnalyticsInterval::Day,
+            ..Default::default()
+        },
+    );
+    assert_eq!(history.summary.requests, 4);
+    assert_eq!(history.summary.status_5xx, 1);
+}

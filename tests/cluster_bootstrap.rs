@@ -79,8 +79,7 @@ fn http(
                 line.to_ascii_lowercase()
                     .strip_prefix("content-length: ")
                     .and_then(|value| value.trim().parse::<usize>().ok())
-            })
-            {
+            }) {
                 let header_end = text.find("\r\n\r\n").unwrap() + 4;
                 if raw.len() >= header_end + len {
                     break;
@@ -238,7 +237,10 @@ fn serve_bootstraps_cluster_elects_leader_replicates_and_fails_over() {
                 csrf = value.to_owned();
             }
         }
-        assert!(!session.is_empty() && !csrf.is_empty(), "login cookies on {control}");
+        assert!(
+            !session.is_empty() && !csrf.is_empty(),
+            "login cookies on {control}"
+        );
         nodes.push(Node {
             control,
             child: Some(child),

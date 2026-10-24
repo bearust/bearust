@@ -1831,6 +1831,86 @@ pub async fn persist_analytics_buckets(
     tx.commit().await
 }
 
+/// Load durable hourly or daily rollups in `[from, to]`, optionally for one
+/// proxy host. Malformed rows are skipped. The caller bounds the range.
+pub async fn load_analytics_rollups(
+    pool: &DbPool,
+    granularity: crate::analytics::RollupGranularity,
+    from: chrono::DateTime<chrono::Utc>,
+    to: chrono::DateTime<chrono::Utc>,
+    proxy_host_id: Option<i64>,
+) -> Result<Vec<PersistedAnalyticsBucket>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT proxy_host_id,payload FROM analytics_rollups
+         WHERE granularity=? AND bucket_timestamp>=? AND bucket_timestamp<=?
+         ORDER BY bucket_timestamp ASC, proxy_host_id ASC",
+    )
+    .bind(granularity.as_str())
+    .bind(from.to_rfc3339())
+    .bind(to.to_rfc3339())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| proxy_host_id.is_none_or(|id| row.get::<i64, _>("proxy_host_id") == id))
+        .filter_map(|row| {
+            let payload: String = row.get("payload");
+            serde_json::from_str::<PersistedAnalyticsBucket>(&payload).ok()
+        })
+        .collect())
+}
+
+/// Upsert in-memory rollups and delete rows older than the granularity's
+/// retention. Uses the same portable update-then-insert sequence as the
+/// minute buckets.
+pub async fn persist_analytics_rollups(
+    pool: &DbPool,
+    granularity: crate::analytics::RollupGranularity,
+    buckets: &[PersistedAnalyticsBucket],
+) -> Result<(), sqlx::Error> {
+    let now = chrono::Utc::now();
+    let updated_at = now.to_rfc3339();
+    let cutoff = (now - granularity.retention()).to_rfc3339();
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM analytics_rollups WHERE granularity=? AND bucket_timestamp < ?")
+        .bind(granularity.as_str())
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?;
+    for bucket in buckets {
+        let payload = serde_json::to_string(bucket).map_err(|error| {
+            sqlx::Error::Protocol(format!("serialize analytics rollup: {error}"))
+        })?;
+        let timestamp = bucket.timestamp.to_rfc3339();
+        let updated = sqlx::query(
+            "UPDATE analytics_rollups SET payload=?,updated_at=?
+             WHERE granularity=? AND proxy_host_id=? AND bucket_timestamp=?",
+        )
+        .bind(&payload)
+        .bind(&updated_at)
+        .bind(granularity.as_str())
+        .bind(bucket.proxy_host_id)
+        .bind(&timestamp)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if updated == 0 {
+            sqlx::query(
+                "INSERT INTO analytics_rollups(granularity,proxy_host_id,bucket_timestamp,payload,updated_at)
+                 VALUES(?,?,?,?,?)",
+            )
+            .bind(granularity.as_str())
+            .bind(bucket.proxy_host_id)
+            .bind(timestamp)
+            .bind(payload)
+            .bind(&updated_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    tx.commit().await
+}
+
 pub async fn seed_builtin_waf_rules(pool: &DbPool) -> Result<(), sqlx::Error> {
     let rules = [
         (
