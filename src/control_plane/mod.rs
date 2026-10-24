@@ -2628,6 +2628,68 @@ fn role_scope_error(error: &sqlx::Error) -> Option<StatusCode> {
     .then_some(StatusCode::BAD_REQUEST)
 }
 
+/// Delegated administration ceiling: an actor may only grant, edit, or
+/// remove access it holds itself. Every global permission must be held
+/// globally by the actor; every proxy-host scope must be held globally or
+/// for that same host. Built-in administrators hold every permission, so
+/// this only constrains delegated (custom-role) administrators.
+async fn within_grant_ceiling(
+    s: &AppState,
+    actor: &User,
+    permissions: &[String],
+    scopes: &[crate::control_plane::models::RolePermissionScope],
+) -> Result<bool, sqlx::Error> {
+    let Some(role) = repository::role_by_slug(&s.db, &actor.role).await? else {
+        return Ok(false);
+    };
+    let held = |key: &str| role.permissions.iter().any(|p| p == key);
+    if !permissions.iter().all(|key| held(key)) {
+        return Ok(false);
+    }
+    Ok(scopes.iter().all(|scope| {
+        held(&scope.permission)
+            || role
+                .scopes
+                .iter()
+                .find(|own| own.permission == scope.permission)
+                .is_some_and(|own| {
+                    scope
+                        .proxy_host_ids
+                        .iter()
+                        .all(|id| own.proxy_host_ids.contains(id))
+                })
+    }))
+}
+
+/// Whether the actor may grant (or act on holders of) the role `slug`.
+async fn role_within_ceiling(s: &AppState, actor: &User, slug: &str) -> Result<bool, sqlx::Error> {
+    let Some(role) = repository::role_by_slug(&s.db, slug).await? else {
+        return Ok(false);
+    };
+    within_grant_ceiling(s, actor, &role.permissions, &role.scopes).await
+}
+
+/// Whether the actor may manage the existing user `id` (by its role).
+async fn user_within_ceiling(s: &AppState, actor: &User, id: i64) -> Result<bool, sqlx::Error> {
+    let Some(target) = repository::list_users(&s.db)
+        .await?
+        .into_iter()
+        .find(|user| user.id == id)
+    else {
+        // Missing users are reported by the handler's own not-found path.
+        return Ok(true);
+    };
+    role_within_ceiling(s, actor, &target.role).await
+}
+
+fn ceiling_denied() -> Response {
+    user_error(
+        StatusCode::FORBIDDEN,
+        "forbidden",
+        "You cannot grant or manage access you do not hold",
+    )
+}
+
 async fn require_role_admin(s: &AppState, h: &HeaderMap) -> Result<User, axum::response::Response> {
     let user = current(s, h)
         .await
@@ -2782,6 +2844,19 @@ async fn create_role(
             "invalid_input",
             "Invalid role name or permission",
         );
+    }
+    if !within_grant_ceiling(&s, &actor, &input.permissions, &input.scopes)
+        .await
+        .unwrap_or(false)
+    {
+        audit::record_state(
+            &s,
+            Some(actor.id),
+            "role_mutation_denied",
+            &format!("slug={slug};reason=grant_ceiling"),
+        )
+        .await;
+        return ceiling_denied();
     }
     let keys = input
         .permissions
@@ -2956,6 +3031,24 @@ async fn update_role(
             "Invalid role update",
         );
     }
+    let next_permissions = input.permissions.clone().unwrap_or_default();
+    let next_scopes = input.scopes.clone().unwrap_or_default();
+    let allowed = within_grant_ceiling(&s, &actor, &before.permissions, &before.scopes)
+        .await
+        .unwrap_or(false)
+        && within_grant_ceiling(&s, &actor, &next_permissions, &next_scopes)
+            .await
+            .unwrap_or(false);
+    if !allowed {
+        audit::record_state(
+            &s,
+            Some(actor.id),
+            "role_mutation_denied",
+            &format!("role_id={id};reason=grant_ceiling"),
+        )
+        .await;
+        return ceiling_denied();
+    }
     let keys = input
         .permissions
         .as_ref()
@@ -3097,6 +3190,19 @@ async fn delete_role(
             "Built-in roles cannot be deleted",
         );
     }
+    if !within_grant_ceiling(&s, &actor, &role.permissions, &role.scopes)
+        .await
+        .unwrap_or(false)
+    {
+        audit::record_state(
+            &s,
+            Some(actor.id),
+            "role_mutation_denied",
+            &format!("role_id={id};reason=grant_ceiling"),
+        )
+        .await;
+        return ceiling_denied();
+    }
     match repository::delete_role(&s.db, id).await {
         Ok(1) => {
             audit::record_state(
@@ -3187,6 +3293,16 @@ async fn create_user(
             "invalid_input",
             "Valid email, role, and password of at least 12 characters required",
         );
+    }
+    if !role_within_ceiling(&s, &actor, role).await.unwrap_or(false) {
+        audit::record_state(
+            &s,
+            Some(actor.id),
+            "user_create_denied",
+            &user_audit(None, "grant_ceiling"),
+        )
+        .await;
+        return ceiling_denied();
     }
     let hash = match auth::hash_password(&input.password) {
         Ok(hash) => hash,
@@ -3312,6 +3428,23 @@ async fn update_user(
             return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid role");
         }
     }
+    let target_allowed = user_within_ceiling(&s, &actor, id).await.unwrap_or(false);
+    let role_allowed = match input.role.as_deref() {
+        Some(role) => role_within_ceiling(&s, &actor, role.trim())
+            .await
+            .unwrap_or(false),
+        None => true,
+    };
+    if !(target_allowed && role_allowed) {
+        audit::record_state(
+            &s,
+            Some(actor.id),
+            "user_update_denied",
+            &user_audit(Some(id), "grant_ceiling"),
+        )
+        .await;
+        return ceiling_denied();
+    }
     let role = input.role.as_deref().map(str::trim);
     let updated = match repository::update_user(&s.db, id, role, input.disabled).await {
         Ok(Some(user)) => user,
@@ -3411,6 +3544,16 @@ async fn revoke_user_sessions(
             return user_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid user id");
         }
     };
+    if !user_within_ceiling(&s, &actor, id).await.unwrap_or(false) {
+        audit::record_state(
+            &s,
+            Some(actor.id),
+            "session_revoke_denied",
+            "reason=grant_ceiling",
+        )
+        .await;
+        return ceiling_denied();
+    }
     if actor.id == id {
         audit::record_state(
             &s,
@@ -3503,6 +3646,16 @@ async fn delete_user(
             "self_mutation",
             "You cannot delete your own account",
         );
+    }
+    if !user_within_ceiling(&s, &actor, id).await.unwrap_or(false) {
+        audit::record_state(
+            &s,
+            Some(actor.id),
+            "user_delete_denied",
+            &user_audit(Some(id), "grant_ceiling"),
+        )
+        .await;
+        return ceiling_denied();
     }
     match repository::delete_user(&s.db, id).await {
         Ok(0) => {

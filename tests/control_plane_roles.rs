@@ -299,3 +299,111 @@ async fn built_in_update_and_assigned_custom_delete_conflict() {
         StatusCode::CONFLICT
     );
 }
+
+#[tokio::test]
+async fn delegated_administrators_cannot_grant_or_manage_access_they_lack() {
+    let (app, _db) = app().await;
+    let (status, _, _) = request(app.clone(), "POST", "/api/setup/initialize", None,
+        r#"{"email":"admin@example.com","password":"correct horse battery","setup_token":"setup-token"}"#).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let admin = login(app.clone(), "admin@example.com", "correct horse battery").await;
+    let (_, me, _) = request(app.clone(), "GET", "/api/auth/me", Some(&admin), "").await;
+    let admin_id = serde_json::from_str::<serde_json::Value>(&me).unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let (status, _, _) = request(app.clone(), "POST", "/api/roles", Some(&admin),
+        r#"{"slug":"team-lead","name":"Team Lead","permissions":["roles.manage","users.manage","proxy_hosts.read"]}"#).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, _) = request(
+        app.clone(),
+        "POST",
+        "/api/users",
+        Some(&admin),
+        r#"{"email":"lead@example.com","password":"lead password 1234","role":"team-lead"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let lead = login(app.clone(), "lead@example.com", "lead password 1234").await;
+
+    // Within the ceiling: a narrower role and a user holding it.
+    let (status, body, _) = request(
+        app.clone(),
+        "POST",
+        "/api/roles",
+        Some(&lead),
+        r#"{"slug":"reader","name":"Reader","permissions":["proxy_hosts.read"]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let reader_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let (status, body, _) = request(
+        app.clone(),
+        "POST",
+        "/api/users",
+        Some(&lead),
+        r#"{"email":"reader@example.com","password":"reader password 1234","role":"reader"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // Above the ceiling: new permissions, built-in roles, and their holders.
+    for (method, uri, body) in [
+        (
+            "POST",
+            "/api/roles".to_owned(),
+            r#"{"slug":"writer","name":"Writer","permissions":["proxy_hosts.write"]}"#,
+        ),
+        (
+            "POST",
+            "/api/roles".to_owned(),
+            r#"{"slug":"scoped","name":"Scoped","permissions":[],"scopes":[{"permission":"certificates.write","proxy_host_ids":[1]}]}"#,
+        ),
+        (
+            "PATCH",
+            format!("/api/roles/{reader_id}"),
+            r#"{"permissions":["proxy_hosts.read","audit_logs.export"]}"#,
+        ),
+        (
+            "POST",
+            "/api/users".to_owned(),
+            r#"{"email":"evil@example.com","password":"evil password 1234","role":"admin"}"#,
+        ),
+        (
+            "POST",
+            "/api/users".to_owned(),
+            r#"{"email":"op@example.com","password":"op password 12345","role":"operator"}"#,
+        ),
+        (
+            "PATCH",
+            format!("/api/users/{admin_id}"),
+            r#"{"disabled":true}"#,
+        ),
+        ("DELETE", format!("/api/users/{admin_id}"), ""),
+    ] {
+        let (status, body, _) = request(app.clone(), method, &uri, Some(&lead), body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {body}");
+    }
+
+    // The administrator is unaffected by the ceiling.
+    let (status, _, _) = request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/roles/{reader_id}"),
+        Some(&admin),
+        r#"{"permissions":["proxy_hosts.read","audit_logs.export"]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Now that `reader` exceeds the lead's access, the lead can no longer edit it.
+    let (status, _, _) = request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/roles/{reader_id}"),
+        Some(&lead),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
