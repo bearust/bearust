@@ -36,6 +36,7 @@ import {
 import { DEMO_MODE } from "@/lib/demo";
 import { CrsPanel } from "./crs-panel";
 import { CaptchaPanel } from "./captcha-panel";
+import { RetrainPanel } from "./retrain-panel";
 import { sanitizeError } from "@/lib/errors";
 import { useRealtimeRefresh } from "@/hooks/use-realtime-refresh";
 import { useAuthStore } from "@/stores/auth-store";
@@ -783,6 +784,7 @@ export function Security() {
             onExport={() => void exportWaf()}
           />
           {isAdmin && !DEMO_MODE && <CrsPanel canWrite={isAdmin} />}
+          {isAdmin && !DEMO_MODE && <RetrainPanel canWrite={isAdmin} />}
         </TabsContent>
         <TabsContent value="bot">
           <BotPanel

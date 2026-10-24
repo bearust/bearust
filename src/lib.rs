@@ -43,4 +43,5 @@ pub mod security_policy;
 pub mod sni;
 pub mod tls;
 pub mod waf;
+pub mod waf_retrain;
 pub mod waf_store;

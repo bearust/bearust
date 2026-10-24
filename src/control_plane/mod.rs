@@ -12,6 +12,7 @@ pub mod plugins;
 pub mod rbac;
 pub mod realtime;
 pub mod repository;
+pub mod retrain;
 pub mod runtime_sync;
 pub mod sso;
 #[cfg(feature = "saml")]
@@ -652,6 +653,20 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route(
             "/api/waf/seclang",
             get(get_waf_seclang).put(update_waf_seclang),
+        )
+        .route(
+            "/api/waf/retrain",
+            get(retrain::get_config).put(retrain::update_config),
+        )
+        .route(
+            "/api/waf/retrain/recommendations",
+            get(retrain::recommendations),
+        )
+        .route("/api/waf/retrain/run", post(retrain::run))
+        .route("/api/waf/retrain/tunings", get(retrain::list_tunings))
+        .route(
+            "/api/waf/retrain/tunings/{rule_id}",
+            axum::routing::delete(retrain::revert_tuning),
         )
         .route(
             "/api/rate-limit/config",
@@ -1722,13 +1737,18 @@ async fn update_waf_seclang(
         Ok(user) => user,
         Err(response) => return response,
     };
-    let Ok(Json(config)) = input else {
+    let Ok(Json(mut config)) = input else {
         return user_error(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Invalid SecLang settings",
         );
     };
+    // Rule exclusions are owned by retraining; keep the stored ones.
+    config.disabled_rule_ids = repository::get_seclang_config(&s.db)
+        .await
+        .map(|stored| stored.disabled_rule_ids)
+        .unwrap_or_default();
     let candidate = config.clone();
     let compiled = tokio::task::spawn_blocking(move || {
         crate::waf::SecLangRuntime::compile(&candidate).map(|_| ())
@@ -2646,6 +2666,15 @@ async fn submit_policy_state(
     state: &AppState,
     actor: &User,
 ) -> Result<(ConfigCommand, CommitReceipt), Response> {
+    submit_policy_state_as(state, command_actor(actor)).await
+}
+
+/// Replicate the current policy state on behalf of `actor` (a user, or
+/// `CommandActor::system()` for background jobs).
+async fn submit_policy_state_as(
+    state: &AppState,
+    actor: CommandActor,
+) -> Result<(ConfigCommand, CommitReceipt), Response> {
     let policy = repository::load_replicated_policy_state(&state.db)
         .await
         .map_err(|_| {
@@ -2659,7 +2688,7 @@ async fn submit_policy_state(
         command_id: Uuid::new_v4(),
         state: policy,
     };
-    let receipt = match submit_config_command(state, command.clone(), actor).await {
+    let receipt = match submit_config_command_as(state, command.clone(), actor).await {
         Ok(receipt) => receipt,
         Err(ConfigSubmissionError::LocalApplyPending(receipt)) => {
             return Err(cluster_write_response(

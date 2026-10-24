@@ -144,6 +144,8 @@ pub struct ReplicatedPolicyState {
     /// Absent from older nodes' commands; then left unchanged.
     #[serde(default)]
     pub captcha: Option<crate::bot_captcha::CaptchaConfig>,
+    #[serde(default)]
+    pub retrain: Option<crate::waf_retrain::RetrainConfig>,
 }
 
 impl ReplicatedPolicyState {
@@ -202,6 +204,11 @@ impl ReplicatedPolicyState {
             self.waf_rules.clone(),
         )
         .map_err(|error| CommandError::Invalid(error.to_string()))?;
+        if let Some(retrain) = &self.retrain {
+            retrain
+                .validate()
+                .map_err(|error| CommandError::Invalid(error.into()))?;
+        }
         if let Some(captcha) = &self.captcha {
             captcha
                 .validate()

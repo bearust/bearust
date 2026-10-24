@@ -646,6 +646,18 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
                 }
             })
         };
+        // Feedback-driven WAF retraining; applies only in enforce mode.
+        let retrain_task = {
+            let state = control_state.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(3600));
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    crate::control_plane::retrain::scheduled(&state).await;
+                }
+            })
+        };
         let analytics_changed: Arc<dyn Fn() + Send + Sync> = {
             let realtime = realtime.clone();
             Arc::new(move || {
@@ -930,6 +942,8 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         control_task.abort();
         analytics_persistence_task.abort();
         let _ = analytics_persistence_task.await;
+        retrain_task.abort();
+        let _ = retrain_task.await;
         if let Some(task) = ai_report_task {
             task.abort();
             let _ = task.await;

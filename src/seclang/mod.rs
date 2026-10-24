@@ -364,6 +364,17 @@ impl RuleSet {
     pub fn rule_count(&self) -> usize {
         self.rule_count
     }
+
+    /// Remove rules by id, as a permanent `ctl:ruleRemoveById`.
+    pub fn disable(&mut self, ids: &[i64]) {
+        if ids.is_empty() {
+            return;
+        }
+        let before = self.entries.len();
+        self.entries
+            .retain(|entry| !matches!(entry, Entry::Rule(rule) if ids.contains(&rule.id)));
+        self.rule_count = self.rule_count.saturating_sub(before - self.entries.len());
+    }
 }
 
 fn compile_rule(

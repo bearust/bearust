@@ -143,8 +143,9 @@ impl SecLangRuntime {
             .iter()
             .map(|(name, content)| ((*name).to_owned(), (*content).to_owned()))
             .collect();
-        let ruleset =
+        let mut ruleset =
             crate::seclang::RuleSet::compile(&sources, &data).map_err(|error| error.to_string())?;
+        ruleset.disable(&config.disabled_rule_ids);
         let level = config.paranoia_level.to_string();
         Ok(Some(Self {
             config: config.clone(),

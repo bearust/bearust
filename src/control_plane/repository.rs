@@ -880,6 +880,9 @@ async fn apply_raft_command_inner(
             if let Some(captcha) = &state.captcha {
                 update_captcha_config(&mut *tx, captcha).await?;
             }
+            if let Some(retrain) = &state.retrain {
+                update_retrain_config(&mut *tx, retrain).await?;
+            }
             sqlx::query("UPDATE bot_config SET mode=?,threshold=?,ttl_seconds=?,fingerprint_key=?,updated_at=? WHERE id=1")
                 .bind(bot_mode_value(state.bot_mode))
                 .bind(state.bot_threshold as i64)
@@ -1440,7 +1443,7 @@ pub async fn get_seclang_config(
     pool: &DbPool,
 ) -> Result<crate::control_plane::models::SecLangConfig, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT crs_enabled,paranoia_level,inbound_threshold,custom_rules,updated_at
+        "SELECT crs_enabled,paranoia_level,inbound_threshold,custom_rules,disabled_rule_ids,updated_at
          FROM waf_seclang_config WHERE id=1",
     )
     .fetch_one(pool)
@@ -1450,6 +1453,8 @@ pub async fn get_seclang_config(
         paranoia_level: row.get::<i64, _>("paranoia_level").clamp(1, 4) as u8,
         inbound_threshold: row.get::<i64, _>("inbound_threshold").clamp(1, 1000) as u16,
         custom_rules: row.get("custom_rules"),
+        disabled_rule_ids: serde_json::from_str(&row.get::<String, _>("disabled_rule_ids"))
+            .unwrap_or_default(),
         updated_at: row.get("updated_at"),
     })
 }
@@ -1463,12 +1468,13 @@ where
 {
     sqlx::query(
         "UPDATE waf_seclang_config SET crs_enabled=?,paranoia_level=?,inbound_threshold=?,
-         custom_rules=?,updated_at=? WHERE id=1",
+         custom_rules=?,disabled_rule_ids=?,updated_at=? WHERE id=1",
     )
     .bind(i64::from(config.crs_enabled))
     .bind(i64::from(config.paranoia_level))
     .bind(i64::from(config.inbound_threshold))
     .bind(&config.custom_rules)
+    .bind(serde_json::to_string(&config.disabled_rule_ids).unwrap_or_else(|_| "[]".into()))
     .bind(chrono::Utc::now().to_rfc3339())
     .execute(executor)
     .await?;
@@ -1502,6 +1508,135 @@ where
         .execute(executor)
         .await?;
     Ok(())
+}
+
+pub async fn get_retrain_config(
+    pool: &DbPool,
+) -> Result<crate::waf_retrain::RetrainConfig, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT mode,min_reports,false_positive_percent,window_days,updated_at
+         FROM waf_retrain_config WHERE id=1",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(crate::waf_retrain::RetrainConfig {
+        mode: crate::waf_retrain::RetrainMode::parse(&row.get::<String, _>("mode")),
+        min_reports: row.get::<i64, _>("min_reports").clamp(1, 10_000) as u32,
+        false_positive_percent: row.get::<i64, _>("false_positive_percent").clamp(50, 100) as u8,
+        window_days: row.get::<i64, _>("window_days").clamp(1, 365) as u32,
+        updated_at: row.get("updated_at"),
+    })
+}
+
+pub async fn update_retrain_config<'e, E>(
+    executor: E,
+    config: &crate::waf_retrain::RetrainConfig,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
+    sqlx::query(
+        "UPDATE waf_retrain_config SET mode=?,min_reports=?,false_positive_percent=?,
+         window_days=?,updated_at=? WHERE id=1",
+    )
+    .bind(config.mode.as_str())
+    .bind(i64::from(config.min_reports))
+    .bind(i64::from(config.false_positive_percent))
+    .bind(i64::from(config.window_days))
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RuleTuning {
+    pub rule_id: i64,
+    /// `waf_rule` (demoted to log) or `seclang` (excluded by id).
+    pub kind: String,
+    pub previous_action: Option<String>,
+    pub false_positives: i64,
+    pub true_positives: i64,
+    pub source: String,
+    pub created_at: String,
+}
+
+pub async fn list_rule_tunings(pool: &DbPool) -> Result<Vec<RuleTuning>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT rule_id,kind,previous_action,false_positives,true_positives,source,created_at
+         FROM waf_rule_tunings ORDER BY created_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| RuleTuning {
+            rule_id: row.get("rule_id"),
+            kind: row.get("kind"),
+            previous_action: row.get("previous_action"),
+            false_positives: row.get("false_positives"),
+            true_positives: row.get("true_positives"),
+            source: row.get("source"),
+            created_at: row.get("created_at"),
+        })
+        .collect())
+}
+
+pub async fn insert_rule_tuning(pool: &DbPool, tuning: &RuleTuning) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO waf_rule_tunings(rule_id,kind,previous_action,false_positives,true_positives,source,created_at)
+         VALUES(?,?,?,?,?,?,?)",
+    )
+    .bind(tuning.rule_id)
+    .bind(&tuning.kind)
+    .bind(&tuning.previous_action)
+    .bind(tuning.false_positives)
+    .bind(tuning.true_positives)
+    .bind(&tuning.source)
+    .bind(&tuning.created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_rule_tuning(pool: &DbPool, rule_id: i64) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("DELETE FROM waf_rule_tunings WHERE rule_id=?")
+        .bind(rule_id)
+        .execute(pool)
+        .await?
+        .rows_affected())
+}
+
+/// Set any WAF rule's action (built-in or custom); used by retraining.
+pub async fn set_waf_rule_action(
+    pool: &DbPool,
+    id: i64,
+    action: WafAction,
+) -> Result<u64, sqlx::Error> {
+    Ok(
+        sqlx::query("UPDATE waf_rules SET action=?,updated_at=? WHERE id=?")
+            .bind(waf_action_value(action))
+            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+    )
+}
+
+/// Feedback created at or after `since` (RFC 3339), newest first.
+pub async fn list_waf_feedback_since(
+    pool: &DbPool,
+    since: &str,
+) -> Result<Vec<WafFeedback>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id,reporter_id,request_id,rule_id,label,note,created_at FROM waf_feedback
+         WHERE created_at >= ? ORDER BY id DESC LIMIT 100000",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(waf_feedback_from_row).collect())
 }
 
 pub async fn get_waf_config(pool: &DbPool) -> Result<WafConfig, sqlx::Error> {
@@ -1826,6 +1961,7 @@ pub async fn load_replicated_policy_state(
         tuning_policies,
         seclang: Some(get_seclang_config(pool).await?),
         captcha: Some(get_captcha_config(pool).await?),
+        retrain: Some(get_retrain_config(pool).await?),
     };
     state
         .validate()

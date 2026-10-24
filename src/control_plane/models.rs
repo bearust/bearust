@@ -334,6 +334,9 @@ pub struct SecLangConfig {
     pub inbound_threshold: u16,
     /// Additional SecLang directives evaluated after the CRS.
     pub custom_rules: String,
+    /// Rule ids excluded by feedback retraining (`ctl:ruleRemoveById`).
+    #[serde(default)]
+    pub disabled_rule_ids: Vec<i64>,
     #[serde(default)]
     pub updated_at: String,
 }
@@ -346,6 +349,7 @@ impl SecLangConfig {
         if !(1..=4).contains(&self.paranoia_level)
             || !(1..=1000).contains(&self.inbound_threshold)
             || self.custom_rules.len() > MAX_CUSTOM_SECLANG_BYTES
+            || self.disabled_rule_ids.len() > 500
         {
             return Err("invalid SecLang settings");
         }
