@@ -495,6 +495,7 @@ fn runtime_store_routing_to(host: &str, backend_addr: SocketAddr) -> Arc<Runtime
         prometheus: Default::default(),
         cluster: Default::default(),
         plugins: Default::default(),
+        streams: Vec::new(),
     };
     let snapshot = RuntimeSnapshot::build(config, None).unwrap();
     let pool = snapshot.pool("main").unwrap();
@@ -557,6 +558,7 @@ fn runtime_store_routing_to_two_backends(
         prometheus: Default::default(),
         cluster: Default::default(),
         plugins: Default::default(),
+        streams: Vec::new(),
     };
     let snapshot = RuntimeSnapshot::build(config, None).unwrap();
     let pool = snapshot.pool("main").unwrap();
@@ -591,6 +593,7 @@ fn empty_runtime_store() -> Arc<RuntimeStore> {
         prometheus: Default::default(),
         cluster: Default::default(),
         plugins: Default::default(),
+        streams: Vec::new(),
     };
     let snapshot = RuntimeSnapshot::build(config, None).unwrap();
     Arc::new(RuntimeStore::new(snapshot))

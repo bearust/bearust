@@ -41,6 +41,7 @@ pub mod seclang;
 pub mod secrets;
 pub mod security_policy;
 pub mod sni;
+pub mod stream_proxy;
 pub mod tls;
 pub mod waf;
 pub mod waf_retrain;

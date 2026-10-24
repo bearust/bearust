@@ -690,6 +690,24 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         };
         let trusted_proxies = IpNetSet::new(config.server.trusted_proxy_cidrs.iter().map(String::as_str));
         let (http3_shutdown_tx, http3_shutdown_rx) = tokio::sync::watch::channel(false);
+        // Layer-4 TCP/UDP listeners share the HTTP/3 shutdown signal.
+        let stream_tasks: Vec<_> = config
+            .streams
+            .iter()
+            .cloned()
+            .map(|stream| {
+                let shutdown = http3_shutdown_rx.clone();
+                let ip_security = Some(control_state.ip_security.clone());
+                tokio::spawn(async move {
+                    let name = stream.name.clone();
+                    if let Err(error) =
+                        crate::stream_proxy::serve(stream, ip_security, shutdown).await
+                    {
+                        tracing::error!(event = "stream_listener_failed", name = %name, error = %error);
+                    }
+                })
+            })
+            .collect();
         let http3_alt_svc = config
             .server
             .http3
@@ -973,6 +991,9 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             let _ = task.await;
         }
         let _ = http3_shutdown_tx.send(true);
+        for task in stream_tasks {
+            let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+        }
         if let Some(http3_task) = http3_task {
             let _ = tokio::time::timeout(
                 Duration::from_secs(config.server.graceful_shutdown_seconds),

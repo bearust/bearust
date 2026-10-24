@@ -114,6 +114,25 @@ signed by that key fail to load (`key_revoked`). Installed versions are
 recorded in `<plugin>/.registry.json` and drive upgrade detection. The CLI
 takes `--registry-key` or `BEARUST_PLUGIN_REGISTRY_KEY`.
 
+## TCP/UDP stream proxying
+
+Non-HTTP services can be proxied at layer 4 from the config file:
+
+```toml
+[[streams]]
+name = "postgres"
+protocol = "tcp"            # or "udp"
+listen = "0.0.0.0:5432"
+backends = ["10.0.0.10:5432", "10.0.0.11:5432"]
+connect_timeout_ms = 3000   # TCP: next backend is tried on failure
+idle_timeout_seconds = 300  # idle TCP connections / UDP sessions close
+max_connections = 10000     # per listener (UDP: concurrent client sessions)
+```
+
+Backends rotate round-robin. UDP keeps one upstream socket per client so
+replies return to the right client. The IP security policy applies to
+stream clients as well. In Docker, publish the listen ports yourself.
+
 ## AI Advisor development
 
 Leave `LLM_API_URL` and `LLM_API_KEY` unset for the default disabled mode. For

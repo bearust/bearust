@@ -28,6 +28,66 @@ pub struct Config {
     pub cluster: ClusterConfig,
     #[serde(default)]
     pub plugins: PluginConfig,
+    /// Layer-4 TCP/UDP proxies (see `crate::stream_proxy`).
+    #[serde(default)]
+    pub streams: Vec<StreamConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamProtocol {
+    Tcp,
+    Udp,
+}
+
+/// One raw TCP or UDP listener forwarding to a set of backends.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StreamConfig {
+    pub name: String,
+    pub protocol: StreamProtocol,
+    pub listen: SocketAddr,
+    pub backends: Vec<SocketAddr>,
+    #[serde(default = "default_stream_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+    /// TCP connections and UDP sessions idle this long are closed.
+    #[serde(default = "default_stream_idle_timeout_seconds")]
+    pub idle_timeout_seconds: u64,
+    /// Concurrent TCP connections or UDP sessions per listener.
+    #[serde(default = "default_stream_max_connections")]
+    pub max_connections: usize,
+}
+
+fn default_stream_connect_timeout_ms() -> u64 {
+    3000
+}
+fn default_stream_idle_timeout_seconds() -> u64 {
+    300
+}
+fn default_stream_max_connections() -> usize {
+    10_000
+}
+
+impl StreamConfig {
+    pub fn validate(&self, index: usize) -> Result<(), ConfigError> {
+        let field = |name: &str| format!("streams[{index}].{name}");
+        if self.name.trim().is_empty() || self.name.len() > 64 {
+            return err(&field("name"), "must be 1-64 characters");
+        }
+        if self.backends.is_empty() || self.backends.len() > 64 {
+            return err(&field("backends"), "must list 1-64 backend addresses");
+        }
+        if !(1..=60_000).contains(&self.connect_timeout_ms) {
+            return err(&field("connect_timeout_ms"), "must be 1-60000");
+        }
+        if !(1..=86_400).contains(&self.idle_timeout_seconds) {
+            return err(&field("idle_timeout_seconds"), "must be 1-86400");
+        }
+        if !(1..=1_000_000).contains(&self.max_connections) {
+            return err(&field("max_connections"), "must be 1-1000000");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -490,6 +550,23 @@ impl Config {
         Ok(config)
     }
     pub fn validate(&self) -> Result<(), ConfigError> {
+        let mut listens = std::collections::BTreeSet::new();
+        for (index, stream) in self.streams.iter().enumerate() {
+            stream.validate(index)?;
+            let reserved = [
+                Some(self.server.bind),
+                Some(self.server.control_bind),
+                self.server.https_bind,
+            ];
+            if reserved.contains(&Some(stream.listen))
+                || !listens.insert((stream.listen, stream.protocol as u8))
+            {
+                return err(
+                    &format!("streams[{index}].listen"),
+                    "must not reuse another listener's address",
+                );
+            }
+        }
         if let Some(https_bind) = self.server.https_bind {
             if https_bind == self.server.bind || https_bind == self.server.control_bind {
                 return err(

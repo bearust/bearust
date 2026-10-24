@@ -94,6 +94,7 @@ async fn request_body_and_response_header_transforms_through_pingora() {
         prometheus: Default::default(),
         cluster: Default::default(),
         plugins: Default::default(),
+        streams: Vec::new(),
     };
     let snapshot = RuntimeSnapshot::build(config, None).unwrap();
     snapshot.pool("main").unwrap().set_healthy(0.into(), true);

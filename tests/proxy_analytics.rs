@@ -31,6 +31,7 @@ fn proxy_builder_accepts_analytics_collector() {
             prometheus: Default::default(),
             cluster: Default::default(),
             plugins: Default::default(),
+            streams: Vec::new(),
         },
         None,
     )
@@ -85,6 +86,7 @@ fn analytics_event_path_is_fail_open_without_collector() {
             prometheus: Default::default(),
             cluster: Default::default(),
             plugins: Default::default(),
+            streams: Vec::new(),
         },
         None,
     )
