@@ -265,7 +265,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for workflow and conventions.
 
 ## Roadmap
 
-Bearust is built in phases tracked in [docs/PRD.md](docs/PRD.md): core proxy, TLS/ACME, dashboard, RBAC, external databases, WAF, analytics, self-learning, clustering, localization, AI advisor (optional), WASM plugins, and HTTP/3 are implemented. Deliberately deferred: SSO/federated identity, long-term metric rollups, cross-node analytics aggregation, and full Coraza/OWASP CRS grammar compatibility.
+Bearust is built in phases tracked in [docs/PRD.md](docs/PRD.md): core proxy, TLS/ACME, dashboard, RBAC, external databases, WAF, analytics, self-learning, clustering, localization, AI advisor (optional), WASM plugins, and HTTP/3 are implemented. Since then: OIDC and SAML single sign-on, hourly/daily analytics rollups and cross-node aggregation, a SecLang engine running the bundled OWASP CRS 4.7.0 (99.8% of the CRS request-phase regression suite), feedback-driven WAF retraining, CAPTCHA providers, FCrDNS-verified crawler bypass, delegated role administration, audit export, realtime event replay, a signed plugin registry with revocation and upgrades, request-body/response-header/streaming/compressed plugin transforms, layer-4 TCP/UDP proxying, and experimental HTTP/3 upstreams. See [DEVELOPMENT.md](DEVELOPMENT.md) for configuration and known limits.
 
 ## Contributing
 
