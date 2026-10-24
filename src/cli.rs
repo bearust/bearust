@@ -567,6 +567,7 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
             )
             .with_reloader(control_state.reloader.clone()));
             cluster_service.set_event_handler(receiver);
+            cluster_service.set_analytics(control_state.analytics.clone());
             Some(
                 crate::cluster_events::ClusterEventFanout::start(
                     cluster_service.clone(),

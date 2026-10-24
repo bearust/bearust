@@ -208,6 +208,45 @@ pub struct AnalyticsHistory {
     pub dimensions: AnalyticsDimensions,
 }
 
+/// One node's contribution to a cluster-wide analytics query.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeAnalyticsExport {
+    pub total: PersistedAnalyticsBucket,
+    pub rows: Vec<PersistedAnalyticsBucket>,
+    pub truncated: bool,
+}
+
+/// Merge node exports into one cluster view. Latency percentiles are
+/// recomputed from the summed histograms, so they are exact across nodes;
+/// top dimensions are merged from each node's top entries.
+pub fn merge_cluster_exports(
+    exports: &[NodeAnalyticsExport],
+    filter: &AnalyticsFilter,
+) -> AnalyticsHistory {
+    let totals = exports
+        .iter()
+        .map(|export| {
+            let host = export.total.proxy_host_id;
+            BucketView::from((host, &bucket_from_persisted(export.total.clone())))
+        })
+        .collect::<Vec<_>>();
+    let rows = exports
+        .iter()
+        .flat_map(|export| export.rows.iter().cloned())
+        .collect::<Vec<_>>();
+    let unbounded = AnalyticsFilter {
+        proxy_host_id: None,
+        from: None,
+        to: None,
+        ..filter.clone()
+    };
+    AnalyticsHistory {
+        summary: summary_from_buckets(&totals),
+        dimensions: dimensions_from_buckets(&totals),
+        timeseries: history_from_rollups(rows, &unbounded).timeseries,
+    }
+}
+
 #[derive(Default)]
 struct Bucket {
     timestamp: DateTime<Utc>,
@@ -466,6 +505,45 @@ impl AnalyticsCollector {
         prune_rollups(map, granularity, max_hosts);
     }
 
+    /// Export this node's view for a cluster-wide query: one total bucket
+    /// carrying the merged histogram and top dimensions, plus per-interval
+    /// rows without dimensions. Rows are dropped oldest-first until the
+    /// encoded export fits `max_bytes`, so a peer response always fits one
+    /// RPC frame; `truncated` reports that the timeseries is partial while
+    /// the total stays exact.
+    pub fn export_for_cluster(
+        &self,
+        filter: &AnalyticsFilter,
+        max_bytes: usize,
+    ) -> NodeAnalyticsExport {
+        let views = self.filtered(filter);
+        let mut total = BucketView::empty(filter.proxy_host_id.unwrap_or(0));
+        for view in &views {
+            total.absorb(view);
+        }
+        let rows = group_views(views, filter.interval)
+            .into_iter()
+            .map(|mut view| {
+                view.clear_dimensions();
+                view.to_persisted()
+            })
+            .collect::<Vec<_>>();
+        let start = rows.len().saturating_sub(filter.limit());
+        let mut export = NodeAnalyticsExport {
+            total: total.to_persisted(),
+            rows: rows[start..].to_vec(),
+            truncated: start > 0,
+        };
+        while !export.rows.is_empty()
+            && serde_json::to_vec(&export).map_or(usize::MAX, |v| v.len()) > max_bytes
+        {
+            let drop = (export.rows.len() / 8).max(1);
+            export.rows.drain(..drop);
+            export.truncated = true;
+        }
+        export
+    }
+
     fn filtered(&self, f: &AnalyticsFilter) -> Vec<BucketView> {
         let mut out = if let Ok(state) = self.state.lock() {
             let mut captured = Vec::new();
@@ -691,6 +769,96 @@ impl<'a> From<(i64, &'a Bucket)> for BucketView {
         }
     }
 }
+impl BucketView {
+    fn empty(host: i64) -> Self {
+        Self::from((host, &Bucket::default()))
+    }
+    fn absorb(&mut self, other: &BucketView) {
+        self.requests = self.requests.saturating_add(other.requests);
+        for (sum, value) in self.status.iter_mut().zip(other.status) {
+            *sum = sum.saturating_add(value);
+        }
+        for (sum, value) in self.histogram.iter_mut().zip(other.histogram) {
+            *sum = sum.saturating_add(value);
+        }
+        self.security.waf_blocks = self
+            .security
+            .waf_blocks
+            .saturating_add(other.security.waf_blocks);
+        self.security.bot_blocks = self
+            .security
+            .bot_blocks
+            .saturating_add(other.security.bot_blocks);
+        self.security.bot_challenges = self
+            .security
+            .bot_challenges
+            .saturating_add(other.security.bot_challenges);
+        self.security.rate_limited = self
+            .security
+            .rate_limited
+            .saturating_add(other.security.rate_limited);
+        self.bandwidth_bytes = self.bandwidth_bytes.saturating_add(other.bandwidth_bytes);
+        for (target, source) in [
+            (&mut self.endpoints, &other.endpoints),
+            (&mut self.upstreams, &other.upstreams),
+            (&mut self.attacker_ips, &other.attacker_ips),
+            (&mut self.attack_types, &other.attack_types),
+        ] {
+            for (key, count) in source {
+                let entry = target.entry(key.clone()).or_insert(0);
+                *entry = entry.saturating_add(*count);
+            }
+        }
+    }
+    fn clear_dimensions(&mut self) {
+        self.endpoints.clear();
+        self.upstreams.clear();
+        self.attacker_ips.clear();
+        self.attack_types.clear();
+    }
+    fn to_persisted(&self) -> PersistedAnalyticsBucket {
+        persisted_from_bucket(
+            self.host,
+            &Bucket {
+                timestamp: self.timestamp,
+                requests: self.requests,
+                status: self.status,
+                security: self.security.clone(),
+                histogram: self.histogram,
+                bandwidth_bytes: self.bandwidth_bytes,
+                endpoints: self.endpoints.clone(),
+                upstreams: self.upstreams.clone(),
+                attacker_ips: self.attacker_ips.clone(),
+                attack_types: self.attack_types.clone(),
+            },
+        )
+    }
+}
+
+/// Group views into interval buckets per host, merging every counter.
+fn group_views(views: Vec<BucketView>, interval: AnalyticsInterval) -> Vec<BucketView> {
+    let seconds = match interval {
+        AnalyticsInterval::Minute => 60,
+        AnalyticsInterval::Hour => 3600,
+        AnalyticsInterval::Day => 86400,
+    };
+    let mut grouped = BTreeMap::<(DateTime<Utc>, i64), BucketView>::new();
+    for view in views {
+        let ts =
+            DateTime::from_timestamp(view.timestamp.timestamp().div_euclid(seconds) * seconds, 0)
+                .unwrap_or(view.timestamp);
+        grouped
+            .entry((ts, view.host))
+            .or_insert_with(|| {
+                let mut empty = BucketView::empty(view.host);
+                empty.timestamp = ts;
+                empty
+            })
+            .absorb(&view);
+    }
+    grouped.into_values().collect()
+}
+
 fn merge(s: &mut AnalyticsSummary, st: &[u64; 5], sec: &SecurityCounters, h: &[u64; 14]) {
     s.requests += st.iter().sum::<u64>();
     s.status_2xx += st[0];

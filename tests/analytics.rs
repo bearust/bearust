@@ -327,3 +327,18 @@ fn hourly_and_daily_rollups_outlive_minute_retention_and_round_trip() {
     assert_eq!(history.summary.requests, 4);
     assert_eq!(history.summary.status_5xx, 1);
 }
+
+#[test]
+fn cluster_export_fits_frame_budget_and_keeps_exact_totals() {
+    let collector = AnalyticsCollector::with_limits(4, 10080);
+    for minute in 0..500 {
+        collector.record(event(1, minute, 200, 10));
+    }
+    let export = collector.export_for_cluster(&AnalyticsFilter::default(), 8 * 1024);
+    assert!(export.truncated);
+    assert!(serde_json::to_vec(&export).unwrap().len() <= 8 * 1024);
+    assert!(!export.rows.is_empty() && export.rows.len() < 500);
+    assert_eq!(export.total.requests, 500);
+    // Oldest rows are dropped first.
+    assert_eq!(export.rows.last().unwrap().timestamp.timestamp(), 499 * 60);
+}

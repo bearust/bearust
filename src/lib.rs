@@ -13,6 +13,7 @@ pub mod bot_store;
 pub mod certificates;
 pub mod cli;
 pub mod cluster;
+pub mod cluster_analytics;
 pub mod cluster_command;
 pub mod cluster_events;
 pub mod cluster_raft;

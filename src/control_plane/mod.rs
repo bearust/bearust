@@ -597,6 +597,7 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route("/api/analytics/timeseries", get(analytics_timeseries))
         .route("/api/analytics/dimensions", get(analytics_dimensions))
         .route("/api/analytics/history", get(analytics_history))
+        .route("/api/analytics/cluster", get(analytics_cluster))
         .route(
             "/api/analytics/retention",
             get(get_analytics_retention).patch(update_analytics_retention),
@@ -4364,6 +4365,30 @@ async fn analytics_history(
         interval,
     };
     Json(crate::analytics::history_from_rollups(rows, &filter)).into_response()
+}
+
+/// Cluster-wide analytics: the local view merged with every peer's. A
+/// standalone node returns its own view with one node entry.
+async fn analytics_cluster(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    RawQuery(raw): RawQuery,
+) -> Response {
+    let q = match parse_analytics_query(raw).and_then(analytics_filter) {
+        Ok(v) => v,
+        Err(_) => {
+            return user_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_input",
+                "Invalid analytics query",
+            )
+        }
+    };
+    if let Err(r) = require_analytics_read(&s, &h, q.proxy_host_id).await {
+        return r;
+    }
+    Json(crate::cluster_analytics::query_cluster(&s.cluster, &s.analytics, &q).await)
+        .into_response()
 }
 
 async fn get_analytics_retention(State(s): State<AppState>, h: HeaderMap) -> Response {

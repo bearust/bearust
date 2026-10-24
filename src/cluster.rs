@@ -158,6 +158,7 @@ pub struct ClusterService {
     raft_handler: Arc<RwLock<Option<Arc<dyn RaftRpcHandler>>>>,
     command_handler: Arc<RwLock<Option<Arc<dyn InternalCommandHandler>>>>,
     event_handler: Arc<RwLock<Option<Arc<dyn ClusterEventHandler>>>>,
+    analytics: Arc<RwLock<Option<Arc<crate::analytics::AnalyticsCollector>>>>,
     topology_transition_gate: tokio::sync::RwLock<bool>,
     realtime: RwLock<Option<Arc<crate::control_plane::realtime::RealtimeHub>>>,
     peer_statuses: Mutex<Option<Vec<(String, PeerStatus)>>>,
@@ -167,6 +168,7 @@ struct ClusterRpcHandlers {
     raft: Option<Arc<dyn RaftRpcHandler>>,
     command: Option<Arc<dyn InternalCommandHandler>>,
     event: Option<Arc<dyn ClusterEventHandler>>,
+    analytics: Option<Arc<crate::analytics::AnalyticsCollector>>,
 }
 
 impl ClusterService {
@@ -204,6 +206,7 @@ impl ClusterService {
             raft_handler: Arc::new(RwLock::new(None)),
             command_handler: Arc::new(RwLock::new(None)),
             event_handler: Arc::new(RwLock::new(None)),
+            analytics: Arc::new(RwLock::new(None)),
             topology_transition_gate: tokio::sync::RwLock::new(false),
             realtime: RwLock::new(None),
             peer_statuses: Mutex::new(None),
@@ -285,6 +288,21 @@ impl ClusterService {
         if let Ok(mut current) = self.event_handler.write() {
             *current = Some(handler);
         }
+    }
+
+    /// Serve `analytics_query` RPCs from this collector so peers can build
+    /// a cluster-wide analytics view.
+    pub fn set_analytics(&self, collector: Arc<crate::analytics::AnalyticsCollector>) {
+        if let Ok(mut current) = self.analytics.write() {
+            *current = Some(collector);
+        }
+    }
+
+    fn analytics(&self) -> Option<Arc<crate::analytics::AnalyticsCollector>> {
+        self.analytics
+            .read()
+            .ok()
+            .and_then(|current| current.clone())
     }
 
     fn raft_handler(&self) -> Option<Arc<dyn RaftRpcHandler>> {
@@ -609,6 +627,7 @@ pub async fn run_cluster_listener(
                                 raft: service.raft_handler(),
                                 command: service.command_handler(),
                                 event: service.event_handler(),
+                                analytics: service.analytics(),
                             },
                         ));
                     }
@@ -713,8 +732,18 @@ async fn handle_cluster_connection(
                         if stream.read_exact(&mut rest).await.is_ok() {
                             let mut frame = header.to_vec();
                             frame.extend_from_slice(&rest);
-                            let response = if handlers.command.is_some() || handlers.event.is_some()
-                            {
+                            let analytics_response =
+                                handlers.analytics.as_deref().and_then(|collector| {
+                                    analytics_query_response(
+                                        &frame,
+                                        &secret,
+                                        &local_node_id,
+                                        collector,
+                                    )
+                                });
+                            let response = if let Some(response) = analytics_response {
+                                response
+                            } else if handlers.command.is_some() || handlers.event.is_some() {
                                 dispatch_authenticated_rpc_with_all_handlers(
                                     &frame,
                                     &secret,
@@ -771,6 +800,32 @@ async fn handle_cluster_connection(
             tracing::debug!(event = "cluster_peer_handshake_timeout");
         }
     }
+}
+
+/// Answer the frame if it is an authenticated `analytics_query`; `None`
+/// leaves every other RPC kind to the regular dispatcher.
+fn analytics_query_response(
+    frame: &[u8],
+    secret: &[u8],
+    local_node_id: &str,
+    collector: &crate::analytics::AnalyticsCollector,
+) -> Option<Result<Vec<u8>, crate::cluster_raft_runtime::RpcTransportError>> {
+    let payload = crate::cluster_raft::decode_rpc_frame(frame, secret).ok()?;
+    #[derive(Deserialize)]
+    struct Kind<'a> {
+        kind: &'a str,
+    }
+    let kind = serde_json::from_slice::<Kind>(payload).ok()?;
+    if kind.kind != crate::cluster_analytics::ANALYTICS_QUERY_KIND {
+        return None;
+    }
+    Some(
+        crate::cluster_analytics::handle_analytics_query(payload, local_node_id, collector)
+            .and_then(|response| {
+                crate::cluster_raft::encode_rpc_frame(&response, secret)
+                    .map_err(|_| crate::cluster_raft_runtime::RpcTransportError::Malformed)
+            }),
+    )
 }
 
 pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
