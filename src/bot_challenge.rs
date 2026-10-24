@@ -107,8 +107,29 @@ impl ChallengeService {
         solution: &str,
         now: u64,
     ) -> Result<(), VerifyError> {
+        if solution.len() > 64 {
+            return Err(VerifyError::Invalid);
+        }
+        self.verify_with(token, fingerprint, now, |nonce_b64| {
+            let mut pow = Sha256::new();
+            pow.update(nonce_b64.as_bytes());
+            pow.update(solution.as_bytes());
+            hex::encode(pow.finalize()).starts_with(&"0".repeat(DIFFICULTY as usize))
+        })
+        .await
+    }
+
+    /// Validate a challenge token (signature, expiry, fingerprint binding,
+    /// single-use nonce, attempt limit) with `proof` deciding whether the
+    /// client passed: proof-of-work, or an already verified CAPTCHA.
+    pub async fn verify_with(
+        &self,
+        token: &str,
+        fingerprint: &str,
+        now: u64,
+        proof: impl FnOnce(&str) -> bool,
+    ) -> Result<(), VerifyError> {
         if token.len() > MAX_TOKEN_BYTES
-            || solution.len() > 64
             || fingerprint.is_empty()
             || fingerprint.len() > MAX_FINGERPRINT_BYTES
         {
@@ -163,10 +184,7 @@ impl ChallengeService {
             return Err(VerifyError::AttemptsExceeded);
         }
         state.attempts += 1;
-        let mut pow = Sha256::new();
-        pow.update(nonce_b64.as_bytes());
-        pow.update(solution.as_bytes());
-        if !hex::encode(pow.finalize()).starts_with(&"0".repeat(DIFFICULTY as usize)) {
+        if !proof(nonce_b64) {
             return Err(VerifyError::Invalid);
         }
         states.remove(&digest);

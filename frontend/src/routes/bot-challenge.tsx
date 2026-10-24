@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "@/api";
 import type { BotChallenge } from "@/api";
 import { serverChallengeFingerprint, solveBotChallenge } from "@/features/bot-challenge/solve";
+import { CaptchaWidget } from "@/features/bot-challenge/captcha";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 
@@ -45,11 +46,16 @@ function BotChallengePage() {
       .finally(() => setBusy(false));
   }, [fingerprint, t]);
 
-  const verify = async () => {
+  const verify = async (captchaResponse?: string) => {
     if (!challenge) return;
     setBusy(true);
     setError("");
     try {
+      if (challenge.captcha) {
+        await api.verifyBotChallenge({ token: challenge.token, fingerprint, captcha_response: captchaResponse });
+        setComplete(true);
+        return;
+      }
       const solution = await solveBotChallenge(challenge, fingerprint);
       await api.verifyBotChallenge({ token: challenge.token, fingerprint, solution });
       setComplete(true);
@@ -71,6 +77,13 @@ function BotChallengePage() {
           {error && <p role="alert" className="mb-4 text-sm text-destructive">{error}</p>}
           {complete ? (
             <p className="text-sm text-primary">{t("bot.verificationComplete")}</p>
+          ) : challenge?.captcha ? (
+            <CaptchaWidget
+              provider={challenge.captcha.provider}
+              siteKey={challenge.captcha.site_key}
+              onToken={(token) => void verify(token)}
+              onError={() => setError(t("errors.challengeUnavailable"))}
+            />
           ) : (
             <Button disabled={busy || !challenge} onClick={() => void verify()}>
               {busy ? t("bot.verifying") : t("bot.verifyBrowser")}

@@ -550,7 +550,15 @@
     "verifying": "Memverifikasi…",
     "verifyBrowser": "Verifikasi browser",
     "anotherChallenge": "Coba tantangan lain",
-    "crawlerDomainPlaceholder": "googlebot.com"
+    "crawlerDomainPlaceholder": "googlebot.com",
+    "captchaTitle": "Penyedia CAPTCHA",
+    "captchaDescription": "Gunakan CAPTCHA sebagai pengganti proof-of-work bawaan di halaman challenge. Secret tetap di node ini.",
+    "captchaProvider": "Penyedia",
+    "captchaNone": "Tidak ada (proof-of-work)",
+    "captchaSiteKey": "Site key",
+    "captchaSecret": "Secret key (kosongkan untuk mempertahankan)",
+    "captchaSave": "Simpan pengaturan CAPTCHA",
+    "captchaSaved": "Pengaturan CAPTCHA disimpan"
   },
   "rateLimit": {
     "title": "Pembatasan laju",

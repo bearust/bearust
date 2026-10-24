@@ -35,6 +35,7 @@ import {
 } from "@/api";
 import { DEMO_MODE } from "@/lib/demo";
 import { CrsPanel } from "./crs-panel";
+import { CaptchaPanel } from "./captcha-panel";
 import { sanitizeError } from "@/lib/errors";
 import { useRealtimeRefresh } from "@/hooks/use-realtime-refresh";
 import { useAuthStore } from "@/stores/auth-store";
@@ -800,6 +801,7 @@ export function Security() {
             onImport={() => void importBot()}
             onExport={() => void exportBot()}
           />
+          {isAdmin && !DEMO_MODE && <CaptchaPanel canWrite={isAdmin} />}
         </TabsContent>
         <TabsContent value="rate">
           <RatePanel

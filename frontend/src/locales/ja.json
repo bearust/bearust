@@ -546,7 +546,15 @@
     "verifying": "検証中…",
     "verifyBrowser": "ブラウザーを検証",
     "anotherChallenge": "別のチャレンジを試す",
-    "crawlerDomainPlaceholder": "googlebot.com"
+    "crawlerDomainPlaceholder": "googlebot.com",
+    "captchaTitle": "CAPTCHA プロバイダー",
+    "captchaDescription": "チャレンジページで組み込みのプルーフオブワークの代わりに CAPTCHA を使用します。シークレットはこのノードに保存されます。",
+    "captchaProvider": "プロバイダー",
+    "captchaNone": "なし（プルーフオブワーク）",
+    "captchaSiteKey": "サイトキー",
+    "captchaSecret": "シークレットキー（空欄で保持）",
+    "captchaSave": "CAPTCHA 設定を保存",
+    "captchaSaved": "CAPTCHA 設定を保存しました"
   },
   "rateLimit": {
     "title": "レート制限",

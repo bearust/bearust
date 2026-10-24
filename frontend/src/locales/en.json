@@ -550,7 +550,15 @@
     "verifying": "Verifying…",
     "verifyBrowser": "Verify browser",
     "anotherChallenge": "Try another challenge",
-    "crawlerDomainPlaceholder": "googlebot.com"
+    "crawlerDomainPlaceholder": "googlebot.com",
+    "captchaTitle": "CAPTCHA provider",
+    "captchaDescription": "Use a CAPTCHA instead of the built-in proof-of-work on the challenge page. The secret stays on this node.",
+    "captchaProvider": "Provider",
+    "captchaNone": "None (proof-of-work)",
+    "captchaSiteKey": "Site key",
+    "captchaSecret": "Secret key (leave empty to keep)",
+    "captchaSave": "Save CAPTCHA settings",
+    "captchaSaved": "CAPTCHA settings saved"
   },
   "rateLimit": {
     "title": "Rate limiting",

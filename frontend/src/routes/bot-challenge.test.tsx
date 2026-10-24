@@ -40,4 +40,22 @@ describe("Bot Challenge route", () => {
     const button = element.querySelector("button") as HTMLButtonElement;
     expect(button.disabled).toBe(false);
   });
+
+  it("renders the configured CAPTCHA and verifies with its response token", async () => {
+    vi.spyOn(api, "botChallenge").mockResolvedValue({ ...challenge, captcha: { provider: "turnstile", site_key: "site-123" } });
+    const verify = vi.spyOn(api, "verifyBotChallenge").mockResolvedValue({ ok: true });
+    const render = vi.fn((_element: HTMLElement, options: Record<string, unknown>) => (options.callback as (token: string) => void)("captcha-token"));
+    (window as unknown as { turnstile: unknown }).turnstile = { render };
+    try {
+      const { element } = await renderRoute([BotChallengeRoute], `/bot-challenge?fingerprint_prefix=${FINGERPRINT}`);
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      });
+      expect(render.mock.calls[0][1]).toMatchObject({ sitekey: "site-123" });
+      expect(verify).toHaveBeenCalledWith({ token: challenge.token, fingerprint: FINGERPRINT, captcha_response: "captcha-token" });
+      expect(element.textContent).toContain("Verification complete");
+    } finally {
+      delete (window as unknown as { turnstile?: unknown }).turnstile;
+    }
+  });
 });

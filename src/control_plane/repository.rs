@@ -877,6 +877,9 @@ async fn apply_raft_command_inner(
             if let Some(seclang) = &state.seclang {
                 update_seclang_config(&mut *tx, seclang).await?;
             }
+            if let Some(captcha) = &state.captcha {
+                update_captcha_config(&mut *tx, captcha).await?;
+            }
             sqlx::query("UPDATE bot_config SET mode=?,threshold=?,ttl_seconds=?,fingerprint_key=?,updated_at=? WHERE id=1")
                 .bind(bot_mode_value(state.bot_mode))
                 .bind(state.bot_threshold as i64)
@@ -1472,6 +1475,35 @@ where
     Ok(())
 }
 
+pub async fn get_captcha_config(
+    pool: &DbPool,
+) -> Result<crate::bot_captcha::CaptchaConfig, sqlx::Error> {
+    let row = sqlx::query("SELECT provider,site_key,updated_at FROM bot_captcha_config WHERE id=1")
+        .fetch_one(pool)
+        .await?;
+    Ok(crate::bot_captcha::CaptchaConfig {
+        provider: crate::bot_captcha::CaptchaProvider::parse(&row.get::<String, _>("provider")),
+        site_key: row.get("site_key"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
+pub async fn update_captcha_config<'e, E>(
+    executor: E,
+    config: &crate::bot_captcha::CaptchaConfig,
+) -> Result<(), sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
+    sqlx::query("UPDATE bot_captcha_config SET provider=?,site_key=?,updated_at=? WHERE id=1")
+        .bind(config.provider.as_str())
+        .bind(&config.site_key)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(executor)
+        .await?;
+    Ok(())
+}
+
 pub async fn get_waf_config(pool: &DbPool) -> Result<WafConfig, sqlx::Error> {
     let row = sqlx::query("SELECT mode,updated_at FROM waf_config WHERE id=1")
         .fetch_one(pool)
@@ -1793,6 +1825,7 @@ pub async fn load_replicated_policy_state(
         emergency_disabled: get_emergency_disabled(pool).await?,
         tuning_policies,
         seclang: Some(get_seclang_config(pool).await?),
+        captcha: Some(get_captcha_config(pool).await?),
     };
     state
         .validate()

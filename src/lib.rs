@@ -7,6 +7,7 @@ pub mod analytics_prometheus;
 pub mod anomaly;
 pub mod balancer;
 pub mod baseline;
+pub mod bot_captcha;
 pub mod bot_challenge;
 pub mod bot_protection;
 pub mod bot_store;

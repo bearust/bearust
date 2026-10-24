@@ -107,6 +107,8 @@ pub struct AppState {
     pub advisor_metrics: Arc<crate::observability::AdvisorMetrics>,
     /// OIDC discovery/JWKS cache shared by SSO logins.
     pub oidc: Arc<sso::OidcCache>,
+    /// Overrides the CAPTCHA provider's siteverify URL (tests only).
+    pub captcha_verify_url: Option<String>,
 }
 
 impl AppState {
@@ -515,6 +517,7 @@ pub async fn build_state(
         ai_advisor: Arc::new(AiAdvisorService::disabled()),
         advisor_metrics: Arc::new(crate::observability::AdvisorMetrics::default()),
         oidc: Arc::new(sso::OidcCache::default()),
+        captcha_verify_url: None,
     })
 }
 
@@ -676,6 +679,10 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route(
             "/api/bot/config",
             get(get_bot_config).patch(update_bot_config),
+        )
+        .route(
+            "/api/bot/captcha",
+            get(get_bot_captcha).put(update_bot_captcha),
         )
         .route(
             "/api/bot/trusted-crawlers",
@@ -905,7 +912,25 @@ struct ChallengeInput {
 struct ChallengeVerifyInput {
     token: String,
     fingerprint: String,
+    #[serde(default)]
     solution: String,
+    /// Provider response token when a CAPTCHA is configured.
+    #[serde(default)]
+    captcha_response: Option<String>,
+}
+
+/// The CAPTCHA in effect: configured provider with a stored secret.
+async fn active_captcha(s: &AppState) -> Option<(crate::bot_captcha::CaptchaConfig, String)> {
+    let config = repository::get_captcha_config(&s.db).await.ok()?;
+    if config.provider == crate::bot_captcha::CaptchaProvider::None {
+        return None;
+    }
+    let secret = s
+        .secrets
+        .get(crate::bot_captcha::SECRET_NAME)
+        .ok()
+        .flatten()?;
+    Some((config, String::from_utf8_lossy(&secret).into_owned()))
 }
 async fn issue_bot_challenge(
     State(s): State<AppState>,
@@ -934,9 +959,14 @@ async fn issue_bot_challenge(
             )
         }
     };
+    let captcha = active_captcha(&s).await.map(|(config, _)| {
+        serde_json::json!({ "provider": config.provider, "site_key": config.site_key })
+    });
+    let mut body = serde_json::to_value(&challenge).unwrap_or_default();
+    body["captcha"] = captcha.unwrap_or(serde_json::Value::Null);
     (
         [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(challenge),
+        Json(body),
     )
         .into_response()
 }
@@ -944,15 +974,34 @@ async fn verify_bot_challenge(
     State(s): State<AppState>,
     Json(input): Json<ChallengeVerifyInput>,
 ) -> impl IntoResponse {
-    let result = s
-        .challenges
-        .verify_solution(
-            &input.token,
-            &input.fingerprint,
-            &input.solution,
-            unix_now(),
-        )
-        .await;
+    let result = match active_captcha(&s).await {
+        // A configured CAPTCHA replaces proof-of-work; the signed,
+        // fingerprint-bound, single-use challenge token still applies.
+        Some((config, secret)) => {
+            let passed = crate::bot_captcha::verify(
+                config.provider,
+                &secret,
+                &config.site_key,
+                input.captcha_response.as_deref().unwrap_or(""),
+                None,
+                s.captcha_verify_url.as_deref(),
+            )
+            .await;
+            s.challenges
+                .verify_with(&input.token, &input.fingerprint, unix_now(), |_| passed)
+                .await
+        }
+        None => {
+            s.challenges
+                .verify_solution(
+                    &input.token,
+                    &input.fingerprint,
+                    &input.solution,
+                    unix_now(),
+                )
+                .await
+        }
+    };
     if result.is_err() {
         return user_error(
             StatusCode::BAD_REQUEST,
@@ -982,6 +1031,120 @@ async fn verify_bot_challenge(
         Json(serde_json::json!({"ok":true})),
     )
         .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptchaInput {
+    provider: crate::bot_captcha::CaptchaProvider,
+    site_key: String,
+    /// Omit to keep the stored secret.
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+async fn captcha_status(s: &AppState) -> Result<serde_json::Value, sqlx::Error> {
+    let config = repository::get_captcha_config(&s.db).await?;
+    let has_secret = s
+        .secrets
+        .get(crate::bot_captcha::SECRET_NAME)
+        .ok()
+        .flatten()
+        .is_some();
+    let mut value = serde_json::to_value(config).unwrap_or_default();
+    value["has_secret"] = has_secret.into();
+    Ok(value)
+}
+
+async fn get_bot_captcha(State(s): State<AppState>, h: HeaderMap) -> Response {
+    if let Err(r) = require_bot_admin(&s, &h).await {
+        return r;
+    }
+    match captcha_status(&s).await {
+        Ok(value) => Json(value).into_response(),
+        Err(_) => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
+    }
+}
+
+async fn update_bot_captcha(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    input: Result<Json<CaptchaInput>, JsonRejection>,
+) -> Response {
+    let actor = match require_bot_admin(&s, &h).await {
+        Ok(user) => user,
+        Err(r) => return r,
+    };
+    let Ok(Json(input)) = input else {
+        return user_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Invalid CAPTCHA settings",
+        );
+    };
+    let config = crate::bot_captcha::CaptchaConfig {
+        provider: input.provider,
+        site_key: input.site_key.trim().to_owned(),
+        updated_at: String::new(),
+    };
+    let secret_ok = input.secret.as_deref().is_none_or(|secret| {
+        !secret.is_empty() && secret.len() <= crate::bot_captcha::MAX_KEY_BYTES
+    });
+    if config.validate().is_err() || !secret_ok {
+        return user_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Invalid CAPTCHA settings",
+        );
+    }
+    if let Some(secret) = input.secret.as_deref() {
+        if s.secrets
+            .put(crate::bot_captcha::SECRET_NAME, secret.as_bytes())
+            .is_err()
+        {
+            return user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "secret_store_error",
+                "Unable to store CAPTCHA secret",
+            );
+        }
+    }
+    if repository::update_captcha_config(&s.db, &config)
+        .await
+        .is_err()
+    {
+        return user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        );
+    }
+    let (policy_command, policy_receipt) = match submit_policy_state(&s, &actor).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    publish_committed_command(&s, &policy_command, &policy_receipt);
+    audit::record_state(
+        &s,
+        Some(actor.id),
+        "bot_captcha_updated",
+        &serde_json::json!({ "provider": config.provider.as_str(), "secret_changed": input.secret.is_some() })
+            .to_string(),
+    )
+    .await;
+    s.realtime.publish("bot.changed");
+    match captcha_status(&s).await {
+        Ok(value) => Json(value).into_response(),
+        Err(_) => user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database_error",
+            "Database unavailable",
+        ),
+    }
 }
 
 async fn require_bot_admin(s: &AppState, h: &HeaderMap) -> Result<User, Response> {

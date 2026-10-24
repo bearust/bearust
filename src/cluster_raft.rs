@@ -141,6 +141,9 @@ pub struct ReplicatedPolicyState {
     /// commands leave the local SecLang settings unchanged.
     #[serde(default)]
     pub seclang: Option<crate::control_plane::models::SecLangConfig>,
+    /// Absent from older nodes' commands; then left unchanged.
+    #[serde(default)]
+    pub captcha: Option<crate::bot_captcha::CaptchaConfig>,
 }
 
 impl ReplicatedPolicyState {
@@ -199,6 +202,11 @@ impl ReplicatedPolicyState {
             self.waf_rules.clone(),
         )
         .map_err(|error| CommandError::Invalid(error.to_string()))?;
+        if let Some(captcha) = &self.captcha {
+            captcha
+                .validate()
+                .map_err(|error| CommandError::Invalid(error.into()))?;
+        }
         if let Some(seclang) = &self.seclang {
             seclang
                 .validate_bounds()
