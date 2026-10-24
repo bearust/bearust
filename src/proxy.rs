@@ -130,6 +130,8 @@ pub struct BearustProxy {
     /// Set on the plain-HTTP listener when an HTTPS listener exists: hosts
     /// with a usable certificate are redirected to `https_port`.
     pub https_redirect: Option<(Arc<crate::sni::SniResolver>, u16)>,
+    /// HTTP/3 clients for pools configured with `[http3]`.
+    pub h3_upstreams: Arc<crate::h3_upstream::H3UpstreamRegistry>,
 }
 
 impl BearustProxy {
@@ -154,6 +156,7 @@ impl BearustProxy {
             plugin_manager: None,
             http3_alt_svc: None,
             https_redirect: None,
+            h3_upstreams: Arc::new(crate::h3_upstream::H3UpstreamRegistry::default()),
         }
     }
     pub fn with_challenge_store(mut self, challenges: Http01Store) -> Self {
@@ -1609,6 +1612,156 @@ impl BearustProxy {
     }
 }
 
+impl BearustProxy {
+    /// Serve the request through an HTTP/3 upstream when the route's pool
+    /// is configured with `[http3]`. Pingora has no QUIC connector, so the
+    /// request is handled here: the body is buffered (bounded) and inspected
+    /// by the WAF, forwarded over HTTP/3, and the response streamed back.
+    /// Returns `false` for ordinary pools.
+    async fn forward_http3_upstream(
+        &self,
+        session: &mut Session,
+        ctx: &mut RequestContext,
+    ) -> Result<bool> {
+        const MAX_H3_REQUEST_BODY: usize = 16 * 1024 * 1024;
+        let (Some(snapshot), Some(route)) = (ctx.snapshot.clone(), ctx.route.clone()) else {
+            return Ok(false);
+        };
+        let Some(h3) = snapshot
+            .config()
+            .upstream_pools
+            .iter()
+            .find(|pool| pool.name == route.upstream_pool)
+            .and_then(|pool| pool.http3.clone())
+        else {
+            return Ok(false);
+        };
+        let Some(pool) = snapshot.pool(&route.upstream_pool) else {
+            return Ok(false);
+        };
+        let respond = |status: u16| {
+            pingora_core::Error::explain(ErrorType::HTTPStatus(status), "http3 upstream")
+        };
+        let client = self
+            .h3_upstreams
+            .client(&route.upstream_pool, &h3)
+            .map_err(|error| {
+                tracing::error!(event = "h3_upstream_config_invalid", error = %error);
+                respond(502)
+            })?;
+        let mut body = Vec::new();
+        while let Some(chunk) = session.read_request_body().await? {
+            if body.len() + chunk.len() > MAX_H3_REQUEST_BODY {
+                return Err(respond(413));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if let Some(waf) = &self.waf {
+            let header = session.req_header();
+            let context = InspectionContext {
+                method: header.method.as_str().to_owned(),
+                path: header.uri.path().to_owned(),
+                query: header.uri.query().unwrap_or("").to_owned(),
+                headers: header
+                    .headers
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        value
+                            .to_str()
+                            .ok()
+                            .map(|value| (name.as_str().to_owned(), value.to_owned()))
+                    })
+                    .collect(),
+                body: body[..body.len().min(crate::waf::MAX_INSPECTION_BODY_BYTES)].to_vec(),
+            };
+            let evaluation = crate::waf::evaluate(&waf.snapshot(), &context);
+            if evaluation.decision == crate::waf::WafDecision::Block {
+                waf.record_detection(&evaluation);
+                ctx.waf_blocked = true;
+                return Err(respond(403));
+            }
+        }
+        let Some(lease) = pool.select_with_key(None, None) else {
+            return Err(respond(503));
+        };
+        let header = session.req_header();
+        let path_and_query = header
+            .uri
+            .path_and_query()
+            .map_or("/", |pq| pq.as_str())
+            .to_owned();
+        let mut builder = http::Request::builder()
+            .method(header.method.clone())
+            .uri(format!("https://{}{path_and_query}", h3.server_name));
+        let mut headers = header.headers.clone();
+        crate::h3_upstream::strip_connection_headers(&mut headers);
+        headers.remove("content-length");
+        if let Some(client_ip) = session
+            .client_addr()
+            .and_then(|addr| addr.as_inet().map(|inet| inet.ip().to_string()))
+        {
+            let forwarded = match headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+                Some(existing) => format!("{existing}, {client_ip}"),
+                None => client_ip,
+            };
+            if let Ok(value) = http::HeaderValue::from_str(&forwarded) {
+                headers.insert("x-forwarded-for", value);
+            }
+        }
+        if let Ok(value) = http::HeaderValue::from_str(&ctx.request_id) {
+            headers.insert("x-request-id", value);
+        }
+        for (name, value) in &headers {
+            builder = builder.header(name, value);
+        }
+        let request = builder.body(()).map_err(|_| respond(400))?;
+        let started = std::time::Instant::now();
+        let mut response = match client
+            .send(
+                lease.address(),
+                request,
+                Bytes::from(body),
+                pool.request_timeout(),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(event = "h3_upstream_failed", backend = %lease.address(), error = %error);
+                pool.record_result(lease.id(), 502, started.elapsed().as_millis() as u64);
+                return Err(respond(502));
+            }
+        };
+        let status = response.head.status().as_u16();
+        let mut head = ResponseHeader::build(status, None).map_err(|_| respond(502))?;
+        let mut upstream_headers = response.head.headers().clone();
+        crate::h3_upstream::strip_connection_headers(&mut upstream_headers);
+        for (name, value) in &upstream_headers {
+            let _ = head.append_header(name.clone(), value.clone());
+        }
+        apply_http3_alt_svc_header(&mut head, self.http3_alt_svc.as_deref());
+        if upstream_headers.get("content-length").is_none() {
+            let _ = head.insert_header("transfer-encoding", "chunked");
+        }
+        session.write_response_header(Box::new(head), false).await?;
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => session.write_response_body(Some(chunk), false).await?,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(event = "h3_upstream_body_failed", error = %error);
+                    break;
+                }
+            }
+        }
+        session.write_response_body(None, true).await?;
+        pool.record_result(lease.id(), status, started.elapsed().as_millis() as u64);
+        self.record_completion(session, ctx, Some(status));
+        ctx.completion_logged = true;
+        Ok(true)
+    }
+}
+
 #[async_trait]
 impl ProxyHttp for BearustProxy {
     type CTX = RequestContext;
@@ -1988,6 +2141,9 @@ impl ProxyHttp for BearustProxy {
                     }
                 }
             }
+        }
+        if self.forward_http3_upstream(session, ctx).await? {
+            return Ok(true);
         }
         Ok(false)
     }
@@ -3365,6 +3521,7 @@ mod tests {
             connect_timeout_seconds: 3,
             request_timeout_seconds: 30,
             passive_health: false,
+            http3: None,
             backends: vec![
                 BackendConfig {
                     address: "127.0.0.1:19001".parse().unwrap(),

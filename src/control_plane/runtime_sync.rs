@@ -228,6 +228,7 @@ impl RuntimeConfigReloader {
                 connect_timeout_seconds: 3,
                 request_timeout_seconds: 30,
                 passive_health: true,
+                http3: None,
                 backends: vec![BackendConfig {
                     address,
                     health_check: HealthCheckKind::Tcp,

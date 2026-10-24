@@ -77,6 +77,7 @@ async fn request_body_and_response_header_transforms_through_pingora() {
             connect_timeout_seconds: 1,
             request_timeout_seconds: 2,
             passive_health: false,
+            http3: None,
             backends: vec![BackendConfig {
                 address: upstream_addr,
                 health_check: HealthCheckKind::Tcp,

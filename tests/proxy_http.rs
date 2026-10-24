@@ -62,6 +62,7 @@ async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() 
             connect_timeout_seconds: 1,
             request_timeout_seconds: 1,
             passive_health: false,
+            http3: None,
             backends: vec![BackendConfig {
                 address: backend_addr,
                 health_check: HealthCheckKind::Tcp,

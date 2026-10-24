@@ -382,6 +382,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rustls",
+ "rustls-native-certs",
  "rustls-pemfile",
  "rustls-pki-types",
  "samael",

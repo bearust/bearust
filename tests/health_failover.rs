@@ -98,6 +98,7 @@ async fn supervisor_transitions_backend_eligibility_within_one_second() {
             connect_timeout_seconds: 1,
             request_timeout_seconds: 1,
             passive_health: false,
+            http3: None,
             backends: vec![BackendConfig {
                 address: server.address,
                 health_check: HealthCheckKind::Http,

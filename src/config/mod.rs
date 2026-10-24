@@ -323,6 +323,23 @@ pub struct PoolConfig {
     #[serde(default)]
     pub passive_health: bool,
     pub backends: Vec<BackendConfig>,
+    /// Speak HTTP/3 (QUIC) to this pool's backends instead of HTTP/1.1.
+    #[serde(default)]
+    pub http3: Option<UpstreamHttp3Config>,
+}
+
+/// TLS settings for HTTP/3 upstreams; QUIC always uses TLS.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UpstreamHttp3Config {
+    /// Name verified against the backend certificate (SNI).
+    pub server_name: String,
+    /// PEM bundle of trusted CAs; the system roots when absent.
+    #[serde(default)]
+    pub ca_file: Option<PathBuf>,
+    /// Skip certificate verification. Only for testing.
+    #[serde(default)]
+    pub insecure_skip_verify: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]

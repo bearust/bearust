@@ -478,6 +478,7 @@ fn runtime_store_routing_to(host: &str, backend_addr: SocketAddr) -> Arc<Runtime
             connect_timeout_seconds: 1,
             request_timeout_seconds: 1,
             passive_health: false,
+            http3: None,
             backends: vec![BackendConfig {
                 address: backend_addr,
                 health_check: HealthCheckKind::Tcp,
@@ -533,6 +534,7 @@ fn runtime_store_routing_to_two_backends(
             connect_timeout_seconds: 1,
             request_timeout_seconds: 1,
             passive_health: false,
+            http3: None,
             backends: vec![
                 BackendConfig {
                     address: first,

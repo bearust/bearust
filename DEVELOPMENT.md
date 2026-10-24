@@ -133,6 +133,27 @@ Backends rotate round-robin. UDP keeps one upstream socket per client so
 replies return to the right client. The IP security policy applies to
 stream clients as well. In Docker, publish the listen ports yourself.
 
+## HTTP/3 upstreams
+
+A config-file pool can speak HTTP/3 (QUIC) to its backends:
+
+```toml
+[[upstream_pools]]
+name = "edge"
+algorithm = "round_robin"
+backends = [{ address = "10.0.0.20:443", health_check = "tcp" }]
+
+[upstream_pools.http3]
+server_name = "api.internal"       # verified against the backend certificate
+ca_file = "/etc/bearust/ca.pem"    # optional; system roots otherwise
+# insecure_skip_verify = true      # testing only
+```
+
+Both listeners use it. One QUIC connection per backend is reused. Request
+bodies are buffered (16 MiB cap) so the WAF still inspects them; responses
+stream back. Plugin request/response transforms are not applied on this
+path, and the h3 crates are pre-1.0, so treat this as experimental.
+
 ## AI Advisor development
 
 Leave `LLM_API_URL` and `LLM_API_KEY` unset for the default disabled mode. For

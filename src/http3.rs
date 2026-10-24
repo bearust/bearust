@@ -132,6 +132,7 @@ struct HandlerState {
     bot: Option<Arc<BotContext>>,
     plugin_manager: Option<Arc<PluginManager>>,
     plugin_notify: Option<Arc<NotificationSink>>,
+    h3_upstreams: Arc<crate::h3_upstream::H3UpstreamRegistry>,
 }
 
 #[derive(Default)]
@@ -346,6 +347,7 @@ pub async fn serve(
         bot: options.bot,
         plugin_manager: options.plugin_manager,
         plugin_notify: options.plugin_notify,
+        h3_upstreams: Arc::new(crate::h3_upstream::H3UpstreamRegistry::default()),
     });
 
     loop {
@@ -1200,6 +1202,88 @@ async fn handle_request<S>(
     }
     append_forwarded_for(&mut outgoing_headers, remote_addr);
     set_header(&mut outgoing_headers, "x-request-id", request_id);
+
+    // Pools configured with `[http3]` are forwarded over QUIC.
+    if let Some(h3) = snapshot
+        .config()
+        .upstream_pools
+        .iter()
+        .find(|config| config.name == pool.name())
+        .and_then(|config| config.http3.clone())
+    {
+        let (status, sent) = match state.h3_upstreams.client(pool.name(), &h3) {
+            Ok(client) => {
+                let mut builder = http::Request::builder()
+                    .method(method.as_str())
+                    .uri(format!(
+                        "https://{}{}",
+                        h3.server_name,
+                        req.uri()
+                            .path_and_query()
+                            .map(|p| p.as_str())
+                            .unwrap_or(&path)
+                    ));
+                for (name, value) in &outgoing_headers {
+                    if !name.eq_ignore_ascii_case("host") {
+                        builder = builder.header(name.as_str(), value.as_str());
+                    }
+                }
+                match builder.body(()) {
+                    Ok(request) => match client
+                        .send(
+                            lease.address(),
+                            request,
+                            bytes::Bytes::from(body.clone()),
+                            pool.request_timeout(),
+                        )
+                        .await
+                    {
+                        Ok(mut response) => {
+                            let status = response.head.status();
+                            let mut headers = response.head.headers().clone();
+                            crate::h3_upstream::strip_connection_headers(&mut headers);
+                            let _ = stream
+                                .send_response(downstream_response_head(status, &headers, false))
+                                .await;
+                            while let Ok(Some(chunk)) = response.chunk().await {
+                                if stream.send_data(chunk).await.is_err() {
+                                    break;
+                                }
+                            }
+                            let _ = stream.finish().await;
+                            (status.as_u16(), true)
+                        }
+                        Err(error) => {
+                            tracing::warn!(event = "h3_upstream_failed", error = %error);
+                            (502, false)
+                        }
+                    },
+                    Err(_) => (400, false),
+                }
+            }
+            Err(error) => {
+                tracing::error!(event = "h3_upstream_config_invalid", error = %error);
+                (502, false)
+            }
+        };
+        if !sent {
+            let resp = http::Response::builder()
+                .status(status)
+                .body(())
+                .expect("static response head is always valid");
+            let _ = stream.send_response(resp).await;
+            let _ = stream.finish().await;
+        }
+        record_analytics_event(
+            &state.analytics,
+            analytics_host_id,
+            status,
+            start,
+            SecurityFlags::default(),
+        );
+        pool.record_result(lease.id(), status, start.elapsed().as_millis() as u64);
+        return;
+    }
 
     let client = match state.clients.get(pool.connect_timeout()) {
         Ok(client) => client,
