@@ -13,6 +13,9 @@ pub mod rbac;
 pub mod realtime;
 pub mod repository;
 pub mod runtime_sync;
+pub mod sso;
+#[cfg(feature = "saml")]
+pub mod sso_saml;
 use crate::acme::{AcmeEnvironment, AcmeManager, LetsEncryptClient};
 use crate::ai_advisor::AiAdvisorService;
 use crate::analytics::{AnalyticsCollector, AnalyticsFilter};
@@ -102,6 +105,8 @@ pub struct AppState {
     /// from provider availability.
     pub ai_advisor: Arc<AiAdvisorService>,
     pub advisor_metrics: Arc<crate::observability::AdvisorMetrics>,
+    /// OIDC discovery/JWKS cache shared by SSO logins.
+    pub oidc: Arc<sso::OidcCache>,
 }
 
 impl AppState {
@@ -509,6 +514,7 @@ pub async fn build_state(
         prometheus: PrometheusConfig::default(),
         ai_advisor: Arc::new(AiAdvisorService::disabled()),
         advisor_metrics: Arc::new(crate::observability::AdvisorMetrics::default()),
+        oidc: Arc::new(sso::OidcCache::default()),
     })
 }
 
@@ -553,6 +559,14 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/me", get(me))
+        .route("/api/auth/sso/providers", get(sso::public_providers))
+        .route("/api/auth/sso/{slug}/start", get(sso::start))
+        .route("/api/auth/sso/{slug}/callback", get(sso::oidc_callback))
+        .route("/api/sso/providers", get(sso::admin_list))
+        .route(
+            "/api/sso/providers/{slug}",
+            axum::routing::put(sso::admin_upsert).delete(sso::admin_delete),
+        )
         .route(
             "/api/auth/me/preferences",
             axum::routing::patch(update_preferences),
@@ -710,6 +724,10 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route("/api/cluster/status", get(get_cluster_status))
         .route("/api/certificates/{id}/renew", post(renew_acme))
         .route("/api/certificates/{id}/status", get(acme_status));
+    #[cfg(feature = "saml")]
+    let app = app
+        .route("/api/auth/sso/{slug}/acs", post(sso_saml::acs))
+        .route("/api/auth/sso/{slug}/metadata", get(sso_saml::metadata));
     let app = app
         .route("/api", any(api_not_found))
         .route("/api/{*path}", any(api_not_found));
@@ -754,7 +772,10 @@ async fn csrf_guard(request: Request<Body>, next: Next) -> Response {
             | "/api/bot/challenge"
             | "/api/bot/challenge/verify"
     );
-    if !mutating || !path.starts_with("/api/") || public {
+    // The SAML assertion consumer receives a cross-site POST from the IdP;
+    // it is protected by the signed, single-use InResponseTo binding instead.
+    let saml_acs = path.starts_with("/api/auth/sso/") && path.ends_with("/acs");
+    if !mutating || !path.starts_with("/api/") || public || saml_acs {
         return next.run(request).await;
     }
     let Some(cookie) = request.headers().get(axum::http::header::COOKIE) else {
@@ -4024,6 +4045,11 @@ async fn setup_initialize(
         ),
     }
 }
+/// The authenticated user for a request, for handlers in submodules.
+pub(crate) async fn current_user(s: &AppState, h: &HeaderMap) -> Result<User, StatusCode> {
+    current(s, h).await
+}
+
 async fn current(s: &AppState, h: &HeaderMap) -> Result<User, StatusCode> {
     let t = auth::cookie(h).ok_or(StatusCode::UNAUTHORIZED)?;
     repository::find_user_by_session(&s.db, &auth::token_hash(t))

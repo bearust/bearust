@@ -390,7 +390,10 @@
     "signIn": "ログイン",
     "signOut": "ログアウト",
     "passwordHint": "パスワード（12文字以上）",
-    "loading": "Bearust を読み込み中…"
+    "loading": "Bearust を読み込み中…",
+    "ssoContinue": "{{name}} で続行",
+    "ssoDivider": "または",
+    "ssoError": "シングルサインオンに失敗しました: {{reason}}"
   },
   "acme": {
     "title": "Let's Encrypt 証明書を発行",
@@ -1118,7 +1121,22 @@
     "localeLocalOnly": "言語をローカルで変更しました。アカウント設定は保存できませんでした。",
     "retentionInvalid": "保持期間は60分から7日間の範囲で指定してください。",
     "retentionSaved": "分析の保持期間を保存しました。",
-    "retentionSaveError": "分析の保持期間を保存できませんでした。"
+    "retentionSaveError": "分析の保持期間を保存できませんでした。",
+    "ssoTab": "シングルサインオン",
+    "ssoTitle": "ID プロバイダー",
+    "ssoDescription": "OIDC または SAML でのサインインを許可します。プロバイダーのシークレットはシークレットストアに保存され、再表示されません。",
+    "ssoSlug": "スラッグ",
+    "ssoName": "表示名",
+    "ssoKind": "プロトコル",
+    "ssoConfig": "設定 (JSON)",
+    "ssoClientSecret": "クライアントシークレット (OIDC、空欄で保持)",
+    "ssoEnabled": "有効",
+    "ssoSave": "プロバイダーを保存",
+    "ssoSaved": "ID プロバイダーを保存しました",
+    "ssoDelete": "削除",
+    "ssoDeleted": "ID プロバイダーを削除しました",
+    "ssoNone": "ID プロバイダーは設定されていません。",
+    "ssoInvalidJson": "設定は有効な JSON である必要があります。"
   },
   "operations": {
     "title": "オペレーション",

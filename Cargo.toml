@@ -60,6 +60,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 uuid = { version = "1", features = ["v4", "serde"] }
 wasmtime = "=27.0.0"
 maxminddb = "0.27"
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
+samael = { version = "=0.0.22", optional = true }
+
+[features]
+default = []
+# SAML 2.0 single sign-on. Requires libxmlsec1 (and its development headers)
+# at build time: `brew install libxmlsec1` or `apt install libxmlsec1-dev`.
+saml = ["dep:samael"]
+samael = ["dep:samael"]
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["ws"] }

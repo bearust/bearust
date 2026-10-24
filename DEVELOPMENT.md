@@ -43,6 +43,31 @@ backup and restore plan before changing a production database URL.
 
 Focused TDD: add a minimal regression test, run it to observe failure, implement the smallest change, then rerun the focused test and the full suite.
 
+## Single sign-on (OIDC and SAML)
+
+OIDC is always compiled in. SAML is behind the `saml` cargo feature because
+it links libxmlsec1; the published Docker image enables it.
+
+```sh
+# Debian/Ubuntu
+sudo apt-get install libxmlsec1-dev libxml2-dev libxslt1-dev pkg-config
+cargo test --features saml --test control_plane_sso_saml
+
+# macOS: libxml2, libxslt, and libxmlsec1 must all come from Homebrew. Mixing
+# them with the system libxml2 aborts at runtime inside libxml2.
+brew install libxmlsec1 libxslt
+export PKG_CONFIG_PATH="$(brew --prefix libxslt)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix libxmlsec1)/lib/pkgconfig"
+export LIBXML2="$(brew --prefix libxml2)/lib/libxml2.dylib"
+cargo test --features saml --test control_plane_sso_saml
+```
+
+Providers are managed under **Settings → Single sign-on** or
+`PUT /api/sso/providers/{slug}` (requires `system.settings.manage`). The OIDC
+callback is `<redirect_base_url>/api/auth/sso/<slug>/callback`; the SAML ACS is
+`<redirect_base_url>/api/auth/sso/<slug>/acs` and SP metadata is served at
+`/api/auth/sso/<slug>/metadata`. SAML IdP metadata must contain a signing
+certificate, and responses must use SHA-256 or stronger signatures and digests.
+
 ## AI Advisor development
 
 Leave `LLM_API_URL` and `LLM_API_KEY` unset for the default disabled mode. For

@@ -394,7 +394,10 @@
     "signIn": "Sign in",
     "signOut": "Sign out",
     "passwordHint": "Password (12+ characters)",
-    "loading": "Loading Bearust…"
+    "loading": "Loading Bearust…",
+    "ssoContinue": "Continue with {{name}}",
+    "ssoDivider": "or",
+    "ssoError": "Single sign-on failed: {{reason}}"
   },
   "acme": {
     "title": "Issue Let's Encrypt certificate",
@@ -1039,7 +1042,10 @@
       "from": "Previous mode",
       "to": "Proposed mode",
       "redacted": "Redacted",
-      "modes": { "monitor-only": "Monitor-only", "block": "Block" }
+      "modes": {
+        "monitor-only": "Monitor-only",
+        "block": "Block"
+      }
     },
     "demo": "Demo advisor",
     "online": "Advisor online",
@@ -1126,7 +1132,22 @@
     "localeLocalOnly": "Language changed locally; account preference could not be saved.",
     "retentionInvalid": "Retention must be between 60 minutes and 7 days.",
     "retentionSaved": "Analytics retention saved.",
-    "retentionSaveError": "Analytics retention could not be saved."
+    "retentionSaveError": "Analytics retention could not be saved.",
+    "ssoTab": "Single sign-on",
+    "ssoTitle": "Identity providers",
+    "ssoDescription": "Let users sign in with OIDC or SAML. Provider secrets are stored in the secret store and never shown again.",
+    "ssoSlug": "Slug",
+    "ssoName": "Display name",
+    "ssoKind": "Protocol",
+    "ssoConfig": "Configuration (JSON)",
+    "ssoClientSecret": "Client secret (OIDC, leave empty to keep)",
+    "ssoEnabled": "Enabled",
+    "ssoSave": "Save provider",
+    "ssoSaved": "Identity provider saved",
+    "ssoDelete": "Delete",
+    "ssoDeleted": "Identity provider deleted",
+    "ssoNone": "No identity providers configured.",
+    "ssoInvalidJson": "Configuration must be valid JSON."
   },
   "operations": {
     "title": "Operations",

@@ -1073,7 +1073,7 @@ async fn seed_id(
     Ok(preferred)
 }
 
-fn generated_id() -> i64 {
+pub(crate) fn generated_id() -> i64 {
     let bytes = *Uuid::new_v4().as_bytes();
     let mut raw = [0u8; 8];
     raw.copy_from_slice(&bytes[..8]);

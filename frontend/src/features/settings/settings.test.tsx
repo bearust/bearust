@@ -95,4 +95,30 @@ describe("account settings", () => {
     expect(document.querySelector('[role="status"]')?.textContent).toBe(i18n.t("settings.localeLocalOnly"));
     expect(useAuthStore.getState().user?.preferred_locale).toBe("en");
   });
+
+  it("saves an identity provider with parsed configuration and rejects invalid JSON", async () => {
+    vi.spyOn(api, "adminSsoProviders").mockResolvedValue([]);
+    const save = vi.spyOn(api, "saveSsoProvider").mockResolvedValue({ id: 1, slug: "corp", name: "Corp", kind: "oidc", enabled: true, config: {}, has_secret: true });
+    await renderSettings();
+    await selectTab("Single sign-on");
+    const setValue = (selector: string, value: string) => {
+      const input = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!;
+      const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    await act(async () => {
+      setValue("#sso-slug", "corp");
+      setValue("#sso-name", "Corp");
+      setValue("#sso-secret", "s3cret");
+      setValue("#sso-config", "{not json");
+    });
+    const form = document.querySelector<HTMLFormElement>("#sso-config")!.closest("form")!;
+    await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe("Configuration must be valid JSON.");
+    expect(save).not.toHaveBeenCalled();
+    await act(async () => setValue("#sso-config", '{"issuer":"https://idp.example.com"}'));
+    await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(save).toHaveBeenCalledWith({ slug: "corp", name: "Corp", kind: "oidc", enabled: true, config: { issuer: "https://idp.example.com" }, client_secret: "s3cret" });
+  });
 });

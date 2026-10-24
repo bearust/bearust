@@ -57,30 +57,8 @@ pub async fn login(
         .flatten();
     if let Some((user, hash)) = found {
         if verify_password(&input.password, &hash) {
-            let token = Uuid::new_v4().to_string();
-            let exp = (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
-            if repository::create_session(&state.db, user.id, &token_hash(&token), &exp)
-                .await
-                .is_ok()
-            {
-                audit::record_state(&state, Some(user.id), "login_success", "session_created")
-                    .await;
-                state.realtime.publish("sessions.changed");
-                let csrf = Uuid::new_v4().to_string();
-                let mut h = HeaderMap::new();
-                h.append(
-                    header::SET_COOKIE,
-                    format!("bearust_session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=86400")
-                        .parse()
-                        .unwrap(),
-                );
-                h.append(
-                    header::SET_COOKIE,
-                    format!("bearust_csrf={csrf}; Secure; SameSite=Lax; Path=/; Max-Age=86400")
-                        .parse()
-                        .unwrap(),
-                );
-                return (h, Json(user)).into_response();
+            if let Some(headers) = issue_session(&state, &user, "session_created").await {
+                return (headers, Json(user)).into_response();
             }
         }
     }
@@ -94,6 +72,37 @@ pub async fn login(
     )
         .into_response()
 }
+/// Create a 24-hour session for `user` and return the session and CSRF
+/// cookies. Shared by password and SSO login; `detail` is the audit detail.
+pub async fn issue_session(
+    state: &AppState,
+    user: &crate::control_plane::models::User,
+    detail: &str,
+) -> Option<HeaderMap> {
+    let token = Uuid::new_v4().to_string();
+    let exp = (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
+    repository::create_session(&state.db, user.id, &token_hash(&token), &exp)
+        .await
+        .ok()?;
+    audit::record_state(state, Some(user.id), "login_success", detail).await;
+    state.realtime.publish("sessions.changed");
+    let csrf = Uuid::new_v4().to_string();
+    let mut h = HeaderMap::new();
+    h.append(
+        header::SET_COOKIE,
+        format!("bearust_session={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=86400")
+            .parse()
+            .ok()?,
+    );
+    h.append(
+        header::SET_COOKIE,
+        format!("bearust_csrf={csrf}; Secure; SameSite=Lax; Path=/; Max-Age=86400")
+            .parse()
+            .ok()?,
+    );
+    Some(h)
+}
+
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if let Some(t) = cookie(&headers) {
         let actor_id = repository::find_user_by_session(&state.db, &token_hash(t))

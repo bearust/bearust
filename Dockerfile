@@ -7,15 +7,18 @@ RUN npm run build
 
 FROM rust:1.97.1-bookworm AS builder
 ENV RUSTUP_TOOLCHAIN=1.97.1
-RUN apt-get update && apt-get install -y --no-install-recommends clang cmake make perl pkg-config && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends clang cmake make perl pkg-config \
+    libxmlsec1-dev libxml2-dev libxslt1-dev libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
 COPY crates ./crates
 COPY migrations ./migrations
-RUN cargo build --release --locked
+# SAML SSO needs libxmlsec1; the published image includes it.
+RUN cargo build --release --locked --features saml
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates netcat-openbsd && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates netcat-openbsd \
+    libxmlsec1 libxmlsec1-openssl libxml2 libxslt1.1 libssl3 && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 bearust && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin bearust \
     && mkdir -p /data /etc/bearust/tls /run/bearust \
     && chown -R bearust:bearust /data /etc/bearust/tls /run/bearust

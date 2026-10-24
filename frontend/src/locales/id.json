@@ -394,7 +394,10 @@
     "signIn": "Masuk",
     "signOut": "Keluar",
     "passwordHint": "Kata sandi (12+ karakter)",
-    "loading": "Memuat Bearust…"
+    "loading": "Memuat Bearust…",
+    "ssoContinue": "Lanjutkan dengan {{name}}",
+    "ssoDivider": "atau",
+    "ssoError": "Single sign-on gagal: {{reason}}"
   },
   "acme": {
     "title": "Terbitkan sertifikat Let's Encrypt",
@@ -1039,7 +1042,10 @@
       "from": "Mode sebelumnya",
       "to": "Mode usulan",
       "redacted": "Disamarkan",
-      "modes": { "monitor-only": "Hanya pantau", "block": "Blokir" }
+      "modes": {
+        "monitor-only": "Hanya pantau",
+        "block": "Blokir"
+      }
     },
     "demo": "Demo advisor",
     "online": "Advisor online",
@@ -1126,7 +1132,22 @@
     "localeLocalOnly": "Bahasa diubah secara lokal; preferensi akun tidak dapat disimpan.",
     "retentionInvalid": "Retensi harus antara 60 menit dan 7 hari.",
     "retentionSaved": "Retensi analitik disimpan.",
-    "retentionSaveError": "Retensi analitik tidak dapat disimpan."
+    "retentionSaveError": "Retensi analitik tidak dapat disimpan.",
+    "ssoTab": "Single sign-on",
+    "ssoTitle": "Penyedia identitas",
+    "ssoDescription": "Izinkan pengguna masuk dengan OIDC atau SAML. Rahasia penyedia disimpan di secret store dan tidak ditampilkan lagi.",
+    "ssoSlug": "Slug",
+    "ssoName": "Nama tampilan",
+    "ssoKind": "Protokol",
+    "ssoConfig": "Konfigurasi (JSON)",
+    "ssoClientSecret": "Client secret (OIDC, kosongkan untuk mempertahankan)",
+    "ssoEnabled": "Aktif",
+    "ssoSave": "Simpan penyedia",
+    "ssoSaved": "Penyedia identitas disimpan",
+    "ssoDelete": "Hapus",
+    "ssoDeleted": "Penyedia identitas dihapus",
+    "ssoNone": "Belum ada penyedia identitas.",
+    "ssoInvalidJson": "Konfigurasi harus berupa JSON yang valid."
   },
   "operations": {
     "title": "Operasional",

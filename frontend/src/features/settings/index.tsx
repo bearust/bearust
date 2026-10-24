@@ -5,6 +5,7 @@ import { Link } from "@tanstack/react-router";
 import {
   Bell,
   Gauge,
+  KeyRound,
   LockKeyhole,
   Palette,
   Save,
@@ -30,6 +31,7 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Main } from "@/components/layout/main";
 import { PageHeader } from "@/components/page-header";
+import { SsoProviders } from "./sso-providers";
 
 export function Settings() {
   const { t } = useTranslation();
@@ -138,6 +140,12 @@ export function Settings() {
             <TabsTrigger value="analytics">
               <Gauge />
               {t("settings.analytics")}
+            </TabsTrigger>
+          )}
+          {user?.role === "admin" && !DEMO_MODE && (
+            <TabsTrigger value="sso">
+              <KeyRound />
+              {t("settings.ssoTab")}
             </TabsTrigger>
           )}
         </TabsList>
@@ -309,6 +317,11 @@ export function Settings() {
                 </form>
               </CardContent>
             </Card>
+          </TabsContent>
+        )}
+        {user?.role === "admin" && !DEMO_MODE && (
+          <TabsContent value="sso">
+            <SsoProviders />
           </TabsContent>
         )}
       </Tabs>
