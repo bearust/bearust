@@ -61,6 +61,11 @@ pub struct RequestContext {
     pub transform_response_buffering: bool,
     pub transform_response_buffer: Vec<u8>,
     pub transform_response_status: u16,
+    pub transform_response_encoding: Option<String>,
+    pub request_body_transform: bool,
+    pub request_body_buffer: Vec<u8>,
+    pub stream_transform: bool,
+    pub stream_index: u32,
 }
 
 impl Default for RequestContext {
@@ -94,6 +99,11 @@ impl Default for RequestContext {
             transform_response_buffering: false,
             transform_response_buffer: Vec::new(),
             transform_response_status: 0,
+            transform_response_encoding: None,
+            request_body_transform: false,
+            request_body_buffer: Vec::new(),
+            stream_transform: false,
+            stream_index: 0,
         }
     }
 }
@@ -802,9 +812,16 @@ pub fn response_transform_eligible(
     }) {
         return false;
     }
+    // gzip/deflate bodies are decoded for the plugin and re-encoded after
+    // (`apply_transform_response_encoded`); other encodings stay opaque.
     match content_encoding {
         None => true,
-        Some(value) => value.is_empty() || value.eq_ignore_ascii_case("identity"),
+        Some(value) => {
+            value.is_empty()
+                || ["identity", "gzip", "x-gzip", "deflate"]
+                    .iter()
+                    .any(|known| value.trim().eq_ignore_ascii_case(known))
+        }
     }
 }
 
@@ -903,6 +920,293 @@ pub fn apply_transform_response_plugin(
             tracing::warn!(event = "transform_response_failed", reason = "panic");
             metrics.record_transform_response_failure();
             body
+        }
+    }
+}
+
+/// Request bodies up to this size are buffered for a
+/// `transform.request_body` plugin; larger bodies stream through unchanged.
+pub const REQUEST_BODY_TRANSFORM_CAP_BYTES: usize = 1024 * 1024;
+/// `transform.response_stream` chunks are handed to the plugin in slices of
+/// at most this many bytes.
+pub const STREAM_TRANSFORM_CHUNK_BYTES: usize = 64 * 1024;
+
+fn identity_encoding(value: Option<&str>) -> bool {
+    value.is_none_or(|v| v.is_empty() || v.eq_ignore_ascii_case("identity"))
+}
+
+/// Whether a request body should be buffered for `transform.request_body`:
+/// a plugin is active, the body is not content-encoded, and its declared
+/// length (if any) fits the cap.
+pub fn request_body_transform_eligible(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    content_length: Option<&str>,
+    content_encoding: Option<&str>,
+    chunked: bool,
+) -> bool {
+    let Some(manager) = plugin_manager else {
+        return false;
+    };
+    if manager
+        .plugin_with_export("bearust_transform_request_body")
+        .is_none()
+        || !identity_encoding(content_encoding)
+    {
+        return false;
+    }
+    match content_length.and_then(|v| v.trim().parse::<usize>().ok()) {
+        Some(len) => len > 0 && len <= REQUEST_BODY_TRANSFORM_CAP_BYTES,
+        None => chunked,
+    }
+}
+
+/// Run the `transform.request_body` plugin; fail open to `body`.
+pub async fn apply_request_body_plugin(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    method: &str,
+    path: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> Vec<u8> {
+    let Some(manager) = plugin_manager else {
+        return body;
+    };
+    let Some(plugin) = manager.plugin_with_export("bearust_transform_request_body") else {
+        return body;
+    };
+    let metrics = manager.metrics();
+    metrics.record_transform_invocation();
+    let request = bearust_plugin_sdk::TransformRequestBodyRequest {
+        method: method.to_owned(),
+        path: path.to_owned(),
+        content_type: content_type.chars().take(256).collect(),
+        body: base64::engine::general_purpose::STANDARD.encode(&body),
+    };
+    let outcome =
+        tokio::task::spawn_blocking(move || plugin.transform_request_body(&request)).await;
+    let decoded = match outcome {
+        Ok(Ok(result)) => base64::engine::general_purpose::STANDARD
+            .decode(&result.body)
+            .ok()
+            .filter(|decoded| decoded.len() <= REQUEST_BODY_TRANSFORM_CAP_BYTES),
+        Ok(Err(error)) => {
+            tracing::warn!(
+                event = "transform_request_body_failed",
+                reason = error.code()
+            );
+            None
+        }
+        Err(_) => None,
+    };
+    match decoded {
+        Some(decoded) => {
+            metrics.record_transform_applied();
+            decoded
+        }
+        None => {
+            metrics.record_transform_failure();
+            body
+        }
+    }
+}
+
+/// Response headers that keep their upstream values whatever a
+/// `transform.response_headers` plugin returns: body framing and encoding.
+const PROTECTED_RESPONSE_HEADERS: [&str; 5] = [
+    "content-length",
+    "transfer-encoding",
+    "content-encoding",
+    "connection",
+    "upgrade",
+];
+
+/// Run the `transform.response_headers` plugin. Returns the replacement
+/// header list (framing headers restored from `headers`), or `None` to
+/// leave the response unchanged (no plugin, failure, or invalid output).
+pub async fn apply_response_headers_plugin(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    status: u16,
+    headers: Vec<(String, String)>,
+) -> Option<Vec<(String, String)>> {
+    let manager = plugin_manager?;
+    let plugin = manager.plugin_with_export("bearust_transform_response_headers")?;
+    if !is_valid_transform_headers(&headers) {
+        return None;
+    }
+    let metrics = manager.metrics();
+    metrics.record_transform_invocation();
+    let protected: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(name, _)| {
+            PROTECTED_RESPONSE_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+        })
+        .cloned()
+        .collect();
+    let request = bearust_plugin_sdk::TransformResponseHeadersRequest { status, headers };
+    let outcome =
+        tokio::task::spawn_blocking(move || plugin.transform_response_headers(&request)).await;
+    match outcome {
+        Ok(Ok(result)) if is_valid_transform_headers(&result.headers) => {
+            let mut next: Vec<(String, String)> = result
+                .headers
+                .into_iter()
+                .filter(|(name, _)| {
+                    !PROTECTED_RESPONSE_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+                })
+                .collect();
+            next.extend(protected);
+            metrics.record_transform_applied();
+            Some(next)
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                event = "transform_response_headers_failed",
+                reason = error.code()
+            );
+            metrics.record_transform_failure();
+            None
+        }
+        _ => {
+            metrics.record_transform_failure();
+            None
+        }
+    }
+}
+
+/// Whether a response should be streamed through `transform.response_stream`
+/// (used only when no buffered `transform.response` plugin applies).
+pub fn response_stream_transform_eligible(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    is_head: bool,
+    status: http::StatusCode,
+    content_encoding: Option<&str>,
+) -> bool {
+    plugin_manager.is_some_and(|manager| {
+        manager
+            .plugin_with_export("bearust_transform_response_chunk")
+            .is_some()
+    }) && !is_head
+        && !status.is_informational()
+        && status != http::StatusCode::NO_CONTENT
+        && status != http::StatusCode::NOT_MODIFIED
+        && identity_encoding(content_encoding)
+}
+
+/// Transform one streamed chunk in `STREAM_TRANSFORM_CHUNK_BYTES` slices.
+/// Each slice fails open independently; `index` counts slices across the
+/// response. Synchronous (uses `block_in_place`, like
+/// `apply_transform_response_plugin`).
+pub fn apply_stream_chunk_plugin(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    status: u16,
+    index: &mut u32,
+    chunk: &[u8],
+    last: bool,
+) -> Vec<u8> {
+    let Some(plugin) = plugin_manager
+        .and_then(|manager| manager.plugin_with_export("bearust_transform_response_chunk"))
+    else {
+        return chunk.to_vec();
+    };
+    let metrics = plugin_manager.map(|m| m.metrics());
+    let slices: Vec<&[u8]> = if chunk.is_empty() {
+        vec![chunk]
+    } else {
+        chunk.chunks(STREAM_TRANSFORM_CHUNK_BYTES).collect()
+    };
+    let count = slices.len();
+    let mut out = Vec::with_capacity(chunk.len());
+    for (position, slice) in slices.into_iter().enumerate() {
+        let request = bearust_plugin_sdk::TransformResponseChunkRequest {
+            status,
+            index: *index,
+            last: last && position + 1 == count,
+            chunk: base64::engine::general_purpose::STANDARD.encode(slice),
+        };
+        *index = index.saturating_add(1);
+        if let Some(metrics) = &metrics {
+            metrics.record_transform_response_invocation();
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::task::block_in_place(|| plugin.transform_response_chunk(&request))
+        }));
+        let decoded = match result {
+            Ok(Ok(result)) => base64::engine::general_purpose::STANDARD
+                .decode(&result.chunk)
+                .ok()
+                .filter(|d| d.len() <= STREAM_TRANSFORM_CHUNK_BYTES * 2),
+            _ => None,
+        };
+        match decoded {
+            Some(decoded) => {
+                if let Some(metrics) = &metrics {
+                    metrics.record_transform_response_applied();
+                }
+                out.extend_from_slice(&decoded);
+            }
+            None => {
+                if let Some(metrics) = &metrics {
+                    metrics.record_transform_response_failure();
+                }
+                out.extend_from_slice(slice);
+            }
+        }
+    }
+    out
+}
+
+/// Decode a gzip/deflate body for transformation, bounded by `cap` bytes of
+/// output (decompression bombs fail open). `None` for other encodings.
+pub fn decode_body(encoding: &str, body: &[u8], cap: usize) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut out = Vec::new();
+    let reader: Box<dyn std::io::Read> = match encoding.to_ascii_lowercase().as_str() {
+        "gzip" | "x-gzip" => Box::new(flate2::read::GzDecoder::new(body)),
+        "deflate" => Box::new(flate2::read::ZlibDecoder::new(body)),
+        _ => return None,
+    };
+    reader.take(cap as u64 + 1).read_to_end(&mut out).ok()?;
+    (out.len() <= cap).then_some(out)
+}
+
+/// Re-encode a transformed body with the response's original encoding.
+pub fn encode_body(encoding: &str, body: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write as _;
+    match encoding.to_ascii_lowercase().as_str() {
+        "gzip" | "x-gzip" => {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(body).ok()?;
+            encoder.finish().ok()
+        }
+        "deflate" => {
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(body).ok()?;
+            encoder.finish().ok()
+        }
+        _ => None,
+    }
+}
+
+/// `transform.response` for a possibly compressed body: gzip/deflate are
+/// decoded, transformed, and re-encoded; anything that fails along the way
+/// returns `body` unchanged.
+pub fn apply_transform_response_encoded(
+    plugin_manager: Option<&Arc<PluginManager>>,
+    status: u16,
+    content_encoding: Option<&str>,
+    body: Vec<u8>,
+) -> Vec<u8> {
+    match content_encoding.filter(|e| !identity_encoding(Some(e))) {
+        None => apply_transform_response_plugin(plugin_manager, status, body),
+        Some(encoding) => {
+            let Some(decoded) = decode_body(encoding, &body, RESPONSE_BODY_TRANSFORM_CAP_BYTES)
+            else {
+                return body;
+            };
+            let transformed = apply_transform_response_plugin(plugin_manager, status, decoded);
+            encode_body(encoding, &transformed).unwrap_or(body)
         }
     }
 }
@@ -1116,6 +1420,193 @@ pub fn route_key(route: &ResolvedRoute) -> i64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     (hash & i64::MAX as u64) as i64
+}
+
+impl BearustProxy {
+    /// WAF request-body inspection (the original `request_body_filter`).
+    async fn waf_request_body_filter(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut RequestContext,
+    ) -> Result<()> {
+        if self.waf.is_none() {
+            return Ok(());
+        }
+        if ctx.waf_buffering {
+            if let Some(chunk) = body.as_ref() {
+                let remaining =
+                    crate::waf::MAX_INSPECTION_BODY_BYTES.saturating_sub(ctx.waf_body.len());
+                let take = chunk.len().min(remaining);
+                ctx.waf_body.extend_from_slice(&chunk[..take]);
+                if take < chunk.len() {
+                    // Keep the original chunk untouched while the retained
+                    // prefix is evaluated below. If allowed, it can stream
+                    // immediately without retaining an unbounded suffix.
+                    ctx.waf_large_chunk = true;
+                    ctx.waf_large_chunk_includes_prefix = take > 0;
+                    ctx.waf_buffering = false;
+                } else {
+                    *body = Some(Bytes::new());
+                }
+            }
+        }
+        if let Some(waf) = &self.waf {
+            let header_values = session
+                .req_header()
+                .headers
+                .iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (name.as_str().to_owned(), value.to_owned()))
+                })
+                .collect();
+            let context = InspectionContext {
+                method: session.req_header().method.as_str().to_owned(),
+                path: session.req_header().uri.path().to_owned(),
+                query: session
+                    .req_header()
+                    .uri
+                    .query()
+                    .unwrap_or_default()
+                    .to_owned(),
+                headers: header_values,
+                body: ctx.waf_body.clone(),
+            };
+            let mut evaluation = ctx
+                .waf_snapshot
+                .as_ref()
+                .map(|snapshot| evaluate(snapshot, &context))
+                .unwrap_or_else(|| evaluate(&waf.snapshot(), &context));
+            if end_of_stream || ctx.waf_body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES {
+                evaluation =
+                    apply_waf_detector(self.plugin_manager.as_ref(), &context, evaluation).await;
+            }
+            ctx.waf_blocked = evaluation.decision == WafDecision::Block;
+            ctx.waf_evaluation = Some(evaluation.clone());
+            // Evaluate every bounded chunk before forwarding it. This
+            // catches body-only attacks without requiring replay/buffering.
+            if ctx.waf_blocked {
+                emit_waf_telemetry(
+                    &ctx.request_id,
+                    waf,
+                    &evaluation,
+                    self.plugin_notify.as_deref(),
+                );
+                *body = None;
+                session
+                    .respond_error_with_body(403, Bytes::from_static(b"Request blocked"))
+                    .await?;
+                self.record_completion(session, ctx, None);
+                ctx.completion_logged = true;
+                // Returning an error is required here: `Ok(())` would let
+                // Pingora continue its upstream body pipeline after the
+                // downstream response was written.
+                return Err(pingora_core::Error::explain(
+                    ErrorType::HTTPStatus(403),
+                    "request blocked by waf",
+                ));
+            }
+            if ctx.waf_large_chunk {
+                if !ctx.waf_large_chunk_includes_prefix && !ctx.waf_body.is_empty() {
+                    let mut forwarded = Vec::with_capacity(
+                        ctx.waf_body.len() + body.as_ref().map_or(0, |bytes| bytes.len()),
+                    );
+                    forwarded.extend_from_slice(&ctx.waf_body);
+                    if let Some(chunk) = body.as_ref() {
+                        forwarded.extend_from_slice(chunk);
+                    }
+                    *body = Some(Bytes::from(forwarded));
+                }
+                ctx.waf_body.clear();
+                ctx.waf_pending_suffix.clear();
+                ctx.waf_large_chunk = false;
+                ctx.waf_large_chunk_includes_prefix = false;
+            }
+            if end_of_stream
+                && (evaluation.semantic_score > 0 || !evaluation.matched_rule_ids.is_empty())
+            {
+                emit_waf_telemetry(
+                    &ctx.request_id,
+                    waf,
+                    &evaluation,
+                    self.plugin_notify.as_deref(),
+                );
+            }
+            let should_flush_buffer = !ctx.waf_blocked
+                && ctx.waf_buffering
+                && (end_of_stream || ctx.waf_body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES);
+            if should_flush_buffer {
+                let mut forwarded =
+                    Vec::with_capacity(ctx.waf_body.len() + ctx.waf_pending_suffix.len());
+                forwarded.extend_from_slice(&ctx.waf_body);
+                forwarded.extend_from_slice(&ctx.waf_pending_suffix);
+                *body = Some(Bytes::from(forwarded));
+                ctx.waf_body.clear();
+                ctx.waf_pending_suffix.clear();
+                ctx.waf_buffering = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// Buffer the request body for `transform.request_body` and emit the
+    /// transformed body at end of stream. Runs after WAF inspection, so the
+    /// WAF always sees the client's original body.
+    async fn transform_request_body_chunk(
+        &self,
+        session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut RequestContext,
+    ) {
+        if !ctx.request_body_transform {
+            return;
+        }
+        if let Some(chunk) = body.take() {
+            if ctx.request_body_buffer.len() + chunk.len() > REQUEST_BODY_TRANSFORM_CAP_BYTES {
+                // Over the cap: flush everything unmodified, stop buffering.
+                ctx.request_body_transform = false;
+                let mut flushed = std::mem::take(&mut ctx.request_body_buffer);
+                flushed.extend_from_slice(&chunk);
+                *body = Some(Bytes::from(flushed));
+                return;
+            }
+            ctx.request_body_buffer.extend_from_slice(&chunk);
+        }
+        if !end_of_stream {
+            *body = Some(Bytes::new());
+            return;
+        }
+        ctx.request_body_transform = false;
+        let buffered = std::mem::take(&mut ctx.request_body_buffer);
+        if buffered.is_empty() {
+            *body = Some(Bytes::new());
+            return;
+        }
+        let header = session.req_header();
+        let content_type = header
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        let method = header.method.as_str().to_owned();
+        let path = header.uri.path().to_owned();
+        *body = Some(Bytes::from(
+            apply_request_body_plugin(
+                self.plugin_manager.as_ref(),
+                &method,
+                &path,
+                &content_type,
+                buffered,
+            )
+            .await,
+        ));
+    }
 }
 
 #[async_trait]
@@ -1592,6 +2083,27 @@ impl ProxyHttp for BearustProxy {
             session.client_addr().map(ToString::to_string).as_deref(),
             &ctx.request_id,
         );
+        let header = |name: &str| {
+            session
+                .req_header()
+                .headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+        };
+        let chunked =
+            header("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+        if request_body_transform_eligible(
+            self.plugin_manager.as_ref(),
+            header("content-length"),
+            header("content-encoding"),
+            chunked,
+        ) {
+            // The transformed length is unknown until the body ends, so the
+            // upstream request is chunk-framed.
+            request.remove_header("content-length");
+            let _ = request.insert_header("transfer-encoding", "chunked");
+            ctx.request_body_transform = true;
+        }
         ctx.upstream_started = true;
         Ok(())
     }
@@ -1603,125 +2115,10 @@ impl ProxyHttp for BearustProxy {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        if self.waf.is_none() {
-            return Ok(());
-        }
-        if ctx.waf_buffering {
-            if let Some(chunk) = body.as_ref() {
-                let remaining =
-                    crate::waf::MAX_INSPECTION_BODY_BYTES.saturating_sub(ctx.waf_body.len());
-                let take = chunk.len().min(remaining);
-                ctx.waf_body.extend_from_slice(&chunk[..take]);
-                if take < chunk.len() {
-                    // Keep the original chunk untouched while the retained
-                    // prefix is evaluated below. If allowed, it can stream
-                    // immediately without retaining an unbounded suffix.
-                    ctx.waf_large_chunk = true;
-                    ctx.waf_large_chunk_includes_prefix = take > 0;
-                    ctx.waf_buffering = false;
-                } else {
-                    *body = Some(Bytes::new());
-                }
-            }
-        }
-        if let Some(waf) = &self.waf {
-            let header_values = session
-                .req_header()
-                .headers
-                .iter()
-                .filter_map(|(name, value)| {
-                    value
-                        .to_str()
-                        .ok()
-                        .map(|value| (name.as_str().to_owned(), value.to_owned()))
-                })
-                .collect();
-            let context = InspectionContext {
-                method: session.req_header().method.as_str().to_owned(),
-                path: session.req_header().uri.path().to_owned(),
-                query: session
-                    .req_header()
-                    .uri
-                    .query()
-                    .unwrap_or_default()
-                    .to_owned(),
-                headers: header_values,
-                body: ctx.waf_body.clone(),
-            };
-            let mut evaluation = ctx
-                .waf_snapshot
-                .as_ref()
-                .map(|snapshot| evaluate(snapshot, &context))
-                .unwrap_or_else(|| evaluate(&waf.snapshot(), &context));
-            if end_of_stream || ctx.waf_body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES {
-                evaluation =
-                    apply_waf_detector(self.plugin_manager.as_ref(), &context, evaluation).await;
-            }
-            ctx.waf_blocked = evaluation.decision == WafDecision::Block;
-            ctx.waf_evaluation = Some(evaluation.clone());
-            // Evaluate every bounded chunk before forwarding it. This
-            // catches body-only attacks without requiring replay/buffering.
-            if ctx.waf_blocked {
-                emit_waf_telemetry(
-                    &ctx.request_id,
-                    waf,
-                    &evaluation,
-                    self.plugin_notify.as_deref(),
-                );
-                *body = None;
-                session
-                    .respond_error_with_body(403, Bytes::from_static(b"Request blocked"))
-                    .await?;
-                self.record_completion(session, ctx, None);
-                ctx.completion_logged = true;
-                // Returning an error is required here: `Ok(())` would let
-                // Pingora continue its upstream body pipeline after the
-                // downstream response was written.
-                return Err(pingora_core::Error::explain(
-                    ErrorType::HTTPStatus(403),
-                    "request blocked by waf",
-                ));
-            }
-            if ctx.waf_large_chunk {
-                if !ctx.waf_large_chunk_includes_prefix && !ctx.waf_body.is_empty() {
-                    let mut forwarded = Vec::with_capacity(
-                        ctx.waf_body.len() + body.as_ref().map_or(0, |bytes| bytes.len()),
-                    );
-                    forwarded.extend_from_slice(&ctx.waf_body);
-                    if let Some(chunk) = body.as_ref() {
-                        forwarded.extend_from_slice(chunk);
-                    }
-                    *body = Some(Bytes::from(forwarded));
-                }
-                ctx.waf_body.clear();
-                ctx.waf_pending_suffix.clear();
-                ctx.waf_large_chunk = false;
-                ctx.waf_large_chunk_includes_prefix = false;
-            }
-            if end_of_stream
-                && (evaluation.semantic_score > 0 || !evaluation.matched_rule_ids.is_empty())
-            {
-                emit_waf_telemetry(
-                    &ctx.request_id,
-                    waf,
-                    &evaluation,
-                    self.plugin_notify.as_deref(),
-                );
-            }
-            let should_flush_buffer = !ctx.waf_blocked
-                && ctx.waf_buffering
-                && (end_of_stream || ctx.waf_body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES);
-            if should_flush_buffer {
-                let mut forwarded =
-                    Vec::with_capacity(ctx.waf_body.len() + ctx.waf_pending_suffix.len());
-                forwarded.extend_from_slice(&ctx.waf_body);
-                forwarded.extend_from_slice(&ctx.waf_pending_suffix);
-                *body = Some(Bytes::from(forwarded));
-                ctx.waf_body.clear();
-                ctx.waf_pending_suffix.clear();
-                ctx.waf_buffering = false;
-            }
-        }
+        self.waf_request_body_filter(session, body, end_of_stream, ctx)
+            .await?;
+        self.transform_request_body_chunk(session, body, end_of_stream, ctx)
+            .await;
         Ok(())
     }
 
@@ -1732,7 +2129,37 @@ impl ProxyHttp for BearustProxy {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         apply_http3_alt_svc_header(upstream_response, self.http3_alt_svc.as_deref());
+        let current: Vec<(String, String)> = upstream_response
+            .headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_owned(), value.to_owned()))
+            })
+            .collect();
+        if let Some(next) = apply_response_headers_plugin(
+            self.plugin_manager.as_ref(),
+            upstream_response.status.as_u16(),
+            current,
+        )
+        .await
+        {
+            let names: Vec<_> = upstream_response.headers.keys().cloned().collect();
+            for name in names {
+                upstream_response.remove_header(&name);
+            }
+            for (name, value) in next {
+                let _ = upstream_response.append_header(name, value);
+            }
+        }
         let method = session.req_header().method.clone();
+        let content_encoding = upstream_response
+            .headers
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         if should_buffer_response_for_transform(
             self.plugin_manager.as_ref(),
             &method,
@@ -1754,6 +2181,19 @@ impl ProxyHttp for BearustProxy {
             let _ = upstream_response.insert_header("transfer-encoding", "chunked");
             ctx.transform_response_buffering = true;
             ctx.transform_response_status = upstream_response.status.as_u16();
+            ctx.transform_response_encoding = content_encoding;
+        } else if response_stream_transform_eligible(
+            self.plugin_manager.as_ref(),
+            method == http::Method::HEAD,
+            upstream_response.status,
+            content_encoding.as_deref(),
+        ) {
+            // Chunk sizes change, so the length is unknown: chunk-frame it.
+            upstream_response.set_version(http::Version::HTTP_11);
+            upstream_response.remove_header("content-length");
+            let _ = upstream_response.insert_header("transfer-encoding", "chunked");
+            ctx.stream_transform = true;
+            ctx.transform_response_status = upstream_response.status.as_u16();
         }
         Ok(())
     }
@@ -1765,6 +2205,22 @@ impl ProxyHttp for BearustProxy {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
+        if ctx.stream_transform {
+            let chunk = body.take().unwrap_or_default();
+            if !chunk.is_empty() || end_of_stream {
+                let mut index = ctx.stream_index;
+                let transformed = apply_stream_chunk_plugin(
+                    self.plugin_manager.as_ref(),
+                    ctx.transform_response_status,
+                    &mut index,
+                    &chunk,
+                    end_of_stream,
+                );
+                ctx.stream_index = index;
+                *body = Some(Bytes::from(transformed));
+            }
+            return Ok(None);
+        }
         if !ctx.transform_response_buffering {
             return Ok(None);
         }
@@ -1782,9 +2238,10 @@ impl ProxyHttp for BearustProxy {
             *body = Some(if buffer.is_empty() {
                 Bytes::new()
             } else {
-                Bytes::from(apply_transform_response_plugin(
+                Bytes::from(apply_transform_response_encoded(
                     self.plugin_manager.as_ref(),
                     ctx.transform_response_status,
+                    ctx.transform_response_encoding.as_deref(),
                     buffer,
                 ))
             });
@@ -2614,10 +3071,19 @@ mod tests {
     }
 
     #[test]
-    fn ineligible_when_the_response_is_compressed() {
+    fn compressed_eligibility_depends_on_the_encoding() {
         let manager = transform_response_manager(true);
+        // gzip/deflate are decoded and re-encoded around the plugin.
+        let mut gzip = sample_response_header(200);
+        gzip.insert_header("content-encoding", "gzip").unwrap();
+        assert!(should_buffer_response_for_transform(
+            Some(&manager),
+            &http::Method::GET,
+            &gzip
+        ));
+        // Other encodings stay opaque and are never handed to the plugin.
         let mut response = sample_response_header(200);
-        response.insert_header("content-encoding", "gzip").unwrap();
+        response.insert_header("content-encoding", "br").unwrap();
         assert!(!should_buffer_response_for_transform(
             Some(&manager),
             &http::Method::GET,

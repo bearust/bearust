@@ -1230,14 +1230,69 @@ async fn handle_request<S>(
     for (name, value) in &outgoing_headers {
         builder = builder.header(name, value);
     }
-    if !body.is_empty() {
-        builder = builder.body(body.clone());
+    let request_content_type = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    let request_content_encoding = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+        .map(|(_, value)| value.clone());
+    let body_len = body.len().to_string();
+    let outgoing_body = if crate::proxy::request_body_transform_eligible(
+        state.plugin_manager.as_ref(),
+        Some(body_len.as_str()),
+        request_content_encoding.as_deref(),
+        false,
+    ) {
+        crate::proxy::apply_request_body_plugin(
+            state.plugin_manager.as_ref(),
+            &method,
+            &path,
+            &request_content_type,
+            body.clone(),
+        )
+        .await
+    } else {
+        body.clone()
+    };
+    if !outgoing_body.is_empty() {
+        builder = builder.body(outgoing_body);
     }
 
     match builder.send().await {
-        Ok(upstream_resp) => {
+        Ok(mut upstream_resp) => {
             let status = http::StatusCode::from_u16(upstream_resp.status().as_u16())
                 .unwrap_or(http::StatusCode::BAD_GATEWAY);
+            let current: Vec<(String, String)> = upstream_resp
+                .headers()
+                .iter()
+                .filter_map(|(name, value)| {
+                    value
+                        .to_str()
+                        .ok()
+                        .map(|value| (name.as_str().to_owned(), value.to_owned()))
+                })
+                .collect();
+            if let Some(next) = crate::proxy::apply_response_headers_plugin(
+                state.plugin_manager.as_ref(),
+                status.as_u16(),
+                current,
+            )
+            .await
+            {
+                let mut map = http::HeaderMap::new();
+                for (name, value) in next {
+                    if let (Ok(name), Ok(value)) = (
+                        http::HeaderName::try_from(name.as_str()),
+                        http::HeaderValue::try_from(value.as_str()),
+                    ) {
+                        map.append(name, value);
+                    }
+                }
+                *upstream_resp.headers_mut() = map;
+            }
             let response_bytes = upstream_resp
                 .headers()
                 .get("content-length")
@@ -1317,9 +1372,13 @@ async fn handle_request<S>(
                         .unwrap();
                     let _ = stream.send_response(resp).await;
                 } else {
-                    let transformed = crate::proxy::apply_transform_response_plugin(
+                    let encoding = upstream_headers
+                        .get("content-encoding")
+                        .and_then(|v| v.to_str().ok());
+                    let transformed = crate::proxy::apply_transform_response_encoded(
                         state.plugin_manager.as_ref(),
                         status.as_u16(),
+                        encoding,
                         buffer,
                     );
                     let resp = downstream_response_head(status, &upstream_headers, true);
@@ -1332,16 +1391,50 @@ async fn handle_request<S>(
                     let _ = stream.finish().await;
                 }
             } else {
-                let resp = downstream_response_head(status, upstream_resp.headers(), false);
+                let streaming = crate::proxy::response_stream_transform_eligible(
+                    state.plugin_manager.as_ref(),
+                    method == "HEAD",
+                    status,
+                    upstream_resp
+                        .headers()
+                        .get("content-encoding")
+                        .and_then(|v| v.to_str().ok()),
+                );
+                let resp = downstream_response_head(status, upstream_resp.headers(), streaming);
                 let _ = stream.send_response(resp).await;
                 let mut body_stream = upstream_resp.bytes_stream();
+                let mut index = 0u32;
                 while let Some(chunk) = body_stream.next().await {
                     let Ok(chunk) = chunk else {
                         upstream_failed = true;
                         break;
                     };
+                    let chunk = if streaming {
+                        bytes::Bytes::from(crate::proxy::apply_stream_chunk_plugin(
+                            state.plugin_manager.as_ref(),
+                            status.as_u16(),
+                            &mut index,
+                            &chunk,
+                            false,
+                        ))
+                    } else {
+                        chunk
+                    };
                     if stream.send_data(chunk).await.is_err() {
                         break;
+                    }
+                }
+                if streaming && !upstream_failed {
+                    // Let the plugin emit trailing output for end of stream.
+                    let tail = crate::proxy::apply_stream_chunk_plugin(
+                        state.plugin_manager.as_ref(),
+                        status.as_u16(),
+                        &mut index,
+                        &[],
+                        true,
+                    );
+                    if !tail.is_empty() {
+                        let _ = stream.send_data(bytes::Bytes::from(tail)).await;
                     }
                 }
                 if upstream_failed {

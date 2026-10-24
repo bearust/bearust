@@ -405,6 +405,53 @@ pub struct TransformResponseResult {
     pub body: String,
 }
 
+/// Input to `bearust_transform_request_body`: the buffered request body
+/// (base64, at most 1 MiB decoded) with context. The output replaces it.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TransformRequestBodyRequest {
+    pub method: String,
+    pub path: String,
+    pub content_type: String,
+    pub body: String,
+}
+
+/// Output of `bearust_transform_request_body` (base64 body).
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TransformRequestBodyResult {
+    pub body: String,
+}
+
+/// Input to `bearust_transform_response_headers`. Framing headers
+/// (`Content-Length`, `Transfer-Encoding`, `Content-Encoding`) are restored
+/// by the host after the transform; every other header may be rewritten.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TransformResponseHeadersRequest {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+}
+
+/// Output of `bearust_transform_response_headers`.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TransformResponseHeadersResult {
+    pub headers: Vec<(String, String)>,
+}
+
+/// Input to `bearust_transform_response_chunk`: one body chunk (base64, at
+/// most 64 KiB decoded), streamed without buffering the whole body.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TransformResponseChunkRequest {
+    pub status: u16,
+    pub index: u32,
+    pub last: bool,
+    pub chunk: String,
+}
+
+/// Output of `bearust_transform_response_chunk` (base64 chunk).
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TransformResponseChunkResult {
+    pub chunk: String,
+}
+
 /// One upstream backend as a `balance.select` plugin sees it: a live
 /// snapshot from the host, never plugin-supplied. `id` is the backend's
 /// stable index within its pool (`balancer::BackendId`, widened to `u64`

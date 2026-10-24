@@ -1,0 +1,11 @@
+id = "transform-response-stream-v2"
+display_name = "transform-response-stream-v2 fixture"
+abi_version = 2
+module = "transform_response_stream_v2.wasm"
+capabilities = ["transform.response_stream"]
+
+[limits]
+memory_pages = 4
+fuel = 10000
+invocation_timeout_ms = 100
+max_output_bytes = 98304

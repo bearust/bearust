@@ -107,14 +107,19 @@ const MIN_TRANSFORM_RESPONSE_INPUT_BYTES: usize = 1_572_864;
 const MIN_BALANCE_INPUT_BYTES: usize = 49_152;
 const EPOCH_TICK: Duration = Duration::from_millis(1);
 const MAX_DETAIL_BYTES: usize = 4096;
-const ALLOWED_CAPABILITIES: [&str; 6] = [
+const ALLOWED_CAPABILITIES: [&str; 9] = [
     "health_check",
     "notify.waf_block",
     "waf.detect",
     "transform.request",
     "transform.response",
     "balance.select",
+    "transform.request_body",
+    "transform.response_headers",
+    "transform.response_stream",
 ];
+/// A streamed chunk is at most 64 KiB (base64 ~87 KiB plus JSON framing).
+const MIN_TRANSFORM_STREAM_INPUT_BYTES: usize = 98_304;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -316,7 +321,23 @@ pub struct CompiledPlugin {
     has_transform_request: bool,
     has_transform_response: bool,
     has_balance_select: bool,
+    /// Exports verified for the JSON-in/JSON-out capabilities added after
+    /// Phase 13 (see `EXTRA_CAPABILITY_EXPORTS`).
+    extra_exports: Vec<&'static str>,
 }
+
+/// Later JSON-ABI capabilities and the export each requires.
+const EXTRA_CAPABILITY_EXPORTS: [(&str, &str); 3] = [
+    ("transform.request_body", "bearust_transform_request_body"),
+    (
+        "transform.response_headers",
+        "bearust_transform_response_headers",
+    ),
+    (
+        "transform.response_stream",
+        "bearust_transform_response_chunk",
+    ),
+];
 
 impl PluginEngine {
     pub fn new(policy: PluginPolicy) -> Result<Self, PluginError> {
@@ -483,6 +504,15 @@ impl PluginEngine {
             }
             _ => return Err(PluginError::AbiMismatch),
         };
+        let mut extra_exports = Vec::new();
+        for (capability, export) in EXTRA_CAPABILITY_EXPORTS {
+            if manifest.capabilities.iter().any(|c| c == capability) {
+                instance
+                    .get_typed_func::<(i32, i32), i64>(&mut store, export)
+                    .map_err(|_| PluginError::AbiMismatch)?;
+                extra_exports.push(export);
+            }
+        }
 
         Ok(CompiledPlugin {
             engine: self.engine.clone(),
@@ -496,6 +526,7 @@ impl PluginEngine {
             has_transform_request,
             has_transform_response,
             has_balance_select,
+            extra_exports,
         })
     }
 }
@@ -912,6 +943,85 @@ impl CompiledPlugin {
         bearust_plugin_sdk::decode(&bytes).map_err(|_| PluginError::Trap)
     }
 
+    /// Invoke a JSON-ABI export (alloc/write/call/read/dealloc), with the
+    /// same fuel, epoch, and bounds checks as the dedicated hooks above.
+    fn call_json<Req: serde::Serialize, Res: serde::de::DeserializeOwned>(
+        &self,
+        export: &'static str,
+        request: &Req,
+    ) -> Result<Res, PluginError> {
+        if !self.extra_exports.contains(&export) {
+            return Err(PluginError::AbiMismatch);
+        }
+        let started = Instant::now();
+        let _scheduler = Arc::clone(&self.scheduler);
+        let mut store = new_store(&self.engine, &self.limits)?;
+        store
+            .set_fuel(self.limits.fuel)
+            .map_err(|_| PluginError::FuelExhausted)?;
+        store.set_epoch_deadline(epoch_ticks(self.limits.invocation_timeout_ms));
+        let instance = Instance::new(&mut store, &self.module, &[])
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .ok_or(PluginError::AbiMismatch)?;
+        let alloc = instance
+            .get_typed_func::<i32, i32>(&mut store, "bearust_alloc")
+            .map_err(|_| PluginError::AbiMismatch)?;
+        let dealloc = instance
+            .get_typed_func::<(i32, i32), ()>(&mut store, "bearust_dealloc")
+            .map_err(|_| PluginError::AbiMismatch)?;
+        let entry = instance
+            .get_typed_func::<(i32, i32), i64>(&mut store, export)
+            .map_err(|_| PluginError::AbiMismatch)?;
+        let input = bearust_plugin_sdk::encode(request);
+        let input_len: i32 = input
+            .len()
+            .try_into()
+            .map_err(|_| PluginError::MemoryLimit)?;
+        let input_ptr = alloc
+            .call(&mut store, input_len)
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        write_guest_bytes(&memory, &mut store, input_ptr, &input, &self.limits)?;
+        let packed = entry
+            .call(&mut store, (input_ptr, input_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        dealloc
+            .call(&mut store, (input_ptr, input_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        let (out_ptr, out_len) = bearust_plugin_sdk::unpack(packed);
+        let bytes = read_guest_bytes(&memory, &store, out_ptr, out_len, &self.limits)?;
+        dealloc
+            .call(&mut store, (out_ptr, out_len))
+            .map_err(|error| map_runtime_error(&error, started, &self.limits))?;
+        bearust_plugin_sdk::decode(&bytes).map_err(|_| PluginError::Trap)
+    }
+
+    pub fn has_export(&self, export: &str) -> bool {
+        self.extra_exports.contains(&export)
+    }
+
+    pub fn transform_request_body(
+        &self,
+        request: &bearust_plugin_sdk::TransformRequestBodyRequest,
+    ) -> Result<bearust_plugin_sdk::TransformRequestBodyResult, PluginError> {
+        self.call_json("bearust_transform_request_body", request)
+    }
+
+    pub fn transform_response_headers(
+        &self,
+        request: &bearust_plugin_sdk::TransformResponseHeadersRequest,
+    ) -> Result<bearust_plugin_sdk::TransformResponseHeadersResult, PluginError> {
+        self.call_json("bearust_transform_response_headers", request)
+    }
+
+    pub fn transform_response_chunk(
+        &self,
+        request: &bearust_plugin_sdk::TransformResponseChunkRequest,
+    ) -> Result<bearust_plugin_sdk::TransformResponseChunkResult, PluginError> {
+        self.call_json("bearust_transform_response_chunk", request)
+    }
+
     /// Invokes the `balance.select` capability's entry point on an
     /// `abi_version: 2` plugin that declared it. Returns the plugin's
     /// chosen `backend_id` or a `PluginError` for any host-detected
@@ -1095,6 +1205,7 @@ impl PluginManifest {
                     || c == "transform.request"
                     || c == "transform.response"
                     || c == "balance.select"
+                    || EXTRA_CAPABILITY_EXPORTS.iter().any(|(cap, _)| c == cap)
             })
         {
             return Err(PluginError::InvalidManifest);
@@ -1144,6 +1255,18 @@ impl PluginManifest {
         }
         if self.capabilities.iter().any(|c| c == "balance.select")
             && self.limits.max_output_bytes < MIN_BALANCE_INPUT_BYTES
+        {
+            return Err(PluginError::InvalidManifest);
+        }
+        let floor = |cap: &str, min: usize| {
+            self.capabilities.iter().any(|c| c == cap) && self.limits.max_output_bytes < min
+        };
+        if floor("transform.request_body", MIN_TRANSFORM_RESPONSE_INPUT_BYTES)
+            || floor("transform.response_headers", MIN_TRANSFORM_INPUT_BYTES)
+            || floor(
+                "transform.response_stream",
+                MIN_TRANSFORM_STREAM_INPUT_BYTES,
+            )
         {
             return Err(PluginError::InvalidManifest);
         }
@@ -2037,6 +2160,22 @@ impl PluginManager {
                 compiled
                     .has_transform_response
                     .then(|| Arc::clone(compiled))
+            })
+    }
+
+    /// The active plugin (lowest enabled id) exporting `export`, for the
+    /// later JSON-ABI capabilities.
+    pub fn plugin_with_export(&self, export: &str) -> Option<Arc<CompiledPlugin>> {
+        self.current
+            .load_full()
+            .plugins
+            .values()
+            .find_map(|record| {
+                if !record.status.enabled {
+                    return None;
+                }
+                let compiled = record.compiled.as_ref()?;
+                compiled.has_export(export).then(|| Arc::clone(compiled))
             })
     }
 

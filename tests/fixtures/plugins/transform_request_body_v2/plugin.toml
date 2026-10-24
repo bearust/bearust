@@ -1,0 +1,11 @@
+id = "transform-request-body-v2"
+display_name = "transform-request-body-v2 fixture"
+abi_version = 2
+module = "transform_request_body_v2.wasm"
+capabilities = ["transform.request_body"]
+
+[limits]
+memory_pages = 1
+fuel = 10000
+invocation_timeout_ms = 100
+max_output_bytes = 1572864
