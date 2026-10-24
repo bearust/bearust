@@ -302,7 +302,19 @@
     "previous": "前へ",
     "pageOf": "{{page}} / {{total}} ページ",
     "next": "次へ",
-    "refreshEvents": "イベントを更新"
+    "refreshEvents": "イベントを更新",
+    "registryTitle": "プラグインレジストリ",
+    "registryDescription": "設定済みのインデックスからプラグインを検索・インストールします。パッケージはチェックサムと署名で検証され、初回ロード時に信頼が固定されます。",
+    "registrySearch": "プラグインを検索",
+    "registryIndexSigned": "署名済みインデックス",
+    "registryIndexUnsigned": "未署名インデックス",
+    "registryInstall": "インストール",
+    "registryUpgrade": "{{version}} にアップグレード",
+    "registryInstalled": "{{version}} をインストール済み",
+    "registryInstalledToast": "{{id}} {{version}} をインストールしました",
+    "registrySignedPackage": "署名済み",
+    "registryUnsignedPackage": "未署名",
+    "registryEmpty": "一致するプラグインはありません。"
   },
   "common": {
     "cancel": "キャンセル",

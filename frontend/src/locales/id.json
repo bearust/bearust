@@ -302,7 +302,19 @@
     "previous": "Sebelumnya",
     "pageOf": "Halaman {{page}} dari {{total}}",
     "next": "Berikutnya",
-    "refreshEvents": "Muat ulang peristiwa"
+    "refreshEvents": "Muat ulang peristiwa",
+    "registryTitle": "Registry plugin",
+    "registryDescription": "Jelajahi dan pasang plugin dari index yang dikonfigurasi. Paket diperiksa checksum dan tanda tangannya; kepercayaan di-pin saat pertama dimuat.",
+    "registrySearch": "Cari plugin",
+    "registryIndexSigned": "Index bertanda tangan",
+    "registryIndexUnsigned": "Index tanpa tanda tangan",
+    "registryInstall": "Pasang",
+    "registryUpgrade": "Upgrade ke {{version}}",
+    "registryInstalled": "Terpasang {{version}}",
+    "registryInstalledToast": "{{id}} {{version}} terpasang",
+    "registrySignedPackage": "Bertanda tangan",
+    "registryUnsignedPackage": "Tanpa tanda tangan",
+    "registryEmpty": "Tidak ada plugin yang cocok."
   },
   "common": {
     "cancel": "Batal",

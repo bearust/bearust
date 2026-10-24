@@ -206,6 +206,8 @@ pub enum PluginError {
     InvalidSignature,
     KeyMismatch,
     TrustStoreUnavailable,
+    /// The signer key was revoked by the plugin registry.
+    KeyRevoked,
 }
 impl PluginError {
     pub fn code(&self) -> &'static str {
@@ -227,6 +229,7 @@ impl PluginError {
             Self::InvalidSignature => "invalid_signature",
             Self::KeyMismatch => "key_mismatch",
             Self::TrustStoreUnavailable => "trust_store_corrupt",
+            Self::KeyRevoked => "key_revoked",
         }
     }
 }
@@ -1202,6 +1205,7 @@ fn resolve_trust(
     plugin_dir: &Path,
     require_signature: bool,
     trust_store: &TrustStore,
+    revoked_keys: &[String],
 ) -> Result<String, PluginError> {
     let sig_path = plugin_dir.join("plugin.sig");
     let sig_bytes = match fs::metadata(&sig_path) {
@@ -1238,6 +1242,10 @@ fn resolve_trust(
             SignatureError::MalformedSignature => PluginError::MalformedSignature,
             SignatureError::InvalidSignature => PluginError::InvalidSignature,
         })?;
+    use base64::Engine as _;
+    if revoked_keys.contains(&base64::engine::general_purpose::STANDARD.encode(key.to_bytes())) {
+        return Err(PluginError::KeyRevoked);
+    }
     match trust_store
         .check_or_pin(&manifest.id, &key)
         .map_err(|_: TrustStoreError| PluginError::Io)?
@@ -1360,6 +1368,7 @@ fn sanitize_error_code(value: &str) -> Option<String> {
             | "malformed_signature"
             | "invalid_signature"
             | "key_mismatch"
+            | "key_revoked"
             | "trust_store_corrupt"
     );
     safe.then(|| value.to_owned())
@@ -1574,6 +1583,7 @@ impl PluginManager {
 
         let trust_store = TrustStore::load(directory.join("trusted-keys.json"))
             .map_err(|_| PluginError::TrustStoreUnavailable)?;
+        let revoked_keys = crate::plugin_registry::load_revoked_keys(directory);
 
         for child in children {
             let manifest_path = child.path().join("plugin.toml");
@@ -1668,6 +1678,7 @@ impl PluginManager {
                     &child.path(),
                     self.config.require_signature,
                     &trust_store,
+                    &revoked_keys,
                 )?;
                 let digest = module_digest(&bytes);
                 let compiled = engine.compile(validated.clone(), &bytes)?;
@@ -1922,6 +1933,10 @@ impl PluginManager {
             errors.remove(id);
         }
         Ok(())
+    }
+
+    pub fn config(&self) -> &PluginConfig {
+        &self.config
     }
 
     pub fn list(&self) -> Vec<PluginStatus> {

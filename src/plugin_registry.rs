@@ -9,7 +9,7 @@
 use crate::plugin_runtime::PluginManifest;
 use crate::plugin_signing::{self, PluginSignature};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -29,7 +29,32 @@ pub struct RegistryEntry {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RegistryIndex {
     pub entries: Vec<RegistryEntry>,
+    /// Signer public keys (base64) the registry has revoked. Honored only
+    /// from an index whose signature verified against the pinned key.
+    #[serde(default)]
+    pub revoked_keys: Vec<String>,
+    /// Individual releases withdrawn by the registry (same condition).
+    #[serde(default)]
+    pub revoked: Vec<RevokedRelease>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RevokedRelease {
+    pub id: String,
+    pub version: String,
+}
+
+/// An index plus whether its detached signature verified. An unsigned index
+/// is a catalog only: its revocation lists are dropped.
+#[derive(Debug, Clone)]
+pub struct VerifiedIndex {
+    pub index: RegistryIndex,
+    pub signed: bool,
+}
+
+/// The community index used when no registry URL is configured.
+pub const DEFAULT_PLUGIN_REGISTRY_URL: &str =
+    "https://raw.githubusercontent.com/Bearust/bearust-plugin-index/main/index.json";
 
 /// A generous ceiling on the index response itself -- a static JSON
 /// catalog has no reason to be large, so anything past this is treated
@@ -44,8 +69,17 @@ pub enum RegistryError {
     NotFound(String),
     ChecksumMismatch,
     MalformedArchive(String),
-    ManifestIdMismatch { expected: String, found: String },
+    ManifestIdMismatch {
+        expected: String,
+        found: String,
+    },
     SignerKeyMismatch(String),
+    /// The index signature is missing or invalid for the pinned registry key.
+    IndexSignature(String),
+    /// The release or its signer key has been revoked by the registry.
+    Revoked(String),
+    AlreadyInstalled(String),
+    Io(String),
 }
 
 impl std::fmt::Display for RegistryError {
@@ -67,6 +101,12 @@ impl std::fmt::Display for RegistryError {
                 "archive's plugin.toml declares id \"{found}\", expected \"{expected}\""
             ),
             Self::SignerKeyMismatch(reason) => write!(f, "signer key mismatch: {reason}"),
+            Self::IndexSignature(reason) => write!(f, "registry index signature: {reason}"),
+            Self::Revoked(reason) => write!(f, "revoked by the registry: {reason}"),
+            Self::AlreadyInstalled(path) => {
+                write!(f, "{path} already exists -- pass --force to overwrite")
+            }
+            Self::Io(reason) => write!(f, "could not write plugin files: {reason}"),
         }
     }
 }
@@ -76,6 +116,65 @@ impl RegistryIndex {
         client: &reqwest::blocking::Client,
         url: &str,
     ) -> Result<RegistryIndex, RegistryError> {
+        let bytes = fetch_bytes(client, url)?;
+        serde_json::from_slice(&bytes).map_err(|e| RegistryError::Parse(e.to_string()))
+    }
+
+    /// Fetch the index and its detached signature (`<url>.sig`, base64
+    /// Ed25519 over the exact index bytes). With a pinned `registry_key`
+    /// the signature is mandatory; without one the index is accepted as an
+    /// unsigned catalog and its revocation lists are ignored.
+    pub fn fetch_verified(
+        client: &reqwest::blocking::Client,
+        url: &str,
+        registry_key: Option<&str>,
+    ) -> Result<VerifiedIndex, RegistryError> {
+        let bytes = fetch_bytes(client, url)?;
+        let mut index: RegistryIndex =
+            serde_json::from_slice(&bytes).map_err(|e| RegistryError::Parse(e.to_string()))?;
+        let signed = match registry_key.map(str::trim).filter(|k| !k.is_empty()) {
+            Some(key) => {
+                let signature = fetch_bytes(client, &format!("{url}.sig"))
+                    .map_err(|e| RegistryError::IndexSignature(format!("no signature: {e}")))?;
+                verify_index_signature(&bytes, &signature, key)?;
+                true
+            }
+            None => false,
+        };
+        if !signed {
+            index.revoked_keys.clear();
+            index.revoked.clear();
+        }
+        Ok(VerifiedIndex { index, signed })
+    }
+}
+
+/// Verify a base64 Ed25519 signature over `bytes` with a base64 public key.
+pub fn verify_index_signature(
+    bytes: &[u8],
+    signature_b64: &[u8],
+    public_key_b64: &str,
+) -> Result<(), RegistryError> {
+    use ed25519_dalek::{Signature, VerifyingKey};
+    let invalid = |reason: &str| RegistryError::IndexSignature(reason.to_owned());
+    let key_bytes: [u8; 32] = BASE64
+        .decode(public_key_b64)
+        .ok()
+        .and_then(|k| k.try_into().ok())
+        .ok_or_else(|| invalid("pinned registry key is not a base64 Ed25519 key"))?;
+    let key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| invalid("invalid registry key"))?;
+    let signature_text = std::str::from_utf8(signature_b64).map_err(|_| invalid("malformed"))?;
+    let signature_bytes: [u8; 64] = BASE64
+        .decode(signature_text.trim())
+        .ok()
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| invalid("malformed"))?;
+    key.verify_strict(bytes, &Signature::from_bytes(&signature_bytes))
+        .map_err(|_| invalid("does not verify against the pinned registry key"))
+}
+
+fn fetch_bytes(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, RegistryError> {
+    {
         let response = client
             .get(url)
             .send()
@@ -104,9 +203,11 @@ impl RegistryIndex {
         if bytes.len() as u64 > MAX_INDEX_RESPONSE_BYTES {
             return Err(RegistryError::ResponseTooLarge);
         }
-        serde_json::from_slice(&bytes).map_err(|e| RegistryError::Parse(e.to_string()))
+        Ok(bytes)
     }
+}
 
+impl RegistryIndex {
     pub fn find(&self, id: &str) -> Option<&RegistryEntry> {
         self.entries.iter().find(|entry| entry.id == id)
     }
@@ -389,6 +490,176 @@ pub fn verify_signer(
             Ok(Some(actual_key_b64))
         }
     }
+}
+
+/// Metadata written next to an installed plugin (`.registry.json`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstallRecord {
+    pub id: String,
+    pub version: String,
+    pub signer: Option<String>,
+    pub index_signed: bool,
+    pub installed_at: String,
+}
+
+pub const INSTALL_RECORD: &str = ".registry.json";
+/// Registry-revoked signer keys, persisted in the plugins directory and
+/// enforced on every plugin reload.
+pub const REVOKED_KEYS_FILE: &str = "revoked-keys.json";
+
+/// The registry version installed in `plugins_dir/<id>`, if it was
+/// installed from a registry.
+pub fn installed_record(plugins_dir: &std::path::Path, id: &str) -> Option<InstallRecord> {
+    let bytes = std::fs::read(plugins_dir.join(id).join(INSTALL_RECORD)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Compare dotted numeric versions (`1.10.0` > `1.9.3`); non-numeric parts
+/// compare as text. Used to flag available upgrades.
+pub fn version_newer(candidate: &str, installed: &str) -> bool {
+    let parse = |v: &str| -> Vec<(u64, String)> {
+        v.trim_start_matches('v')
+            .split(['.', '-', '+'])
+            .map(|part| (part.parse::<u64>().unwrap_or(0), part.to_owned()))
+            .collect()
+    };
+    parse(candidate) > parse(installed)
+}
+
+/// Merge a signed index's revoked keys into the plugins directory's
+/// revocation file so already-installed plugins stop loading.
+pub fn persist_revocations(
+    plugins_dir: &std::path::Path,
+    verified: &VerifiedIndex,
+) -> Result<(), RegistryError> {
+    if !verified.signed || verified.index.revoked_keys.is_empty() {
+        return Ok(());
+    }
+    let path = plugins_dir.join(REVOKED_KEYS_FILE);
+    let mut keys = load_revoked_keys(plugins_dir);
+    for key in &verified.index.revoked_keys {
+        if !keys.contains(key) {
+            keys.push(key.clone());
+        }
+    }
+    keys.sort();
+    std::fs::create_dir_all(plugins_dir).map_err(|e| RegistryError::Io(e.to_string()))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&keys).unwrap_or_default())
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .map_err(|e| RegistryError::Io(e.to_string()))
+}
+
+/// Revoked signer keys recorded in `plugins_dir` (empty when none).
+pub fn load_revoked_keys(plugins_dir: &std::path::Path) -> Vec<String> {
+    std::fs::read(plugins_dir.join(REVOKED_KEYS_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// A plugin ready to be written: verified and checked against revocations.
+pub struct PreparedInstall {
+    pub entry: RegistryEntry,
+    pub extracted: ExtractedPlugin,
+    pub signer: Option<String>,
+    pub index_signed: bool,
+}
+
+/// Download, checksum, extract, signer-check, and revocation-check one
+/// registry entry without touching the filesystem.
+pub fn prepare_install(
+    client: &reqwest::blocking::Client,
+    verified: &VerifiedIndex,
+    id: &str,
+) -> Result<PreparedInstall, RegistryError> {
+    let entry = verified
+        .index
+        .find(id)
+        .ok_or_else(|| RegistryError::NotFound(id.to_owned()))?
+        .clone();
+    if verified
+        .index
+        .revoked
+        .iter()
+        .any(|r| r.id == entry.id && r.version == entry.version)
+    {
+        return Err(RegistryError::Revoked(format!(
+            "{} {}",
+            entry.id, entry.version
+        )));
+    }
+    let tarball = download_and_verify(client, &entry)?;
+    let extracted = extract_tarball(&tarball, id)?;
+    let signer = verify_signer(&extracted, entry.signer_public_key.as_deref())?;
+    if let Some(key) = &signer {
+        if verified.index.revoked_keys.contains(key) {
+            return Err(RegistryError::Revoked(format!("signer key {key}")));
+        }
+    }
+    Ok(PreparedInstall {
+        entry,
+        extracted,
+        signer,
+        index_signed: verified.signed,
+    })
+}
+
+/// Write a prepared plugin into `plugins_dir/<id>` atomically (temp dir +
+/// rename), with its install record. `force` replaces an existing plugin
+/// (upgrade). Trust pinning still happens on the next reload.
+pub fn write_install(
+    plugins_dir: &std::path::Path,
+    prepared: &PreparedInstall,
+    force: bool,
+) -> Result<InstallRecord, RegistryError> {
+    let id = &prepared.entry.id;
+    let target_dir = plugins_dir.join(id);
+    if target_dir.parent() != Some(plugins_dir) {
+        return Err(RegistryError::NotFound(id.clone()));
+    }
+    if target_dir.exists() && !force {
+        return Err(RegistryError::AlreadyInstalled(
+            target_dir.display().to_string(),
+        ));
+    }
+    let record = InstallRecord {
+        id: id.clone(),
+        version: prepared.entry.version.clone(),
+        signer: prepared.signer.clone(),
+        index_signed: prepared.index_signed,
+        installed_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let io = |e: std::io::Error| RegistryError::Io(e.to_string());
+    std::fs::create_dir_all(plugins_dir).map_err(io)?;
+    let temp_dir = plugins_dir.join(format!(".{id}.install-tmp"));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).map_err(io)?;
+    let extracted = &prepared.extracted;
+    let write_result = (|| -> std::io::Result<()> {
+        std::fs::write(temp_dir.join("plugin.toml"), &extracted.manifest_bytes)?;
+        std::fs::write(
+            temp_dir.join(&extracted.manifest.module),
+            &extracted.wasm_bytes,
+        )?;
+        if let Some(signature_bytes) = &extracted.signature_bytes {
+            std::fs::write(temp_dir.join("plugin.sig"), signature_bytes)?;
+        }
+        std::fs::write(
+            temp_dir.join(INSTALL_RECORD),
+            serde_json::to_vec_pretty(&record).unwrap_or_default(),
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(io(error));
+    }
+    if target_dir.exists() {
+        std::fs::remove_dir_all(&target_dir).map_err(io)?;
+    }
+    std::fs::rename(&temp_dir, &target_dir).map_err(io)?;
+    Ok(record)
 }
 
 #[cfg(test)]
@@ -753,6 +1024,8 @@ max_output_bytes = 1024
                     signer_public_key: None,
                 },
             ],
+            revoked_keys: Vec::new(),
+            revoked: Vec::new(),
         }
     }
 

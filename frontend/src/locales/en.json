@@ -302,7 +302,19 @@
     "previous": "Previous",
     "pageOf": "Page {{page}} of {{total}}",
     "next": "Next",
-    "refreshEvents": "Refresh events"
+    "refreshEvents": "Refresh events",
+    "registryTitle": "Plugin registry",
+    "registryDescription": "Browse and install plugins from the configured index. Packages are checksum- and signature-checked; trust is pinned on first load.",
+    "registrySearch": "Search plugins",
+    "registryIndexSigned": "Signed index",
+    "registryIndexUnsigned": "Unsigned index",
+    "registryInstall": "Install",
+    "registryUpgrade": "Upgrade to {{version}}",
+    "registryInstalled": "Installed {{version}}",
+    "registryInstalledToast": "{{id}} {{version}} installed",
+    "registrySignedPackage": "Signed",
+    "registryUnsignedPackage": "Unsigned",
+    "registryEmpty": "No plugins match."
   },
   "common": {
     "cancel": "Cancel",

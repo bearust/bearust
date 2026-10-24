@@ -82,7 +82,8 @@ fn plugin_error(error: PluginError) -> Response {
         | PluginError::SignatureRequired
         | PluginError::MalformedSignature
         | PluginError::InvalidSignature
-        | PluginError::KeyMismatch => (StatusCode::BAD_REQUEST, "Invalid plugin"),
+        | PluginError::KeyMismatch
+        | PluginError::KeyRevoked => (StatusCode::BAD_REQUEST, "Invalid plugin"),
         PluginError::Timeout
         | PluginError::FuelExhausted
         | PluginError::MemoryLimit
@@ -284,3 +285,219 @@ pub async fn health_check(
 // Keep this assertion close to the response conversion: adding a field to
 // PluginStatus requires an explicit review of the public redaction boundary.
 fn _status_is_safe(_: &PluginStatus) {}
+
+#[derive(serde::Serialize)]
+struct RegistryListing {
+    index_signed: bool,
+    entries: Vec<RegistryListingEntry>,
+}
+
+#[derive(serde::Serialize)]
+struct RegistryListingEntry {
+    id: String,
+    display_name: String,
+    description: String,
+    version: String,
+    signed: bool,
+    installed_version: Option<String>,
+    update_available: bool,
+}
+
+/// Index URL and pinned key from `[plugins]`, falling back to the default
+/// community index.
+fn registry_source(state: &AppState) -> (String, Option<String>) {
+    let config = state.plugin_manager.config();
+    (
+        config
+            .registry_url
+            .clone()
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or_else(|| crate::plugin_registry::DEFAULT_PLUGIN_REGISTRY_URL.to_owned()),
+        config.registry_public_key.clone(),
+    )
+}
+
+fn registry_error(error: crate::plugin_registry::RegistryError) -> Response {
+    use crate::plugin_registry::RegistryError;
+    let (status, code) = match &error {
+        RegistryError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+        RegistryError::AlreadyInstalled(_) => (StatusCode::CONFLICT, "conflict"),
+        RegistryError::Revoked(_) => (StatusCode::CONFLICT, "revoked"),
+        RegistryError::IndexSignature(_) => (StatusCode::BAD_GATEWAY, "registry_untrusted"),
+        RegistryError::ChecksumMismatch
+        | RegistryError::MalformedArchive(_)
+        | RegistryError::ManifestIdMismatch { .. }
+        | RegistryError::SignerKeyMismatch(_) => {
+            (StatusCode::BAD_GATEWAY, "registry_package_invalid")
+        }
+        RegistryError::Io(_) => (StatusCode::SERVICE_UNAVAILABLE, "io_error"),
+        RegistryError::Fetch(_) | RegistryError::Parse(_) | RegistryError::ResponseTooLarge => {
+            (StatusCode::BAD_GATEWAY, "registry_unavailable")
+        }
+    };
+    // Registry-provided text never reaches the client; codes are stable.
+    user_error(status, code, "Plugin registry request failed")
+}
+
+fn fetch_index(
+    url: &str,
+    key: Option<&str>,
+) -> Result<
+    (
+        reqwest::blocking::Client,
+        crate::plugin_registry::VerifiedIndex,
+    ),
+    crate::plugin_registry::RegistryError,
+> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| crate::plugin_registry::RegistryError::Fetch(e.to_string()))?;
+    let verified = crate::plugin_registry::RegistryIndex::fetch_verified(&client, url, key)?;
+    Ok((client, verified))
+}
+
+/// `GET /api/plugins/registry?q=`: browse the registry with install state.
+pub async fn registry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Err(response) = require_permission(&state, &headers, Permission::PluginsRead).await {
+        return response;
+    }
+    let (url, key) = registry_source(&state);
+    let directory = state.plugin_manager.config().directory.clone();
+    let search = query.get("q").cloned().unwrap_or_default();
+    let listing = tokio::task::spawn_blocking(move || {
+        let (_, verified) = fetch_index(&url, key.as_deref())?;
+        let _ = crate::plugin_registry::persist_revocations(&directory, &verified);
+        let entries = verified
+            .index
+            .search(&search)
+            .into_iter()
+            .take(200)
+            .map(|entry| {
+                let installed = crate::plugin_registry::installed_record(&directory, &entry.id)
+                    .map(|record| record.version);
+                RegistryListingEntry {
+                    update_available: installed
+                        .as_deref()
+                        .is_some_and(|v| crate::plugin_registry::version_newer(&entry.version, v)),
+                    installed_version: installed,
+                    id: entry.id.clone(),
+                    display_name: entry.display_name.chars().take(200).collect(),
+                    description: entry.description.chars().take(500).collect(),
+                    version: entry.version.chars().take(64).collect(),
+                    signed: entry.signer_public_key.is_some(),
+                }
+            })
+            .collect();
+        Ok::<_, crate::plugin_registry::RegistryError>(RegistryListing {
+            index_signed: verified.signed,
+            entries,
+        })
+    })
+    .await;
+    match listing {
+        Ok(Ok(listing)) => Json(listing).into_response(),
+        Ok(Err(error)) => registry_error(error),
+        Err(_) => user_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "registry_unavailable",
+            "Plugin registry request failed",
+        ),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct InstallRequest {
+    /// Replace an installed plugin (upgrade or reinstall).
+    #[serde(default)]
+    force: bool,
+}
+
+/// `POST /api/plugins/registry/{id}/install`: install or upgrade from the
+/// registry, then reload plugins (trust pinning happens on that reload).
+pub async fn registry_install(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let actor = match require_permission(&state, &headers, Permission::PluginsManage).await {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    if let Err(response) = validate_id(&id) {
+        return response;
+    }
+    let request = if body.iter().all(u8::is_ascii_whitespace) {
+        InstallRequest::default()
+    } else {
+        match serde_json::from_slice::<InstallRequest>(&body) {
+            Ok(request) => request,
+            Err(_) => {
+                return user_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_input",
+                    "Invalid install request",
+                )
+            }
+        }
+    };
+    let force = request.force;
+    let (url, key) = registry_source(&state);
+    let directory = state.plugin_manager.config().directory.clone();
+    let install_id = id.clone();
+    let installed = tokio::task::spawn_blocking(move || {
+        let (client, verified) = fetch_index(&url, key.as_deref())?;
+        crate::plugin_registry::persist_revocations(&directory, &verified)?;
+        let prepared = crate::plugin_registry::prepare_install(&client, &verified, &install_id)?;
+        crate::plugin_registry::write_install(&directory, &prepared, force)
+    })
+    .await;
+    let record = match installed {
+        Ok(Ok(record)) => record,
+        Ok(Err(error)) => {
+            audit::record_plugin_state(
+                &state,
+                Some(actor.id),
+                &id,
+                "registry_install",
+                "failure",
+                Some("registry_error"),
+            )
+            .await;
+            return registry_error(error);
+        }
+        Err(_) => {
+            return user_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "registry_unavailable",
+                "Plugin registry request failed",
+            )
+        }
+    };
+    audit::record_plugin_state(
+        &state,
+        Some(actor.id),
+        &id,
+        "registry_install",
+        "success",
+        None,
+    )
+    .await;
+    let manager = std::sync::Arc::clone(&state.plugin_manager);
+    let _ = tokio::task::spawn_blocking(move || manager.reload_from_disk_without_audit()).await;
+    state.realtime.publish("plugins.changed");
+    Json(serde_json::json!({
+        "id": record.id,
+        "version": record.version,
+        "signed": record.signer.is_some(),
+        "index_signed": record.index_signed,
+        "plugin": state.plugin_manager.list().into_iter().find(|p| p.id == id).map(plugin_status),
+    }))
+    .into_response()
+}

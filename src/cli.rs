@@ -91,6 +91,10 @@ pub enum PluginCommand {
         /// Registry index URL (overrides `BEARUST_PLUGIN_REGISTRY_URL`).
         #[arg(long)]
         registry_url: Option<String>,
+        /// Pinned registry public key (overrides `BEARUST_PLUGIN_REGISTRY_KEY`);
+        /// when set, the index must carry a valid `<url>.sig`.
+        #[arg(long)]
+        registry_key: Option<String>,
     },
     /// Downloads, verifies, and installs a plugin from the registry index.
     Install {
@@ -108,6 +112,26 @@ pub enum PluginCommand {
         /// Registry index URL (overrides `BEARUST_PLUGIN_REGISTRY_URL`).
         #[arg(long)]
         registry_url: Option<String>,
+        /// Pinned registry public key (overrides `BEARUST_PLUGIN_REGISTRY_KEY`).
+        #[arg(long)]
+        registry_key: Option<String>,
+    },
+    /// Upgrades registry-installed plugins whose index version is newer.
+    Upgrade {
+        /// Plugin id to upgrade; all registry-installed plugins when omitted.
+        id: Option<String>,
+        /// Plugins directory holding the installed bundles.
+        #[arg(long)]
+        out: PathBuf,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+        /// Registry index URL (overrides `BEARUST_PLUGIN_REGISTRY_URL`).
+        #[arg(long)]
+        registry_url: Option<String>,
+        /// Pinned registry public key (overrides `BEARUST_PLUGIN_REGISTRY_KEY`).
+        #[arg(long)]
+        registry_key: Option<String>,
     },
 }
 
@@ -1041,14 +1065,36 @@ fn plugin_command(action: PluginCommand) -> Result<(), AppError> {
         PluginCommand::Search {
             query,
             registry_url,
-        } => plugin_search(&query, registry_url.as_deref()),
+            registry_key,
+        } => plugin_search(&query, registry_url.as_deref(), registry_key.as_deref()),
         PluginCommand::Install {
             id,
             out,
             yes,
             force,
             registry_url,
-        } => plugin_install(&id, &out, yes, force, registry_url.as_deref()),
+            registry_key,
+        } => plugin_install(
+            &id,
+            &out,
+            yes,
+            force,
+            registry_url.as_deref(),
+            registry_key.as_deref(),
+        ),
+        PluginCommand::Upgrade {
+            id,
+            out,
+            yes,
+            registry_url,
+            registry_key,
+        } => plugin_upgrade(
+            id.as_deref(),
+            &out,
+            yes,
+            registry_url.as_deref(),
+            registry_key.as_deref(),
+        ),
     }
 }
 
@@ -1135,8 +1181,7 @@ fn plugin_sign(plugin_dir: &Path, key_path: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-const DEFAULT_PLUGIN_REGISTRY_URL: &str =
-    "https://raw.githubusercontent.com/Bearust/bearust-plugin-index/main/index.json";
+use crate::plugin_registry::DEFAULT_PLUGIN_REGISTRY_URL;
 
 fn resolve_registry_url(flag: Option<&str>) -> String {
     if let Some(url) = flag {
@@ -1150,12 +1195,38 @@ fn resolve_registry_url(flag: Option<&str>) -> String {
     DEFAULT_PLUGIN_REGISTRY_URL.to_owned()
 }
 
-fn plugin_search(query: &str, registry_url: Option<&str>) -> Result<(), AppError> {
+fn resolve_registry_key(flag: Option<&str>) -> Option<String> {
+    flag.map(str::to_owned)
+        .or_else(|| std::env::var("BEARUST_PLUGIN_REGISTRY_KEY").ok())
+        .filter(|key| !key.trim().is_empty())
+}
+
+fn fetch_registry(
+    registry_url: Option<&str>,
+    registry_key: Option<&str>,
+) -> Result<
+    (
+        reqwest::blocking::Client,
+        crate::plugin_registry::VerifiedIndex,
+    ),
+    AppError,
+> {
     let url = resolve_registry_url(registry_url);
+    let key = resolve_registry_key(registry_key);
     let client = reqwest::blocking::Client::new();
-    let index = crate::plugin_registry::RegistryIndex::fetch(&client, &url)
-        .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
-    let results = index.search(query);
+    let verified =
+        crate::plugin_registry::RegistryIndex::fetch_verified(&client, &url, key.as_deref())
+            .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+    Ok((client, verified))
+}
+
+fn plugin_search(
+    query: &str,
+    registry_url: Option<&str>,
+    registry_key: Option<&str>,
+) -> Result<(), AppError> {
+    let (_, verified) = fetch_registry(registry_url, registry_key)?;
+    let results = verified.index.search(query);
     if results.is_empty() {
         println!("no plugins match \"{query}\"");
         return Ok(());
@@ -1198,11 +1269,8 @@ fn plugin_install(
     yes: bool,
     force: bool,
     registry_url: Option<&str>,
+    registry_key: Option<&str>,
 ) -> Result<(), AppError> {
-    use crate::plugin_registry::{
-        download_and_verify, extract_tarball, verify_signer, RegistryIndex,
-    };
-
     if id.is_empty()
         || id.len() > crate::plugin_runtime::MAX_ID_LEN
         || !crate::plugin_runtime::valid_id(id)
@@ -1211,47 +1279,47 @@ fn plugin_install(
             "\"{id}\" is not a valid plugin id (lowercase letters, digits, and hyphens only)"
         )));
     }
-
-    let url = resolve_registry_url(registry_url);
-    let client = reqwest::blocking::Client::new();
-    let index =
-        RegistryIndex::fetch(&client, &url).map_err(|e| AppError::PluginRegistry(e.to_string()))?;
-    let entry = index.find(id).ok_or_else(|| {
-        AppError::PluginRegistry(
-            crate::plugin_registry::RegistryError::NotFound(id.to_owned()).to_string(),
-        )
-    })?;
-
     let target_dir = plugins_directory.join(id);
-    if target_dir.parent() != Some(plugins_directory) {
-        return Err(AppError::PluginRegistry(format!(
-            "\"{id}\" is not a valid plugin id (lowercase letters, digits, and hyphens only)"
-        )));
-    }
     if target_dir.exists() && !force {
-        return Err(AppError::PluginRegistry(format!(
-            "{} already exists -- pass --force to overwrite",
-            target_dir.display()
-        )));
+        return Err(AppError::PluginRegistry(
+            crate::plugin_registry::RegistryError::AlreadyInstalled(
+                target_dir.display().to_string(),
+            )
+            .to_string(),
+        ));
     }
-
-    let tarball =
-        download_and_verify(&client, entry).map_err(|e| AppError::PluginRegistry(e.to_string()))?;
-    let extracted =
-        extract_tarball(&tarball, id).map_err(|e| AppError::PluginRegistry(e.to_string()))?;
-    let signer = verify_signer(&extracted, entry.signer_public_key.as_deref())
+    let (client, verified) = fetch_registry(registry_url, registry_key)?;
+    crate::plugin_registry::persist_revocations(plugins_directory, &verified)
         .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+    install_one(&client, &verified, id, plugins_directory, yes, force)
+}
 
+/// Prepare, confirm, and write one registry plugin.
+fn install_one(
+    client: &reqwest::blocking::Client,
+    verified: &crate::plugin_registry::VerifiedIndex,
+    id: &str,
+    plugins_directory: &Path,
+    yes: bool,
+    force: bool,
+) -> Result<(), AppError> {
+    let prepared = crate::plugin_registry::prepare_install(client, verified, id)
+        .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
     println!(
-        "{}  v{}\ncapabilities: {}\nsigner: {}",
-        entry.id,
-        sanitize_for_terminal(&entry.version),
-        if extracted.manifest.capabilities.is_empty() {
+        "{}  v{}\ncapabilities: {}\nsigner: {}\nindex: {}",
+        prepared.entry.id,
+        sanitize_for_terminal(&prepared.entry.version),
+        if prepared.extracted.manifest.capabilities.is_empty() {
             "(none)".to_owned()
         } else {
-            extracted.manifest.capabilities.join(", ")
+            prepared.extracted.manifest.capabilities.join(", ")
         },
-        signer.as_deref().unwrap_or("unsigned"),
+        prepared.signer.as_deref().unwrap_or("unsigned"),
+        if verified.signed {
+            "signed"
+        } else {
+            "unsigned"
+        },
     );
     if !yes {
         print!("Install this plugin? [y/N]: ");
@@ -1267,39 +1335,63 @@ fn plugin_install(
             return Ok(());
         }
     }
-
-    std::fs::create_dir_all(plugins_directory)
+    crate::plugin_registry::write_install(plugins_directory, &prepared, force)
         .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
-    let temp_dir = plugins_directory.join(format!(".{id}.install-tmp"));
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    std::fs::create_dir_all(&temp_dir).map_err(|e| AppError::PluginRegistry(e.to_string()))?;
-    let write_result = (|| -> std::io::Result<()> {
-        std::fs::write(temp_dir.join("plugin.toml"), &extracted.manifest_bytes)?;
-        std::fs::write(
-            temp_dir.join(&extracted.manifest.module),
-            &extracted.wasm_bytes,
-        )?;
-        if let Some(signature_bytes) = &extracted.signature_bytes {
-            std::fs::write(temp_dir.join("plugin.sig"), signature_bytes)?;
-        }
-        Ok(())
-    })();
-    if let Err(error) = write_result {
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        return Err(AppError::PluginRegistry(error.to_string()));
-    }
-
-    if target_dir.exists() {
-        std::fs::remove_dir_all(&target_dir)
-            .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
-    }
-    std::fs::rename(&temp_dir, &target_dir).map_err(|e| AppError::PluginRegistry(e.to_string()))?;
-
     println!(
         "installed {} to {} -- run `POST /api/plugins/reload` to load it",
         id,
-        target_dir.display()
+        plugins_directory.join(id).display()
     );
+    Ok(())
+}
+
+fn plugin_upgrade(
+    id: Option<&str>,
+    plugins_directory: &Path,
+    yes: bool,
+    registry_url: Option<&str>,
+    registry_key: Option<&str>,
+) -> Result<(), AppError> {
+    let (client, verified) = fetch_registry(registry_url, registry_key)?;
+    crate::plugin_registry::persist_revocations(plugins_directory, &verified)
+        .map_err(|e| AppError::PluginRegistry(e.to_string()))?;
+    let installed: Vec<crate::plugin_registry::InstallRecord> = match id {
+        Some(id) => crate::plugin_registry::installed_record(plugins_directory, id)
+            .map(|record| vec![record])
+            .ok_or_else(|| {
+                AppError::PluginRegistry(format!("{id} was not installed from a registry"))
+            })?,
+        None => std::fs::read_dir(plugins_directory)
+            .map_err(|e| AppError::PluginRegistry(e.to_string()))?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                crate::plugin_registry::installed_record(
+                    plugins_directory,
+                    &entry.file_name().to_string_lossy(),
+                )
+            })
+            .collect(),
+    };
+    let mut upgraded = 0;
+    for record in installed {
+        let Some(entry) = verified.index.find(&record.id) else {
+            continue;
+        };
+        if !crate::plugin_registry::version_newer(&entry.version, &record.version) {
+            continue;
+        }
+        println!(
+            "{}: {} -> {}",
+            record.id,
+            sanitize_for_terminal(&record.version),
+            sanitize_for_terminal(&entry.version)
+        );
+        install_one(&client, &verified, &record.id, plugins_directory, yes, true)?;
+        upgraded += 1;
+    }
+    if upgraded == 0 {
+        println!("all registry plugins are up to date");
+    }
     Ok(())
 }
 

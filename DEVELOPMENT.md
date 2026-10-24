@@ -93,6 +93,27 @@ CRS is a deliberate capacity trade-off. Not supported: response phases,
 persistent collections (`IP`, `GLOBAL`), and `exec`/`setenv` side effects.
 Unsupported operators, transformations, or actions fail rule loading.
 
+## Plugin registry trust
+
+`bearust plugin search|install|upgrade` and **Plugins → Plugin registry**
+read a static JSON index. To make the index itself trustworthy, publish a
+detached signature next to it and pin the registry key:
+
+```sh
+# index.json.sig = base64(Ed25519 signature over the exact index.json bytes)
+[plugins]
+registry_url = "https://plugins.example.com/index.json"
+registry_public_key = "<base64 Ed25519 public key>"
+```
+
+With a pinned key, an index without a valid `index.json.sig` is refused.
+Only a verified index may revoke: `"revoked": [{"id": "...", "version":
+"..."}]` blocks installing a release, and `"revoked_keys": ["<base64 key>"]`
+is persisted to `<plugins dir>/revoked-keys.json`, after which plugins
+signed by that key fail to load (`key_revoked`). Installed versions are
+recorded in `<plugin>/.registry.json` and drive upgrade detection. The CLI
+takes `--registry-key` or `BEARUST_PLUGIN_REGISTRY_KEY`.
+
 ## AI Advisor development
 
 Leave `LLM_API_URL` and `LLM_API_KEY` unset for the default disabled mode. For

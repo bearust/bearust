@@ -590,6 +590,11 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         .route("/api/events", get(events))
         .route("/api/plugins", get(plugins::list))
         .route("/api/plugins/reload", post(plugins::reload))
+        .route("/api/plugins/registry", get(plugins::registry))
+        .route(
+            "/api/plugins/registry/{id}/install",
+            post(plugins::registry_install),
+        )
         .route("/api/plugins/{id}/enable", post(plugins::enable))
         .route("/api/plugins/{id}/disable", post(plugins::disable))
         .route("/api/plugins/{id}", axum::routing::delete(plugins::unload))

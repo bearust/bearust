@@ -51,6 +51,13 @@ pub struct PluginConfig {
     pub max_output_bytes: usize,
     #[serde(default)]
     pub require_signature: bool,
+    /// Registry index used by the dashboard (CLI: `--registry-url`).
+    #[serde(default)]
+    pub registry_url: Option<String>,
+    /// Pinned registry public key (base64 Ed25519). When set, the index
+    /// must have a valid detached signature and its revocations apply.
+    #[serde(default)]
+    pub registry_public_key: Option<String>,
 }
 
 impl Default for PluginConfig {
@@ -65,6 +72,8 @@ impl Default for PluginConfig {
             invocation_timeout_ms: default_plugin_invocation_timeout_ms(),
             max_output_bytes: default_plugin_max_output_bytes(),
             require_signature: false,
+            registry_url: None,
+            registry_public_key: None,
         }
     }
 }
