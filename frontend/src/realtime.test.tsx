@@ -72,14 +72,14 @@ describe("useRealtimeUpdates", () => {
     expect(source.url).toBe("/api/events");
     expect(source.options).toEqual({ withCredentials: true });
     await act(async () => source.onopen?.());
-    await act(async () => source.emit("users.changed", "1"));
-    await act(async () => source.emit("proxy_hosts.changed", "2"));
-    await act(async () => source.emit("certificates.changed", "3"));
-    await act(async () => source.emit("audit", "4"));
-    await act(async () => source.emit("audit", "4"));
-    await act(async () => source.emit("sessions.changed", "5"));
-    await act(async () => source.emit("analytics.changed", "6"));
-    await act(async () => source.emit("unknown", "7"));
+    await act(async () => source.emit("users.changed", "e1:1"));
+    await act(async () => source.emit("proxy_hosts.changed", "e1:2"));
+    await act(async () => source.emit("certificates.changed", "e1:3"));
+    await act(async () => source.emit("audit", "e1:4"));
+    await act(async () => source.emit("audit", "e1:4"));
+    await act(async () => source.emit("sessions.changed", "e1:5"));
+    await act(async () => source.emit("analytics.changed", "e1:6"));
+    await act(async () => source.emit("unknown", "e1:7"));
     expect(users).toHaveBeenCalledTimes(1);
     expect(hosts).toHaveBeenCalledTimes(1);
     expect(certificates).toHaveBeenCalledTimes(1);
@@ -126,12 +126,17 @@ describe("useRealtimeUpdates", () => {
     }
   });
 
-  it("reloads missed data once per page and accepts reset ids after reconnect", async () => {
+  it("resumes from the last event id and reloads only when replay has a gap", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("EventSource", MockEventSource);
     let pageRefreshes = 0;
     let hostRefreshes = 0;
     const root = createRoot(document.body);
+    const reconnect = async (index: number) => {
+      await act(async () => sources[index].onerror?.());
+      await act(async () => vi.advanceTimersByTime(30_000));
+      await act(async () => sources[index + 1].onopen?.());
+    };
     try {
       await act(async () => root.render(<>
         <Harness loaders={{ hosts: () => { hostRefreshes++; } }} onStatus={() => {}} />
@@ -140,20 +145,31 @@ describe("useRealtimeUpdates", () => {
       const first = sources[0];
       await act(async () => {
         first.onopen?.();
-        first.emit("proxy_hosts.changed", "100");
-        first.onerror?.();
+        first.emit("ready", "", { replay: "fresh" });
+        first.emit("proxy_hosts.changed", "e1:100");
       });
-      await act(async () => vi.advanceTimersByTime(1_000));
-      await act(async () => sources[1].onopen?.());
-      expect(pageRefreshes).toBe(1);
-      expect(hostRefreshes).toBe(2);
-      await act(async () => sources[1].emit("proxy_hosts.changed", "1"));
-      expect(hostRefreshes).toBe(3);
-      // A late callback from the closed connection cannot advance the new cursor.
+      expect(hostRefreshes).toBe(1);
+
+      // Complete replay: the missed event arrives, no full reload.
+      await reconnect(0);
+      expect(sources[1].url).toBe("/api/events?last_event_id=e1%3A100");
       await act(async () => {
-        first.emit("proxy_hosts.changed", "101");
-        sources[1].emit("proxy_hosts.changed", "2");
+        sources[1].emit("ready", "", { replay: "ok" });
+        sources[1].emit("proxy_hosts.changed", "e1:101");
       });
+      expect(pageRefreshes).toBe(0);
+      expect(hostRefreshes).toBe(2);
+      // A late callback from the closed connection cannot advance the cursor.
+      await act(async () => first.emit("proxy_hosts.changed", "e1:102"));
+      expect(hostRefreshes).toBe(2);
+
+      // Server restarted: the gap forces one reload and new-epoch ids apply.
+      await reconnect(1);
+      expect(sources[2].url).toBe("/api/events?last_event_id=e1%3A101");
+      await act(async () => sources[2].emit("ready", "", { replay: "gap" }));
+      expect(pageRefreshes).toBe(1);
+      expect(hostRefreshes).toBe(3);
+      await act(async () => sources[2].emit("proxy_hosts.changed", "e2:1"));
       expect(hostRefreshes).toBe(4);
     } finally {
       await act(async () => root.unmount());

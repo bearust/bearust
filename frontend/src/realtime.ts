@@ -65,13 +65,16 @@ export function useRealtimeUpdates(loaders: RealtimeLoaders): RealtimeStatus {
     let stopped = false;
     let delay = RECONNECT_BASE_MS;
     let connectedOnce = false;
+    // Last seen `<epoch>:<sequence>` id, sent on reconnect so the server can
+    // replay what was missed instead of forcing a full reload.
+    let lastEventId = "";
 
     const reload = (loader: (() => unknown | Promise<unknown>) | undefined) => {
       if (loader) void Promise.resolve().then(loader).catch(() => undefined);
     };
     const resync = () => {
-      // The hub has no replay. Reload current state after a gap; page hooks
-      // receive a single notification even when they listen to several kinds.
+      // Reload current state when the server cannot replay the gap; page
+      // hooks receive a single notification even when they listen to several kinds.
       for (const loader of new Set(Object.values(loadersRef.current))) reload(loader);
       window.dispatchEvent(new Event("bearust:realtime-resync"));
     };
@@ -79,18 +82,31 @@ export function useRealtimeUpdates(loaders: RealtimeLoaders): RealtimeStatus {
     const connect = () => {
       if (stopped) return;
       setStatus("connecting");
-      const connection = new EventSource("/api/events", { withCredentials: true });
+      const url = lastEventId
+        ? `/api/events?last_event_id=${encodeURIComponent(lastEventId)}`
+        : "/api/events";
+      const connection = new EventSource(url, { withCredentials: true });
       source = connection;
-      // IDs belong to one process and may restart after failover/restart.
-      let lastId = 0;
       const active = () => !stopped && source === connection;
       connection.onopen = () => {
         if (!active()) return;
         delay = RECONNECT_BASE_MS;
         setStatus("connected");
-        if (connectedOnce) resync();
-        connectedOnce = true;
       };
+      connection.addEventListener("ready", (event) => {
+        if (!active()) return;
+        let replay = "fresh";
+        try {
+          replay = (JSON.parse((event as MessageEvent).data) as { replay?: string }).replay ?? "fresh";
+        } catch {
+          // An unparseable ready frame is treated as a fresh stream.
+        }
+        // After a reconnect, anything but a complete replay means events may
+        // have been missed (restart, failover, or an expired id).
+        if (connectedOnce && replay !== "ok") resync();
+        if (replay !== "ok") lastEventId = "";
+        connectedOnce = true;
+      });
       connection.onerror = () => {
         if (!active()) return;
         setStatus("disconnected");
@@ -110,10 +126,9 @@ export function useRealtimeUpdates(loaders: RealtimeLoaders): RealtimeStatus {
       for (const kind of Object.keys(EVENT_LOADERS)) {
         connection.addEventListener(kind, (event) => {
           if (!active()) return;
-          const numericId = Number(event.lastEventId);
-          if (Number.isFinite(numericId) && numericId > 0) {
-            if (numericId <= lastId) return;
-            lastId = numericId;
+          if (event.lastEventId) {
+            if (!isNewer(event.lastEventId, lastEventId)) return;
+            lastEventId = event.lastEventId;
           }
           window.dispatchEvent(new CustomEvent("bearust:realtime", { detail: kind }));
           reload(loadersRef.current[EVENT_LOADERS[kind]]);
@@ -134,4 +149,12 @@ export function useRealtimeUpdates(loaders: RealtimeLoaders): RealtimeStatus {
     };
   }, []);
   return status;
+}
+
+/** Compare `<epoch>:<sequence>` ids; an id from another epoch is newer. */
+function isNewer(candidate: string, current: string): boolean {
+  const [epoch, seq] = candidate.split(":");
+  const [currentEpoch, currentSeq] = current.split(":");
+  if (!current || epoch !== currentEpoch) return true;
+  return Number(seq) > Number(currentSeq);
 }

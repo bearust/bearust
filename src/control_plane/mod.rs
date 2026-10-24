@@ -3878,7 +3878,16 @@ async fn current(s: &AppState, h: &HeaderMap) -> Result<User, StatusCode> {
         .ok_or(StatusCode::UNAUTHORIZED)
 }
 
-async fn events(State(s): State<AppState>, h: HeaderMap) -> Response {
+async fn events(State(s): State<AppState>, h: HeaderMap, RawQuery(raw): RawQuery) -> Response {
+    // EventSource cannot set headers on a manual reconnect, so the last id
+    // may also arrive as `?last_event_id=`.
+    let query_last_event_id = raw.as_deref().and_then(|raw| {
+        serde_urlencoded::from_str::<Vec<(String, String)>>(raw)
+            .ok()?
+            .into_iter()
+            .find(|(key, _)| key == "last_event_id")
+            .map(|(_, value)| value)
+    });
     if current(&s, &h).await.is_err() {
         return user_error(
             StatusCode::UNAUTHORIZED,
@@ -3887,9 +3896,36 @@ async fn events(State(s): State<AppState>, h: HeaderMap) -> Response {
         );
     }
 
-    // Authentication is checked before subscribing.  Last-Event-ID is
-    // intentionally ignored: the process-local hub does not provide replay.
+    // Subscribe before resolving replay so no event published in between is
+    // lost; the stream skips live events already delivered by the replay.
     let receiver = s.realtime.subscribe();
+    let last_event_id = h
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .or(query_last_event_id);
+    let (replay_state, backlog) = match s.realtime.replay_since(last_event_id.as_deref()) {
+        realtime::Replay::Fresh => ("fresh", Vec::new()),
+        realtime::Replay::Events(events) => ("ok", events),
+        realtime::Replay::Gap => ("gap", Vec::new()),
+    };
+    let delivered = backlog.last().map_or(0, |e| e.id);
+    let ready = Event::default().event("ready").data(
+        serde_json::json!({ "epoch": s.realtime.epoch(), "replay": replay_state }).to_string(),
+    );
+    let hub = s.realtime.clone();
+    let encode = move |value: &realtime::RealtimeEvent| {
+        Event::default()
+            .id(hub.event_id(value))
+            .event(value.kind.clone())
+            .json_data(value)
+            .unwrap_or_else(|_| Event::default().event("reconnect").data("{}"))
+    };
+    let mut pending = std::collections::VecDeque::from(
+        std::iter::once(ready)
+            .chain(backlog.iter().map(&encode))
+            .collect::<Vec<_>>(),
+    );
     // Keep the stream authenticated for its entire lifetime.  The first tick
     // is consumed before constructing the stream because `interval` otherwise
     // fires immediately; subsequent ticks revalidate the same session without
@@ -3898,35 +3934,40 @@ async fn events(State(s): State<AppState>, h: HeaderMap) -> Response {
     revalidation.tick().await;
     revalidation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let stream = unfold(
-        (receiver, true, s, h, revalidation),
-        |(mut receiver, ready, state, headers, mut revalidation)| async move {
-            if ready {
-                let event = Event::default().event("ready").data("{}");
-                return Some((
-                    Ok::<Event, Infallible>(event),
-                    (receiver, false, state, headers, revalidation),
-                ));
-            }
-            tokio::select! {
-                next = receiver.recv() => {
-                    let next = match next {
-                        Ok(value) => Event::default()
-                            .id(value.id.to_string())
-                            .event(value.kind.clone())
-                            .json_data(value)
-                            .unwrap_or_else(|_| Event::default().event("reconnect").data("{}")),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            Event::default().event("reconnect").data(r#"{"reason":"lagged"}"#)
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-                    };
-                    Some((Ok::<Event, Infallible>(next), (receiver, false, state, headers, revalidation)))
+        (receiver, s, h, revalidation, delivered),
+        move |(mut receiver, state, headers, mut revalidation, mut delivered)| {
+            let next_pending = pending.pop_front();
+            let encode = encode.clone();
+            async move {
+                if let Some(event) = next_pending {
+                    return Some((
+                        Ok::<Event, Infallible>(event),
+                        (receiver, state, headers, revalidation, delivered),
+                    ));
                 }
-                _ = revalidation.tick() => {
-                    if current(&state, &headers).await.is_err() {
-                        return None;
+                loop {
+                    tokio::select! {
+                        next = receiver.recv() => {
+                            let next = match next {
+                                Ok(value) if value.id <= delivered => continue,
+                                Ok(value) => {
+                                    delivered = value.id;
+                                    encode(&value)
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    Event::default().event("reconnect").data(r#"{"reason":"lagged"}"#)
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                            };
+                            return Some((Ok::<Event, Infallible>(next), (receiver, state, headers, revalidation, delivered)));
+                        }
+                        _ = revalidation.tick() => {
+                            if current(&state, &headers).await.is_err() {
+                                return None;
+                            }
+                            return Some((Ok::<Event, Infallible>(Event::default().comment("heartbeat")), (receiver, state, headers, revalidation, delivered)));
+                        }
                     }
-                    Some((Ok::<Event, Infallible>(Event::default().comment("heartbeat")), (receiver, false, state, headers, revalidation)))
                 }
             }
         },

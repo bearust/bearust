@@ -110,15 +110,19 @@ async fn events_endpoint_requires_auth_and_streams_ready_and_published_events() 
 }
 
 #[tokio::test]
-async fn events_endpoint_ignores_last_event_id_and_does_not_replay_history() {
-    let (app, _state, cookie) = authenticated_app().await;
+async fn events_endpoint_replays_missed_events_after_last_event_id() {
+    let (app, state, cookie) = authenticated_app().await;
+    let first = state.realtime.publish("users.changed");
+    let roles_event = state.realtime.publish("roles.changed");
+    state.realtime.publish("waf.changed");
+    let last_id = state.realtime.event_id(&first);
     let response = app
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri("/api/events")
                 .header("cookie", &cookie)
-                .header("last-event-id", "17")
+                .header("last-event-id", &last_id)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -126,10 +130,59 @@ async fn events_endpoint_ignores_last_event_id_and_does_not_replay_history() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body();
-    let ready = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    let ready = String::from_utf8(ready.to_vec()).unwrap();
+    async fn next(body: &mut axum::body::Body) -> String {
+        String::from_utf8(
+            body.frame()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+    let ready = next(&mut body).await;
     assert!(ready.starts_with("event: ready\n"));
-    assert!(!ready.contains("17"));
+    assert!(ready.contains(r#""replay":"ok""#));
+    let roles = next(&mut body).await;
+    assert!(roles.contains("event: roles.changed\n"));
+    assert!(roles.contains(&format!("id: {}\n", state.realtime.event_id(&roles_event))));
+    assert!(next(&mut body).await.contains("event: waf.changed\n"));
+    let live_event = state.realtime.publish("users.changed");
+    let live = next(&mut body).await;
+    assert!(live.contains(&format!("id: {}\n", state.realtime.event_id(&live_event))));
+}
+
+#[tokio::test]
+async fn events_endpoint_reports_gap_for_foreign_or_expired_ids() {
+    let (app, state, cookie) = authenticated_app().await;
+    for _ in 0..bearust::control_plane::realtime::REPLAY_CAPACITY + 5 {
+        state.realtime.publish("users.changed");
+    }
+    let expired = format!("{}:1", state.realtime.epoch());
+    for last_id in ["17", "otherepoch:3", expired.as_str()] {
+        let uri = format!(
+            "/api/events?{}",
+            serde_urlencoded::to_string([("last_event_id", last_id)]).unwrap()
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut body = response.into_body();
+        let ready = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        let ready = String::from_utf8(ready.to_vec()).unwrap();
+        assert!(ready.contains(r#""replay":"gap""#), "{last_id}: {ready}");
+    }
 }
 
 #[tokio::test]
