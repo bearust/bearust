@@ -137,8 +137,10 @@ Orgs may span regions, so one node cannot complete HTTP-01 for a hostname served
 
 **Validation:** issuance and renewal tests against Pebble (local ACME test server) in Docker; desired-state golden tests include certificates and challenges.
 
-- [ ] Central ACME client (DNS-01 wildcard + shared HTTP-01)
-- [ ] Renewal job + tenant certificate status UI
+- [x] Central ACME client (DNS-01 wildcard + shared HTTP-01)
+- [x] Renewal job + tenant certificate status API (the screen is built with the Task 7 dashboard)
+
+**Delivered (2026-11-02):** Bearust: `PUT /api/desired-state` gained `certificates` (`{name, cert_pem, key_pem}`, stored as `managed-<name>`, the whole managed set is replaced, dashboard certificates untouched, served by SNI) and `acme_challenges` (`{host, token, key_authorization}`, replacing the pushed set in the HTTP-01 store); both are validated before anything changes. Fixed an existing bug on the way: the proxy and the ACME manager each had their own `Http01Store`, so the proxy never answered challenges; `AppState.http01` is now shared by both. SaaS: `internal/certs` on `golang.org/x/crypto/acme`, migration `000019_certificates` (`acme_accounts`, `certificates`, `acme_http_challenges`), job `certs.issue` every minute when `ACME_DIRECTORY_URL` and `SECRETS_KEY` are set, at most 3 orders per run, claim + backoff 5m→6h, renewal 30 days before expiry with the current certificate kept on failure, keys AES-GCM sealed. HTTP-01 challenges are pushed with `nodesync.SyncOrg` before the CA validates; the platform wildcard is only issued when the DNS provider can write TXT (Cloudflare). Tenant API `GET /org/certificates`, `POST /org/certificates/:id/retry`. Tests: fake issuer/sync/zone, Postgres schema test, Pebble (`TestLivePebbleIssue`) and a run against a local Bearust node that served the pushed challenge and then the issued certificate by SNI (`TestLiveIssueAndServeOnBearust`). Pebble ran with `PEBBLE_VA_ALWAYS_VALID=1`, so a CA fetching the challenge over the network is not exercised yet. A node restart forgets pushed challenges until the next document change (they are in memory); an order in flight then fails and is retried. The x/crypto finalize step needs a fallback when the CA omits the Location header.
 
 ### Task 7: Tenant dashboard
 
