@@ -90,8 +90,10 @@ The SaaS must call a node's control API without a browser session.
 
 **Validation:** unit tests with a fake resolver; quota `QUOTA_EXCEEDED` on plan limit; `DOMAIN_TAKEN` across orgs.
 
-- [ ] Domain CRUD + TXT verification job
-- [ ] Tests for uniqueness, quota, expiry
+- [x] Domain CRUD + TXT verification job
+- [x] Tests for uniqueness, quota, expiry
+
+**Delivered (2026-11-01):** DNS provider is Cloudflare (`DNS_PROVIDER=cloudflare`, zone-scoped token), behind a `Zone` interface with a no-op default for development. Platform hostnames get A records only for nodes whose `address` is a public IPv4; nodes with private addresses are skipped (a separate public-IP field may be needed later).
 
 ### Task 4: Routing and load-balancer configuration
 
