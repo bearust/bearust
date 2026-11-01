@@ -105,8 +105,10 @@ The SaaS must call a node's control API without a browser session.
 
 **Validation:** table-driven validation tests, SSRF guard tests, RBAC (`owner` writes, `member` read-only).
 
-- [ ] Schema + CRUD API with validation
-- [ ] SSRF, ownership, and quota tests
+- [x] Schema + CRUD API with validation
+- [x] SSRF, ownership, and quota tests
+
+**Delivered (2026-11-01):** `pools`, `pool_backends`, `routes`, `organizations.config_revision`. Backends are IP literals only (Bearust dials `SocketAddr`), which also rules out DNS rebinding. Routes reference `domain_id`, so platform hostnames follow slug changes. There is no separate `proxy_hosts` table: a route is the host entry, and its TLS mode moves to Task 6. The `plugin` algorithm is not offered to tenants.
 
 ### Task 5: Node sync engine
 
