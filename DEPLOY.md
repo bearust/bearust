@@ -87,6 +87,14 @@ endpoints instead of a browser session:
   /api/desired-state`), otherwise the node answers `409 stale_generation`, so
   a delayed or replayed push cannot roll the node back. Retrying the same
   document with a new generation is safe.
+- **Managed certificates and challenges.** The same document may carry
+  `"certificates": [{"name", "cert_pem", "key_pem"}]` and
+  `"acme_challenges": [{"host", "token", "key_authorization"}]`. Certificates
+  are stored as `managed-<name>` and served by SNI; each push replaces the
+  whole managed set and leaves certificates uploaded in the dashboard alone.
+  Challenges are answered at `/.well-known/acme-challenge/<token>` for their
+  host, so a managing plane can complete HTTP-01 for a hostname served by
+  several nodes. Challenges live in memory for 10 minutes.
 
 Keep the control API off the public internet. For a managed node, bind it to
 a private interface only (`BEARUST_CONTROL_HOST=<wireguard-or-vpc-ip>`) and

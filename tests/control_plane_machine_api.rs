@@ -4,6 +4,7 @@ use axum::{
     Router,
 };
 use bearust::{
+    acme::Http01Store,
     control_plane::{
         auth::{hash_password, token_hash},
         build_state, repository, router,
@@ -15,7 +16,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
-async fn setup() -> (Router, Arc<RuntimeStore>, tempfile::TempDir) {
+async fn setup() -> (Router, Arc<RuntimeStore>, tempfile::TempDir, Http01Store) {
     let directory = tempdir().unwrap();
     let config_path = directory.path().join("bearust.toml");
     std::fs::write(&config_path, include_str!("fixtures/valid.toml")).unwrap();
@@ -39,12 +40,13 @@ async fn setup() -> (Router, Arc<RuntimeStore>, tempfile::TempDir) {
     )
     .await
     .unwrap();
+    let http01 = state.http01.clone();
     let state = state.with_runtime(
         Arc::clone(&runtime),
         Arc::new(config_path),
         Arc::new(directory.path().join("missing.pid")),
     );
-    (router(state), runtime, directory)
+    (router(state), runtime, directory, http01)
 }
 
 enum Caller<'a> {
@@ -117,7 +119,7 @@ fn document(generation: i64, pool: &str, host: &str) -> Value {
 
 #[tokio::test]
 async fn api_tokens_are_scoped_and_cannot_manage_identity() {
-    let (app, runtime, _directory) = setup().await;
+    let (app, runtime, _directory, _) = setup().await;
 
     let (status, _) = call(
         &app,
@@ -219,7 +221,7 @@ async fn api_tokens_are_scoped_and_cannot_manage_identity() {
 
 #[tokio::test]
 async fn desired_state_applies_atomically_with_generation_guard() {
-    let (app, runtime, _directory) = setup().await;
+    let (app, runtime, _directory, _) = setup().await;
     let (_, token) = create_token(&app, "write").await;
 
     // A dashboard proxy host must survive desired-state pushes.
@@ -338,5 +340,78 @@ async fn desired_state_applies_atomically_with_generation_guard() {
     assert!(snapshot.route("a.example.test", "/").is_none());
     assert!(snapshot.route("status.example.test", "/").is_some());
     drop(snapshot);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn desired_state_carries_managed_certificates_and_challenges() {
+    let (app, runtime, _directory, http01) = setup().await;
+    let (_, token) = create_token(&app, "write").await;
+    let cert = rcgen::generate_simple_self_signed(vec!["shop.example.test".to_string()]).unwrap();
+    let digest = "a".repeat(43);
+    let mut doc = document(1, "tenant-a", "shop.example.test");
+    doc["certificates"] = json!([{
+        "name": "t-abc.shop",
+        "cert_pem": cert.cert.pem(),
+        "key_pem": cert.key_pair.serialize_pem(),
+    }]);
+    doc["acme_challenges"] = json!([{
+        "host": "shop.example.test",
+        "token": "tok_1",
+        "key_authorization": format!("tok_1.{digest}"),
+    }]);
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/desired-state",
+        Caller::Token(&token),
+        Some(doc),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        http01.get_for_hostname("shop.example.test", "tok_1"),
+        Some(format!("tok_1.{digest}"))
+    );
+    let (_, certs) = call(&app, "GET", "/api/certificates", Caller::Session, None).await;
+    let names: Vec<&str> = certs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    assert!(names.contains(&"managed-t-abc.shop"), "{certs}");
+
+    // A key that does not match is refused and nothing changes.
+    let other = rcgen::generate_simple_self_signed(vec!["x.example.test".to_string()]).unwrap();
+    let mut bad = document(2, "tenant-a", "shop.example.test");
+    bad["certificates"] = json!([{
+        "name": "t-abc.shop",
+        "cert_pem": cert.cert.pem(),
+        "key_pem": other.key_pair.serialize_pem(),
+    }]);
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/desired-state",
+        Caller::Token(&token),
+        Some(bad),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // A document without them removes both.
+    let (status, _) = call(
+        &app,
+        "PUT",
+        "/api/desired-state",
+        Caller::Token(&token),
+        Some(document(3, "tenant-a", "shop.example.test")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(http01.get_for_hostname("shop.example.test", "tok_1"), None);
+    let (_, certs) = call(&app, "GET", "/api/certificates", Caller::Session, None).await;
+    assert!(!certs.to_string().contains("managed-t-abc.shop"), "{certs}");
     runtime.shutdown().await.unwrap();
 }

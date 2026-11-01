@@ -104,14 +104,9 @@ impl CertificateStore {
         })
     }
 
-    pub fn import_custom(
-        &self,
-        name: impl Into<String>,
-        cert_pem: &[u8],
-        key_pem: &[u8],
-    ) -> Result<CertificateRecord, CertificateError> {
-        let name = name.into();
-        validate_name(&name)?;
+    /// Parses a PEM certificate and private key and checks that they match
+    /// and that the certificate has not expired. Nothing is written.
+    pub fn check_pair(cert_pem: &[u8], key_pem: &[u8]) -> Result<X509, CertificateError> {
         let cert = X509::from_pem(cert_pem).map_err(|_| CertificateError::Malformed)?;
         let key = PKey::private_key_from_pem(key_pem).map_err(|_| CertificateError::Malformed)?;
         let cert_pub = cert
@@ -134,6 +129,18 @@ impl CertificateStore {
         {
             return Err(CertificateError::Expired);
         }
+        Ok(cert)
+    }
+
+    pub fn import_custom(
+        &self,
+        name: impl Into<String>,
+        cert_pem: &[u8],
+        key_pem: &[u8],
+    ) -> Result<CertificateRecord, CertificateError> {
+        let name = name.into();
+        validate_name(&name)?;
+        let cert = Self::check_pair(cert_pem, key_pem)?;
         let hostnames = hostnames(&cert);
         let expiry = cert.not_after().to_string();
         let dir = self.root.join(&name);
@@ -180,6 +187,18 @@ impl CertificateStore {
             fs::rename(&staging, &dir).map_err(CertificateError::Io)?;
         }
         Ok(record)
+    }
+
+    /// Deletes a stored certificate directory. Missing is not an error.
+    pub fn remove(&self, name: &str) -> Result<(), CertificateError> {
+        validate_name(name)?;
+        let dir = self.root.join(name);
+        match fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_symlink() => Err(CertificateError::InvalidPath),
+            Ok(_) => fs::remove_dir_all(&dir).map_err(CertificateError::Io),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(CertificateError::Io(e)),
+        }
     }
 
     pub fn import_letsencrypt(

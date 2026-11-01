@@ -705,6 +705,29 @@ pub struct DesiredStateRequest {
     pub generation: i64,
     pub pools: Vec<crate::config::PoolConfig>,
     pub routes: Vec<crate::config::RouteConfig>,
+    /// Certificates issued by the managing control plane. They replace every
+    /// earlier managed certificate (stored as `managed-<name>`); dashboard
+    /// certificates are untouched. Omitted means "no managed certificates".
+    #[serde(default)]
+    pub certificates: Vec<ManagedCertificate>,
+    /// HTTP-01 challenge responses the proxy serves for the managing control
+    /// plane's ACME orders. They replace the previous managed set.
+    #[serde(default)]
+    pub acme_challenges: Vec<ManagedAcmeChallenge>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedCertificate {
+    pub name: String,
+    pub cert_pem: String,
+    pub key_pem: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedAcmeChallenge {
+    pub host: String,
+    pub token: String,
+    pub key_authorization: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

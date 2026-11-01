@@ -3898,6 +3898,37 @@ pub async fn insert_certificate(
     Ok(id)
 }
 
+/// Insert or refresh a certificate row by name (used for certificates pushed
+/// by a managing control plane).
+pub async fn upsert_certificate(
+    pool: &DbPool,
+    name: &str,
+    source: &str,
+    hosts: &str,
+    expiry: &str,
+    cert_path: &str,
+    key_path: &str,
+) -> Result<(), sqlx::Error> {
+    let updated = sqlx::query("UPDATE certificates SET source=?,covered_hostnames=?,expiry=?,certificate_path=?,key_path=? WHERE name=?")
+        .bind(source).bind(hosts).bind(expiry).bind(cert_path).bind(key_path).bind(name)
+        .execute(pool).await?
+        .rows_affected();
+    if updated == 0 {
+        insert_certificate(pool, name, source, hosts, expiry, cert_path, key_path).await?;
+    }
+    Ok(())
+}
+
+pub async fn delete_certificate_by_name(pool: &DbPool, name: &str) -> Result<u64, sqlx::Error> {
+    Ok(
+        sqlx::query("DELETE FROM certificates WHERE name=? AND active=0")
+            .bind(name)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+    )
+}
+
 pub async fn list_certificates(pool: &DbPool) -> Result<Vec<CertificateMetadata>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT id,name,source,covered_hostnames,expiry,active FROM certificates ORDER BY id",

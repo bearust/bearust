@@ -8,6 +8,7 @@ pub mod audit;
 pub mod auth;
 pub mod locale;
 pub mod machine_api;
+pub(crate) mod managed_certs;
 pub mod models;
 pub mod plugins;
 pub mod rbac;
@@ -86,6 +87,9 @@ pub struct AppState {
     pub auth_attempts: Arc<Mutex<HashMap<String, (Instant, u32)>>>,
     pub secrets: SecretStore,
     pub acme: Arc<dyn AcmeService>,
+    /// HTTP-01 challenge responses served by the proxy: shared by the local
+    /// ACME manager and by challenges pushed through `/api/desired-state`.
+    pub http01: crate::acme::Http01Store,
     pub realtime: Arc<realtime::RealtimeHub>,
     pub waf: Arc<WafStore>,
     pub ip_security: Arc<crate::security_policy::IpSecurityStore>,
@@ -427,7 +431,9 @@ pub async fn build_state(
         reqwest::Client::new(),
     )
     .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-    let manager = AcmeManager::with_transport(certificates.as_ref().clone(), Arc::new(client));
+    let http01 = crate::acme::Http01Store::default();
+    let manager = AcmeManager::with_transport(certificates.as_ref().clone(), Arc::new(client))
+        .with_challenge_store(http01.clone());
     let certificate_acme = Arc::new(CertificateAcmeService::new(
         db.clone(),
         certificates.clone(),
@@ -500,6 +506,7 @@ pub async fn build_state(
         auth_attempts: Arc::new(Mutex::new(HashMap::new())),
         secrets,
         acme: Arc::new(CertificateAcmeAdapter::new(certificate_acme)),
+        http01,
         realtime,
         waf,
         ip_security,

@@ -95,6 +95,35 @@ impl Http01Store {
             Some(value)
         }
     }
+    /// Atomically replaces every challenge stored under `order` with
+    /// `entries` of (hostname, token, key authorization). Invalid entries are
+    /// rejected before anything changes.
+    pub fn replace_order(
+        &self,
+        order: &str,
+        entries: &[(String, String, String)],
+    ) -> Result<(), Http01Error> {
+        if order.bytes().any(|b| b.is_ascii_control())
+            || entries.iter().any(|(host, token, value)| {
+                !valid_token(token)
+                    || !valid_key_authorization(token, value)
+                    || host.is_empty()
+                    || host.bytes().any(|b| b.is_ascii_control())
+            })
+        {
+            return Err(Http01Error::InvalidValue);
+        }
+        let expiry = Instant::now() + self.lifetime;
+        let mut map = self.inner.lock().expect("challenge lock");
+        map.retain(|(o, _, _), _| o != order);
+        for (host, token, value) in entries {
+            map.insert(
+                (order.to_owned(), host.to_ascii_lowercase(), token.clone()),
+                (value.clone(), expiry),
+            );
+        }
+        Ok(())
+    }
     pub fn remove(&self, token: &str) {
         self.remove_for_order("", "", token);
     }

@@ -846,7 +846,9 @@ fn serve_proxy(path: PathBuf, json_logs: bool, config: config::Config) -> Result
         server_config.graceful_shutdown_timeout_seconds =
             Some(config.server.graceful_shutdown_seconds);
         let ready_path = std::env::var_os("BEARUST_UPGRADE_READY").map(PathBuf::from);
-        let mut proxy_handler = crate::proxy::BearustProxy::new(store.clone()).with_waf_store(waf_store)
+        let mut proxy_handler = crate::proxy::BearustProxy::new(store.clone())
+                .with_challenge_store(control_state.http01.clone())
+                .with_waf_store(waf_store)
                 .with_ip_security_store(control_state.ip_security.clone())
                 .with_host_auth_store(control_state.host_auth.clone())
                 .with_bot_store(bot_store, challenge_service)

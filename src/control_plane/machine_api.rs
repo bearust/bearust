@@ -6,6 +6,8 @@
 //! * Desired state: `PUT /api/desired-state` replaces the whole routing
 //!   document (pools and routes) in one validated runtime swap, guarded by a
 //!   strictly increasing generation so a delayed push cannot roll back a node.
+//!   The same document carries managed certificates and HTTP-01 challenges
+//!   (see `managed_certs`).
 
 use super::models::{
     ApiTokenScope, CreateApiTokenRequest, CreatedApiToken, DesiredStateRequest, DesiredStateStatus,
@@ -367,6 +369,32 @@ pub(crate) async fn put_desired_state(
         )
             .into_response();
     }
+    if let Err(message) =
+        super::managed_certs::validate(&request.certificates, &request.acme_challenges)
+    {
+        audit::record_state(
+            &s,
+            Some(user.id),
+            "desired_state_update_denied",
+            "reason=invalid_certificates",
+        )
+        .await;
+        return user_error(StatusCode::BAD_REQUEST, "invalid_desired_state", &message);
+    }
+    // Certificates first, so new routes are served with their certificate
+    // from the first request.
+    if let Err(message) = super::managed_certs::apply_certificates(&s, &request.certificates).await
+    {
+        tracing::warn!(event = "desired_state_certificates_failed", error = %message);
+        return user_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "certificate_store_error",
+            "Unable to store managed certificates",
+        );
+    }
+    if let Err(message) = super::managed_certs::apply_challenges(&s, &request.acme_challenges) {
+        return user_error(StatusCode::BAD_REQUEST, "invalid_desired_state", &message);
+    }
     if let Err(response) = commit_runtime_config(&s, &user, &next, "desired_state").await {
         return response;
     }
@@ -388,10 +416,12 @@ pub(crate) async fn put_desired_state(
         Some(user.id),
         "desired_state_applied",
         &format!(
-            "generation={};pool_count={};route_count={}",
+            "generation={};pool_count={};route_count={};certificate_count={};challenge_count={}",
             request.generation,
             request.pools.len(),
-            request.routes.len()
+            request.routes.len(),
+            request.certificates.len(),
+            request.acme_challenges.len()
         ),
     )
     .await;
