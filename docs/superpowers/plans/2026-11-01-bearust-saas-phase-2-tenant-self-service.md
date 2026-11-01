@@ -121,8 +121,10 @@ The SaaS must call a node's control API without a browser session.
 
 **Validation:** renderer golden tests; job tests against an `httptest` fake Bearust; one manual run against a local Bearust from `bearust/docker-compose.dev.yml`.
 
-- [ ] Renderer + client + sync job
-- [ ] Drift check, admin status view, local end-to-end run
+- [x] Renderer + client + sync job
+- [x] Drift check, admin status view, local end-to-end run
+
+**Delivered (2026-11-01):** credentials live on `edge_nodes` (`control_url`, `api_token_ciphertext`, AES-256-GCM with `SECRETS_KEY`) instead of a separate `node_credentials` table. The reconcile job applies nodes in-line every minute rather than one queued job per node; a failed node is retried on the next run. Config changes therefore reach nodes within about a minute; an immediate push on save can be added later. The admin "status view" is the API (`GET/POST /edge-nodes/{id}/sync`); its dashboard screen belongs to Task 7. End-to-end run: `TestLiveBearustSync` against a local `bearust serve` with a write token passed.
 
 ### Task 6: Certificates (central issuance)
 
