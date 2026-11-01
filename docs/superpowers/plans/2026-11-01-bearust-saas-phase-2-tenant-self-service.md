@@ -60,8 +60,8 @@ Every signup gets a personal organization; tenants are placed on edge nodes with
 
 **Validation:** Go tests for signup → org created, placement respects `max_tenants`, cross-org reads return 404.
 
-- [ ] Migration + models + placement service
-- [ ] Signup creates org; tests for quota and isolation
+- [x] Migration + models + placement service
+- [x] Signup creates org; tests for quota and isolation
 
 ### Task 2: Machine access to Bearust nodes (bearust core)
 
