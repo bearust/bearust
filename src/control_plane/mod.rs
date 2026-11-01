@@ -7,6 +7,7 @@ pub mod ai_advisor;
 pub mod audit;
 pub mod auth;
 pub mod locale;
+pub mod machine_api;
 pub mod models;
 pub mod plugins;
 pub mod rbac;
@@ -744,6 +745,18 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
             get(get_load_balancer).put(update_load_balancer),
         )
         .route(
+            "/api/desired-state",
+            get(machine_api::get_desired_state).put(machine_api::put_desired_state),
+        )
+        .route(
+            "/api/api-tokens",
+            get(machine_api::list_api_tokens).post(machine_api::create_api_token),
+        )
+        .route(
+            "/api/api-tokens/{id}",
+            axum::routing::delete(machine_api::revoke_api_token),
+        )
+        .route(
             "/api/certificates",
             get(list_certificates).post(upload_certificate),
         )
@@ -768,6 +781,10 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
         app
     };
     app.layer(axum::middleware::from_fn(csrf_guard))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            machine_api::api_token_guard,
+        ))
         .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .with_state(state)
         .fallback_service(
@@ -4356,11 +4373,20 @@ pub(crate) async fn current_user(s: &AppState, h: &HeaderMap) -> Result<User, St
     current(s, h).await
 }
 
+/// Resolve the caller from the session cookie or, without one, from an API
+/// token (`machine_api::api_token_guard` has already enforced its scope).
 async fn current(s: &AppState, h: &HeaderMap) -> Result<User, StatusCode> {
-    let t = auth::cookie(h).ok_or(StatusCode::UNAUTHORIZED)?;
-    repository::find_user_by_session(&s.db, &auth::token_hash(t))
+    if let Some(t) = auth::cookie(h) {
+        return repository::find_user_by_session(&s.db, &auth::token_hash(t))
+            .await
+            .map_err(|_| StatusCode::UNAUTHORIZED)?
+            .ok_or(StatusCode::UNAUTHORIZED);
+    }
+    let token = machine_api::bearer(h).ok_or(StatusCode::UNAUTHORIZED)?;
+    repository::find_user_by_api_token(&s.db, &auth::token_hash(token))
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?
+        .map(|(user, _)| user)
         .ok_or(StatusCode::UNAUTHORIZED)
 }
 
@@ -6720,64 +6746,8 @@ async fn update_load_balancer(
         )
             .into_response();
     }
-    let command = ConfigCommand::UpdateRuntimeConfig {
-        command_id: Uuid::new_v4(),
-        config: Box::new(next.clone()),
-    };
-    let receipt = match submit_config_command(&s, command.clone(), &user).await {
-        Ok(receipt) => receipt,
-        Err(ConfigSubmissionError::LocalApplyPending(receipt)) => {
-            audit::record_state(
-                &s,
-                Some(user.id),
-                "load_balancer_update_pending",
-                "reason=local_apply_pending",
-            )
-            .await;
-            publish_committed_command(&s, &command, &receipt);
-            return cluster_write_response(ClusterWriteError::LocalApplyPending { receipt });
-        }
-        Err(ConfigSubmissionError::Cluster(error)) => {
-            audit::record_state(
-                &s,
-                Some(user.id),
-                "load_balancer_update_failed",
-                "reason=cluster_write_failed",
-            )
-            .await;
-            return cluster_write_response(error);
-        }
-        Err(ConfigSubmissionError::Database) => {
-            audit::record_state(
-                &s,
-                Some(user.id),
-                "load_balancer_update_failed",
-                "reason=database_error",
-            )
-            .await;
-            return user_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "database_error",
-                "Unable to persist load balancer configuration",
-            );
-        }
-    };
-    if let Err(error) = s.reloader.apply_runtime_config(next.clone()).await {
-        audit::record_state(
-            &s,
-            Some(user.id),
-            "load_balancer_update_failed",
-            "reason=reload_failed",
-        )
-        .await;
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(ErrorEnvelope {
-                code: "reload_failed".into(),
-                message: error.to_string(),
-            }),
-        )
-            .into_response();
+    if let Err(response) = commit_runtime_config(&s, &user, &next, "load_balancer").await {
+        return response;
     }
     audit::record_state(
         &s,
@@ -6790,8 +6760,80 @@ async fn update_load_balancer(
         ),
     )
     .await;
-    publish_committed_command(&s, &command, &receipt);
     Json(load_balancer_snapshot(runtime)).into_response()
+}
+
+/// Replicate `next` through the cluster command log (when clustered) and apply
+/// it to the live runtime. `event` prefixes the audit events on failure.
+async fn commit_runtime_config(
+    s: &AppState,
+    user: &User,
+    next: &crate::config::Config,
+    event: &str,
+) -> Result<(), Response> {
+    let command = ConfigCommand::UpdateRuntimeConfig {
+        command_id: Uuid::new_v4(),
+        config: Box::new(next.clone()),
+    };
+    let receipt = match submit_config_command(s, command.clone(), user).await {
+        Ok(receipt) => receipt,
+        Err(ConfigSubmissionError::LocalApplyPending(receipt)) => {
+            audit::record_state(
+                s,
+                Some(user.id),
+                &format!("{event}_update_pending"),
+                "reason=local_apply_pending",
+            )
+            .await;
+            publish_committed_command(s, &command, &receipt);
+            return Err(cluster_write_response(
+                ClusterWriteError::LocalApplyPending { receipt },
+            ));
+        }
+        Err(ConfigSubmissionError::Cluster(error)) => {
+            audit::record_state(
+                s,
+                Some(user.id),
+                &format!("{event}_update_failed"),
+                "reason=cluster_write_failed",
+            )
+            .await;
+            return Err(cluster_write_response(error));
+        }
+        Err(ConfigSubmissionError::Database) => {
+            audit::record_state(
+                s,
+                Some(user.id),
+                &format!("{event}_update_failed"),
+                "reason=database_error",
+            )
+            .await;
+            return Err(user_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "Unable to persist runtime configuration",
+            ));
+        }
+    };
+    if let Err(error) = s.reloader.apply_runtime_config(next.clone()).await {
+        audit::record_state(
+            s,
+            Some(user.id),
+            &format!("{event}_update_failed"),
+            "reason=reload_failed",
+        )
+        .await;
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorEnvelope {
+                code: "reload_failed".into(),
+                message: error.to_string(),
+            }),
+        )
+            .into_response());
+    }
+    publish_committed_command(s, &command, &receipt);
+    Ok(())
 }
 
 fn load_balancer_snapshot(runtime: &crate::runtime::RuntimeStore) -> LoadBalancerSnapshot {

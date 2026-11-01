@@ -62,6 +62,37 @@ ACME credentials are accepted only by the authenticated certificate API and are 
 
 The command is `bearust serve --config /etc/bearust/bearust.toml --json-logs`. The PID file defaults to `./bearust.pid` relative to `/run/bearust`; send `SIGHUP` (`docker compose kill -s HUP bearust`) after atomically replacing the mounted config. Shutdown is graceful: listeners stop accepting new work and in-flight requests drain.
 
+## Managed nodes (API tokens and desired state)
+
+A managing control plane such as Bearust Cloud drives a node through two
+endpoints instead of a browser session:
+
+- **API tokens.** An administrator with `system.settings.manage` creates one
+  from a signed-in session (`POST /api/api-tokens` with
+  `{"name": "bearust-cloud", "scope": "write"}`); the `brt_…` secret is
+  returned once and only its hash is stored. Send it as
+  `Authorization: Bearer brt_…`. A token acts as the administrator who created
+  it, narrowed by scope: `read` allows only safe methods, `write` also allows
+  configuration changes. No token can reach `/api/api-tokens`, `/api/users`,
+  `/api/roles`, `/api/setup`, `/api/auth`, `/api/sso`, or change plugins.
+  Revoke with `DELETE /api/api-tokens/{id}`; creation, revocation, and
+  denials are audited.
+- **Desired state.** `PUT /api/desired-state` takes
+  `{"generation": n, "pools": [...], "routes": [...]}` (the same pool and
+  route shapes as `/api/load-balancer`). The whole document is validated and
+  applied in one runtime swap; an invalid document changes nothing. It
+  replaces every pool and route except the `proxy-host-*` ones materialized
+  from dashboard proxy hosts, and those names are refused in the document.
+  `generation` must be greater than the last applied one (`GET
+  /api/desired-state`), otherwise the node answers `409 stale_generation`, so
+  a delayed or replayed push cannot roll the node back. Retrying the same
+  document with a new generation is safe.
+
+Keep the control API off the public internet. For a managed node, bind it to
+a private interface only (`BEARUST_CONTROL_HOST=<wireguard-or-vpc-ip>`) and
+allow the managing plane's address in the firewall; never use `0.0.0.0` on a
+public interface.
+
 ## Optional AI Advisor
 
 The advisor remains disabled unless both `LLM_API_URL` and `LLM_API_KEY` are

@@ -75,8 +75,10 @@ The SaaS must call a node's control API without a browser session.
 
 **Validation:** `cargo test` for token auth, scope denial, stale-generation 409, atomic rollback on invalid input; existing dashboard tests unchanged.
 
-- [ ] API tokens with scopes + audit
-- [ ] Atomic desired-state endpoint with generation check
+- [x] API tokens with scopes + audit
+- [x] Atomic desired-state endpoint with generation check
+
+**Delivered (2026-11-01):** `migrations/0027_api_tokens_desired_state.sql`, `src/control_plane/machine_api.rs`, `tests/control_plane_machine_api.rs`, DEPLOY.md "Managed nodes". Deviations: the document carries `pools` and `routes` only (tenant hosts render straight to pools/routes, so no `proxy_hosts`); `certificates` and `acme_challenges` are added in Task 6 where they are first needed. Dashboard-created `proxy-host-*` pools/routes are preserved and reserved. Tokens are created over the API from a session; a dashboard/CLI screen is a follow-up.
 
 ### Task 3: Domains and DNS verification
 

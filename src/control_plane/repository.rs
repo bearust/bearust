@@ -4411,6 +4411,140 @@ pub async fn rollback_tuning_recommendation_tx(
     Ok(Some((host_id, restored_rl)))
 }
 
+fn api_token_from_row(row: &sqlx::any::AnyRow) -> crate::control_plane::models::ApiToken {
+    use crate::control_plane::models::{ApiToken, ApiTokenScope};
+    let scope: String = row.get("scope");
+    ApiToken {
+        id: row.get("id"),
+        name: row.get("name"),
+        // Unknown scopes are never written; fall back to the narrower one.
+        scope: ApiTokenScope::parse(&scope).unwrap_or(ApiTokenScope::Read),
+        user_id: row.get("user_id"),
+        created_at: row.get("created_at"),
+        last_used_at: row.get("last_used_at"),
+        revoked_at: row.get("revoked_at"),
+    }
+}
+
+pub async fn create_api_token(
+    pool: &DbPool,
+    user_id: i64,
+    name: &str,
+    scope: crate::control_plane::models::ApiTokenScope,
+    hash: &str,
+) -> Result<crate::control_plane::models::ApiToken, sqlx::Error> {
+    let id = generated_id();
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO api_tokens(id,name,token_hash,scope,user_id,created_at) VALUES(?,?,?,?,?,?)",
+    )
+    .bind(id)
+    .bind(name)
+    .bind(hash)
+    .bind(scope.as_str())
+    .bind(user_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(crate::control_plane::models::ApiToken {
+        id,
+        name: name.to_string(),
+        scope,
+        user_id,
+        created_at: now,
+        last_used_at: None,
+        revoked_at: None,
+    })
+}
+
+pub async fn list_api_tokens(
+    pool: &DbPool,
+) -> Result<Vec<crate::control_plane::models::ApiToken>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id,name,scope,user_id,created_at,last_used_at,revoked_at FROM api_tokens ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.iter().map(api_token_from_row).collect())
+}
+
+/// Revoke a token; returns false when no active token has that id.
+pub async fn revoke_api_token(pool: &DbPool, id: i64) -> Result<bool, sqlx::Error> {
+    let result =
+        sqlx::query("UPDATE api_tokens SET revoked_at=? WHERE id=? AND revoked_at IS NULL")
+            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(id)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Resolve an active token to its (enabled) owner and scope.
+pub async fn find_user_by_api_token(
+    pool: &DbPool,
+    hash: &str,
+) -> Result<Option<(User, crate::control_plane::models::ApiTokenScope)>, sqlx::Error> {
+    let row = sqlx::query("SELECT t.id AS token_id,t.scope,u.id,u.email,u.role,u.created_at,u.disabled,u.preferred_locale FROM api_tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=? AND t.revoked_at IS NULL AND u.disabled=0")
+        .bind(hash)
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let scope: String = row.get("scope");
+    let Some(scope) = crate::control_plane::models::ApiTokenScope::parse(&scope) else {
+        return Ok(None);
+    };
+    let token_id: i64 = row.get("token_id");
+    sqlx::query("UPDATE api_tokens SET last_used_at=? WHERE id=?")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(token_id)
+        .execute(pool)
+        .await?;
+    Ok(Some((
+        User {
+            id: row.get("id"),
+            email: row.get("email"),
+            role: row.get("role"),
+            created_at: row.get("created_at"),
+            disabled: row.get::<i64, _>("disabled") != 0,
+            preferred_locale: row.get("preferred_locale"),
+        },
+        scope,
+    )))
+}
+
+pub async fn get_desired_state(
+    pool: &DbPool,
+) -> Result<crate::control_plane::models::DesiredStateStatus, sqlx::Error> {
+    let row = sqlx::query("SELECT generation,applied_at FROM desired_state WHERE id=1")
+        .fetch_optional(pool)
+        .await?;
+    Ok(match row {
+        Some(row) => crate::control_plane::models::DesiredStateStatus {
+            generation: row.get("generation"),
+            applied_at: row.get("applied_at"),
+        },
+        None => crate::control_plane::models::DesiredStateStatus {
+            generation: 0,
+            applied_at: None,
+        },
+    })
+}
+
+pub async fn set_desired_state_generation(
+    pool: &DbPool,
+    generation: i64,
+    applied_at: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE desired_state SET generation=?, applied_at=? WHERE id=1")
+        .bind(generation)
+        .bind(applied_at)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod advisor_persistence_tests {
     use super::*;

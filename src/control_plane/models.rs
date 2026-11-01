@@ -643,3 +643,72 @@ pub struct CertificateMetadata {
     pub expiry: String,
     pub active: bool,
 }
+
+/// Scope of a machine API token. `Read` allows only safe methods; `Write`
+/// also allows configuration changes. Neither can manage users, roles,
+/// tokens, or setup.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiTokenScope {
+    Read,
+    Write,
+}
+
+impl ApiTokenScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(Self::Read),
+            "write" => Some(Self::Write),
+            _ => None,
+        }
+    }
+}
+
+/// Token metadata; the secret is only returned once, at creation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiToken {
+    pub id: i64,
+    pub name: String,
+    pub scope: ApiTokenScope,
+    pub user_id: i64,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateApiTokenRequest {
+    pub name: String,
+    pub scope: ApiTokenScope,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreatedApiToken {
+    #[serde(flatten)]
+    pub token: ApiToken,
+    /// Plain token, shown once.
+    pub secret: String,
+}
+
+/// Complete routing document pushed by a managing control plane. It replaces
+/// every pool and route except the ones materialized from dashboard proxy
+/// hosts (`proxy-host-*`), which stay untouched.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DesiredStateRequest {
+    pub generation: i64,
+    pub pools: Vec<crate::config::PoolConfig>,
+    pub routes: Vec<crate::config::RouteConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DesiredStateStatus {
+    pub generation: i64,
+    pub applied_at: Option<String>,
+}

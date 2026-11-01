@@ -408,7 +408,7 @@ async fn migrations_record_order_and_seed_exact_permissions() {
     assert_eq!(
         versions,
         // Every migration, in order; bump the bound when adding one.
-        (1..=26).collect::<Vec<i64>>()
+        (1..=27).collect::<Vec<i64>>()
     );
     let lock_row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM setup_lock WHERE id=1")
         .fetch_one(&pool)
