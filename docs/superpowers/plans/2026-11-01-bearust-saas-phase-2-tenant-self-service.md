@@ -151,8 +151,10 @@ Orgs may span regions, so one node cannot complete HTTP-01 for a hostname served
 
 **Validation:** Vitest for forms and actions; Playwright `tenant-onboarding.spec.ts` (signup → domain (verification stubbed in E2E) → pool → route → applied against a fake node).
 
-- [ ] Tenant pages + server actions
-- [ ] E2E onboarding flow
+- [x] Tenant pages + server actions
+- [x] E2E onboarding flow
+
+**Delivered (2026-11-02):** `/app` (overview with plan usage, placements and their sync state, organization settings; domains with TXT/CNAME instructions and "check now"; pools with a one-line-per-backend editor; routes; certificates with retry), server actions in `app/(main)/app/actions.ts`, decoders in `lib/api/tenant-contracts.ts`. `GET /org` placements gained `sync: {status: pending|applied|failed, last_synced_at}` (node errors stay staff-only). Admin: the edge node page shows sync state, generations, last error, credential entry and "Resync now" (staff only). Landing: sign-ins go through `/auth/landing`, which sends staff to `/dashboard` and everyone else to `/app`. Deviation: sign-ups receive the existing Viewer role, which is also a read-only staff role, so "staff" means holding one of the management/admin permissions, and the dashboard stays reachable for Viewers rather than being closed to tenants; a dedicated customer role is a follow-up. The E2E uses the always-verified platform subdomain instead of stubbing TXT verification, and a fake node served by the test. Fixed on the way: concurrent first `GET /org` calls (layout + page) raced to create the personal organization (500, or two organizations); creation now locks the user row and re-checks. Tests: Vitest for backend-line parsing, form payloads, error mapping, sync decoding and landing; Postgres test for the concurrent first access; `tenant-onboarding.spec.ts` passed against the compose stack. The AI and queue E2E specs fail on this machine with and without these changes.
 
 ### Task 8: Tenant visibility (basic)
 
