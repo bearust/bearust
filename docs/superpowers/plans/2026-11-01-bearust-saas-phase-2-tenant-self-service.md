@@ -162,7 +162,11 @@ Orgs may span regions, so one node cannot complete HTTP-01 for a hostname served
 
 **Validation:** client tests with fixture responses; empty state when data is unavailable.
 
-- [ ] Host-filtered analytics or documented follow-up
+- [x] Host-filtered analytics or documented follow-up
+
+**Delivered (2026-11-02):** documented follow-up plus sync/health status. Bearust analytics cannot serve tenants yet: the collector keys every event by `proxy_host_id` (dashboard proxy hosts), so desired-state routes have no key to filter on, and `/api/analytics/*` accept only dashboard sessions, not API tokens. Tenant visibility therefore ships as per-region status on the overview: sync state (Task 7) and node health (`placements[].health`: `up`/`down` from the latest edge node check, `unknown` without a check in the last 10 minutes). Tests: SQLite test for the latest/fresh check, Postgres suite, decoder test with fixtures, onboarding E2E.
+
+**Bearust follow-up (analytics per host):** key analytics events by request host (bounded like the other dimensions) or by desired-state route name, add a `host` (or `route`) filter to `/api/analytics/summary` and `/api/analytics/timeseries`, and allow a `read`-scope API token on those endpoints. The SaaS then queries each node an organization is placed on with that organization's hosts and sums the results.
 
 ---
 
