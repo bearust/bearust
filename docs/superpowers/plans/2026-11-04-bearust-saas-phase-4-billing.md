@@ -127,6 +127,8 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** state machine table tests; Postgres tests for numbering under concurrency and for constraints; entitlements tests per status.
 
+> **Progress 2026-11-04 (ticket #2):** currencies, plan prices, subscriptions and the entitlement resolver are landed. The plan's migration numbers were stale: the new billing tables live in `000020_billing_core`, and the `plans` columns/seed were edited into `000015_organizations` in place because the SaaS is pre-production. The state machine, invoicing and gateway tables follow in tickets #3–#5.
+
 - [ ] Schema + catalog
 - [ ] Subscription state machine + entitlements
 - [ ] Invoices, payments, refunds (fake gateway)
