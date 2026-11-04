@@ -27,6 +27,8 @@
 - System organization roles: **Owner, Admin, Developer, Viewer**.
 - System platform roles: **Super Admin, Platform Admin, Operator, Support, Billing, Viewer**; custom platform roles stay possible.
 - **Remove Employee, Student, the Unmer Gate role mapping and the Unmer Gate provider.**
+- **Passwordless authentication only:** magic link (email) and OAuth with Google, Facebook, GitHub and X. Password login, registration, reset and change are removed. Microsoft and generic OIDC stay available as optional, off by default.
+- **Free tier guardrails in this phase:** a user may own at most **one Free organization** (further owned organizations must be on a paid plan; joining others by invitation is unlimited); sign-up is protected by a captcha (Cloudflare Turnstile) and a disposable-email blocklist. Usage quotas and Free-only nodes are in Phase 5 (`2026-11-04-bearust-saas-phase-5-usage-limits.md`).
 - Billing (Phase 4) is planned now; the `Billing` platform role and `org.billing.*` permissions are created here with no billing screens yet.
 
 ## Global Constraints
@@ -37,7 +39,7 @@
 - An organization always keeps at least one Owner; the last Owner cannot leave, be removed or be demoted.
 - A user without a platform role is not staff, whatever else they hold. Sign-up assigns no platform role.
 - Impersonation of a tenant user is audited on both sides: the platform audit log and the organization's audit log name the staff member; sessions expire after 60 minutes; Super Admins cannot be impersonated; `impersonate.staff` is Super Admin only.
-- New error codes: `ORG_ROLE_NOT_FOUND`, `ORG_ROLE_IN_USE`, `ROLE_SCOPE_MISMATCH`, `LAST_OWNER`, `MEMBER_NOT_FOUND`, `INVITATION_NOT_FOUND`, `INVITATION_EXPIRED`, `ALREADY_MEMBER`, `ORG_REQUIRED`.
+- New error codes: `ORG_ROLE_NOT_FOUND`, `ORG_ROLE_IN_USE`, `ROLE_SCOPE_MISMATCH`, `LAST_OWNER`, `MEMBER_NOT_FOUND`, `FREE_ORG_LIMIT`, `MAGIC_LINK_INVALID`, `MAGIC_LINK_EXPIRED`, `CAPTCHA_FAILED`, `EMAIL_DISPOSABLE`, `EMAIL_UNVERIFIED`, `INVITATION_NOT_FOUND`, `INVITATION_EXPIRED`, `ALREADY_MEMBER`, `ORG_REQUIRED`.
 
 ---
 
@@ -140,16 +142,27 @@ Bearust SaaS (`bearust-saas`):
 - [ ] Members and invitations
 - [ ] Custom organization roles
 
-### Task 4: Sign-up, staff identity, and Unmer Gate removal
+### Task 4: Passwordless sign-in, sign-up, staff identity, and Unmer Gate removal
 
 **Files:** `internal/auth/password_routes.go`, OAuth/e2e user creation paths, `internal/auth/gate_roles.go`, `internal/auth/provider.go`, `internal/config/`, migration `000023_drop_unmer_roles`, seeders, `.env.example`, charts.
 
+- Passwordless authentication:
+  - Magic link: `POST /auth/magic-link` (email, captcha token) mails a single-use link valid 15 minutes (token hashed at rest, reusing `user_tokens`); `POST /auth/magic-link/verify` signs in, creating the user on first use. Responses never reveal whether an email exists; per-email and per-IP throttling.
+  - OAuth: keep Google and GitHub, add Facebook and X; Microsoft and generic OIDC optional. Each provider is enabled by its env credentials; at least one sign-in method must be enabled at startup.
+  - Account linking: a provider identity attaches to an existing user automatically **only** when the provider asserts a verified email equal to the user's. When the provider gives no email or an unverified one (possible with X and Facebook), the user confirms an email through a magic link before the account is created or linked.
+  - Remove password login, registration, reset, change, the `AUTH_PASSWORD_ENABLED` setting and the password columns' use (keep the column nullable for one release, then drop). Existing password users sign in with a magic link to the same email.
+- Sign-up protection: Cloudflare Turnstile on the magic-link request and the first OAuth sign-up (`TURNSTILE_SECRET_KEY`; disabled when unset for local development); disposable-email blocklist (bundled list, refreshable).
+- Free organization limit: creating an organization when the user already owns a Free one answers `FREE_ORG_LIMIT` (the new organization must start on a paid plan, wired in Phase 4).
 - Sign-up creates the personal organization with the user as Owner and assigns **no** platform role. Data migration: users whose only platform role is Viewer and who own an organization lose the platform Viewer role.
 - `GET /me/permissions` returns `platform_permissions` and `is_staff` (has any platform role). The frontend uses `is_staff` instead of guessing (`tenant-access.ts` is removed).
 - Remove the Unmer Gate provider, its config and role mapping; delete Employee and Student (reassign any holders to nothing, logged). At least one login method must remain enabled.
 
-**Validation:** sign-up test (no platform role, Owner of a new org); migration test; config test that refuses to start with no login method; existing auth tests updated.
+**Validation:** sign-up test (no platform role, Owner of a new org); magic link tests (expiry, single use, no account enumeration, throttling); OAuth linking tests (verified email links, unverified or missing email requires magic-link confirmation); `FREE_ORG_LIMIT` test; migration test; config test that refuses to start with no sign-in method; existing auth tests updated, password E2E replaced by `magic-link.spec.ts`.
 
+- [ ] Magic link sign-in
+- [ ] Facebook and X providers + safe account linking
+- [ ] Remove password authentication
+- [ ] Turnstile, disposable-email blocklist, one Free organization per user
 - [ ] Sign-up without platform role + data migration
 - [ ] `is_staff` in the permission context
 - [ ] Remove Unmer Gate, Employee, Student

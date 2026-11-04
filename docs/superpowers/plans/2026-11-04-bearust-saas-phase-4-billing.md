@@ -33,6 +33,8 @@ Provider APIs change; this plan does not rely on remembered details. Task 0 reco
   - Downgrade (lower plan or yearly → monthly): the unused value of the current period becomes **account credit** applied to future invoices (no cash refund); the new plan starts now.
   - Proration uses seconds remaining in the period; amounts round half-up to the currency's minor unit.
   - Provider-managed subscriptions use the provider's own proration when it matches this rule (verified in Task 0); otherwise the SaaS computes the amount and charges or credits through the adapter.
+- **Trial:** every new organization can start one **14-day Pro trial without a payment method** (status `trialing`, Pro limits). At the end it becomes Free unless the customer subscribed; one trial per organization and per owner. Trials run on Free-tier nodes unless the customer subscribes.
+- **Plan quotas** (from Phase 5) are part of the plan: bandwidth and requests per month and the per-host rate limit sit next to the resource limits and are edited with the plan.
 - **Tax:**
   - Dodo Payments is Merchant of Record and handles tax on its payments; the SaaS stores its invoice reference.
   - Non-MoR gateways (Xendit, later Midtrans and Duitku): Bearust is the seller. Prices are tax-inclusive; the tax rate is a staff-editable setting per currency/country, **default 0%** (a business that is not a PKP does not collect PPN). Invoices show the tax line only when the rate is above 0.
