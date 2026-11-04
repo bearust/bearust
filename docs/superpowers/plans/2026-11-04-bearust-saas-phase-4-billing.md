@@ -24,15 +24,19 @@ Provider APIs change; this plan does not rely on remembered details. Task 0 reco
 
 - Billing ships together with the RBAC work as the next phases; multiple gateways are a requirement, not a later extension.
 - Gateways requested: Midtrans, Xendit, Duitku, Paddle, Stripe, Dodo Payments, PayPal, extensible to more.
-
-## Open decisions (default in bold, change before Task 3)
-
-1. Order of adapters after the fake provider: **Xendit (IDR) and Stripe (USD) first**, then Midtrans, Duitku, Paddle, Dodo Payments, PayPal.
-2. Currencies: **IDR and USD** prices per plan; a price exists per (plan, currency, interval).
-3. Intervals: **monthly and yearly** (yearly with a configurable discount).
-4. Failed payment: **7-day grace (`past_due`), then downgrade to Free**; existing resources stay but creating new ones over the Free limits is blocked.
-5. Upgrades take effect immediately with proration as a credit on the next invoice; downgrades take effect at period end.
-6. Tax for non-MoR gateways: **prices are tax-inclusive** with a configurable tax rate shown on the invoice; formal tax invoices are a follow-up.
+- **First adapters: Xendit (IDR) and Dodo Payments (USD)**, chosen for easy sign-up and sandbox access. The others follow in Task 4.
+- **Currencies: IDR and USD**, with more addable later as data (a `currencies` row plus prices), no code change.
+- **Intervals: monthly and yearly** for every paid plan, like Claude subscriptions: the customer picks a plan and an interval; yearly has its own price (typically discounted). Switching interval is a plan change.
+- **Failed payment: 7-day grace (`past_due`), then downgrade to Free.** Existing resources keep running; creating resources beyond the Free limits is blocked until the organization is back under them or pays.
+- **Plan changes are prorated in both directions and take effect immediately:**
+  - Upgrade (higher plan or monthly → yearly): charge `new price × remaining fraction − unused value of the current period` now.
+  - Downgrade (lower plan or yearly → monthly): the unused value of the current period becomes **account credit** applied to future invoices (no cash refund); the new plan starts now.
+  - Proration uses seconds remaining in the period; amounts round half-up to the currency's minor unit.
+  - Provider-managed subscriptions use the provider's own proration when it matches this rule (verified in Task 0); otherwise the SaaS computes the amount and charges or credits through the adapter.
+- **Tax:**
+  - Dodo Payments is Merchant of Record and handles tax on its payments; the SaaS stores its invoice reference.
+  - Non-MoR gateways (Xendit, later Midtrans and Duitku): Bearust is the seller. Prices are tax-inclusive; the tax rate is a staff-editable setting per currency/country, **default 0%** (a business that is not a PKP does not collect PPN). Invoices show the tax line only when the rate is above 0.
+  - Before charging real money, confirm thresholds and tax-invoice duties with a tax consultant; formal e-Faktur integration is a follow-up.
 
 ## Global Constraints
 
@@ -51,9 +55,11 @@ Provider APIs change; this plan does not rely on remembered details. Task 0 reco
 
 - `currencies(code, exponent)`
 - `plans` (existing) gains `active`, `sort`, `description`, `features` (jsonb for marketing copy); limits stay as columns.
-- `plan_prices(id, plan_code, currency, interval, amount_minor, active, provider_refs jsonb)` — provider product/price ids per gateway where needed.
+- `plan_prices(id, plan_code, currency, interval month|year, amount_minor, active, provider_refs jsonb)` — provider product/price ids per gateway where needed.
 - `payment_gateways(code, display_name, enabled, mode sandbox|live, config_ciphertext, webhook_secret_ciphertext, currencies, capabilities jsonb, sort)`
 - `billing_customers(org_id, gateway_code, provider_customer_id)`
+- `credit_balances(org_id, currency, amount_minor)` and `credit_entries(id, org_id, currency, amount_minor, reason, invoice_id, created_at)` for downgrade credit
+- `tax_rates(country, currency, rate_bps, inclusive, active)` (default 0 bps)
 - `subscriptions(id, org_id, plan_code, price_id, gateway_code, status trialing|active|past_due|canceled|expired|incomplete, managed_by provider|saas, provider_subscription_id, current_period_start, current_period_end, cancel_at_period_end, grace_until, created_at, updated_at)`
 - `invoices(id, number, org_id, subscription_id, currency, subtotal_minor, tax_minor, total_minor, status draft|open|paid|void|uncollectible, due_at, paid_at, provider_invoice_ref, pdf_url)`
 - `invoice_lines(invoice_id, description, quantity, unit_minor, amount_minor, period_start, period_end)`
@@ -113,6 +119,8 @@ Bearust SaaS (`bearust-saas`):
 
 - Subscription state machine with explicit transitions and tests for every edge (including out-of-order events).
 - Entitlements: `Entitlements(org)` returns the effective plan limits; `internal/org`, `domains`, `lbconfig` read limits from it.
+- Proration: one pure function `Prorate(current, next, at)` returning charge or credit; table tests for upgrade, downgrade, interval switch, same-day change and period end.
+- Credit balance applied automatically to the next invoice before charging.
 - Invoice numbering: per-year sequence, e.g. `BRT-2026-000123`, gapless within the database.
 
 **Validation:** state machine table tests; Postgres tests for numbering under concurrency and for constraints; entitlements tests per status.
@@ -131,26 +139,26 @@ Bearust SaaS (`bearust-saas`):
 - [ ] Webhook endpoint + processing
 - [ ] Renewal, dunning, reconcile jobs
 
-### Task 3: First real adapters (Xendit, Stripe by default)
+### Task 3: First real adapters (Xendit, Dodo Payments)
 
-- Implement against the capability matrix; sandbox credentials from env for live tests (`TEST_XENDIT_*`, `TEST_STRIPE_*`), skipped when absent.
+- Implement against the capability matrix; sandbox credentials from env for live tests (`TEST_XENDIT_*`, `TEST_DODO_*`), skipped when absent.
 
 **Validation:** adapter unit tests with recorded fixtures; live sandbox tests for checkout creation, webhook verification and refund.
 
 - [ ] Xendit
-- [ ] Stripe
+- [ ] Dodo Payments
 
 ### Task 4: Remaining adapters
 
-- Midtrans, Duitku, Paddle, Dodo Payments, PayPal, in the order chosen in "Open decisions".
+- Stripe, Midtrans, Duitku, Paddle, PayPal (order decided after Task 0).
 - Merchant of Record adapters store the provider invoice reference and skip SaaS tax lines.
 
 **Validation:** as Task 3 per adapter.
 
+- [ ] Stripe
 - [ ] Midtrans
 - [ ] Duitku
 - [ ] Paddle
-- [ ] Dodo Payments
 - [ ] PayPal
 
 ### Task 5: Tenant billing UI
