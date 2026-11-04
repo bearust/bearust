@@ -108,8 +108,15 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** Postgres tests for the scope trigger and constraints; unit tests for `Authorize` over both scopes, including a platform permission never satisfying an organization check and vice versa.
 
-- [ ] Schema, trigger, seeds
-- [ ] Scoped `Authorize`
+- [x] Schema, trigger, seeds
+- [x] Scoped `Authorize`
+
+**Delivered (2026-11-04), deviations:**
+- The platform assignment table keeps its name `user_roles` (a trigger restricts it to platform roles) instead of being renamed; `organization_member_roles` is created here rather than in Task 2.
+- Existing slugs `roles.*`, `permissions.*` and `users.impersonate` are kept instead of `platform.roles.manage` and `impersonate.staff`.
+- Organization permissions and system organization roles live in migration `000015_organizations` (the SaaS is not in production, so migrations were edited in place).
+- Pulled forward from Task 4: sign-up (password and the E2E session helper) assigns no platform role, because the platform Viewer is now a staff role that can read organizations. No data migration is needed. Employee and Student stay until Task 4.
+- E2E helpers treat auto-created accounts as tenants (`/app`); `ai.spec.ts` "Viewer sees only AI chat" still logs in an auto-created account and must switch to a staff Viewer in Task 6.
 
 ### Task 2: Organization memberships with roles
 
@@ -163,7 +170,7 @@ Bearust SaaS (`bearust-saas`):
 - [ ] Facebook and X providers + safe account linking
 - [ ] Remove password authentication
 - [ ] Turnstile, disposable-email blocklist, one Free organization per user
-- [ ] Sign-up without platform role + data migration
+- [ ] Sign-up without platform role + data migration (no-role sign-up done in Task 1; data migration not needed before production)
 - [ ] `is_staff` in the permission context
 - [ ] Remove Unmer Gate, Employee, Student
 
