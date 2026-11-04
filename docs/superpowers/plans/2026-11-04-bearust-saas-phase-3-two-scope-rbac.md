@@ -212,8 +212,14 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** tests for each target rule, expiry, dual attribution, and the organization audit entries.
 
-- [ ] Target rules + expiry
-- [ ] Organization audit log
+- [x] Target rules + expiry
+- [x] Organization audit log
+
+**Deviations (2026-11-04):**
+- `users.impersonate` is renamed `impersonate.staff`; the route stays `POST /users/{id}/impersonate` and accepts either permission (403 `FORBIDDEN` with neither, `IMPERSONATE_FORBIDDEN` when a target rule fails).
+- `org_audit_events` is folded into migration `000015` and written through a small `internal/orgaudit` package (auth cannot import org). It records every successful write to `/org/*`, not only writes made while impersonating; `impersonator_id` marks the impersonated ones.
+- Every member role can read the log (all system roles hold `org.audit.read`).
+- Starting impersonation from the organization detail page is UI work and moves to Task 6.
 
 ### Task 6: Frontend
 
