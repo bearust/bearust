@@ -182,13 +182,24 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** sign-up test (no platform role, Owner of a new org); magic link tests (expiry, single use, no account enumeration, throttling); OAuth linking tests (verified email links, unverified or missing email requires magic-link confirmation); `FREE_ORG_LIMIT` test; migration test; config test that refuses to start with no sign-in method; existing auth tests updated, password E2E replaced by `magic-link.spec.ts`.
 
-- [ ] Magic link sign-in
-- [ ] Facebook and X providers + safe account linking
-- [ ] Remove password authentication
-- [ ] Turnstile, disposable-email blocklist, one Free organization per user
-- [ ] Sign-up without platform role + data migration (no-role sign-up done in Task 1; data migration not needed before production)
-- [ ] `is_staff` in the permission context
-- [ ] Remove Unmer Gate, Employee, Student
+- [x] Magic link sign-in
+- [x] Facebook and X providers + safe account linking
+- [x] Remove password authentication
+- [x] Turnstile, disposable-email blocklist, one Free organization per user
+- [x] Sign-up without platform role + data migration (no-role sign-up done in Task 1; data migration not needed before production)
+- [x] `is_staff` in the permission context
+- [x] Remove Unmer Gate, Employee, Student
+
+**Deviations (2026-11-04):**
+- Magic links live in a new `magic_links` table (folded into `000001`) instead of `user_tokens`, because the user may not exist yet; the `users.password` column is dropped outright (no production data).
+- `is_staff` is added to `/me/permissions` without a separate `platform_permissions` field (platform roles are the only roles in that context); the frontend derives staff from the session's platform roles.
+- `POST /me/organizations` creates Free organizations only and answers `FREE_ORG_LIMIT` once the caller owns one; paid organizations come with checkout (Phase 4).
+- Facebook emails are always treated as unverified (confirmed by magic link); X emails count as verified only when X returns `confirmed_email`.
+- The disposable-domain list is bundled (`internal/auth/data/disposable_domains.txt`); refresh it by replacing the file.
+- Turnstile also guards OAuth starts, not only magic-link requests.
+- Added `TRUSTED_PROXIES` so per-IP throttles see the browser address (`X-Forwarded-For` is believed only from listed peers).
+- The magic link page submits the token with a button, so mail scanners that prefetch links cannot use it up.
+- The `a.rizal@unmer.ac.id` seed user and the Employee/Student roles are removed.
 
 ### Task 5: Tenant impersonation with dual audit
 
