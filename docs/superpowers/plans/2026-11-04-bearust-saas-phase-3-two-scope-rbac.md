@@ -154,8 +154,16 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** handler tests for escalation attempts (granting `org.delete` as Admin, assigning Owner as Admin, editing a system role), invitation expiry and email mismatch, role in use.
 
-- [ ] Members and invitations
-- [ ] Custom organization roles
+- [x] Members and invitations
+- [x] Custom organization roles
+
+**Delivered (2026-11-04), deviations:**
+- Tables live in `000015_organizations` (no `000022`); invitation roles are a join table `organization_invitation_roles` instead of a `role_ids` array.
+- Extra routes: `GET /invitations/{token}` (preview for the accept page), and `DELETE /org/members/{user_id}` doubles as "leave" when the id is the caller's.
+- Escalation rules: an actor may only change a member whose permissions it holds, may only assign, create or edit roles within its own permissions (editing or deleting a stronger custom role is refused too), and only Owners assign, remove or demote Owners. Error `ORG_PERMISSION_ESCALATION`; other codes `ORG_MEMBER_NOT_FOUND`, `ORG_LAST_OWNER`, `ORG_ROLE_NOT_FOUND`, `ORG_ROLE_SYSTEM`, `ORG_ROLE_IN_USE`, `ORG_ROLE_NAME_TAKEN`, `ALREADY_MEMBER`, `INVITATION_NOT_FOUND`, `INVITATION_EXPIRED` (410), `INVITATION_EMAIL_MISMATCH`.
+- Re-inviting an email replaces its pending invitation and token; custom role names may not reuse system role names.
+- `GET /org/roles` needs `org.members.read`; `GET /org/permissions` needs `org.read`.
+- Invitation mail: template `org.invitation` (en, id) through the mail queue; the link is `${APP_URL}/invite/{token}` (page in Task 6).
 
 ### Task 4: Passwordless sign-in, sign-up, staff identity, and Unmer Gate removal
 
