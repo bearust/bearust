@@ -131,9 +131,17 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** handler tests per permission (allowed, denied 403, other org 404); Postgres test for the data migration; tests for the last-owner rule.
 
-- [ ] Membership roles + migration
-- [ ] Organization selection + `/me/organizations`
-- [ ] Permission checks on every `/org/*` route
+- [x] Membership roles + migration
+- [x] Organization selection + `/me/organizations`
+- [x] Permission checks on every `/org/*` route
+
+**Delivered (2026-11-04), deviations:**
+- No `000021` migration and no data migration: `organization_members.role` was dropped from `000015_organizations` in place, and the sign-up path inserts the Owner role in `organization_member_roles`.
+- Permission checks live in `org.Service.Caller(ctx, user, perm)` and `Writable(ctx, user, perm)` (the services already resolve the organization there) instead of a `RequireOrgPermission` route middleware. Reads need the matching `org.*.read`, writes `org.*.manage`; `ORG_PERMISSION_DENIED` replaces `ORG_OWNER_REQUIRED`.
+- `GET /org` answers `permissions` (the caller's `org.*`) instead of `role`; the tenant UI hides actions per permission.
+- `X-Org-ID` is read by `org.SelectFromHeader()` on the protected API group. The frontend does not send it yet: the organization switcher is Task 6, so the oldest membership is used until then.
+- `org.ensureOwnerRemains` exists with tests; Task 3 calls it when members or roles change.
+- `org.SystemRolePermissions()` mirrors the migration for SQLite fixtures (`internal/org/orgtest`); a Postgres test keeps both in step.
 
 ### Task 3: Members, invitations and custom organization roles
 
