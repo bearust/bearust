@@ -232,10 +232,19 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** Vitest for permission-driven rendering and forms; Playwright `org-members.spec.ts` (Owner invites a member as Developer → member accepts → member cannot manage members → Owner creates a custom role with `org.members.read` and assigns it), `org-impersonation.spec.ts` (Support impersonates a tenant member, the tenant sees it in the audit log), existing specs updated (Viewer becomes a staff-only role).
 
-- [ ] Switcher + permission-driven `/app`
-- [ ] Members, invitations, roles, audit pages
-- [ ] Staff organization detail + impersonation
-- [ ] E2E
+**Deviations (2026-11-04):**
+- The switcher is a plain `<select>` that navigates to `/app/select-org?org=` (a route handler sets or clears the `bearust_org` cookie); `backendFetch` sends the cookie as `X-Org-ID`. A stale selection (`ORG_NOT_FOUND`) clears the cookie through the same route.
+- The Roles nav item needs `org.members.read` (members and roles are read together); editing needs `org.roles.manage`.
+- Developer holds every `.read` permission, so `org-members.spec.ts` checks that a Developer reads members but cannot manage them, then grants a custom role with `org.members.manage` (not `.read`).
+- Invite sign-up path: `/invite/{token}` stores the link in a 1-hour `bearust_next` cookie; `/auth/landing` returns there after sign-in (`safeNext`).
+- Staff who also belong to organizations get a "My organizations" link in the dashboard header instead of an account-menu entry.
+- New backend `GET /organizations/{id}` (staff organization detail) and a development-only `GET /org/e2e/invitation?email=` returning the latest invitation link for Playwright.
+- The impersonation ticket cookie lives 60 minutes, matching the backend TTL.
+
+- [x] Switcher + permission-driven `/app`
+- [x] Members, invitations, roles, audit pages
+- [x] Staff organization detail + impersonation
+- [x] E2E
 
 ---
 
