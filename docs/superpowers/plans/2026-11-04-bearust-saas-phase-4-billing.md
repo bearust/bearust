@@ -130,10 +130,12 @@ Bearust SaaS (`bearust-saas`):
 > **Progress 2026-11-04 (ticket #2):** currencies, plan prices, subscriptions and the entitlement resolver are landed. The plan's migration numbers were stale: the new billing tables live in `000020_billing_core`, and the `plans` columns/seed were edited into `000015_organizations` in place because the SaaS is pre-production. The state machine, invoicing and gateway tables follow in tickets #3–#5.
 >
 > **Progress 2026-11-04 (ticket #3):** the fake gateway, checkout, explicit subscription state machine, webhook inbox and queue processing are landed. Gateways, customers, billing profiles, webhook events, invoice sequences, invoices, invoice lines and payments live in `000021_billing_runtime`; subscriptions gained checkout/last-event columns in `000020`. The webhook endpoint and processing checkbox is done; renewal, dunning and reconciliation jobs follow in #7/#8.
+>
+> **Progress 2026-11-04 (ticket #4):** tax rates with tax-inclusive extraction, full and partial refunds, and tenant/staff invoice and payment APIs are landed. `tax_rates` and `refunds` live in `000021_billing_runtime`; invoice numbering is gapless per year and covered by a concurrency test.
 
 - [ ] Schema + catalog
 - [x] Subscription state machine + entitlements
-- [ ] Invoices, payments, refunds (fake gateway)
+- [x] Invoices, payments, refunds (fake gateway)
 
 ### Task 2: Webhooks and jobs
 
