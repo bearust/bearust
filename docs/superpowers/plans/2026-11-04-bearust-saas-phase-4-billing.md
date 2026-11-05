@@ -134,6 +134,8 @@ Bearust SaaS (`bearust-saas`):
 > **Progress 2026-11-04 (ticket #4):** tax rates with tax-inclusive extraction, full and partial refunds, and tenant/staff invoice and payment APIs are landed. `tax_rates` and `refunds` live in `000021_billing_runtime`; invoice numbering is gapless per year and covered by a concurrency test.
 >
 > **Progress 2026-11-05 (ticket #5):** immediate plan/interval changes use one pure proration function (seconds remaining, half-up), upgrades charge through the adapter, downgrades add account credit, and credit is applied before the next charge. `credit_balances` and `credit_entries` live in `000021_billing_runtime`; invoices gained `credit_minor`. Task 1 is complete.
+>
+> **Progress 2026-11-05 (ticket #6):** the 14-day Pro trial starts without a payment method, with one redemption per organization and owner, converts through the existing checkout webhook, and expires via the daily `billing.trials` job. `trial_redemptions` live in `000021_billing_runtime`; subscriptions gained pending-plan fields in `000020`. Free-node placement for trial organizations is enforced in Phase 5.
 
 - [x] Schema + catalog
 - [x] Subscription state machine + entitlements
