@@ -490,6 +490,7 @@ async fn desired_state_routes_accept_and_validate_limits() {
     let mut valid = document(1, "limited", "limited.example");
     valid["routes"][0]["rate_limit"] = json!({"requests_per_second": 20, "burst": 40});
     valid["routes"][0]["max_body_bytes"] = json!(1048576);
+    valid["routes"][0]["paused"] = json!(true);
     let (status, body) = call(
         &app,
         "PUT",
@@ -508,4 +509,5 @@ async fn desired_state_routes_accept_and_validate_limits() {
         .unwrap();
     assert_eq!(route.rate_limit.unwrap().requests_per_second, 20);
     assert_eq!(route.max_body_bytes, Some(1048576));
+    assert!(route.paused);
 }

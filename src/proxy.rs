@@ -70,6 +70,12 @@ pub struct RequestContext {
     pub request_body_bytes: u64,
 }
 
+const TEXT_PLAIN: &str = "text/plain; charset=utf-8";
+/// Seconds a client should wait before retrying a paused route.
+const PAUSED_RETRY_AFTER_SECONDS: &str = "3600";
+/// Served for paused routes (quota exhausted, inactivity, plan downgrade).
+const PAUSED_PAGE: &[u8] = b"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Site paused</title><style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1.5rem;color:#1f2933}h1{font-size:1.5rem}p{line-height:1.5;color:#52606d}</style></head><body><h1>This site is paused</h1><p>The owner's Bearust plan has paused this site, usually because a usage limit was reached or the site was inactive. The owner can resume it or upgrade from the Bearust dashboard.</p><p><small>Served by Bearust</small></p></body></html>";
+
 impl Default for RequestContext {
     fn default() -> Self {
         Self {
@@ -262,13 +268,14 @@ impl BearustProxy {
         ctx: &mut RequestContext,
         status: u16,
         retry_after: Option<&str>,
+        content_type: &str,
         body: &'static [u8],
     ) -> Result<()> {
         let mut response = ResponseHeader::build(status, Some(3)).map_err(|error| {
             pingora_core::Error::explain(ErrorType::HTTPStatus(500), error.to_string())
         })?;
         let mut headers = vec![
-            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Content-Type", content_type),
             ("Cache-Control", "no-store"),
         ];
         if let Some(value) = retry_after {
@@ -2079,13 +2086,34 @@ impl ProxyHttp for BearustProxy {
             return Ok(true);
         };
         let route = resolved_route.clone();
+        if route.paused {
+            ctx.route = Some(route);
+            ctx.snapshot = Some(snapshot);
+            self.reject(
+                session,
+                ctx,
+                503,
+                Some(PAUSED_RETRY_AFTER_SECONDS),
+                "text/html; charset=utf-8",
+                PAUSED_PAGE,
+            )
+            .await?;
+            return Ok(true);
+        }
         let admitted = snapshot.admit_route(&route.name, Instant::now());
         ctx.route = Some(route.clone());
         ctx.snapshot = Some(snapshot);
         if let Err(retry_after) = admitted {
             let seconds = retry_after.as_secs().max(1).to_string();
-            self.reject(session, ctx, 429, Some(&seconds), b"Too many requests")
-                .await?;
+            self.reject(
+                session,
+                ctx,
+                429,
+                Some(&seconds),
+                TEXT_PLAIN,
+                b"Too many requests",
+            )
+            .await?;
             return Ok(true);
         }
         if let Some(limit) = route.max_body_bytes {
@@ -2096,8 +2124,15 @@ impl ProxyHttp for BearustProxy {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.trim().parse::<u64>().ok());
             if declared.is_some_and(|length| length > limit) {
-                self.reject(session, ctx, 413, None, b"Request body too large")
-                    .await?;
+                self.reject(
+                    session,
+                    ctx,
+                    413,
+                    None,
+                    TEXT_PLAIN,
+                    b"Request body too large",
+                )
+                .await?;
                 return Ok(true);
             }
         }

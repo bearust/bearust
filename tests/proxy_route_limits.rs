@@ -15,7 +15,7 @@ mod support;
 /// Pingora's server owns a process-wide listener loop; run explicitly with `--ignored`.
 #[tokio::test]
 #[ignore = "starts a process-wide Pingora server; run with cargo test --test proxy_route_limits -- --ignored"]
-async fn route_rate_limit_and_body_limit_are_enforced() {
+async fn route_rate_limit_body_limit_and_pause_are_enforced() {
     let backend = support::spawn_http_backend(
         Arc::new(std::sync::atomic::AtomicU16::new(200)),
         "stream-body",
@@ -52,17 +52,29 @@ async fn route_rate_limit_and_body_limit_are_enforced() {
                 weight: 1,
             }],
         }],
-        routes: vec![RouteConfig {
-            rate_limit: Some(RouteRateLimit {
-                requests_per_second: 1,
-                burst: 2,
-            }),
-            max_body_bytes: Some(8),
-            name: "default".into(),
-            host: "example.test".into(),
-            path_prefix: "/".into(),
-            upstream_pool: "main".into(),
-        }],
+        routes: vec![
+            RouteConfig {
+                rate_limit: Some(RouteRateLimit {
+                    requests_per_second: 1,
+                    burst: 2,
+                }),
+                max_body_bytes: Some(8),
+                paused: false,
+                name: "default".into(),
+                host: "example.test".into(),
+                path_prefix: "/".into(),
+                upstream_pool: "main".into(),
+            },
+            RouteConfig {
+                name: "paused".into(),
+                host: "paused.test".into(),
+                path_prefix: "/".into(),
+                upstream_pool: "main".into(),
+                rate_limit: None,
+                max_body_bytes: None,
+                paused: true,
+            },
+        ],
         rate_limit: Default::default(),
         prometheus: Default::default(),
         cluster: Default::default(),
@@ -112,5 +124,18 @@ async fn route_rate_limit_and_body_limit_are_enforced() {
         .unwrap();
     assert_eq!(limited.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
     assert!(limited.headers().get("retry-after").is_some());
+
+    // A paused route answers with the Bearust page instead of the backend.
+    let paused = client
+        .get(format!("http://{address}/stream"))
+        .header("Host", "paused.test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(paused.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(paused.headers().get("retry-after").unwrap(), "3600");
+    let page = paused.text().await.unwrap();
+    assert!(page.contains("This site is paused"));
+    assert!(!page.contains("stream-body"));
     backend.shutdown().await;
 }

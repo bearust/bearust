@@ -364,6 +364,10 @@ pub struct RouteConfig {
     /// Largest accepted request body in bytes. Omitted means unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_body_bytes: Option<u64>,
+    /// A paused route answers 503 with a Bearust page and never contacts
+    /// its pool. Omitted means not paused.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
 }
 
 /// Per-route token bucket: `requests_per_second` refill, `burst` capacity.

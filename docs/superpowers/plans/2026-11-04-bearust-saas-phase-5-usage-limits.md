@@ -60,7 +60,7 @@ Bearust SaaS (`bearust-saas`):
 **Validation:** cargo tests for the token bucket, body limit and paused response; machine API tests for the new fields.
 
 - [x] Rate limit + body limit (bearust#2: one shared bucket per route, 429 with Retry-After; Content-Length over the limit gets 413 before the backend, streamed bodies are cut off with 413 once they pass it; buckets refill to full on every config apply)
-- [ ] Paused routes
+- [x] Paused routes (bearust#3: 503 HTML page with `Retry-After: 3600`, checked before the rate limit so paused routes never touch their pool; the page tells visitors the owner can resume or upgrade from the Bearust dashboard but carries no per-tenant link)
 
 ### Task 3: Usage collection and quotas in the SaaS
 

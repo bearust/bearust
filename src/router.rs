@@ -15,6 +15,7 @@ pub struct ResolvedRoute {
     pub path_prefix: String,
     pub upstream_pool: String,
     pub max_body_bytes: Option<u64>,
+    pub paused: bool,
 }
 
 pub struct Router {
@@ -48,6 +49,7 @@ impl Router {
                     path_prefix: route.path_prefix.clone(),
                     upstream_pool: route.upstream_pool.clone(),
                     max_body_bytes: route.max_body_bytes,
+                    paused: route.paused,
                 });
         }
         for routes in indexed.values_mut() {
@@ -133,6 +135,7 @@ mod limit_tests {
             upstream_pool: "pool".into(),
             rate_limit: limit,
             max_body_bytes: Some(1024),
+            paused: false,
         }
     }
 
@@ -162,6 +165,15 @@ mod limit_tests {
         assert_eq!(
             router.route("open.example", "/").unwrap().max_body_bytes,
             Some(1024)
+        );
+        assert!(!router.route("open.example", "/").unwrap().paused);
+        let mut paused = route("paused", None);
+        paused.paused = true;
+        assert!(
+            Router::new(&[paused])
+                .route("paused.example", "/")
+                .unwrap()
+                .paused
         );
     }
 }

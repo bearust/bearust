@@ -88,6 +88,7 @@ async fn request_body_and_response_header_transforms_through_pingora() {
         routes: vec![RouteConfig {
             rate_limit: None,
             max_body_bytes: None,
+            paused: false,
             name: "default".into(),
             host: "example.test".into(),
             path_prefix: "/".into(),
