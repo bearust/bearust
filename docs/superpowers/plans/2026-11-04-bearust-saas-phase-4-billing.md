@@ -140,6 +140,8 @@ Bearust SaaS (`bearust-saas`):
 > **Progress 2026-11-05 (ticket #7):** SaaS-managed subscriptions get a renewal invoice and payment link seven days before the period ends; tokenized subscriptions are charged on the due date. Dunning reminds on days 1/3/6, then downgrades to Free after the 7-day grace. `payment_url` and `renewal_key` live on invoices, `past_due_since` on subscriptions, and `dunning_events` in `000021_billing_runtime`. Reconciliation remains in #8.
 >
 > **Progress 2026-11-05 (ticket #8):** provider-managed subscriptions are reconciled through the existing state machine, webhook events can be listed, inspected and replayed by staff, and raw payloads are pruned after 90 days. The daily jobs are `billing.reconcile` and `billing.webhook.prune`.
+>
+> **Progress 2026-11-05 (tickets #16/#17):** `/app/billing` now has the catalog and plan picker, currency/interval/gateway selection, first checkout and trial start, immediate plan changes, cancel at period end, invoices with a printable detail page, payments, credit ledger and billing profile. `billing-checkout.spec.ts` covers subscribe → change plan → cancel. The backend gained profile and cancel endpoints.
 
 - [x] Schema + catalog
 - [x] Subscription state machine + entitlements
@@ -183,8 +185,8 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** Vitest for plan/price selection and states; Playwright `billing-checkout.spec.ts` against the fake gateway (subscribe → webhook → limits raised → cancel → period end → Free).
 
-- [ ] Billing pages
-- [ ] E2E
+- [x] Billing pages
+- [x] E2E
 
 ### Task 6: Staff billing UI
 
