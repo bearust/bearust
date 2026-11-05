@@ -142,6 +142,8 @@ Bearust SaaS (`bearust-saas`):
 > **Progress 2026-11-05 (ticket #8):** provider-managed subscriptions are reconciled through the existing state machine, webhook events can be listed, inspected and replayed by staff, and raw payloads are pruned after 90 days. The daily jobs are `billing.reconcile` and `billing.webhook.prune`.
 >
 > **Progress 2026-11-05 (tickets #16/#17):** `/app/billing` now has the catalog and plan picker, currency/interval/gateway selection, first checkout and trial start, immediate plan changes, cancel at period end, invoices with a printable detail page, payments, credit ledger and billing profile. `billing-checkout.spec.ts` covers subscribe → change plan → cancel. The backend gained profile and cancel endpoints.
+>
+> **Progress 2026-11-05 (ticket #18):** `/dashboard/billing` now edits plans, prices and quotas; configures and tests gateways; extends, cancels and changes subscriptions; lists invoices/payments and issues refunds; edits tax rates; and lists/replays webhooks. The public pricing page reads the live catalog. `billing-admin.spec.ts` covers price edit, gateway save/test and refund.
 
 - [x] Schema + catalog
 - [x] Subscription state machine + entitlements
@@ -195,8 +197,8 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** Vitest; Playwright `billing-admin.spec.ts` (create a price, enable the fake gateway, refund a payment).
 
-- [ ] Staff pages
-- [ ] Pricing page
+- [x] Staff pages
+- [x] Pricing page
 
 ---
 
