@@ -136,6 +136,8 @@ Bearust SaaS (`bearust-saas`):
 > **Progress 2026-11-05 (ticket #5):** immediate plan/interval changes use one pure proration function (seconds remaining, half-up), upgrades charge through the adapter, downgrades add account credit, and credit is applied before the next charge. `credit_balances` and `credit_entries` live in `000021_billing_runtime`; invoices gained `credit_minor`. Task 1 is complete.
 >
 > **Progress 2026-11-05 (ticket #6):** the 14-day Pro trial starts without a payment method, with one redemption per organization and owner, converts through the existing checkout webhook, and expires via the daily `billing.trials` job. `trial_redemptions` live in `000021_billing_runtime`; subscriptions gained pending-plan fields in `000020`. Free-node placement for trial organizations is enforced in Phase 5.
+>
+> **Progress 2026-11-05 (ticket #7):** SaaS-managed subscriptions get a renewal invoice and payment link seven days before the period ends; tokenized subscriptions are charged on the due date. Dunning reminds on days 1/3/6, then downgrades to Free after the 7-day grace. `payment_url` and `renewal_key` live on invoices, `past_due_since` on subscriptions, and `dunning_events` in `000021_billing_runtime`. Reconciliation remains in #8.
 
 - [x] Schema + catalog
 - [x] Subscription state machine + entitlements
