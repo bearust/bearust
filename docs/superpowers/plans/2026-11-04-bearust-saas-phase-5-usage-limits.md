@@ -71,9 +71,9 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** delta and reset tests; Postgres rollup tests; quota threshold tests with a fake clock; render tests for limits and paused routes.
 
-- [ ] Poller + rollups
-- [ ] Quota evaluation, pause/resume, notifications
-- [ ] Limits rendered into desired state
+- [x] Poller + rollups
+- [x] Quota evaluation, pause/resume, notifications
+- [x] Limits rendered into desired state
 
 ### Task 4: Node tiers and Free placement
 
@@ -84,7 +84,7 @@ Bearust SaaS (`bearust-saas`):
 **Validation:** placement tests per tier; move-on-plan-change test; domain gating tests.
 
 - [x] Tiers + placement (saas#36: `tier` column edited into 000014, default `free`; the seeder adds a paid node edge-sin-02; free-tier capacity error carries `details.upgrade`; moving placements on plan change is saas#42)
-- [ ] Custom domain gating
+- [x] Custom domain gating
 
 ### Task 5: Inactivity lifecycle
 
@@ -93,8 +93,8 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** job tests with a fake clock for warning, pause, resume and deletion.
 
-- [ ] Warning, pause, resume
-- [ ] Deletion
+- [x] Warning, pause, resume
+- [x] Deletion
 
 ### Task 6: Frontend
 
@@ -103,11 +103,20 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** Vitest for meters and banners; Playwright `quota-pause.spec.ts` with a fake node reporting usage over quota → routes paused → upgrade (fake gateway) → resumed.
 
-- [ ] Tenant usage + paused banner
-- [ ] Staff views and overrides
-- [ ] E2E
+- [x] Tenant usage + paused banner
+- [x] Staff views and overrides
+- [x] E2E
 
 ---
+
+## Progress (2026-11-05)
+
+- Usage tables live in `000022_usage`; organization pause/boost fields and the placement retire pointer were edited into `000015_organizations` in place.
+- `usage.poll` rolls cumulative per-boot node counters into `usage_hourly`; `lifecycle.inactive` handles the 23/30/90-day lifecycle.
+- Plan limits and paused state are rendered into every route; Free custom-domain routes are paused and certificate renewal skips them.
+- Placement moves use the new node first and drop the old placement after that node acknowledges the desired state.
+- Admin overrides and tenant resume are audited; `/dashboard/usage` and `/app` expose the meters and pause banner.
+- E2E `quota-pause.spec.ts` passes against a fake node and the fake gateway.
 
 ## Risks
 
