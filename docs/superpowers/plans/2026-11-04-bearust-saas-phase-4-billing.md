@@ -138,6 +138,8 @@ Bearust SaaS (`bearust-saas`):
 > **Progress 2026-11-05 (ticket #6):** the 14-day Pro trial starts without a payment method, with one redemption per organization and owner, converts through the existing checkout webhook, and expires via the daily `billing.trials` job. `trial_redemptions` live in `000021_billing_runtime`; subscriptions gained pending-plan fields in `000020`. Free-node placement for trial organizations is enforced in Phase 5.
 >
 > **Progress 2026-11-05 (ticket #7):** SaaS-managed subscriptions get a renewal invoice and payment link seven days before the period ends; tokenized subscriptions are charged on the due date. Dunning reminds on days 1/3/6, then downgrades to Free after the 7-day grace. `payment_url` and `renewal_key` live on invoices, `past_due_since` on subscriptions, and `dunning_events` in `000021_billing_runtime`. Reconciliation remains in #8.
+>
+> **Progress 2026-11-05 (ticket #8):** provider-managed subscriptions are reconciled through the existing state machine, webhook events can be listed, inspected and replayed by staff, and raw payloads are pruned after 90 days. The daily jobs are `billing.reconcile` and `billing.webhook.prune`.
 
 - [x] Schema + catalog
 - [x] Subscription state machine + entitlements
@@ -151,7 +153,7 @@ Bearust SaaS (`bearust-saas`):
 **Validation:** replay tests with recorded fixtures (duplicate, out-of-order, invalid signature); job tests with a fake clock.
 
 - [x] Webhook endpoint + processing
-- [ ] Renewal, dunning, reconcile jobs
+- [x] Renewal, dunning, reconcile jobs
 
 ### Task 3: First real adapters (Xendit, Dodo Payments)
 
