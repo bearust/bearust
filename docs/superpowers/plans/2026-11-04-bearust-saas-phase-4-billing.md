@@ -113,7 +113,7 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** the matrix is reviewed by the user before adapters beyond `fake` start.
 
-- [ ] Capability matrix
+- [x] Capability matrix
 
 ### Task 1: Billing core
 
