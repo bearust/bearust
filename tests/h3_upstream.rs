@@ -187,6 +187,8 @@ async fn pingora_forwards_http1_requests_to_an_http3_pool() {
             }],
         }],
         routes: vec![RouteConfig {
+            rate_limit: None,
+            max_body_bytes: None,
             name: "default".into(),
             host: "example.test".into(),
             path_prefix: "/".into(),

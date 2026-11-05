@@ -357,7 +357,25 @@ pub struct RouteConfig {
     pub host: String,
     pub path_prefix: String,
     pub upstream_pool: String,
+    /// Token-bucket limit shared by every client of this route. Omitted
+    /// means unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RouteRateLimit>,
+    /// Largest accepted request body in bytes. Omitted means unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_bytes: Option<u64>,
 }
+
+/// Per-route token bucket: `requests_per_second` refill, `burst` capacity.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RouteRateLimit {
+    pub requests_per_second: u32,
+    pub burst: u32,
+}
+
+pub const MAX_ROUTE_REQUESTS_PER_SECOND: u32 = 100_000;
+pub const MAX_ROUTE_BURST: u32 = 1_000_000;
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Algorithm {
@@ -763,6 +781,26 @@ impl Config {
                 return Err(validation(
                     &format!("routes[{i}].host"),
                     "must be a non-empty host authority without control characters",
+                ));
+            }
+            if let Some(limit) = r.rate_limit {
+                if !(1..=MAX_ROUTE_REQUESTS_PER_SECOND).contains(&limit.requests_per_second) {
+                    return Err(validation(
+                        &format!("routes[{i}].rate_limit.requests_per_second"),
+                        format!("must be 1-{MAX_ROUTE_REQUESTS_PER_SECOND}"),
+                    ));
+                }
+                if !(1..=MAX_ROUTE_BURST).contains(&limit.burst) {
+                    return Err(validation(
+                        &format!("routes[{i}].rate_limit.burst"),
+                        format!("must be 1-{MAX_ROUTE_BURST}"),
+                    ));
+                }
+            }
+            if r.max_body_bytes == Some(0) {
+                return Err(validation(
+                    &format!("routes[{i}].max_body_bytes"),
+                    "must be at least 1",
                 ));
             }
             let key = (normalize_config_host(&r.host), r.path_prefix.clone());

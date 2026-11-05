@@ -457,3 +457,55 @@ async fn usage_reports_desired_state_hosts_to_read_tokens() {
     let (status, _) = call(&app, "GET", "/api/usage", Caller::Anonymous, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn desired_state_routes_accept_and_validate_limits() {
+    let (app, runtime, _dir, _http01) = setup().await;
+    let (_, writer) = create_token(&app, "write").await;
+
+    let mut invalid = document(1, "limited", "limited.example");
+    invalid["routes"][0]["rate_limit"] = json!({"requests_per_second": 0, "burst": 5});
+    let (status, _) = call(
+        &app,
+        "PUT",
+        "/api/desired-state",
+        Caller::Token(&writer),
+        Some(invalid),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let mut zero_body = document(1, "limited", "limited.example");
+    zero_body["routes"][0]["max_body_bytes"] = json!(0);
+    let (status, _) = call(
+        &app,
+        "PUT",
+        "/api/desired-state",
+        Caller::Token(&writer),
+        Some(zero_body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let mut valid = document(1, "limited", "limited.example");
+    valid["routes"][0]["rate_limit"] = json!({"requests_per_second": 20, "burst": 40});
+    valid["routes"][0]["max_body_bytes"] = json!(1048576);
+    let (status, body) = call(
+        &app,
+        "PUT",
+        "/api/desired-state",
+        Caller::Token(&writer),
+        Some(valid),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let snapshot = runtime.load();
+    let route = snapshot
+        .config()
+        .routes
+        .iter()
+        .find(|route| route.name == "limited")
+        .unwrap();
+    assert_eq!(route.rate_limit.unwrap().requests_per_second, 20);
+    assert_eq!(route.max_body_bytes, Some(1048576));
+}

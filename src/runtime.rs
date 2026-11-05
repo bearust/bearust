@@ -81,6 +81,14 @@ impl RuntimeSnapshot {
         let route = self.router.route(authority, path)?;
         Some((route, Arc::clone(self.pools.get(&route.upstream_pool)?)))
     }
+    /// Per-route rate limit; see [`crate::router::Router::admit`].
+    pub fn admit_route(
+        &self,
+        route_name: &str,
+        now: std::time::Instant,
+    ) -> Result<(), std::time::Duration> {
+        self.router.admit(route_name, now)
+    }
     pub fn pool(&self, name: &str) -> Option<Arc<PoolState>> {
         self.pools.get(name).cloned()
     }

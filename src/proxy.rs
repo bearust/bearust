@@ -66,6 +66,8 @@ pub struct RequestContext {
     pub request_body_buffer: Vec<u8>,
     pub stream_transform: bool,
     pub stream_index: u32,
+    /// Request body bytes seen so far, for the route body limit.
+    pub request_body_bytes: u64,
 }
 
 impl Default for RequestContext {
@@ -104,6 +106,7 @@ impl Default for RequestContext {
             request_body_buffer: Vec::new(),
             stream_transform: false,
             stream_index: 0,
+            request_body_bytes: 0,
         }
     }
 }
@@ -249,6 +252,40 @@ impl BearustProxy {
     ) -> Self {
         self.https_redirect = Some((resolver, https_port));
         self
+    }
+
+    /// Answer a request with a short plain-text status (429, 413, 503) and
+    /// record it as completed.
+    async fn reject(
+        &self,
+        session: &mut Session,
+        ctx: &mut RequestContext,
+        status: u16,
+        retry_after: Option<&str>,
+        body: &'static [u8],
+    ) -> Result<()> {
+        let mut response = ResponseHeader::build(status, Some(3)).map_err(|error| {
+            pingora_core::Error::explain(ErrorType::HTTPStatus(500), error.to_string())
+        })?;
+        let mut headers = vec![
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Cache-Control", "no-store"),
+        ];
+        if let Some(value) = retry_after {
+            headers.push(("Retry-After", value));
+        }
+        for (name, value) in headers {
+            response.insert_header(name, value).map_err(|error| {
+                pingora_core::Error::explain(ErrorType::HTTPStatus(500), error.to_string())
+            })?;
+        }
+        session
+            .as_downstream_mut()
+            .write_error_response(response, Bytes::from_static(body))
+            .await?;
+        self.record_completion(session, ctx, Some(status));
+        ctx.completion_logged = true;
+        Ok(())
     }
 
     fn record_completion(
@@ -2042,8 +2079,28 @@ impl ProxyHttp for BearustProxy {
             return Ok(true);
         };
         let route = resolved_route.clone();
+        let admitted = snapshot.admit_route(&route.name, Instant::now());
         ctx.route = Some(route.clone());
         ctx.snapshot = Some(snapshot);
+        if let Err(retry_after) = admitted {
+            let seconds = retry_after.as_secs().max(1).to_string();
+            self.reject(session, ctx, 429, Some(&seconds), b"Too many requests")
+                .await?;
+            return Ok(true);
+        }
+        if let Some(limit) = route.max_body_bytes {
+            let declared = session
+                .req_header()
+                .headers
+                .get("content-length")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u64>().ok());
+            if declared.is_some_and(|length| length > limit) {
+                self.reject(session, ctx, 413, None, b"Request body too large")
+                    .await?;
+                return Ok(true);
+            }
+        }
         if let Some(auth) = &self.host_auth {
             let authorization = session
                 .req_header()
@@ -2278,6 +2335,16 @@ impl ProxyHttp for BearustProxy {
         end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        if let Some(chunk) = body.as_ref() {
+            ctx.request_body_bytes = ctx.request_body_bytes.saturating_add(chunk.len() as u64);
+            let limit = ctx.route.as_ref().and_then(|route| route.max_body_bytes);
+            if limit.is_some_and(|limit| ctx.request_body_bytes > limit) {
+                return Err(pingora_core::Error::explain(
+                    ErrorType::HTTPStatus(413),
+                    "request body exceeds the route limit",
+                ));
+            }
+        }
         self.waf_request_body_filter(session, body, end_of_stream, ctx)
             .await?;
         self.transform_request_body_chunk(session, body, end_of_stream, ctx)

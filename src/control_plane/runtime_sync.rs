@@ -237,6 +237,8 @@ impl RuntimeConfigReloader {
                 }],
             });
             config.routes.push(RouteConfig {
+                rate_limit: None,
+                max_body_bytes: None,
                 name: format!("{HOST_ROUTE_PREFIX}{}", host.id),
                 host: host.domain.clone(),
                 path_prefix: "/".into(),

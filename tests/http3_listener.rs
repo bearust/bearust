@@ -487,6 +487,8 @@ fn runtime_store_routing_to(host: &str, backend_addr: SocketAddr) -> Arc<Runtime
             }],
         }],
         routes: vec![RouteConfig {
+            rate_limit: None,
+            max_body_bytes: None,
             name: "default".into(),
             host: host.into(),
             path_prefix: "/".into(),
@@ -551,6 +553,8 @@ fn runtime_store_routing_to_two_backends(
             ],
         }],
         routes: vec![RouteConfig {
+            rate_limit: None,
+            max_body_bytes: None,
             name: "default".into(),
             host: host.into(),
             path_prefix: "/".into(),
