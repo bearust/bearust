@@ -144,6 +144,8 @@ Bearust SaaS (`bearust-saas`):
 > **Progress 2026-11-05 (tickets #16/#17):** `/app/billing` now has the catalog and plan picker, currency/interval/gateway selection, first checkout and trial start, immediate plan changes, cancel at period end, invoices with a printable detail page, payments, credit ledger and billing profile. `billing-checkout.spec.ts` covers subscribe → change plan → cancel. The backend gained profile and cancel endpoints.
 >
 > **Progress 2026-11-05 (ticket #18):** `/dashboard/billing` now edits plans, prices and quotas; configures and tests gateways; extends, cancels and changes subscriptions; lists invoices/payments and issues refunds; edits tax rates; and lists/replays webhooks. The public pricing page reads the live catalog. `billing-admin.spec.ts` covers price edit, gateway save/test and refund.
+>
+> **Progress 2026-11-05 (tickets #9–#15):** adapters for Xendit, Dodo Payments, Stripe, Midtrans, Duitku, Paddle and PayPal implement the shared gateway contract with webhook fixtures and checkout/refund/cancel/fetch paths. Gateways are seeded disabled; sandbox tests are gated by `TEST_*` environment variables and each adapter remains unverified until a live sandbox run passes.
 
 - [x] Schema + catalog
 - [x] Subscription state machine + entitlements
@@ -165,8 +167,8 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** adapter unit tests with recorded fixtures; live sandbox tests for checkout creation, webhook verification and refund.
 
-- [ ] Xendit
-- [ ] Dodo Payments
+- [x] Xendit
+- [x] Dodo Payments
 
 ### Task 4: Remaining adapters
 
@@ -175,11 +177,11 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** as Task 3 per adapter.
 
-- [ ] Stripe
-- [ ] Midtrans
-- [ ] Duitku
-- [ ] Paddle
-- [ ] PayPal
+- [x] Stripe
+- [x] Midtrans
+- [x] Duitku
+- [x] Paddle
+- [x] PayPal
 
 ### Task 5: Tenant billing UI
 
