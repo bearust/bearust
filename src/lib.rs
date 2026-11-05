@@ -26,6 +26,7 @@ pub mod crawler_verify;
 pub mod h3_upstream;
 pub mod health;
 pub mod http3;
+pub mod metering;
 pub mod observability;
 pub mod plugin_notify;
 pub mod plugin_registry;

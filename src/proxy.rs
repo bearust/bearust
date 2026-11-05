@@ -278,6 +278,13 @@ impl BearustProxy {
         if ctx.analytics_logged {
             return;
         }
+        crate::metering::global().record(crate::metering::UsageSample {
+            host: ctx.route.as_ref().map(|route| route.host.as_str()),
+            path: session.req_header().uri.path(),
+            status: status_code,
+            bytes_in: session.body_bytes_read() as u64,
+            bytes_out: session.body_bytes_sent() as u64,
+        });
         let Some(analytics) = &self.analytics else {
             ctx.analytics_logged = true;
             return;

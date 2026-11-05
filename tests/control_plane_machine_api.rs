@@ -415,3 +415,45 @@ async fn desired_state_carries_managed_certificates_and_challenges() {
     assert!(!certs.to_string().contains("managed-t-abc.shop"), "{certs}");
     runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn usage_reports_desired_state_hosts_to_read_tokens() {
+    let (app, _runtime, _dir, _http01) = setup().await;
+    let (_, writer) = create_token(&app, "write").await;
+    let (_, reader) = create_token(&app, "read").await;
+    let (status, _) = call(
+        &app,
+        "PUT",
+        "/api/desired-state",
+        Caller::Token(&writer),
+        Some(document(1, "tenant-pool", "tenant.example")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    bearust::metering::global().record(bearust::metering::UsageSample {
+        host: Some("tenant.example"),
+        path: "/",
+        status: 200,
+        bytes_in: 5,
+        bytes_out: 50,
+    });
+    bearust::metering::global().record(bearust::metering::UsageSample {
+        host: Some("not-in-desired-state.example"),
+        path: "/",
+        status: 200,
+        bytes_in: 5,
+        bytes_out: 50,
+    });
+
+    let (status, body) = call(&app, "GET", "/api/usage", Caller::Token(&reader), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["boot_id"].as_str().is_some());
+    let hosts = body["hosts"].as_object().unwrap();
+    assert!(hosts["tenant.example"]["requests"].as_u64().unwrap() >= 1);
+    assert!(hosts["tenant.example"]["bytes_out"].as_u64().unwrap() >= 50);
+    assert!(!hosts.contains_key("not-in-desired-state.example"));
+
+    let (status, _) = call(&app, "GET", "/api/usage", Caller::Anonymous, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

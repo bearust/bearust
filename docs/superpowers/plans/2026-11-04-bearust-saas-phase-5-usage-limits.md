@@ -50,7 +50,7 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** cargo tests for counting, exclusions (health checks, ACME), bounded cardinality, reset detection; existing analytics tests unchanged.
 
-- [ ] Counters + usage endpoint
+- [x] Counters + usage endpoint (bearust#1: `src/metering.rs`, `GET /api/usage` needs `ProxyHostsRead`; health checks are outbound probes, so only ACME challenges and unmatched requests are excluded; bytes are body bytes)
 
 ### Task 2: Per-route rate limit, body limit and paused routes
 

@@ -269,6 +269,32 @@ pub(crate) async fn get_desired_state(State(s): State<AppState>, h: HeaderMap) -
     }
 }
 
+/// Per-host usage counters for the hosts of the desired state (routes not
+/// materialized from dashboard proxy hosts). Read scope is enough; the boot
+/// id lets the poller detect counter resets.
+pub(crate) async fn get_usage(State(s): State<AppState>, h: HeaderMap) -> Response {
+    if let Err(response) = require_proxy_permission(&s, &h, Permission::ProxyHostsRead).await {
+        return response;
+    }
+    let Some(runtime) = s.runtime.as_ref() else {
+        return user_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime_unavailable",
+            "The live data-plane runtime is not attached",
+        );
+    };
+    let snapshot = runtime.load();
+    let hosts = desired_state_hosts(&snapshot.config().routes);
+    Json(crate::metering::global().report(hosts)).into_response()
+}
+
+fn desired_state_hosts(routes: &[crate::config::RouteConfig]) -> impl Iterator<Item = &str> {
+    routes
+        .iter()
+        .filter(|route| !route.name.starts_with(PROXY_HOST_PREFIX))
+        .map(|route| route.host.as_str())
+}
+
 /// Serializes desired-state applies on this node so the generation check and
 /// the runtime swap cannot interleave.
 fn apply_lock() -> &'static Mutex<()> {
