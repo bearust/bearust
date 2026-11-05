@@ -113,10 +113,17 @@ Bearust SaaS (`bearust-saas`):
 
 - Usage tables live in `000022_usage`; organization pause/boost fields and the placement retire pointer were edited into `000015_organizations` in place.
 - `usage.poll` rolls cumulative per-boot node counters into `usage_hourly`; `lifecycle.inactive` handles the 23/30/90-day lifecycle.
-- Plan limits and paused state are rendered into every route; Free custom-domain routes are paused and certificate renewal skips them.
+- Plan limits and paused state are rendered into every route; Free custom-domain routes are paused and custom-domain certificate renewal skips them.
 - Placement moves use the new node first and drop the old placement after that node acknowledges the desired state.
 - Admin overrides and tenant resume are audited; `/dashboard/usage` and `/app` expose the meters and pause banner.
 - E2E `quota-pause.spec.ts` passes against a fake node and the fake gateway.
+
+### Review fixes (2026-11-05)
+
+- Poll cursors lock inside the ingest transaction, a poll where every node fails returns an error, and host ownership comes from the same render that builds routes.
+- The quota event is recorded in the pause transaction; pause/resume updates are conditional, inactivity wins over quota, and a staff lift holds until the period end. A scheduled pass resumes idle quota pauses at the boundary.
+- `GET /usage` exposes `exceeded_quotas`; tenant resume of a quota pause returns `QUOTA_REQUESTS_EXCEEDED`/`QUOTA_BANDWIDTH_EXCEEDED`; paused configuration writes return `ORG_PAUSED` with the reason.
+- The final deletion warning is sent at day 83 and deletion waits seven days after it; Free platform certificates keep renewing while custom certificates are skipped.
 
 ## Risks
 
