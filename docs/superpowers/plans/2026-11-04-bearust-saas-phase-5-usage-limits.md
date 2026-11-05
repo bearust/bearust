@@ -83,7 +83,7 @@ Bearust SaaS (`bearust-saas`):
 
 **Validation:** placement tests per tier; move-on-plan-change test; domain gating tests.
 
-- [ ] Tiers + placement
+- [x] Tiers + placement (saas#36: `tier` column edited into 000014, default `free`; the seeder adds a paid node edge-sin-02; free-tier capacity error carries `details.upgrade`; moving placements on plan change is saas#42)
 - [ ] Custom domain gating
 
 ### Task 5: Inactivity lifecycle
