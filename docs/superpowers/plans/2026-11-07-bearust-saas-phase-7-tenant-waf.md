@@ -18,7 +18,7 @@
 - `DesiredStateRequest { generation, pools, routes, certificates, acme_challenges }` (`src/control_plane/models.rs:704`) uses `crate::config::RouteConfig`, which already carries per-route `rate_limit`, `max_body_bytes` and `paused` rendered by the SaaS (`internal/nodesync/render.go`).
 - The SaaS has no WAF code today (backend or frontend).
 
-## Decisions (proposed, to confirm before Task 1)
+## Decisions (confirmed 2026-11-07)
 
 - **Policy scope:** one policy per organization, with per-host overrides of mode only. Per-path policies are out of scope.
 - **Custom rules:** structured matchers only (field, operator, value, action), reusing Bearust's bounded `regex` engine, at most 20 per organization. **No raw SecLang from tenants**: it is unbounded to compile and evaluate on a shared node.
