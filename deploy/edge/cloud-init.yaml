@@ -1,0 +1,311 @@
+#cloud-config
+# Bearust edge node bootstrap.
+#
+# This file is a template. Render it with the variables documented in
+# DEPLOY.md ("Edge nodes (Bearust Cloud)") before passing it to a provider:
+#
+#   export BEARUST_EDGE_CONTROL_PLANE_IP=203.0.113.10
+#   export BEARUST_EDGE_HOSTNAME=sin-1-free-admin.bearust.cloud
+#   export BEARUST_EDGE_IMAGE_TAG=v0.1.0
+#   # Optional while the GHCR package is private:
+#   export BEARUST_EDGE_GHCR_USERNAME=octocat
+#   export BEARUST_EDGE_GHCR_TOKEN=ghp_...
+#   # Optional SSH allowlist (defaults to 0.0.0.0/0):
+#   export BEARUST_EDGE_SSH_ALLOWED_CIDR=203.0.113.0/24
+#   envsubst '${BEARUST_EDGE_CONTROL_PLANE_IP} ${BEARUST_EDGE_HOSTNAME} ${BEARUST_EDGE_IMAGE_TAG} ${BEARUST_EDGE_GHCR_USERNAME} ${BEARUST_EDGE_GHCR_TOKEN} ${BEARUST_EDGE_SSH_ALLOWED_CIDR}' \
+#     < deploy/edge/cloud-init.yaml > /tmp/bearust-edge-user-data.yaml
+#
+# The rendered file contains secrets if a GHCR token is supplied. Do not
+# commit it, paste it into an issue, or leave it on a shared host.
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - jq
+  - netcat-openbsd
+  - ufw
+
+write_files:
+  - path: /etc/bearust-edge/edge.env
+    owner: root:root
+    permissions: '0600'
+    content: |
+      # Rendered by cloud-init. Treat as a secret: it can contain a GHCR token.
+      CONTROL_PLANE_IP="${BEARUST_EDGE_CONTROL_PLANE_IP}"
+      EDGE_HOSTNAME="${BEARUST_EDGE_HOSTNAME}"
+      IMAGE_TAG="${BEARUST_EDGE_IMAGE_TAG}"
+      GHCR_USERNAME="${BEARUST_EDGE_GHCR_USERNAME}"
+      GHCR_TOKEN="${BEARUST_EDGE_GHCR_TOKEN}"
+      SSH_ALLOWED_CIDR="${BEARUST_EDGE_SSH_ALLOWED_CIDR}"
+
+  - path: /etc/bearust-edge/bearust.toml
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [server]
+      # Data plane. Docker publishes these on the host's public 80/443.
+      bind = "0.0.0.0:8080"
+      https_bind = "0.0.0.0:8443"
+      https_public_port = 443
+
+      # Admin API. Caddy terminates TLS on host port 8443 and proxies here;
+      # this port is published on host loopback only.
+      control_bind = "0.0.0.0:8081"
+      control_database = "/data/bearust.sqlite"
+      certificate_store = "/data/certificates"
+      pid_file = "/run/bearust/bearust.pid"
+
+  - path: /opt/bearust-edge/docker-compose.yml
+    owner: root:root
+    permissions: '0644'
+    content: |
+      name: bearust-edge
+
+      services:
+        bearust:
+          image: "ghcr.io/bearust/bearust:${IMAGE_TAG:?IMAGE_TAG is required}"
+          restart: unless-stopped
+          # Nginx Proxy Manager layout; the admin API is loopback-only and is
+          # TLS-terminated by Caddy below.
+          ports:
+            - "80:8080"
+            - "443:8443"
+            - "127.0.0.1:8081:8081"
+          volumes:
+            - bearust-data:/data
+            - bearust-tls:/etc/bearust/tls
+            - /etc/bearust-edge/bearust.toml:/etc/bearust/bearust.toml:ro
+          environment:
+            RUST_LOG: "${RUST_LOG:-info}"
+            DATABASE_URL: "sqlite:///data/bearust.sqlite"
+          working_dir: /run/bearust
+          # Graceful drain is 30s; give Docker time to deliver SIGTERM.
+          stop_grace_period: 35s
+          healthcheck:
+            test:
+              - CMD-SHELL
+              - test -s /run/bearust/bearust.pid && nc -z 127.0.0.1 8080 && nc -z 127.0.0.1 8081
+            interval: 10s
+            timeout: 3s
+            start_period: 15s
+            retries: 10
+          read_only: true
+          tmpfs:
+            - /tmp:mode=1777
+            - /run/bearust:uid=10001,gid=10001,mode=0755
+          cap_drop: [ALL]
+          security_opt: [no-new-privileges:true]
+          logging:
+            driver: json-file
+            options:
+              max-size: "10m"
+              max-file: "3"
+
+        caddy:
+          image: caddy:2.11.9-alpine
+          restart: unless-stopped
+          # Host networking lets UFW filter port 8443 before Caddy sees it.
+          # Caddy reaches the loopback-published admin port above.
+          network_mode: host
+          depends_on:
+            bearust:
+              condition: service_healthy
+          volumes:
+            - /opt/bearust-edge/Caddyfile:/etc/caddy/Caddyfile:ro
+            - /var/lib/bearust-edge/caddy/data:/data
+            - /var/lib/bearust-edge/caddy/config:/config
+          environment:
+            EDGE_HOSTNAME: "${EDGE_HOSTNAME:?EDGE_HOSTNAME is required}"
+          read_only: true
+          tmpfs:
+            - /tmp:mode=1777
+          cap_drop: [ALL]
+          security_opt: [no-new-privileges:true]
+          logging:
+            driver: json-file
+            options:
+              max-size: "10m"
+              max-file: "3"
+
+      volumes:
+        bearust-data:
+          name: bearust-data
+        bearust-tls:
+          name: bearust-tls
+
+  - path: /opt/bearust-edge/Caddyfile
+    owner: root:root
+    permissions: '0644'
+    content: |
+      {
+        admin off
+        # Only the explicit https:// site below is served. Do not open host
+        # port 80 for redirects; Bearust owns 80/443 for tenant traffic.
+        auto_https disable_redirects
+      }
+
+      https://{$EDGE_HOSTNAME}:8443 {
+        # A private CA: export root.crt and install it on the control plane
+        # (see DEPLOY.md). The admin API is not exposed to public clients.
+        tls internal
+
+        reverse_proxy 127.0.0.1:8081 {
+          header_up X-Forwarded-Proto https
+        }
+
+        header {
+          Strict-Transport-Security "max-age=31536000"
+          X-Content-Type-Options "nosniff"
+          Referrer-Policy "no-referrer"
+        }
+
+        log {
+          output file /data/access.log {
+            roll_size 10MiB
+            roll_keep 5
+          }
+          format console
+        }
+      }
+
+  - path: /usr/local/sbin/bearust-edge-bootstrap
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      umask 022
+
+      log() { printf '[bearust-edge] %s\n' "$*"; }
+      fail() { printf '[bearust-edge] ERROR: %s\n' "$*" >&2; exit 1; }
+
+      [ "$(id -u)" -eq 0 ] || fail "must run as root"
+      [ -r /etc/bearust-edge/edge.env ] || fail "missing /etc/bearust-edge/edge.env"
+
+      set -a
+      # shellcheck disable=SC1091
+      . /etc/bearust-edge/edge.env
+      set +a
+
+      : "${CONTROL_PLANE_IP:?CONTROL_PLANE_IP is required}"
+      : "${EDGE_HOSTNAME:?EDGE_HOSTNAME is required}"
+      : "${IMAGE_TAG:?IMAGE_TAG is required}"
+      SSH_ALLOWED_CIDR="${SSH_ALLOWED_CIDR:-0.0.0.0/0}"
+
+      printf '%s' "$CONTROL_PLANE_IP" | grep -Eq '^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$' \
+        || fail "CONTROL_PLANE_IP must be an IPv4/IPv6 address or CIDR"
+      printf '%s' "$SSH_ALLOWED_CIDR" | grep -Eq '^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$' \
+        || fail "SSH_ALLOWED_CIDR must be an IPv4/IPv6 address or CIDR"
+      printf '%s' "$EDGE_HOSTNAME" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$' \
+        || fail "EDGE_HOSTNAME must be a DNS name without a scheme or port"
+      [ "${#EDGE_HOSTNAME}" -le 253 ] || fail "EDGE_HOSTNAME is too long"
+      printf '%s' "$IMAGE_TAG" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$' \
+        || fail "IMAGE_TAG must be an OCI tag such as v0.1.0 or sha-<commit>"
+      if [ -n "${GHCR_TOKEN:-}" ]; then
+        [ -n "${GHCR_USERNAME:-}" ] || fail "GHCR_USERNAME is required when GHCR_TOKEN is set"
+      fi
+
+      install -d -m 0755 /opt/bearust-edge /etc/bearust-edge
+      install -d -m 0700 /var/lib/bearust-edge /var/lib/bearust-edge/caddy
+      install -d -m 0700 /var/lib/bearust-edge/caddy/data /var/lib/bearust-edge/caddy/config
+      chmod 0600 /etc/bearust-edge/edge.env
+
+      if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        case "${ID:-}" in
+          ubuntu|debian) ;;
+          *) fail "unsupported distribution '${ID:-unknown}'; use Ubuntu 22.04/24.04 or Debian 12" ;;
+        esac
+        [ -n "${VERSION_CODENAME:-}" ] || fail "VERSION_CODENAME is missing from /etc/os-release"
+
+        log "installing Docker CE from download.docker.com"
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL "https://download.docker.com/linux/${ID}/gpg" -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+        arch="$(dpkg --print-architecture)"
+        printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' \
+          "$arch" "$ID" "$VERSION_CODENAME" > /etc/apt/sources.list.d/docker.list
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      fi
+      systemctl enable --now docker
+
+      if [ ! -f /etc/docker/daemon.json ]; then
+        cat > /etc/docker/daemon.json <<'JSON'
+      {"log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3"}}
+      JSON
+      fi
+
+      log "configuring UFW: 80/443 public, 8443 from ${CONTROL_PLANE_IP} only, ssh from ${SSH_ALLOWED_CIDR}"
+      ufw --force reset
+      sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw 2>/dev/null || true
+      # Docker owns container forwarding; UFW still filters host listeners.
+      sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
+      ufw default deny incoming
+      ufw default allow outgoing
+      ufw allow from "$SSH_ALLOWED_CIDR" to any port 22 proto tcp comment 'ssh'
+      ufw allow 80/tcp comment 'bearust http'
+      ufw allow 443/tcp comment 'bearust https'
+      ufw allow from "$CONTROL_PLANE_IP" to any port 8443 proto tcp comment 'bearust admin api (control plane only)'
+      ufw --force enable
+      ufw reload
+
+      # Apply daemon.json and re-add Docker's iptables chains after the UFW
+      # reset, before containers start. Docker-published 80/443 then work;
+      # host 8443 stays UFW-filtered.
+      systemctl restart docker
+      for _ in $(seq 1 30); do
+        docker info >/dev/null 2>&1 && break
+        sleep 1
+      done
+      docker info >/dev/null 2>&1 || fail "Docker daemon did not become ready"
+
+      # Compose reads this file for ${IMAGE_TAG} / ${EDGE_HOSTNAME}.
+      {
+        printf 'IMAGE_TAG=%s\n' "$IMAGE_TAG"
+        printf 'EDGE_HOSTNAME=%s\n' "$EDGE_HOSTNAME"
+      } > /opt/bearust-edge/.env
+      chmod 0644 /opt/bearust-edge/.env
+
+      if [ -n "${GHCR_TOKEN:-}" ]; then
+        log "logging in to ghcr.io as ${GHCR_USERNAME}"
+        printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin >/dev/null
+        # Keep the Docker credential store; drop the token from the env file.
+        sed -i '/^GHCR_TOKEN=/d' /etc/bearust-edge/edge.env
+      fi
+
+      cd /opt/bearust-edge
+      log "pulling Bearust ${IMAGE_TAG} and Caddy"
+      docker compose pull
+      docker compose up -d --remove-orphans
+
+      # Caddy creates its local CA on first start. Export the root so the
+      # control plane can trust this node's admin certificate.
+      rm -f /etc/bearust-edge/admin-ca.crt
+      for _ in $(seq 1 60); do
+        root="$(find /var/lib/bearust-edge/caddy/data -path '*/pki/authorities/local/root.crt' -type f -print -quit 2>/dev/null || true)"
+        if [ -n "$root" ]; then
+          install -m 0644 "$root" /etc/bearust-edge/admin-ca.crt
+          (cd /etc/bearust-edge && sha256sum admin-ca.crt > admin-ca.crt.sha256)
+          break
+        fi
+        sleep 2
+      done
+      if [ -s /etc/bearust-edge/admin-ca.crt ]; then
+        log "admin CA written to /etc/bearust-edge/admin-ca.crt"
+      else
+        log "WARNING: admin CA not found yet; check 'docker compose logs caddy' and rerun this script"
+      fi
+
+      log "bootstrap complete; follow DEPLOY.md to trust the CA, create the admin/API token, and register this node"
+
+final_message: "Bearust edge bootstrap finished in $UPTIME seconds. See /var/log/cloud-init-output.log and DEPLOY.md."
+
+runcmd:
+  - [bash, /usr/local/sbin/bearust-edge-bootstrap]
