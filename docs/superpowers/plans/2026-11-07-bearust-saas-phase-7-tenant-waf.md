@@ -102,12 +102,14 @@ Deviations (2026-11-07):
 - [x] Plan-gated controls show the upgrade path instead of failing.
 - [x] EN/ID messages; e2e spec covering enable block mode, add a rule, see a blocked request.
 
-Deviations (Task 5, SaaS 644429c, c0bae58, d7e15f0): counters are per organization per hour in `usage_hourly`, not per host; events are a persisted, deduplicated 30-day sample of each node's recent-event ring, served by a new `GET /org/waf/events?host=` (totals stay exact); the page filters events by domain. The e2e (`e2e/waf.spec.ts`) drives a fake node, so the real-node check stays in acceptance. Production had already run 000015, 000017 and 000022, so the WAF schema moved out of those in-place edits into a new `000027_waf` (ADR 0003).
+Deviations (Task 5, SaaS 28c7b0e, c0bae58, d7e15f0): counters are per organization per hour in `usage_hourly`, not per host; events are a persisted, deduplicated 30-day sample of each node's recent-event ring, served by a new `GET /org/waf/events?host=` (totals stay exact); the page filters events by domain. The e2e (`e2e/waf.spec.ts`) drives a fake node, so the real-node check stays in acceptance. Production had already run 000015, 000017 and 000022, so the WAF schema moved out of those in-place edits into a new `000027_waf` (ADR 0003).
 
 ## Task 6: Staff view and docs
 
-- [ ] `/dashboard`: per-node WAF compile status and errors; per-organization policy visible during impersonation only.
-- [ ] Customer docs page and README feature list; landing page mentions WAF once it ships.
+- [x] `/dashboard`: per-node WAF compile status and errors; per-organization policy visible during impersonation only.
+- [x] Customer docs page and README feature list; landing page mentions WAF once it ships.
+
+Deviations (Task 6, SaaS 67a3026): compile status is a per-node summary of the rendered route policies (block/monitor routes, custom rules, CRS levels) on the node sync panel; a policy the node rejects fails the push and shows as the last sync error, since Bearust validates before it accepts a document. Staff see a tenant's policy only by impersonating into `/app/waf`; the staff plan editor gained the three WAF gates. The customer docs are `docs/waf.md` (there is no docs site), and the landing page folds the WAF into the routing card to keep the six-card grid.
 
 ## Acceptance
 
