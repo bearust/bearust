@@ -51,8 +51,8 @@ Bearust core (`bearust`):
 
 **Validation:** Go tests for each sign-in path with sign-ups closed/open and with/without invitation; Vitest for the setting and invite form; Playwright: invited user signs up, uninvited user is refused.
 
-- [ ] Setting + enforcement
-- [ ] Staff beta invitations
+- [x] Setting + enforcement
+- [x] Staff beta invitations
 
 ### Task 2: Complimentary subscriptions
 
@@ -61,8 +61,8 @@ Bearust core (`bearust`):
 
 **Validation:** fake-clock tests for grant, reminder, expiry and extension; placement-move test; Vitest for the staff form and the tenant plan badge.
 
-- [ ] Grant, extend, revoke
-- [ ] Reminder and expiry
+- [x] Grant, extend, revoke
+- [x] Reminder and expiry
 
 ### Task 3: Launch gateways
 
@@ -71,7 +71,7 @@ Bearust core (`bearust`):
 
 **Validation:** config tests that disabled gateways cannot be selected; sandbox test run recorded (human supplies credentials).
 
-- [ ] Gateway enablement
+- [x] Gateway enablement
 - [ ] Sandbox verification recorded
 
 ### Task 4: CI/CD on GitHub Actions
@@ -83,9 +83,9 @@ Bearust core (`bearust`):
 
 **Validation:** workflows green on a PR and on `main`; a dry-run deploy to the VPS.
 
-- [ ] CI workflow
-- [ ] Image builds (SaaS + Bearust core)
-- [ ] Deploy workflow + rollback runbook
+- [x] CI workflow
+- [x] Image builds (SaaS + Bearust core)
+- [x] Deploy workflow + rollback runbook
 
 ### Task 5: Control plane deployment and backups
 
@@ -107,9 +107,9 @@ Bearust core (`bearust`):
 
 **Validation:** a fresh VM reaches "synced" in the dashboard from the script plus runbook alone; an update rolls without dropping traffic on the other node.
 
-- [ ] cloud-init + firewall
-- [ ] Registration runbook
-- [ ] Update procedure
+- [x] cloud-init + firewall
+- [x] Registration runbook
+- [x] Update procedure
 
 ### Task 7: Monitoring and alerting
 
@@ -119,8 +119,8 @@ Bearust core (`bearust`):
 
 **Validation:** Go tests for alert rules and the Telegram sender (fake HTTP); a fired test alert received in Telegram.
 
-- [ ] Telegram + rules
-- [ ] Daily digest
+- [x] Telegram + rules
+- [x] Daily digest
 - [ ] Uptime checks configured
 
 ### Task 8: Abuse reporting
@@ -130,8 +130,8 @@ Bearust core (`bearust`):
 
 **Validation:** Go tests for report creation and host→organization resolution; Vitest for the form and queue; Playwright: report → staff sees it → suspend.
 
-- [ ] Report page + tickets
-- [ ] Staff queue
+- [x] Report page + tickets
+- [x] Staff queue
 
 ### Task 9: Beta launch checklist
 
@@ -141,6 +141,19 @@ Bearust core (`bearust`):
 - [ ] Checklist complete and beta opened
 
 ---
+
+## Progress (2026-11-07)
+
+- Closed sign-ups use the `signups.open` setting with a staff beta-invitation table (migration `000023`); every new-user sign-in path is covered.
+- Complimentary grants extend the existing subscription model and reuse the cancel-at-period-end expiry/tier-move path; the owning `000020_billing_core` migration was edited in place instead of adding `000024`, per the pre-production rule.
+- Launch gateways are limited by `BILLING_LAUNCH_GATEWAYS` (Dodo and Xendit by default in production), enforced for checkout, webhooks and staff edits.
+- Alerting adds `internal/alerts` (migration `000025`) with a Telegram sender, deduplicated incidents, a backup-failure ingest endpoint and the daily staff digest.
+- Abuse reporting adds `internal/abuse` (migration `000026`), the public captcha-protected `/abuse` page and the staff queue with audited suspension.
+- CI moved to GitHub Actions (PR CI, GHCR builds, deploy/rollback) and `gitlab-ci/` is gone.
+- Bearust edge provisioning adds `deploy/edge/cloud-init.yaml` and the DEPLOY.md runbook.
+- E2E added `signups.spec.ts` and `abuse.spec.ts`; both pass along with the existing billing, quota and onboarding specs.
+
+Remaining human-only work: run the workflows on GitHub, dry-run the deploy, verify the cloud-init on a throwaway VM, run the Dodo/Xendit sandbox checks, fire a real Telegram alert, configure uptime checks, and complete the launch checklist (Tasks 5 and 9).
 
 ## Risks
 
