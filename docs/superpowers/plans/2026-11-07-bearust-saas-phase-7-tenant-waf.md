@@ -69,10 +69,19 @@ Deviations (2026-11-07):
 
 ## Task 3: SaaS data model and API
 
-- [ ] Tables `waf_policies` (org-owned, mode, builtins, crs paranoia) and `waf_rules` (org-owned, structured matcher, action), plus `waf_host_overrides`; edit the owning migration in place (pre-production rule).
-- [ ] Plan fields: `waf_block_mode`, `waf_crs`, `waf_custom_rules_max`.
-- [ ] `/org/waf` endpoints (get/update policy, CRUD rules, host overrides) behind new org permissions `org.waf.read` / `org.waf.manage`, seeded into the default organization roles.
-- [ ] Validate matchers with the same limits Bearust enforces, so invalid rules fail in the SaaS, not on the node.
+- [x] Tables `waf_policies` (org-owned, mode, builtins, crs paranoia) and `waf_rules` (org-owned, structured matcher, action), plus `waf_host_overrides`; edit the owning migration in place (pre-production rule).
+- [x] Plan fields: `waf_block_mode`, `waf_crs`, `waf_custom_rules_max`.
+- [x] `/org/waf` endpoints (get/update policy, CRUD rules, host overrides) behind new org permissions `org.waf.read` / `org.waf.manage`, seeded into the default organization roles.
+- [x] Validate matchers with the same limits Bearust enforces, so invalid rules fail in the SaaS, not on the node.
+
+Deviations (2026-11-07):
+
+- Tables live in `000017_lb_config` (edited in place, pre-production); plan columns and the `org.waf.*` permissions in `000015_organizations`. Developer gets `org.waf.manage`; Viewer gets `org.waf.read` through the `.read` rule.
+- `waf_policies` stores the four built-ins as booleans and `crs_paranoia_level` (NULL = CRS off). No row means the default (built-ins on, monitor-only). `waf_rules.rule_no` is the node rule id: per organization, `MAX + 1`, never reused after a delete. Host overrides are keyed by `domain_id` and change the mode only.
+- Seeded plans: Free `false/false/0`, Pro and Business `true/true/20`. In the staff plan editor payload the three WAF fields are optional; omitted keeps the stored value, so the current staff UI cannot wipe them (UI fields come in Task 6).
+- Endpoints: `GET/PUT /org/waf`, `POST /org/waf/rules`, `PUT/DELETE /org/waf/rules/{id}`, `PUT/DELETE /org/waf/hosts/{domain_id}`. Field errors use `VALIDATION_FAILED` (as lbconfig does) instead of `WAF_RULE_INVALID`; added `WAF_RULE_NOT_FOUND`. `WAF_FEATURE_REQUIRES_PAID_PLAN` is 403 with `details.feature` (`block_mode` | `crs`) and `details.upgrade`; `WAF_RULE_LIMIT_EXCEEDED` is 422.
+- Patterns are checked with Go's RE2 as `(?i:pattern)`; Bearust's Rust regex is close enough, and the node still rejects anything it cannot compile.
+- `internal/waf` added to `make test-pg`.
 
 ## Task 4: Render and sync
 
