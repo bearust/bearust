@@ -85,9 +85,15 @@ Deviations (2026-11-07):
 
 ## Task 4: Render and sync
 
-- [ ] `nodesync.Render` attaches the organization's policy (with host overrides) to each of its routes.
-- [ ] Downgrade to a plan without block mode or CRS renders the allowed subset and records why in the policy status.
-- [ ] Tests: render isolation between two organizations on one node; hash changes when a policy changes; suspended or paused organizations unaffected.
+- [x] `nodesync.Render` attaches the organization's policy (with host overrides) to each of its routes.
+- [x] Downgrade to a plan without block mode or CRS renders the allowed subset and records why in the policy status.
+- [x] Tests: render isolation between two organizations on one node; hash changes when a policy changes; suspended or paused organizations unaffected.
+
+Deviations (2026-11-07):
+
+- Every tenant route always carries `waf` (the default policy when the organization never saved one), which is what keeps managed routes off the node-wide WAF (see the Task 1 deviation).
+- Plan limits are applied in one place, `waf.Resolve`, used by both the render and `GET /org/waf`. A downgrade keeps the stored settings; block mode (policy and overrides) falls back to monitor-only, the CRS is dropped, and only the lowest-numbered custom rules up to the plan limit are sent. "Policy status" is `effective.restricted` (`block_mode`, `crs`, `custom_rules`) in `GET /org/waf`, not a stored column.
+- Contract: the SaaS test asserts the exact rendered JSON, and `router::saas_contract_tests` in Bearust core parses and compiles the same string. Not yet run against a live node (`TEST_BEARUST_URL` is not available here); that is covered by the phase acceptance item.
 
 ## Task 5: Tenant UI in `/app`
 

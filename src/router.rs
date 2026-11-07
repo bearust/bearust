@@ -256,3 +256,34 @@ mod waf_tests {
         assert_eq!(with.waf.unwrap().rules[0].id, 1);
     }
 }
+
+#[cfg(test)]
+mod saas_contract_tests {
+    use super::*;
+
+    /// The exact `waf` object Bearust SaaS renders for a route
+    /// (`internal/nodesync` TestRenderAttachesEachTenantsWafPolicy asserts
+    /// the same string). Keep both sides in step.
+    const SAAS_ROUTE_WAF: &str = r#"{"mode":"block","builtins":["sqli"],"crs":{"paranoia_level":2},"rules":[{"id":2,"category":"bots","field":"headers","pattern":"sqlmap","action":"inherit"},{"id":5,"category":"admin","field":"path","pattern":"^/wp-admin","action":"block"}]}"#;
+
+    #[test]
+    fn saas_rendered_route_waf_is_accepted() {
+        let route: RouteConfig = serde_json::from_str(&format!(
+            r#"{{"name":"t-abc-r","host":"shop.example","path_prefix":"/","upstream_pool":"t-abc-web","waf":{SAAS_ROUTE_WAF}}}"#
+        ))
+        .unwrap();
+        let policy = route.waf.as_ref().unwrap();
+        let snapshot = crate::waf::compile_route_policy(policy).unwrap();
+        assert_eq!(snapshot.mode, crate::control_plane::models::WafMode::Block);
+        assert!(Router::new(&[route]).waf("t-abc-r").is_some());
+    }
+
+    #[test]
+    fn saas_default_route_waf_is_accepted() {
+        let policy: crate::config::RouteWafPolicy = serde_json::from_str(
+            r#"{"mode":"monitor-only","builtins":["sqli","xss","path_traversal","command_injection"],"rules":[]}"#,
+        )
+        .unwrap();
+        assert!(crate::waf::compile_route_policy(&policy).is_ok());
+    }
+}
