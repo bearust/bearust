@@ -194,7 +194,7 @@ write_files:
       : "${CONTROL_PLANE_IP:?CONTROL_PLANE_IP is required}"
       : "${EDGE_HOSTNAME:?EDGE_HOSTNAME is required}"
       : "${IMAGE_TAG:?IMAGE_TAG is required}"
-      SSH_ALLOWED_CIDR="${SSH_ALLOWED_CIDR:-0.0.0.0/0}"
+      : "${SSH_ALLOWED_CIDR:?SSH_ALLOWED_CIDR is required (use 0.0.0.0/0 only on purpose)}"
 
       printf '%s' "$CONTROL_PLANE_IP" | grep -Eq '^[0-9A-Fa-f:.]+(/[0-9]{1,3})?$' \
         || fail "CONTROL_PLANE_IP must be an IPv4/IPv6 address or CIDR"

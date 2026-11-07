@@ -144,7 +144,7 @@ The template uses `${BEARUST_EDGE_*}` placeholders and is rendered with
 | `BEARUST_EDGE_IMAGE_TAG` | yes | `v0.1.0` or `sha-<commit>` | Immutable `ghcr.io/bearust/bearust` tag; avoid `latest` in production |
 | `BEARUST_EDGE_GHCR_USERNAME` | no | `octocat` | GitHub user for a private GHCR package |
 | `BEARUST_EDGE_GHCR_TOKEN` | no | `ghp_…` | PAT with `read:packages`; required only while the package is private |
-| `BEARUST_EDGE_SSH_ALLOWED_CIDR` | no | `203.0.113.0/24` | SSH allowlist; defaults to `0.0.0.0/0`, so narrow it in production |
+| `BEARUST_EDGE_SSH_ALLOWED_CIDR` | yes | `203.0.113.0/24` | SSH allowlist; provisioning fails without it (set `0.0.0.0/0` only on purpose) |
 
 The admin hostname must resolve from the control plane. Use a DNS-only record
 (no Cloudflare proxy): the certificate is a private CA and the control plane
