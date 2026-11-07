@@ -97,10 +97,12 @@ Deviations (2026-11-07):
 
 ## Task 5: Tenant UI in `/app`
 
-- [ ] `/app/waf`: mode toggle, built-in signature list, CRS switch with paranoia level, custom rules editor, host overrides.
-- [ ] Event list and logged/blocked counters per host from the usage poller.
-- [ ] Plan-gated controls show the upgrade path instead of failing.
-- [ ] EN/ID messages; e2e spec covering enable block mode, add a rule, see a blocked request.
+- [x] `/app/waf`: mode toggle, built-in signature list, CRS switch with paranoia level, custom rules editor, host overrides.
+- [x] Event list and logged/blocked counters per host from the usage poller.
+- [x] Plan-gated controls show the upgrade path instead of failing.
+- [x] EN/ID messages; e2e spec covering enable block mode, add a rule, see a blocked request.
+
+Deviations (Task 5, SaaS 644429c, c0bae58, d7e15f0): counters are per organization per hour in `usage_hourly`, not per host; events are a persisted, deduplicated 30-day sample of each node's recent-event ring, served by a new `GET /org/waf/events?host=` (totals stay exact); the page filters events by domain. The e2e (`e2e/waf.spec.ts`) drives a fake node, so the real-node check stays in acceptance. Production had already run 000015, 000017 and 000022, so the WAF schema moved out of those in-place edits into a new `000027_waf` (ADR 0003).
 
 ## Task 6: Staff view and docs
 
