@@ -74,6 +74,7 @@ async fn local_pingora_service_routes_and_returns_503_without_healthy_backend() 
             rate_limit: None,
             max_body_bytes: None,
             paused: false,
+            waf: None,
             name: "default".into(),
             host: "example.test".into(),
             path_prefix: "/".into(),

@@ -368,7 +368,55 @@ pub struct RouteConfig {
     /// its pool. Omitted means not paused.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub paused: bool,
+    /// WAF policy evaluated for this route instead of the node-wide WAF.
+    /// Omitted means the node-wide WAF applies (standalone Bearust); a
+    /// managing control plane sends one for every route it owns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waf: Option<RouteWafPolicy>,
 }
+
+/// Per-route WAF policy sent by a managing control plane. It is compiled
+/// into its own snapshot, so one route's policy never affects another's.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RouteWafPolicy {
+    pub mode: crate::control_plane::models::WafMode,
+    /// Built-in signatures to enable: `sqli`, `xss`, `path_traversal`,
+    /// `command_injection`.
+    #[serde(default)]
+    pub builtins: Vec<String>,
+    /// OWASP CRS at the given paranoia level. Omitted means off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crs: Option<RouteWafCrs>,
+    /// Structured custom rules (no raw SecLang).
+    #[serde(default)]
+    pub rules: Vec<RouteWafRule>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RouteWafCrs {
+    pub paranoia_level: u8,
+}
+
+/// A custom rule: a case-insensitive regex over one request field.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RouteWafRule {
+    /// Positive id chosen by the control plane, unique within the route.
+    pub id: i64,
+    pub category: String,
+    /// `any`, `method`, `path`, `query`, `headers` or `body`.
+    pub field: String,
+    pub pattern: String,
+    #[serde(default)]
+    pub action: crate::control_plane::models::WafAction,
+}
+
+pub const ROUTE_WAF_BUILTINS: [&str; 4] = ["sqli", "xss", "path_traversal", "command_injection"];
+pub const MAX_ROUTE_WAF_RULES: usize = 20;
+pub const MAX_ROUTE_WAF_PARANOIA: u8 = 2;
+pub const MAX_ROUTE_WAF_CATEGORY_BYTES: usize = 64;
 
 /// Per-route token bucket: `requests_per_second` refill, `burst` capacity.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -807,6 +855,11 @@ impl Config {
                     "must be at least 1",
                 ));
             }
+            if let Some(policy) = &r.waf {
+                if let Err(message) = crate::waf::compile_route_policy(policy) {
+                    return Err(validation(&format!("routes[{i}].waf"), message));
+                }
+            }
             let key = (normalize_config_host(&r.host), r.path_prefix.clone());
             if !route_keys.insert(key) {
                 return Err(validation(
@@ -968,6 +1021,20 @@ host = "api.example.com"
 path_prefix = "/"
 upstream_pool = "api"
 "#;
+
+    #[test]
+    fn route_waf_policies_are_validated_with_the_config() {
+        let with_waf = |waf: &str| {
+            format!(
+                "[server]\nbind = \"127.0.0.1:8080\"\ncontrol_bind = \"127.0.0.1:8081\"\n{MINIMAL_ROUTABLE}\n[routes.waf]\n{waf}\n"
+            )
+        };
+        assert!(Config::parse(&with_waf("mode = \"block\"\nbuiltins = [\"sqli\"]")).is_ok());
+        let error = Config::parse(&with_waf("mode = \"block\"\nbuiltins = [\"ssrf\"]"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("routes[0].waf"), "{error}");
+    }
 
     #[test]
     fn http3_enabled_without_tls_is_rejected() {

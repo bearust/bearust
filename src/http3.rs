@@ -876,8 +876,11 @@ async fn handle_request<S>(
         return;
     }
 
-    if let Some(waf) = &state.waf {
-        let snapshot = waf.snapshot();
+    let authority = downstream_host.as_deref().unwrap_or_default();
+    let waf_snapshot = snapshot
+        .route_waf(authority, &path)
+        .or_else(|| state.waf.as_ref().map(|waf| waf.snapshot()));
+    if let Some(snapshot) = waf_snapshot {
         let context = build_inspection_context(&method, &path, &query, &headers, body.clone());
         let evaluation = crate::waf::evaluate(&snapshot, &context);
         // waf.detect: reused directly from src/proxy.rs (pure, no Pingora
@@ -891,7 +894,7 @@ async fn handle_request<S>(
         // src/proxy.rs's two-phase ctx.waf_telemetry_emitted guard.
         crate::proxy::emit_waf_telemetry(
             &request_id,
-            waf,
+            state.waf.as_deref(),
             &evaluation,
             state.plugin_notify.as_deref(),
         );
@@ -1019,7 +1022,6 @@ async fn handle_request<S>(
     }
 
     // Not blocked (or WAF not configured): route and forward.
-    let authority = downstream_host.as_deref().unwrap_or_default();
     let Some((route, pool)) = snapshot.route(authority, &path) else {
         let resp = http::Response::builder()
             .status(http::StatusCode::NOT_FOUND)

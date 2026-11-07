@@ -89,6 +89,11 @@ impl RuntimeSnapshot {
     ) -> Result<(), std::time::Duration> {
         self.router.admit(route_name, now)
     }
+    /// WAF policy of the route serving this request, when the route has one.
+    pub fn route_waf(&self, authority: &str, path: &str) -> Option<Arc<crate::waf::WafSnapshot>> {
+        let route = self.router.route(authority, path)?;
+        self.router.waf(&route.name)
+    }
     pub fn pool(&self, name: &str) -> Option<Arc<PoolState>> {
         self.pools.get(name).cloned()
     }

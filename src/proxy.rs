@@ -1420,7 +1420,7 @@ fn reassert_protected_request_headers(
 
 pub fn emit_waf_telemetry(
     request_id: &str,
-    waf: &WafStore,
+    waf: Option<&WafStore>,
     evaluation: &Evaluation,
     notify: Option<&crate::plugin_notify::NotificationSink>,
 ) {
@@ -1437,7 +1437,9 @@ pub fn emit_waf_telemetry(
         reason_ids = %details.reason_ids,
         decision = ?evaluation.decision,
     );
-    waf.record_detection(evaluation);
+    if let Some(waf) = waf {
+        waf.record_detection(evaluation);
+    }
     if let Some(notify) = notify {
         if let Some(event) = waf_block_event(request_id, evaluation.decision.clone(), &details) {
             notify.notify_waf_block(event);
@@ -1485,7 +1487,7 @@ impl BearustProxy {
         end_of_stream: bool,
         ctx: &mut RequestContext,
     ) -> Result<()> {
-        if self.waf.is_none() {
+        if ctx.waf_snapshot.is_none() {
             return Ok(());
         }
         if ctx.waf_buffering {
@@ -1506,7 +1508,7 @@ impl BearustProxy {
                 }
             }
         }
-        if let Some(waf) = &self.waf {
+        if let Some(waf_snapshot) = ctx.waf_snapshot.clone() {
             let header_values = session
                 .req_header()
                 .headers
@@ -1530,11 +1532,7 @@ impl BearustProxy {
                 headers: header_values,
                 body: ctx.waf_body.clone(),
             };
-            let mut evaluation = ctx
-                .waf_snapshot
-                .as_ref()
-                .map(|snapshot| evaluate(snapshot, &context))
-                .unwrap_or_else(|| evaluate(&waf.snapshot(), &context));
+            let mut evaluation = evaluate(&waf_snapshot, &context);
             if end_of_stream || ctx.waf_body.len() >= crate::waf::MAX_INSPECTION_BODY_BYTES {
                 evaluation =
                     apply_waf_detector(self.plugin_manager.as_ref(), &context, evaluation).await;
@@ -1546,7 +1544,7 @@ impl BearustProxy {
             if ctx.waf_blocked {
                 emit_waf_telemetry(
                     &ctx.request_id,
-                    waf,
+                    self.waf.as_deref(),
                     &evaluation,
                     self.plugin_notify.as_deref(),
                 );
@@ -1585,7 +1583,7 @@ impl BearustProxy {
             {
                 emit_waf_telemetry(
                     &ctx.request_id,
-                    waf,
+                    self.waf.as_deref(),
                     &evaluation,
                     self.plugin_notify.as_deref(),
                 );
@@ -1707,7 +1705,7 @@ impl BearustProxy {
             }
             body.extend_from_slice(&chunk);
         }
-        if let Some(waf) = &self.waf {
+        if let Some(waf_snapshot) = ctx.waf_snapshot.clone() {
             let header = session.req_header();
             let context = InspectionContext {
                 method: header.method.as_str().to_owned(),
@@ -1725,9 +1723,11 @@ impl BearustProxy {
                     .collect(),
                 body: body[..body.len().min(crate::waf::MAX_INSPECTION_BODY_BYTES)].to_vec(),
             };
-            let evaluation = crate::waf::evaluate(&waf.snapshot(), &context);
+            let evaluation = crate::waf::evaluate(&waf_snapshot, &context);
             if evaluation.decision == crate::waf::WafDecision::Block {
-                waf.record_detection(&evaluation);
+                if let Some(waf) = &self.waf {
+                    waf.record_detection(&evaluation);
+                }
                 ctx.waf_blocked = true;
                 return Err(respond(403));
             }
@@ -1958,8 +1958,12 @@ impl ProxyHttp for BearustProxy {
             ctx.bot_blocked = evaluation.action == BotAction::Block;
             ctx.bot_challenge = evaluation.action == BotAction::Challenge;
         }
-        if let Some(waf) = &self.waf {
-            let waf_snapshot = waf.snapshot();
+        // A route that carries its own policy (managed, per tenant) is
+        // evaluated with it alone; other routes use the node-wide WAF.
+        let waf_snapshot = snapshot
+            .route_waf(host, &path)
+            .or_else(|| self.waf.as_ref().map(|waf| waf.snapshot()));
+        if let Some(waf_snapshot) = waf_snapshot {
             ctx.waf_snapshot = Some(waf_snapshot.clone());
             ctx.waf_body_expected = session
                 .req_header()
@@ -2003,7 +2007,7 @@ impl ProxyHttp for BearustProxy {
             if !ctx.waf_body_expected && !ctx.waf_telemetry_emitted {
                 emit_waf_telemetry(
                     &ctx.request_id,
-                    waf,
+                    self.waf.as_deref(),
                     &evaluation,
                     self.plugin_notify.as_deref(),
                 );

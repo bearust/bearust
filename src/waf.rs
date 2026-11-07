@@ -280,6 +280,129 @@ pub fn compile_snapshot(
     })
 }
 
+/// Rule ids for built-in signatures in a route policy. Negative so they never
+/// collide with the positive ids a control plane gives custom rules.
+fn route_builtin_id(name: &str) -> i64 {
+    match name {
+        "sqli" => -1,
+        "xss" => -2,
+        "path_traversal" => -3,
+        _ => -4,
+    }
+}
+
+/// Compiled CRS runtimes shared by every route at the same paranoia level, so
+/// many tenants on one node compile the CRS at most once per level.
+fn shared_crs(paranoia_level: u8) -> Result<std::sync::Arc<SecLangRuntime>, String> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<u8, Arc<SecLangRuntime>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().map_err(|_| "crs cache poisoned".to_owned())?;
+    if let Some(runtime) = cache.get(&paranoia_level) {
+        return Ok(Arc::clone(runtime));
+    }
+    let config = SecLangConfig {
+        crs_enabled: true,
+        paranoia_level,
+        inbound_threshold: ROUTE_CRS_INBOUND_THRESHOLD,
+        custom_rules: String::new(),
+        disabled_rule_ids: Vec::new(),
+        updated_at: String::new(),
+    };
+    let runtime =
+        SecLangRuntime::compile(&config)?.ok_or_else(|| "crs produced no rules".to_owned())?;
+    let runtime = Arc::new(runtime);
+    cache.insert(paranoia_level, Arc::clone(&runtime));
+    Ok(runtime)
+}
+
+/// CRS default inbound anomaly threshold, used for every route policy.
+pub const ROUTE_CRS_INBOUND_THRESHOLD: u16 = 5;
+
+/// Validate and compile a per-route policy into its own snapshot.
+pub fn compile_route_policy(policy: &crate::config::RouteWafPolicy) -> Result<WafSnapshot, String> {
+    use crate::config::{
+        MAX_ROUTE_WAF_CATEGORY_BYTES, MAX_ROUTE_WAF_PARANOIA, MAX_ROUTE_WAF_RULES,
+        ROUTE_WAF_BUILTINS,
+    };
+    let mut rules = Vec::with_capacity(policy.builtins.len() + policy.rules.len());
+    for name in &policy.builtins {
+        if !ROUTE_WAF_BUILTINS.contains(&name.as_str()) {
+            return Err(format!("unknown built-in signature {name}"));
+        }
+        let id = route_builtin_id(name);
+        if rules.iter().any(|rule: &CompiledRule| rule.id == id) {
+            return Err(format!("duplicate built-in signature {name}"));
+        }
+        rules.push(CompiledRule::compile(&WafRule {
+            id,
+            name: name.clone(),
+            source: "builtin".into(),
+            category: name.clone(),
+            severity: "high".into(),
+            enabled: true,
+            action: WafAction::Inherit,
+            matcher_json: serde_json::json!({ "builtin": name }).to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        })?);
+    }
+    if policy.rules.len() > MAX_ROUTE_WAF_RULES {
+        return Err(format!("at most {MAX_ROUTE_WAF_RULES} custom rules"));
+    }
+    for rule in &policy.rules {
+        if rule.id < 1 {
+            return Err("custom rule ids must be positive".into());
+        }
+        if rules.iter().any(|existing| existing.id == rule.id) {
+            return Err(format!("duplicate custom rule id {}", rule.id));
+        }
+        let category = rule.category.trim();
+        if category.is_empty()
+            || category.len() > MAX_ROUTE_WAF_CATEGORY_BYTES
+            || category.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "rule {} category must be 1-{MAX_ROUTE_WAF_CATEGORY_BYTES} bytes without control characters",
+                rule.id
+            ));
+        }
+        rules.push(
+            CompiledRule::compile(&WafRule {
+                id: rule.id,
+                name: format!("rule-{}", rule.id),
+                source: "custom".into(),
+                category: category.to_owned(),
+                severity: "medium".into(),
+                enabled: true,
+                action: rule.action,
+                matcher_json: serde_json::json!({ "field": rule.field, "pattern": rule.pattern })
+                    .to_string(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .map_err(|_| format!("rule {} has an invalid field or pattern", rule.id))?,
+        );
+    }
+    let seclang = match policy.crs {
+        None => None,
+        Some(crs) if (1..=MAX_ROUTE_WAF_PARANOIA).contains(&crs.paranoia_level) => {
+            Some(shared_crs(crs.paranoia_level)?)
+        }
+        Some(_) => {
+            return Err(format!(
+                "crs.paranoia_level must be 1-{MAX_ROUTE_WAF_PARANOIA}"
+            ))
+        }
+    };
+    Ok(WafSnapshot {
+        mode: policy.mode,
+        rules,
+        seclang,
+    })
+}
+
 fn parse_field(value: &str) -> Result<MatchField, &'static str> {
     match value {
         "any" => Ok(MatchField::Any),
@@ -771,5 +894,121 @@ mod tests {
             },
         );
         assert_eq!(merged.severity.as_deref(), Some("high"));
+    }
+}
+
+#[cfg(test)]
+mod route_policy_tests {
+    use super::*;
+    use crate::config::{RouteWafCrs, RouteWafPolicy, RouteWafRule};
+
+    fn policy(mode: WafMode) -> RouteWafPolicy {
+        RouteWafPolicy {
+            mode,
+            builtins: vec!["sqli".into()],
+            crs: None,
+            rules: Vec::new(),
+        }
+    }
+
+    fn request(query: &str) -> InspectionContext {
+        InspectionContext {
+            method: "GET".into(),
+            path: "/search".into(),
+            query: query.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn each_policy_decides_with_its_own_mode() {
+        let block = compile_route_policy(&policy(WafMode::Block)).unwrap();
+        let monitor = compile_route_policy(&policy(WafMode::MonitorOnly)).unwrap();
+        let attack = request("q=1 union select password from users");
+        assert_eq!(evaluate(&block, &attack).decision, WafDecision::Block);
+        assert_eq!(evaluate(&monitor, &attack).decision, WafDecision::Log);
+        assert_eq!(
+            evaluate(&block, &request("q=shoes")).decision,
+            WafDecision::Allow
+        );
+    }
+
+    #[test]
+    fn custom_rules_match_their_field_and_keep_their_action() {
+        let mut p = policy(WafMode::MonitorOnly);
+        p.builtins.clear();
+        p.rules.push(RouteWafRule {
+            id: 7,
+            category: "admin".into(),
+            field: "path".into(),
+            pattern: "^/wp-admin".into(),
+            action: WafAction::Block,
+        });
+        let snapshot = compile_route_policy(&p).unwrap();
+        let mut hit = request("");
+        hit.path = "/WP-ADMIN/setup.php".into();
+        let evaluation = evaluate(&snapshot, &hit);
+        assert_eq!(evaluation.decision, WafDecision::Block);
+        assert_eq!(evaluation.matched_rule_ids, vec![7]);
+    }
+
+    #[test]
+    fn invalid_policies_are_rejected() {
+        let mut unknown = policy(WafMode::Block);
+        unknown.builtins.push("ssrf".into());
+        assert!(compile_route_policy(&unknown).is_err());
+
+        let mut duplicate = policy(WafMode::Block);
+        duplicate.builtins.push("sqli".into());
+        assert!(compile_route_policy(&duplicate).is_err());
+
+        let rule = |id: i64, pattern: &str| RouteWafRule {
+            id,
+            category: "custom".into(),
+            field: "any".into(),
+            pattern: pattern.into(),
+            action: WafAction::Inherit,
+        };
+        for rules in [
+            vec![rule(0, "x")],
+            vec![rule(1, "x"), rule(1, "y")],
+            vec![rule(1, "(")],
+            vec![rule(1, &"a".repeat(2049))],
+            (1..=21).map(|id| rule(id, "x")).collect(),
+        ] {
+            let mut p = policy(WafMode::Block);
+            p.rules = rules;
+            assert!(compile_route_policy(&p).is_err());
+        }
+
+        let mut bad_field = policy(WafMode::Block);
+        bad_field.rules.push(RouteWafRule {
+            field: "cookies".into(),
+            ..rule(1, "x")
+        });
+        assert!(compile_route_policy(&bad_field).is_err());
+
+        for level in [0, 3] {
+            let mut p = policy(WafMode::Block);
+            p.crs = Some(RouteWafCrs {
+                paranoia_level: level,
+            });
+            assert!(compile_route_policy(&p).is_err());
+        }
+    }
+
+    #[test]
+    fn crs_is_compiled_once_per_paranoia_level() {
+        let mut p = policy(WafMode::Block);
+        p.crs = Some(RouteWafCrs { paranoia_level: 1 });
+        let first = compile_route_policy(&p).unwrap();
+        let second = compile_route_policy(&p).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            first.seclang.as_ref().unwrap(),
+            second.seclang.as_ref().unwrap()
+        ));
+        let attack = request("id=1' or 1=1--");
+        assert_eq!(evaluate(&first, &attack).decision, WafDecision::Block);
     }
 }

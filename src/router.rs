@@ -1,10 +1,11 @@
 use crate::config::RouteConfig;
 use crate::rate_limit::{Decision, TokenBucket};
+use crate::waf::{compile_route_policy, WafSnapshot};
 use http::uri::Authority;
 use std::{
     collections::HashMap,
     str::FromStr,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -23,13 +24,30 @@ pub struct Router {
     /// One shared bucket per rate-limited route, keyed by route name. Buckets
     /// start full whenever a new configuration is applied.
     limiters: HashMap<String, Mutex<TokenBucket>>,
+    /// Compiled WAF policy per route name, for routes that carry one.
+    wafs: HashMap<String, Arc<WafSnapshot>>,
 }
 
 impl Router {
     pub fn new(routes: &[RouteConfig]) -> Self {
         let mut indexed: HashMap<String, Vec<ResolvedRoute>> = HashMap::new();
         let mut limiters = HashMap::new();
+        let mut wafs = HashMap::new();
         for route in routes {
+            if let Some(policy) = &route.waf {
+                // Policies are validated before a configuration is accepted;
+                // one that still fails to compile turns the route's WAF off
+                // rather than falling back to another tenant's node-wide WAF.
+                let snapshot = compile_route_policy(policy).unwrap_or_else(|error| {
+                    tracing::error!(event = "route_waf_compile_failed", route = %route.name, error = %error);
+                    WafSnapshot {
+                        mode: crate::control_plane::models::WafMode::MonitorOnly,
+                        rules: Vec::new(),
+                        seclang: None,
+                    }
+                });
+                wafs.insert(route.name.clone(), Arc::new(snapshot));
+            }
             if let Some(limit) = route.rate_limit {
                 if let Ok(bucket) =
                     TokenBucket::new(limit.burst, f64::from(limit.requests_per_second))
@@ -58,6 +76,7 @@ impl Router {
         Self {
             routes: indexed,
             limiters,
+            wafs,
         }
     }
 
@@ -74,6 +93,11 @@ impl Router {
             Decision::Allowed { .. } => Ok(()),
             Decision::Limited { retry_after, .. } => Err(retry_after),
         }
+    }
+
+    /// The route's own WAF policy; `None` means the node-wide WAF applies.
+    pub fn waf(&self, route_name: &str) -> Option<Arc<WafSnapshot>> {
+        self.wafs.get(route_name).cloned()
     }
 
     pub fn route(&self, authority: &str, path: &str) -> Option<&ResolvedRoute> {
@@ -136,6 +160,7 @@ mod limit_tests {
             rate_limit: limit,
             max_body_bytes: Some(1024),
             paused: false,
+            waf: None,
         }
     }
 
@@ -175,5 +200,59 @@ mod limit_tests {
                 .unwrap()
                 .paused
         );
+    }
+}
+
+#[cfg(test)]
+mod waf_tests {
+    use super::*;
+    use crate::config::RouteWafPolicy;
+    use crate::control_plane::models::WafMode;
+
+    fn route(name: &str, waf: Option<RouteWafPolicy>) -> RouteConfig {
+        RouteConfig {
+            name: name.into(),
+            host: format!("{name}.example"),
+            path_prefix: "/".into(),
+            upstream_pool: "pool".into(),
+            rate_limit: None,
+            max_body_bytes: None,
+            paused: false,
+            waf,
+        }
+    }
+
+    #[test]
+    fn only_routes_with_a_policy_get_their_own_waf() {
+        let policy = |mode| RouteWafPolicy {
+            mode,
+            builtins: vec!["xss".into()],
+            crs: None,
+            rules: Vec::new(),
+        };
+        let router = Router::new(&[
+            route("a", Some(policy(WafMode::Block))),
+            route("b", Some(policy(WafMode::MonitorOnly))),
+            route("standalone", None),
+        ]);
+        assert_eq!(router.waf("a").unwrap().mode, WafMode::Block);
+        assert_eq!(router.waf("b").unwrap().mode, WafMode::MonitorOnly);
+        assert!(router.waf("standalone").is_none());
+    }
+
+    #[test]
+    fn documents_without_waf_still_parse() {
+        let route: RouteConfig = serde_json::from_str(
+            r#"{"name":"r","host":"h.example","path_prefix":"/","upstream_pool":"p"}"#,
+        )
+        .unwrap();
+        assert!(route.waf.is_none());
+        let with: RouteConfig = serde_json::from_str(
+            r#"{"name":"r","host":"h.example","path_prefix":"/","upstream_pool":"p",
+                "waf":{"mode":"block","builtins":["sqli"],"crs":{"paranoia_level":1},
+                       "rules":[{"id":1,"category":"c","field":"path","pattern":"^/x"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(with.waf.unwrap().rules[0].id, 1);
     }
 }

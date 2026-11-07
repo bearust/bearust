@@ -38,11 +38,21 @@
 
 ## Task 1: Per-route WAF policy in Bearust core
 
-- [ ] Add `waf: Option<RouteWafPolicy>` to `RouteConfig` (`mode`, `builtins` enabled set, `crs: Option<{ paranoia }>`, `rules: Vec<WafRule>`), serde-defaulted so old documents still apply.
-- [ ] Compile route policies when the desired state is applied; cache compiled CRS runtimes per paranoia level and reuse them across routes and generations.
-- [ ] Proxy: for managed routes evaluate the matched route's compiled policy; keep the node-wide snapshot for non-managed routes.
-- [ ] Reject invalid policies in `PUT /api/desired-state` with a per-route error instead of applying a partial document.
-- [ ] Tests: two routes with different modes on one node, the same attack is blocked on one and logged on the other; CRS compiled once for many routes; old documents without `waf` still apply.
+- [x] Add `waf: Option<RouteWafPolicy>` to `RouteConfig` (`mode`, `builtins` enabled set, `crs: Option<{ paranoia }>`, `rules: Vec<WafRule>`), serde-defaulted so old documents still apply.
+- [x] Compile route policies when the desired state is applied; cache compiled CRS runtimes per paranoia level and reuse them across routes and generations.
+- [x] Proxy: for managed routes evaluate the matched route's compiled policy; keep the node-wide snapshot for non-managed routes.
+- [x] Reject invalid policies in `PUT /api/desired-state` with a per-route error instead of applying a partial document.
+- [x] Tests: two routes with different modes on one node, the same attack is blocked on one and logged on the other; CRS compiled once for many routes; old documents without `waf` still apply.
+
+Deviations (2026-11-07):
+
+- A route **without** `waf` still uses the node-wide WAF, so standalone Bearust and existing documents keep their behaviour. "Never the node-wide WAF for managed routes" is therefore enforced by the SaaS sending `waf` on every route it renders (Task 4), not by the node.
+- Route policies work even when the node has no `WafStore`; detections are still traced and, when a store exists, written to the node audit log. Per-host counters come in Task 2.
+- The HTTP/3 listener and the HTTP/3 upstream path also evaluate the route's policy, so isolation holds on every protocol.
+- Built-in signatures get fixed negative rule ids (`sqli` -1, `xss` -2, `path_traversal` -3, `command_injection` -4); custom rule ids must be positive. The CRS inbound anomaly threshold is fixed at 5 (CRS default).
+- In block mode the existing semantic SQLi scoring can block even when the `sqli` built-in is off (unchanged evaluator behaviour). The tenant UI should say so.
+- Wire format: `{"mode":"block"|"monitor-only","builtins":[...],"crs":{"paranoia_level":1},"rules":[{"id":1,"category":"...","field":"any|method|path|query|headers|body","pattern":"...","action":"inherit|allow|log|block"}]}`.
+- `http3::tests::upstream_clients_follow_changed_connect_timeouts` is timing-flaky on this machine before and after the change (2 of 5 baseline runs failed); not a regression.
 
 ## Task 2: Per-host WAF counters and event sample in Bearust core
 
