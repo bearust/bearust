@@ -288,6 +288,23 @@ pub(crate) async fn get_usage(State(s): State<AppState>, h: HeaderMap) -> Respon
     Json(crate::metering::global().report(hosts)).into_response()
 }
 
+/// Recent redacted WAF events per host of the desired state, newest first.
+pub(crate) async fn get_waf_events(State(s): State<AppState>, h: HeaderMap) -> Response {
+    if let Err(response) = require_proxy_permission(&s, &h, Permission::ProxyHostsRead).await {
+        return response;
+    }
+    let Some(runtime) = s.runtime.as_ref() else {
+        return user_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "runtime_unavailable",
+            "The live data-plane runtime is not attached",
+        );
+    };
+    let snapshot = runtime.load();
+    let hosts = desired_state_hosts(&snapshot.config().routes);
+    Json(crate::metering::global().waf_events(hosts)).into_response()
+}
+
 fn desired_state_hosts(routes: &[crate::config::RouteConfig]) -> impl Iterator<Item = &str> {
     routes
         .iter()

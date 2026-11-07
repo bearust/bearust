@@ -752,6 +752,7 @@ pub fn router_with_metrics(state: AppState, include_metrics: bool) -> Router {
             get(get_load_balancer).put(update_load_balancer),
         )
         .route("/api/usage", get(machine_api::get_usage))
+        .route("/api/usage/waf-events", get(machine_api::get_waf_events))
         .route(
             "/api/desired-state",
             get(machine_api::get_desired_state).put(machine_api::put_desired_state),

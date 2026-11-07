@@ -130,4 +130,20 @@ async fn route_waf_policies_are_isolated_per_tenant() {
         status("monitor.test", Some(xss)).await,
         reqwest::StatusCode::OK
     );
+
+    // Each tenant's host gets its own WAF counters and events; the route
+    // without a policy is not metered for WAF.
+    let meter = bearust::metering::global();
+    let usage = meter.report(["block.test", "monitor.test", "plain.test"]);
+    assert_eq!(usage.hosts["block.test"].waf_blocked, 2);
+    assert_eq!(usage.hosts["block.test"].waf_logged, 0);
+    assert_eq!(usage.hosts["monitor.test"].waf_logged, 2);
+    assert_eq!(usage.hosts["monitor.test"].waf_blocked, 0);
+    assert_eq!(usage.hosts["plain.test"].waf_logged, 0);
+    let events = meter.waf_events(["block.test"]);
+    let events = &events.hosts["block.test"];
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].path, "/submit");
+    assert_eq!(events[1].path, "/search", "query strings are never kept");
+    assert_eq!(events[1].client_ip, Some("127.0.0.1".parse().unwrap()));
 }

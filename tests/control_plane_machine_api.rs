@@ -511,3 +511,64 @@ async fn desired_state_routes_accept_and_validate_limits() {
     assert_eq!(route.max_body_bytes, Some(1048576));
     assert!(route.paused);
 }
+
+#[tokio::test]
+async fn waf_events_report_desired_state_hosts_to_read_tokens() {
+    let (app, _runtime, _dir, _http01) = setup().await;
+    let (_, writer) = create_token(&app, "write").await;
+    let (_, reader) = create_token(&app, "read").await;
+    let (status, _) = call(
+        &app,
+        "PUT",
+        "/api/desired-state",
+        Caller::Token(&writer),
+        Some(document(1, "tenant-pool", "waf-tenant.example")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    for host in ["waf-tenant.example", "waf-other.example"] {
+        bearust::metering::global().record_waf(bearust::metering::WafSample {
+            host,
+            action: bearust::metering::WafEventAction::Block,
+            rule_ids: &[-1],
+            categories: &["sqli".to_owned()],
+            method: "GET",
+            path: "/search",
+            client_ip: None,
+        });
+    }
+
+    let (status, body) = call(
+        &app,
+        "GET",
+        "/api/usage/waf-events",
+        Caller::Token(&reader),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hosts = body["hosts"].as_object().unwrap();
+    let events = hosts["waf-tenant.example"].as_array().unwrap();
+    assert_eq!(events[0]["action"], "block");
+    assert_eq!(events[0]["categories"][0], "sqli");
+    assert!(!hosts.contains_key("waf-other.example"));
+
+    let (_, usage) = call(&app, "GET", "/api/usage", Caller::Token(&reader), None).await;
+    assert!(
+        usage["hosts"]["waf-tenant.example"]["waf_blocked"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/usage/waf-events",
+        Caller::Anonymous,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

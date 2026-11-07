@@ -53,6 +53,10 @@ pub struct RequestContext {
     pub waf_evaluation: Option<Evaluation>,
     pub waf_telemetry_emitted: bool,
     pub waf_snapshot: Option<Arc<WafSnapshot>>,
+    /// Host of the route whose own WAF policy is evaluated, and the client
+    /// address, for per-host WAF metering. `None` under the node-wide WAF.
+    pub waf_route_host: Option<String>,
+    pub waf_client_ip: Option<std::net::IpAddr>,
     pub waf_body_expected: bool,
     pub bot_evaluation: Option<BotEvaluation>,
     pub bot_blocked: bool,
@@ -99,6 +103,8 @@ impl Default for RequestContext {
             waf_evaluation: None,
             waf_telemetry_emitted: false,
             waf_snapshot: None,
+            waf_route_host: None,
+            waf_client_ip: None,
             waf_body_expected: false,
             bot_evaluation: None,
             bot_blocked: false,
@@ -329,6 +335,15 @@ impl BearustProxy {
             bytes_in: session.body_bytes_read() as u64,
             bytes_out: session.body_bytes_sent() as u64,
         });
+        if let (Some(host), Some(evaluation)) = (&ctx.waf_route_host, &ctx.waf_evaluation) {
+            record_route_waf(
+                host,
+                evaluation,
+                session.req_header().method.as_str(),
+                session.req_header().uri.path(),
+                ctx.waf_client_ip,
+            );
+        }
         let Some(analytics) = &self.analytics else {
             ctx.analytics_logged = true;
             return;
@@ -1447,6 +1462,31 @@ pub fn emit_waf_telemetry(
     }
 }
 
+/// Count a route-policy WAF detection for its host (see `crate::metering`).
+/// Allowed requests are not recorded.
+pub fn record_route_waf(
+    host: &str,
+    evaluation: &Evaluation,
+    method: &str,
+    path: &str,
+    client_ip: Option<std::net::IpAddr>,
+) {
+    let action = match evaluation.decision {
+        WafDecision::Block => crate::metering::WafEventAction::Block,
+        WafDecision::Log => crate::metering::WafEventAction::Log,
+        _ => return,
+    };
+    crate::metering::global().record_waf(crate::metering::WafSample {
+        host,
+        action,
+        rule_ids: &evaluation.matched_rule_ids,
+        categories: &evaluation.categories,
+        method,
+        path,
+        client_ip,
+    });
+}
+
 pub fn emit_rate_limit_telemetry(
     request_id: &str,
     decision: &RateLimitDecision,
@@ -1960,9 +2000,17 @@ impl ProxyHttp for BearustProxy {
         }
         // A route that carries its own policy (managed, per tenant) is
         // evaluated with it alone; other routes use the node-wide WAF.
-        let waf_snapshot = snapshot
-            .route_waf(host, &path)
-            .or_else(|| self.waf.as_ref().map(|waf| waf.snapshot()));
+        let route_waf = snapshot.route_waf(host, &path);
+        if route_waf.is_some() {
+            ctx.waf_route_host = snapshot
+                .route(host, &path)
+                .map(|(route, _)| route.host.clone());
+            ctx.waf_client_ip = session
+                .client_addr()
+                .and_then(|addr| addr.as_inet().map(|inet| inet.ip()))
+                .map(|peer| client_ip(peer, &session.req_header().headers, &self.trusted_proxies));
+        }
+        let waf_snapshot = route_waf.or_else(|| self.waf.as_ref().map(|waf| waf.snapshot()));
         if let Some(waf_snapshot) = waf_snapshot {
             ctx.waf_snapshot = Some(waf_snapshot.clone());
             ctx.waf_body_expected = session

@@ -877,9 +877,12 @@ async fn handle_request<S>(
     }
 
     let authority = downstream_host.as_deref().unwrap_or_default();
-    let waf_snapshot = snapshot
-        .route_waf(authority, &path)
-        .or_else(|| state.waf.as_ref().map(|waf| waf.snapshot()));
+    let route_waf = snapshot.route_waf(authority, &path);
+    let waf_route_host = route_waf
+        .as_ref()
+        .and_then(|_| snapshot.route(authority, &path))
+        .map(|(route, _)| route.host.clone());
+    let waf_snapshot = route_waf.or_else(|| state.waf.as_ref().map(|waf| waf.snapshot()));
     if let Some(snapshot) = waf_snapshot {
         let context = build_inspection_context(&method, &path, &query, &headers, body.clone());
         let evaluation = crate::waf::evaluate(&snapshot, &context);
@@ -898,6 +901,15 @@ async fn handle_request<S>(
             &evaluation,
             state.plugin_notify.as_deref(),
         );
+        if let Some(host) = &waf_route_host {
+            let ip = state
+                .trusted_proxies
+                .as_ref()
+                .map_or(remote_addr.ip(), |trusted| {
+                    client_ip(remote_addr.ip(), req.headers(), trusted)
+                });
+            crate::proxy::record_route_waf(host, &evaluation, &method, &path, Some(ip));
+        }
         if evaluation.decision == crate::waf::WafDecision::Block {
             let resp = http::Response::builder()
                 .status(http::StatusCode::FORBIDDEN)

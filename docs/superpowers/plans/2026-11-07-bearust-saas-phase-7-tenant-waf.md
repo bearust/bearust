@@ -56,9 +56,16 @@ Deviations (2026-11-07):
 
 ## Task 2: Per-host WAF counters and event sample in Bearust core
 
-- [ ] Count `waf_logged` and `waf_blocked` per host alongside the Phase 5 metering counters.
-- [ ] Keep a bounded ring of recent redacted events per host (rule id, category, action, method, path, client IP, time).
-- [ ] Expose both through the read-scope token API used by the usage poller.
+- [x] Count `waf_logged` and `waf_blocked` per host alongside the Phase 5 metering counters.
+- [x] Keep a bounded ring of recent redacted events per host (rule id, category, action, method, path, client IP, time).
+- [x] Expose both through the read-scope token API used by the usage poller.
+
+Deviations (2026-11-07):
+
+- Counters `waf_logged` / `waf_blocked` are new fields of each host in `GET /api/usage` (additive; the SaaS poller does not decode strictly). Only routes with their own policy are WAF-metered; allowed requests are not recorded. Each request is recorded once, at completion, with its final decision.
+- Events are served by a separate read-scope endpoint, `GET /api/usage/waf-events` (`{ boot_id, hosts: { <host>: [event, ...] } }`, newest first, only desired-state hosts), so the usage poll stays small. At most 50 events per host, in memory, lost on restart.
+- Event shape: `{ at, action: "log"|"block", rule_ids (≤8), categories (≤4, ≤64 bytes), method, path (no query string, ≤256 bytes, control characters stripped), client_ip }`. The query string is dropped entirely rather than truncated.
+- Requests blocked by a route policy before routing completes are still not counted in `requests`/bytes (unchanged Phase 5 behaviour); they appear only in `waf_blocked`.
 
 ## Task 3: SaaS data model and API
 
