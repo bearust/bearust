@@ -52,8 +52,8 @@ Copy the template into its own repository and rename it in one pass. Independent
 
 **Validation:** `git log` shows the init commit; working tree clean afterwards.
 
-- [ ] Copy template and run init-project rename
-- [ ] Create private `Bearust/saas` repo and push
+- [x] Copy template and run init-project rename
+- [x] Create private `Bearust/saas` repo and push
 
 ### Task 2: Verify the template baseline
 
@@ -64,8 +64,8 @@ Prove the rename did not break the stack before adding features.
 
 **Validation:** `make dev` serves the app, `make db-up` + `make db-seed` succeed, `make test` is green.
 
-- [ ] Bring up `make dev` with seeded database
-- [ ] Run `make test` green on the untouched baseline
+- [x] Bring up `make dev` with seeded database
+- [x] Run `make test` green on the untouched baseline
 
 ### Task 3: Public landing in the same frontend
 
@@ -78,8 +78,8 @@ Marketing surface for `bearust.cloud` without a second app or deploy.
 
 **Validation:** `/` and `/pricing` render without login; dashboard routes still redirect anonymous users to login.
 
-- [ ] Build landing + pricing public routes
-- [ ] Verify anonymous access to landing, protected dashboard
+- [x] Build landing + pricing public routes
+- [x] Verify anonymous access to landing, protected dashboard
 
 ### Task 4: Public SaaS authentication
 
@@ -92,8 +92,8 @@ Switch the template from internal SSO default to public self-signup.
 
 **Validation:** new user can register and log in with password; at least one public OAuth provider links to an existing account; unmapped SSO user sees the access-denied message; app refuses to boot with all methods disabled.
 
-- [ ] Enable password + public OAuth, remap/disable Gate
-- [ ] Test register, login, link/unlink, and no-auth boot refusal
+- [x] Enable password + public OAuth, remap/disable Gate
+- [x] Test register, login, link/unlink, and no-auth boot refusal
 
 ### Task 5: Region and edge-node data model
 
@@ -106,8 +106,8 @@ Schema everything else builds on. Independently testable via migrate up/down and
 
 **Validation:** `db-up`/`db-down` round-trips cleanly; seeder suite passes; negative quotas rejected at validation layer.
 
-- [ ] Write and apply edge inventory migration
-- [ ] Seed regions + example nodes
+- [x] Write and apply edge inventory migration
+- [x] Seed regions + example nodes
 
 ### Task 6: Edge management API with RBAC
 
@@ -120,8 +120,8 @@ Admin/operator CRUD for regions and nodes; viewer read-only.
 
 **Validation:** API tests cover create/read/update/delete, 404 codes (`REGION_NOT_FOUND`, `EDGE_NODE_NOT_FOUND`), 422 on invalid quota (`QUOTA_INVALID`), 403 for viewer writes, 409 deleting a region still referenced (`REGION_IN_USE`).
 
-- [ ] Implement regions + nodes CRUD with quota validation
-- [ ] Cover RBAC and error codes with API tests
+- [x] Implement regions + nodes CRUD with quota validation
+- [x] Cover RBAC and error codes with API tests
 
 ### Task 7: Edge dashboard UI
 
@@ -135,8 +135,8 @@ Operator-facing inventory management reusing template patterns.
 
 **Validation:** Vitest suites for new components pass; Playwright spec passes; `tsc`/lint clean per template checks.
 
-- [ ] Build edge list/detail/form pages with quota inputs
-- [ ] Add sidebar entries and e2e spec
+- [x] Build edge list/detail/form pages with quota inputs
+- [x] Add sidebar entries and e2e spec
 
 ### Task 8: Basic per-node monitoring
 
@@ -148,8 +148,8 @@ Lightweight status visibility, mock-tolerant at first.
 
 **Validation:** worker test with stub endpoint records snapshots; detail page shows fresh check timestamp after a poll cycle.
 
-- [ ] Add polling job + snapshot storage
-- [ ] Show node status history in detail view
+- [x] Add polling job + snapshot storage
+- [x] Show node status history in detail view
 
 ### Task 9: Domain and environment wiring (no deploy)
 
@@ -161,7 +161,7 @@ Prepare production config without performing the deploy.
 
 **Validation:** production compose config renders with the new values in dry-run; no deploy executed.
 
-- [ ] Document apex/docs domain split and production env
+- [x] Document apex/docs domain split and production env
 
 ---
 
