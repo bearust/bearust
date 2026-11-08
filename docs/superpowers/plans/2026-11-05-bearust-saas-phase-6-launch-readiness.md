@@ -72,7 +72,7 @@ Bearust core (`bearust`):
 **Validation:** config tests that disabled gateways cannot be selected; sandbox test run recorded (human supplies credentials).
 
 - [x] Gateway enablement
-- [ ] Sandbox verification recorded
+- [x] Sandbox verification recorded (bearust/saas#53: Xendit and Dodo, 2026-11-07)
 
 ### Task 4: CI/CD on GitHub Actions
 
@@ -121,7 +121,7 @@ Bearust core (`bearust`):
 
 - [x] Telegram + rules
 - [x] Daily digest
-- [ ] Uptime checks configured
+- [x] Uptime checks configured (bearust/saas#61, confirmed by the owner 2026-11-08)
 
 ### Task 8: Abuse reporting
 
