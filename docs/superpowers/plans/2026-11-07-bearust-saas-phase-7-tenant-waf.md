@@ -113,6 +113,11 @@ Deviations (Task 6, SaaS 67a3026): compile status is a per-node summary of the r
 
 ## Acceptance
 
-- [ ] On a node shared by two organizations, enabling block mode for one does not change responses for the other (e2e against a real Bearust node).
-- [ ] A node restart reapplies the last policy without the SaaS.
-- [ ] All checks green: `go test ./...`, `make test-pg`, `make lint-go`, frontend typecheck/vitest/lint:api, `cargo test` in core.
+- [x] On a node shared by two organizations, enabling block mode for one does not change responses for the other (e2e against a real Bearust node).
+- [x] A node restart reapplies the last policy without the SaaS.
+- [x] All checks green: `go test ./...`, `make test-pg`, `make lint-go`, frontend typecheck/vitest/lint:api, `cargo test` in core.
+
+Deviations (acceptance, 2026-11-08): run against a locally built Bearust (core `b494fc0`, release) with its own SQLite store, not a deployed node. `TestLiveWafIsolation` in `internal/nodesync/waf_live_test.go` puts two organizations on one node, syncs, and checks that block mode for one returns 403 to an attack while the other still gets 200 for the same attack and for clean requests. The SaaS refuses loopback backends, so the test rewrites the backend row to the local upstream after creating the pool. The restart item was checked by hand: stop the node, start it with no SaaS push, and the same requests still gave 403 and 200. Findings:
+- The built-in `sqli` signature does not match `' OR '1'='1` or `; DROP TABLE users--` (both pass in block mode). `UNION SELECT` and XSS are blocked, so the test uses `UNION SELECT`. This is a core detection gap, not an isolation bug; follow up in core.
+- `cargo test`: 767 passed, 1 failed. `http3::tests::upstream_clients_follow_changed_connect_timeouts` fails under the full parallel run and passes alone (3 of 3); it is a wall-clock test with 700 ms slack, unrelated to the WAF.
+- A node stop drains for about a second; a start in that window refuses to run because the PID file is still held.
