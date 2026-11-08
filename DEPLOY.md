@@ -178,6 +178,46 @@ node running the proxy and Caddy. Open 80/443 to the internet, 8443 only to
 `BEARUST_EDGE_CONTROL_PLANE_IP`, and 22 only to the SSH allowlist in the
 provider firewall as well. The node commands below assume root (or `sudo -i`).
 
+### Install on a VM that already runs other services
+
+Do not run the cloud-init bootstrap on a shared host. It calls
+`ufw --force reset`, which wipes any existing firewall rules, including the
+provider's default iptables rules on Oracle Cloud images. Install the same
+files by hand instead:
+
+1. Render the template as above, then copy the `write_files` contents for
+   `/etc/bearust-edge/edge.env`, `/etc/bearust-edge/bearust.toml`,
+   `/opt/bearust-edge/docker-compose.yml` and `/opt/bearust-edge/Caddyfile`
+   from the rendered file onto the host at the same paths
+   (`edge.env` mode `0600`, the rest `0644`).
+2. Make sure nothing else listens on 80, 443, 8443 or 8081
+   (`ss -lntp | grep -E ':(80|443|8443|8081)\b'`). Bearust needs 80/443 for
+   itself; an existing reverse proxy on those ports has to move or go.
+3. Install Docker if it is missing, log in to GHCR if the package is private,
+   and start the stack: `cd /opt/bearust-edge && docker compose up -d`.
+4. Open 8443 to the control plane only, in the host firewall the VM already
+   uses, rather than UFW. On Oracle images (iptables plus
+   `netfilter-persistent`), insert the rule above the final `REJECT`:
+
+   ```sh
+   n=$(iptables -S INPUT | grep -n -- '-j REJECT' | head -1 | cut -d: -f1)
+   iptables -I INPUT $((n-1)) -s <control-plane-ip>/32 -p tcp -m state \
+     --state NEW --dport 8443 -m comment --comment 'bearust admin api' -j ACCEPT
+   netfilter-persistent save
+   ```
+
+   Ports 80/443 are published by Docker and bypass the INPUT chain, so they
+   need no host rule.
+5. Mirror the rule in the provider firewall (Oracle security list or NSG).
+   When the control plane and node share a VCN, traffic arrives from the
+   control plane's **private** address (for example `10.0.0.238`), so allow
+   that address, not its public IP. A wrong source here makes 8443 time out
+   with no packets reaching the host; check with
+   `tcpdump -ni <iface> 'tcp port 8443'` on the node.
+
+Then continue with the first-boot checks below, skipping the cloud-init and
+`ufw` commands.
+
 ### First-boot checks
 
 ```sh
