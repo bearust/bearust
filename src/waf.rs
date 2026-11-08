@@ -533,26 +533,38 @@ fn field_values(field: MatchField, context: &NormalizedContext) -> Vec<String> {
     }
 }
 
+// Built-in signatures run on normalized (decoded, lowercased) text.
+static BUILTIN_SQLI: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?:union\s+select|select\s+.+\s+from",
+        // Tautologies after a closing quote: ' or 1=1, " and 'a'='a.
+        r#"|['"]\s*(?:or|and)\s+(?:\d+\s*=\s*\d+|['"][^'"]*['"]\s*=\s*['"])"#,
+        // A quote followed by a comment that cuts off the rest of the query.
+        r"|'\s*(?:--|#|/\*)",
+        // Stacked statements.
+        r"|;\s*(?:(?:drop|truncate|alter)\s+(?:table|database)\b|delete\s+from\b|insert\s+into\b",
+        r"|update\s+\w+\s+set\b|exec(?:ute)?\s+\w|shutdown\b))",
+    ))
+    .expect("static regex")
+});
+static BUILTIN_XSS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:<\s*script|javascript\s*:|on(?:error|load)\s*=)").expect("static regex")
+});
+static BUILTIN_PATH_TRAVERSAL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/)").expect("static regex"));
+static BUILTIN_COMMAND_INJECTION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:;|\||&&)\s*(?:cat|sh|bash|curl|wget|nc)\b").expect("static regex")
+});
+
 fn builtin_matches(kind: BuiltinKind, value: &str) -> bool {
     let value = value.to_ascii_lowercase();
-    match kind {
-        BuiltinKind::Sqli => Regex::new(
-            r"(?:union\s+select|(?:'|%27)\s*(?:or|and)\s+\d+\s*=\s*\d+|select\s+.+\s+from)",
-        )
-        .expect("static regex")
-        .is_match(&value),
-        BuiltinKind::Xss => Regex::new(r"(?:<\s*script|javascript\s*:|on(?:error|load)\s*=)")
-            .expect("static regex")
-            .is_match(&value),
-        BuiltinKind::PathTraversal => Regex::new(r"(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/)")
-            .expect("static regex")
-            .is_match(&value),
-        BuiltinKind::CommandInjection => {
-            Regex::new(r"(?:;|\||&&)\s*(?:cat|sh|bash|curl|wget|nc)\b")
-                .expect("static regex")
-                .is_match(&value)
-        }
-    }
+    let regex = match kind {
+        BuiltinKind::Sqli => &BUILTIN_SQLI,
+        BuiltinKind::Xss => &BUILTIN_XSS,
+        BuiltinKind::PathTraversal => &BUILTIN_PATH_TRAVERSAL,
+        BuiltinKind::CommandInjection => &BUILTIN_COMMAND_INJECTION,
+    };
+    regex.is_match(&value)
 }
 
 static SEMANTIC_SQLI: LazyLock<Regex> = LazyLock::new(|| {
@@ -932,6 +944,46 @@ mod route_policy_tests {
             evaluate(&block, &request("q=shoes")).decision,
             WafDecision::Allow
         );
+    }
+
+    #[test]
+    fn builtin_sqli_catches_string_tautologies_and_stacked_queries() {
+        let block = compile_route_policy(&policy(WafMode::Block)).unwrap();
+        for attack in [
+            "id=1%27%20OR%20%271%27%3D%271",
+            "user=admin' or 'a'='a",
+            "user=x\" or \"1\"=\"1",
+            "id=1\" or 1=1",
+            "user=admin'--",
+            "user=admin' #",
+            "id=1;%20DROP%20TABLE%20users--",
+            "id=1; delete from users",
+            "id=1;insert into users values (1)",
+            "id=1; update users set role='admin'",
+            "id=1; exec xp_cmdshell 'dir'",
+            "id=1; truncate table logs",
+        ] {
+            assert_eq!(
+                evaluate(&block, &request(attack)).decision,
+                WafDecision::Block,
+                "{attack}"
+            );
+        }
+        for clean in [
+            "q=rock 'n' roll",
+            "q=it's or isn't",
+            "q=drop table tennis",
+            "q=a;b",
+            "q=select a plan; update later",
+            "name=o'brien&page=2",
+            "q=tom & jerry; delete key",
+        ] {
+            assert_eq!(
+                evaluate(&block, &request(clean)).decision,
+                WafDecision::Allow,
+                "{clean}"
+            );
+        }
     }
 
     #[test]
