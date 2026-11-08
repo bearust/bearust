@@ -95,9 +95,11 @@ Bearust core (`bearust`):
 
 **Validation:** stack deploys and rolls back on a failing health check; backup and restore run end to end; documented in `docs/deployment/bearust-cloud.md`.
 
-- [ ] Production stack
-- [ ] Backups + restore test
-- [ ] First deploy + migration rule switch
+- [x] Production stack
+- [x] Backups + restore test
+- [x] First deploy + migration rule switch
+
+Deviations (Task 5, closed in bearust/saas#56, #57, #60): no Docker secrets; every production env value is a GitHub Actions repository variable and the Deploy workflow writes `prod.env` from them (SaaS 1e27065, owner's decision 2026-11-08). No TLS in the stack: no host port is published and the Cloudflare tunnel terminates TLS. Health checks and the rollback check landed in SaaS c0856a9, verified on a local Swarm.
 
 ### Task 6: Edge node provisioning
 
